@@ -19,6 +19,13 @@ process poll loop, the file calls and the lost-create cleanup come from
   the background when it returns.
 - ``stop_job_sandboxes`` finds the sandboxes of a job by their metadata and
   reads every page of the list.
+- With a budget the box is protected (SKY-549). It reserves its whole
+  funded lifetime before the create, sends an explicit vCPU and memory
+  shape, and checks the shape after the create. Mosaic's ``ttl_seconds`` is
+  an inactivity limit, not a lifetime cap, so the provider destroys the box
+  itself when its funded lifetime ends. The stop settles the hold after a
+  confirmed destroy, releases it when Mosaic refused the create, and keeps
+  it pending otherwise.
 - A ``sudo`` command runs as the ``root`` user.
 - Harbor's snapshot builds, volumes, secrets, SSH, pause, the ``/workspace``
   transfer staging and directory transfer are left out.
@@ -28,17 +35,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import logging
 import math
 import re
 import shlex
 import uuid
-from collections.abc import Awaitable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
-from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
+from core.billing.budgets import BudgetError
+from core.billing.mosaic_usage import MosaicUsageReservation
+from core.billing.runtime import UsagePendingError
+
+from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
     SandboxError,
@@ -94,7 +106,11 @@ _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
 _TIMEOUT_EXIT_CODE = 124
 
-MOSAIC_CAPABILITIES = EnvironmentCapabilities(name="mosaic", network_modes=frozenset(NetworkMode))
+MOSAIC_CAPABILITIES = EnvironmentCapabilities(name="mosaic", billable=True, network_modes=frozenset(NetworkMode))
+# The shape a protected box sends when the spec names none: Mosaic's default
+# template shape, and 2 GiB for each vCPU as in its published shapes.
+_DEFAULT_VCPU = 2
+_MEMORY_MB_PER_VCPU = 2048
 
 # The event loop keeps only weak references to tasks, so a background
 # cleanup that nobody awaits must stay here until it ends.
@@ -246,6 +262,24 @@ def _create_params(spec: SandboxSpec, box_tag: str) -> dict[str, Any]:
     return params
 
 
+def _settle_failure(error: Exception) -> Exception:
+    """Return the usage error that a failed settle raises from ``stop()``.
+
+    Args:
+        error: The settle failure.
+
+    Returns:
+        A usage error unchanged. Any other failure becomes a
+        ``UsagePendingError``, because the hold stays pending and the error
+        text can hold database details.
+    """
+    if isinstance(error, UsagePendingError | BudgetError):
+        return error
+    pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+    pending.__cause__ = error
+    return pending
+
+
 def _destroy_by_id(sandbox_id: str) -> None:
     """Destroy one sandbox by its id. Blocking; run it in a thread.
 
@@ -260,27 +294,70 @@ class MosaicEnvironment(SandboxEnvironment):
 
     capabilities = MOSAIC_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, timeouts: PhaseTimeouts | None = None) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        timeouts: PhaseTimeouts | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = MosaicUsageReservation,
+    ) -> None:
         """Check the spec and prepare the create call.
 
         Args:
             spec: The sandbox to open.
             timeouts: The phase timeouts; ``None`` sets no start or run limit.
+            budget: The ``BudgetRuntime`` that funds the box, or ``None``.
+            usage_factory: Makes the usage reservation of a protected box.
 
         Raises:
-            SandboxSpecError: Mosaic cannot open this spec.
+            SandboxSpecError: Mosaic cannot open this spec, or a protected box
+                has no operation key.
         """
+        if budget is not None:
+            if spec.operation_key is None:
+                raise SandboxSpecError("A protected Mosaic sandbox needs an operation key.")
+            self.capabilities = dataclasses.replace(MOSAIC_CAPABILITIES, protected=True)
         super().__init__(spec)
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
         self._box_tag = uuid.uuid4().hex
         self._create_params = _create_params(spec, self._box_tag)
+        if budget is not None:
+            vcpu = spec.resources.cpus if spec.resources.mode is not ResourceMode.IGNORE else _DEFAULT_VCPU
+            self._create_params["vcpu"] = vcpu
+            self._create_params.setdefault("memory_mb", vcpu * _MEMORY_MB_PER_VCPU)
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._billing_call: asyncio.Future[Any] | None = None
+        self._expiry: asyncio.Future[None] | None = None
+        self._start_error: BaseException | None = None
+        self._settle_error: Exception | None = None
         self._box: Any = None
         self._create_call: asyncio.Future[Any] | None = None
         self._starting: asyncio.Future[None] | None = None
         self._create_dispatched = False
         self._started = False
         self._stop_task: asyncio.Future[None] | None = None
+
+    @property
+    def usage(self) -> Any | None:
+        """Return the usage reservation of a protected box, once it exists."""
+        return self._usage
+
+    def _usage_request(self) -> dict[str, Any]:
+        """Build the request that the reservation prices.
+
+        Returns:
+            The box shape, and its lifetime plus the stop limit, because the
+            box runs until its bounded destroy ends.
+        """
+        return {
+            "vcpu": self._create_params["vcpu"],
+            "memory_mb": self._create_params["memory_mb"],
+            "lifetime_ms": math.ceil((self.spec.lifetime_seconds + STOP_TIMEOUT) * 1000),
+        }
 
     @classmethod
     def preflight(cls) -> None:
@@ -320,7 +397,13 @@ class MosaicEnvironment(SandboxEnvironment):
         try:
             await self._starting
         except BaseException as error:
-            await self.stop()
+            self._start_error = error
+            try:
+                await self.stop()
+            except Exception as settle_error:
+                # Keep the start error for the caller; the owner's next
+                # stop() reports the settle failure.
+                self._settle_error = settle_error
             task = asyncio.current_task()
             if isinstance(error, asyncio.CancelledError) and task is not None and not task.cancelling():
                 raise SandboxInfraError("The Mosaic sandbox stopped during its start.") from None
@@ -328,15 +411,74 @@ class MosaicEnvironment(SandboxEnvironment):
         finally:
             self._starting = None
 
+    async def _reserve(self) -> Any | None:
+        """Reserve the funded lifetime of a protected box.
+
+        Returns:
+            The usage reservation, or ``None`` for an unprotected box.
+        """
+        if self._budget is None:
+            return None
+        reserving = asyncio.ensure_future(
+            asyncio.to_thread(
+                self._usage_factory, self._budget, self._usage_request(), operation_key=self.spec.operation_key
+            )
+        )
+        try:
+            self._usage = await asyncio.shield(reserving)
+        except asyncio.CancelledError:
+            # The thread cannot be cancelled and may still reserve; keep its
+            # result so the teardown releases it instead of leaking it.
+            while not reserving.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(reserving)
+            if not reserving.cancelled() and reserving.exception() is None:
+                self._usage = reserving.result()
+            raise
+        return self._usage
+
+    async def _billing(self, call: Callable[..., Any], *args: Any) -> Any:
+        """Run one reservation call in a thread that a cancel cannot cut short.
+
+        The teardown awaits the same call before it settles.
+
+        Args:
+            call: The reservation method.
+            *args: Its arguments.
+
+        Returns:
+            The result of the call.
+        """
+        self._billing_call = asyncio.ensure_future(asyncio.to_thread(call, *args))
+        return await asyncio.shield(self._billing_call)
+
+    async def _expire(self, at: float) -> None:
+        """Stop the box when its funded lifetime ends.
+
+        Args:
+            at: The event loop time at which the funded lifetime ends.
+        """
+        await asyncio.sleep(max(0.0, at - asyncio.get_running_loop().time()))
+        logger.info("Mosaic sandbox reached its funded lifetime; destroying it.")
+        if self._stop_task is None:
+            self._stop_task = asyncio.ensure_future(self._teardown())
+        # The stop() of the box's owner raises a settle error, not this task.
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(self._stop_task)
+
     async def _create(self) -> None:
-        """Create the sandbox in a thread and keep it.
+        """Reserve a protected box's funding, then create the sandbox in a thread and keep it.
 
         Raises:
             StartTimeoutError: The create did not finish within the start timeout.
         """
         limit = self._start_limit
+        usage = await self._reserve()
         try:
             async with asyncio.timeout(limit) as deadline:
+                if usage is not None:
+                    usage.dispatched()
+                funded_until = asyncio.get_running_loop().time() + self.spec.lifetime_seconds
                 self._create_dispatched = True
                 # The SDK create blocks, and a cancel cannot end its thread.
                 # The teardown waits for this future to find the box it made.
@@ -346,6 +488,9 @@ class MosaicEnvironment(SandboxEnvironment):
                 # The box is kept here, not in start(), so a stop that cancels
                 # the start right after the create still sees it.
                 self._box = AsyncSandbox(sync_box)
+                if usage is not None:
+                    await self._billing(usage.confirm_created, sync_box)
+                    self._expiry = asyncio.ensure_future(self._expire(funded_until))
         except TimeoutError:
             if not deadline.expired():
                 raise
@@ -514,22 +659,38 @@ class MosaicEnvironment(SandboxEnvironment):
         return data.decode("utf-8")
 
     async def stop(self) -> None:
-        """Destroy the sandbox once. Safe to call again."""
+        """Destroy the sandbox once and settle its hold. Safe to call again.
+
+        Raises:
+            UsagePendingError: The settle failed, so the hold stays pending.
+            BudgetError: The settle write failed.
+        """
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._teardown())
         await asyncio.shield(self._stop_task)
+        # Only one stop caller gets a settle failure, so a second stop
+        # returns quietly.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
 
     async def _teardown(self) -> None:
-        """End a running start, then destroy the sandbox or the lost create's box."""
+        """End a running start, destroy the sandbox or the lost create's box, then settle the hold."""
         if self._starting is not None and not self._starting.done():
             # A stop during the start: end the wait for the create first.
             self._starting.cancel()
             with contextlib.suppress(BaseException):
                 await self._starting
+        if self._expiry is not None:
+            self._expiry.cancel()
+        if self._billing_call is not None:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(self._billing_call)
         box, call = self._box, self._create_call
         self._box = self._create_call = None
+        destroyed = False
         if box is not None:
-            await _bounded(box.destroy(), "destroy the sandbox")
+            destroyed = await _bounded(box.destroy(), "destroy the sandbox")
         elif self._create_dispatched:
             action = "destroy the lost sandbox"
             cleanup = asyncio.ensure_future(self._destroy_orphan(call))
@@ -540,6 +701,36 @@ class MosaicEnvironment(SandboxEnvironment):
             done, _pending = await asyncio.wait({cleanup}, timeout=STOP_TIMEOUT)
             if not done:
                 logger.warning("Mosaic did not %s in time; it goes on in the background.", action)
+        await self._close_usage(box is not None, destroyed)
+
+    async def _close_usage(self, created: bool, destroyed: bool) -> None:
+        """Settle, release or keep the hold of a protected box after its teardown.
+
+        Args:
+            created: The create returned a box.
+            destroyed: Mosaic confirmed the destroy of that box.
+        """
+        usage, self._usage = self._usage, None
+        if usage is None:
+            return
+        # A 4xx answer or a refused token proves the create made no box.
+        refused = not self._create_dispatched or isinstance(self._start_error, SandboxRejectedError | SandboxFatalError)
+        try:
+            if created:
+                if destroyed:
+                    usage.stopped()
+                await asyncio.to_thread(usage.settle)
+            elif refused:
+                try:
+                    await asyncio.to_thread(usage.release, type(self._start_error).__name__)
+                except BudgetError:
+                    await asyncio.to_thread(usage.pending)
+            else:
+                await asyncio.to_thread(usage.pending)
+        except Exception as billing_error:
+            logger.warning("Mosaic sandbox usage stays pending: %s", type(billing_error).__name__)
+            if created:
+                self._settle_error = _settle_failure(billing_error)
 
     async def _destroy_orphan(self, call: asyncio.Future[Any] | None) -> None:
         """Destroy the box of a create that ended before the provider kept it.

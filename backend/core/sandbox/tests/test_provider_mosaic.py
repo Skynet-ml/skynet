@@ -18,7 +18,9 @@ from typing import Any
 
 import pytest
 
+from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
 from core.sandbox.errors import (
     SandboxFatalError,
@@ -27,6 +29,7 @@ from core.sandbox.errors import (
     SandboxTransientError,
     StartTimeoutError,
 )
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import mosaic
 from core.sandbox.providers.mosaic import BOX_TAG, MosaicEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -843,3 +846,242 @@ async def test_a_start_timeout_slower_than_the_stop_limit_is_destroyed_later(
     assert box.state == "running"
     await _wait_for_the_background_cleanup()
     assert box.state == "destroyed"
+
+
+class FakeUsage:
+    """Stand in for a ``MosaicUsageReservation`` and record its calls."""
+
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str | None) -> None:
+        """Keep the reserve arguments.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The operation key.
+        """
+        self.budget = budget
+        self.request = request
+        self.operation_key = operation_key
+        self.calls: list[str] = []
+        self.confirm_delay = 0.0
+        self.confirm_error: Exception | None = None
+        self.is_stopped = False
+        USAGES.append(self)
+
+    def dispatched(self) -> None:
+        """Record the create dispatch."""
+        self.calls.append("dispatched")
+
+    def confirm_created(self, sandbox: Any) -> None:
+        """Record the confirm, wait or fail when the test says so.
+
+        Args:
+            sandbox: The sync sandbox.
+
+        Raises:
+            Exception: The test's confirm error.
+        """
+        self.calls.append(f"confirm:{sandbox.id}")
+        if self.confirm_delay:
+            time.sleep(self.confirm_delay)
+        if self.confirm_error is not None:
+            raise self.confirm_error
+
+    def stopped(self) -> None:
+        """Record the confirmed destroy."""
+        self.is_stopped = True
+        self.calls.append("stopped")
+
+    def settle(self) -> None:
+        """Record the settle, and fail it like the real one without a confirmed destroy.
+
+        Raises:
+            UsagePendingError: No confirmed destroy exists.
+        """
+        self.calls.append("settle")
+        if not self.is_stopped:
+            raise UsagePendingError("no confirmed destroy")
+
+    def release(self, reason: str) -> None:
+        """Record the release.
+
+        Args:
+            reason: The refusal reason.
+        """
+        self.calls.append(f"release:{reason}")
+
+    def pending(self) -> None:
+        """Record that the hold stays pending."""
+        self.calls.append("pending")
+
+
+USAGES: list[FakeUsage] = []
+
+
+@pytest.fixture
+def usages() -> list[FakeUsage]:
+    """Clear and return the fake reservations of the test.
+
+    Returns:
+        The list that each ``FakeUsage`` adds itself to.
+    """
+    USAGES.clear()
+    return USAGES
+
+
+def _protected(**overrides: Any) -> MosaicEnvironment:
+    """Return a protected environment with the fake usage factory.
+
+    Args:
+        **overrides: Spec fields to replace.
+
+    Returns:
+        The environment.
+    """
+    spec = _spec(**{"operation_key": "op-1", **overrides})
+    return MosaicEnvironment(spec, budget=object(), usage_factory=FakeUsage)
+
+
+def test_the_usage_adapter_is_registered() -> None:
+    """Find the Mosaic usage adapter by its provider name."""
+    assert usage_adapter("mosaic") is not None
+
+
+def test_a_protected_box_needs_an_operation_key() -> None:
+    """Refuse a protected box without an operation key."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        MosaicEnvironment(_spec(), budget=object(), usage_factory=FakeUsage)
+
+
+def test_a_protected_box_is_billable_and_protected() -> None:
+    """Mark a funded box protected and leave the class capabilities unchanged."""
+    assert MosaicEnvironment.capabilities.billable
+    assert not MosaicEnvironment.capabilities.protected
+    assert _protected().capabilities.protected
+
+
+async def test_a_protected_box_reserves_its_shape_and_settles_after_the_stop(
+    fake_sdk: FakeCloud, usages: list[FakeUsage]
+) -> None:
+    """Reserve the sent shape before the create and settle after a confirmed destroy."""
+    env = _protected(resources=ResourceRequest(cpus=4))
+    await env.start()
+    (box,) = fake_sdk.boxes.values()
+    assert (box.params["vcpu"], box.params["memory_mb"]) == (4, 8192)
+    (usage,) = usages
+    assert usage.request == {"vcpu": 4, "memory_mb": 8192, "lifetime_ms": 301_000}
+    assert usage.operation_key == "op-1"
+    await env.stop()
+    await env.stop()
+    assert box.state == "destroyed"
+    assert usage.calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
+
+
+async def test_an_ignored_shape_sends_the_default_shape(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Send Mosaic's default shape so the reserved shape is the billed one."""
+    env = _protected(resources=ResourceRequest(mode=ResourceMode.IGNORE))
+    await env.start()
+    (box,) = fake_sdk.boxes.values()
+    assert (box.params["vcpu"], box.params["memory_mb"]) == (2, 4096)
+    await env.stop()
+
+
+async def test_a_failed_confirm_still_destroys_and_settles(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Settle the hold when the start fails after the create made a box."""
+
+    def factory(*args: Any, **kwargs: Any) -> FakeUsage:
+        """Make a reservation whose confirm fails.
+
+        Args:
+            *args: The reserve arguments.
+            **kwargs: The reserve keyword arguments.
+
+        Returns:
+            The reservation.
+        """
+        usage = FakeUsage(*args, **kwargs)
+        usage.confirm_error = UsagePendingError("shape mismatch")
+        return usage
+
+    env = MosaicEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=factory)
+    with pytest.raises(UsagePendingError, match="shape mismatch"):
+        await env.start()
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert usages[0].calls[-2:] == ["stopped", "settle"]
+
+
+async def test_a_cancelled_start_still_destroys_and_settles(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Wait for the confirm, destroy the box and settle when the start is cancelled."""
+
+    def factory(*args: Any, **kwargs: Any) -> FakeUsage:
+        """Make a reservation whose confirm is slow.
+
+        Args:
+            *args: The reserve arguments.
+            **kwargs: The reserve keyword arguments.
+
+        Returns:
+            The reservation.
+        """
+        usage = FakeUsage(*args, **kwargs)
+        usage.confirm_delay = 0.2
+        return usage
+
+    env = MosaicEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=factory)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
+
+
+async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Release the hold when Mosaic refused the create with a 4xx answer."""
+    fake_sdk.create_error = FakeMosaicError("400", status=400)
+    env = _protected()
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    assert usages[0].calls == ["dispatched", "release:SandboxRejectedError"]
+
+
+async def test_a_lost_create_keeps_the_hold_pending(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Keep the hold pending when the create may have made a box that Skynet never saw."""
+    fake_sdk.create_error = FakeMosaicError("lost", code="transport")
+    fake_sdk.create_error_after_box = True
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert usages[0].calls == ["dispatched", "pending"]
+
+
+async def test_a_failed_destroy_keeps_the_hold_and_the_stop_reports_it(
+    fake_sdk: FakeCloud, usages: list[FakeUsage]
+) -> None:
+    """Raise the settle failure from one stop when Mosaic did not confirm the destroy."""
+    env = _protected()
+    await env.start()
+    (box,) = fake_sdk.boxes.values()
+    fake_sdk.destroy_fails = {box.id}
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    await env.stop()
+    assert usages[0].calls[-1] == "settle"
+    assert "stopped" not in usages[0].calls
+
+
+async def test_the_box_is_destroyed_when_its_funded_lifetime_ends(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Destroy and settle the box at its funded lifetime, because Mosaic's TTL counts only idle time."""
+    env = _protected(lifetime_seconds=0.05)
+    await env.start()
+    (box,) = fake_sdk.boxes.values()
+    for _ in range(200):
+        if "settle" in usages[0].calls:
+            break
+        await asyncio.sleep(0.01)
+    assert box.state == "destroyed"
+    assert usages[0].calls[-2:] == ["stopped", "settle"]
+    await env.stop()
