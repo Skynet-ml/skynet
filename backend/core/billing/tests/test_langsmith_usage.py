@@ -289,6 +289,55 @@ def test_failed_pending_mark_keeps_the_original_error(
         reservation.settle()
 
 
+def test_confirm_records_the_sizes_before_the_ledger_call(
+    database: Engine, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the reported sizes when the ledger fails to record the sandbox id."""
+    runtime = _runtime(database)
+    reservation = LangSmithUsageReservation(runtime, CREATE, operation_key="box-1")
+
+    def broken_mark(*args: Any) -> None:
+        """Fail like a lost database.
+
+        Args:
+            *args: The ledger call arguments.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database lost")
+
+    monkeypatch.setattr(runtime.service, "mark_dispatched", broken_mark)
+    with pytest.raises(RuntimeError):
+        reservation.confirm_created(SimpleNamespace(id="sandbox-uuid", vcpus=2))
+    assert reservation.reported == {"vcpus": 2}
+
+
+def test_release_marks_pending_on_a_database_error(
+    database: Engine, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the coverage held and pending when the release fails with a database error."""
+    runtime = _runtime(database)
+    reservation = LangSmithUsageReservation(runtime, CREATE, operation_key="box-1")
+
+    def broken_reject(*args: Any, **kwargs: Any) -> None:
+        """Fail like a lost database.
+
+        Args:
+            *args: The ledger call arguments.
+            **kwargs: The ledger call options.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database lost")
+
+    monkeypatch.setattr(runtime.service, "reject", broken_reject)
+    with pytest.raises(RuntimeError):
+        reservation.release("create-not-sent")
+    assert runtime.service.get_operation(reservation.operation.id, "alice").state == "pending"
+
+
 def test_extend_funds_a_longer_lifetime(database: Engine, clock: Clock) -> None:
     """Grow the coverage for a longer lifetime and refuse an extension that does not grow it."""
     runtime = _runtime(database)

@@ -265,7 +265,8 @@ class LangSmithEnvironment(SandboxEnvironment):
             SandboxRejectedError: The server refused the request, or the image
                 did not start.
             BudgetError: The budget refused the reservation of a protected box.
-            UsagePendingError: The created box is larger than its reservation.
+            BudgetError: The ledger refused to record the created sandbox id.
+                The sandbox is deleted first.
         """
         if self._box is not None:
             return
@@ -354,11 +355,12 @@ class LangSmithEnvironment(SandboxEnvironment):
         A protected box waits for a 404 proof. After an answered create this
         takes about one poll. After a create without an answer (a timeout,
         a cancel, a 5xx), the proof counts only after the create window, so
-        ``stop`` and a cancelled ``start`` can block for the start limit plus
-        60 s grace, plus the 60 s poll window, plus one last pass of up to
-        about 122 s (get, delete, poll pause). With the default 900 s start
-        limit that is about 20 minutes. This is deliberate: an earlier settle
-        could miss a box that the create still makes.
+        ``stop`` and a cancelled ``start`` can block for the first delete (up
+        to 60 s), the start limit plus 60 s grace, the 60 s poll window, one
+        last pass of up to about 122 s (get, delete, poll pause), and the
+        client close (up to 60 s). With the default 900 s start limit that is
+        about 1,200 to 1,260 s, or about 20 to 21 minutes. This is deliberate:
+        an earlier settle could miss a box that the create still makes.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the delete.

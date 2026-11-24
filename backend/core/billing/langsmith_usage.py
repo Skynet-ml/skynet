@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 from .budget_amounts import cent_units
-from .budgets import BudgetConflictError, BudgetError, OperationSnapshot
+from .budgets import BudgetConflictError, OperationSnapshot
 from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationError, json_fingerprint, operation_quote
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
@@ -199,15 +199,16 @@ class LangSmithUsageReservation:
         Args:
             box: The SDK sandbox that the create call returned.
         """
-        self.sandbox_id = getattr(box, "id", None)
-        if self.sandbox_id:
-            self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, self.sandbox_id)
+        # The sizes come first, so a failed ledger call below cannot price a larger box at the funded size.
         for field in _SIZE_FIELDS:
             # The SDK leaves a field None when the server omits it; the create
             # call sent the funded value.
             value = getattr(box, field, None)
             if value is not None:
                 self.reported[field] = value
+        self.sandbox_id = getattr(box, "id", None)
+        if self.sandbox_id:
+            self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, self.sandbox_id)
 
     def mark_deleted(self, at: float | None = None) -> None:
         """Record that the provider confirmed the sandbox is deleted, so its billed life is over.
@@ -253,7 +254,8 @@ class LangSmithUsageReservation:
             reason: Why no box exists, for the ledger evidence.
 
         Raises:
-            BudgetError: When the ledger refuses the release; the coverage stays held.
+            BudgetError: When the ledger refuses the release. A database error
+                passes through the same way. The coverage stays held.
         """
         try:
             self.runtime.service.reject(
@@ -262,7 +264,8 @@ class LangSmithUsageReservation:
                 evidence_key=f"langsmith-release:{self.operation.id}",
                 evidence={"provider": "langsmith", "name": self.request.get("name"), "reason": reason},
             )
-        except BudgetError:
+        except Exception:
+            # Also a database error: pending() leaves states it does not own alone.
             self._keep_pending()
             raise
         self.runtime.unpin(self.operation.id)
@@ -383,7 +386,7 @@ class LangSmithUsage:
         return LangSmithUsageReservation(runtime, request, operation_key=operation_key, reserved=reserved)
 
     def confirm(self, reservation: LangSmithUsageReservation, session: Any) -> None:
-        """Verify the created sandbox matches its funded envelope.
+        """Record the created sandbox's id and reported sizes.
 
         Args:
             reservation: The box's claimed reservation.
