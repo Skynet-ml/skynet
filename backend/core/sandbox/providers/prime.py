@@ -224,7 +224,11 @@ async def _labelled(client: Any, label: str, *, ended: bool = False) -> AsyncIte
     """
     cursor: str | None = None
     while True:
-        page = await client.list(labels=[label], exclude_terminated=not ended, per_page=_LIST_PAGE, cursor=cursor)
+        # The SDK sends any value that is not None as ``is_active``, and
+        # ``is_active=false`` lists only ended boxes. None lists every box.
+        page = await client.list(
+            labels=[label], exclude_terminated=None if ended else True, per_page=_LIST_PAGE, cursor=cursor
+        )
         for sandbox in page.sandboxes:
             # The label filter is a server query; check it here too, so a
             # wider answer never deletes another sandbox.
@@ -238,9 +242,11 @@ async def _labelled(client: Any, label: str, *, ended: bool = False) -> AsyncIte
 def _refused(error: BaseException | None) -> bool:
     """Tell whether Prime refused a create with an answer that can mean no box was made.
 
-    The SDK sends the create again after a 5xx or a lost connection, so a
-    4xx answer can answer a retry whose first try made a box. Only a label
-    search can then show that no box exists. A 409 is an idempotency
+    prime-sandboxes 0.5.8 sends the create with ``idempotent_post=True``, so
+    it sends it up to 3 times after a ReadError, a RemoteProtocolError, a
+    ConnectError or a 502, 503 or 504 answer. A 4xx answer can thus answer a
+    retry whose first try made a box. A refusal alone never releases the
+    hold: only label searches that find no box can show that none exists. A 409 is an idempotency
     conflict, which can mean that a box exists, so it is never a refusal.
 
     Args:

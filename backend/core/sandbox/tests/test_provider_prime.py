@@ -73,6 +73,7 @@ class FakeUploadTimeoutError(RuntimeError):
 # The SDK model defaults; its validator sets a 5 GB disk when an image is given.
 _SDK_DEFAULTS = {"cpu_cores": 1.0, "memory_gb": 1.0, "disk_size_gb": 5.0, "timeout_minutes": 60, "gpu_count": 0}
 _CREATED_AT = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+_FAKE_ENDED = frozenset({"ERROR", "TERMINATED", "TIMEOUT"})
 
 
 class FakeCreateRequest(dict):
@@ -353,25 +354,29 @@ class FakeClient:
         return SimpleNamespace(applied=CLOUD.apply_after <= 0)
 
     async def list(
-        self, *, labels: list[str], exclude_terminated: bool, per_page: int, cursor: str | None
+        self, *, labels: list[str], exclude_terminated: bool | None, per_page: int, cursor: str | None
     ) -> SimpleNamespace:
         """Return one page of sandboxes with these labels.
 
         Args:
             labels: The label filter.
-            exclude_terminated: Leave terminated sandboxes out.
+            exclude_terminated: The SDK ``is_active`` filter, or ``None`` for every box.
             per_page: The page size the provider asked for.
             cursor: The page cursor.
 
         Returns:
             An object like ``SandboxListResponse``.
         """
-        CLOUD.list_calls.append({"labels": labels, "per_page": per_page, "cursor": cursor})
+        CLOUD.list_calls.append(
+            {"labels": labels, "per_page": per_page, "cursor": cursor, "exclude_terminated": exclude_terminated}
+        )
+        # Like the SDK: None sends no is_active and lists every box; True
+        # lists only active boxes; False lists only ended boxes.
         boxes = [
             box
             for box in CLOUD.boxes.values()
             if (CLOUD.list_ignores_labels or set(labels) <= set(box.labels))
-            and not (exclude_terminated and box.status == "TERMINATED")
+            and (exclude_terminated is None or (box.status not in _FAKE_ENDED) == exclude_terminated)
         ]
         start = int(cursor or 0)
         page = boxes[start : start + CLOUD.page_size]
@@ -1241,6 +1246,35 @@ async def test_a_refused_create_whose_box_already_ended_settles(
     assert not any(call.startswith("delete:") for call in fake_sdk.calls)
     assert [name for name, _ in usage.calls] == ["confirm", "settle"]
     assert usage.calls[-1][1]["terminated_at"] == (_CREATED_AT + timedelta(seconds=30)).isoformat()
+    assert usage.seconds == [None]
+
+
+async def test_a_refused_create_whose_box_still_runs_settles(fake_sdk: FakeCloud) -> None:
+    """Find a running box under the label after a refused create, delete it and settle it, never release it."""
+    original = FakeClient.create
+
+    async def create(self: FakeClient, request: FakeCreateRequest) -> SimpleNamespace:
+        """Make a running box, then answer 400 like an SDK retry after a 5xx.
+
+        Args:
+            request: The create request.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 400, after the box exists.
+        """
+        view = await original(self, request)
+        CLOUD.boxes[view.id].status = "RUNNING"
+        raise FakeAPIError("HTTP 400: duplicate")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FakeClient, "create", create)
+        recorder = UsageRecorder()
+        with pytest.raises(SandboxRejectedError):
+            await _protected(recorder).start()
+    (usage,) = recorder.made
+    assert fake_sdk.list_calls[0]["exclude_terminated"] is None
+    assert "delete:sbx-1" in fake_sdk.calls
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
     assert usage.seconds == [None]
 
 
