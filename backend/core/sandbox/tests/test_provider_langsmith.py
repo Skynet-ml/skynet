@@ -9,13 +9,22 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
-from collections.abc import AsyncIterator, Mapping
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
+from core.billing.budgets import BudgetError, BudgetService
+from core.billing.langsmith_usage import LangSmithUsageReservation
+from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.sandbox import SandboxSpec, factory
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.errors import (
     SandboxFatalError,
     SandboxInfraError,
@@ -28,6 +37,7 @@ from core.sandbox.providers import langsmith
 from core.sandbox.providers.langsmith import LangSmithEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+from core.storage.models import Base, BillingCustomerModel
 
 try:
     from langsmith import sandbox as sdk
@@ -216,6 +226,8 @@ class FakeBox:
         """
         self.server = server
         self.files: dict[str, bytes] = {}
+        for field, value in server.box_fields.items():
+            setattr(self, field, value)
 
     async def write(self, path: str, content: bytes, **kwargs: Any) -> None:
         """Store one file."""
@@ -288,6 +300,14 @@ class FakeServer:
         self.create_gate: asyncio.Event | None = None
         self.delete_started = asyncio.Event()
         self.delete_gate: asyncio.Event | None = None
+        self.box_fields: dict[str, Any] = {}
+        self.get_error: BaseException | None = None
+        self.late_box_seconds: float | None = None
+        # Each delete takes the next step: "keep" returns but keeps the box,
+        # "fail" raises and keeps it, "lost" removes it and then raises.
+        self.delete_steps: list[str] = []
+        self.found_at: list[float] = []
+        self.missing_at: list[float] = []
 
 
 class FakeClient:
@@ -308,6 +328,11 @@ class FakeClient:
         if self.server.create_hangs:
             await asyncio.Event().wait()
         if self.server.create_error is not None:
+            if self.server.late_box_seconds is not None:
+                name = kwargs["name"]
+                asyncio.get_running_loop().call_later(
+                    self.server.late_box_seconds, self.server.boxes.__setitem__, name, FakeBox(self.server)
+                )
             raise self.server.create_error
         box = FakeBox(self.server)
         self.server.boxes[kwargs["name"]] = box
@@ -321,8 +346,26 @@ class FakeClient:
         self.server.delete_started.set()
         if self.server.delete_gate is not None:
             await self.server.delete_gate.wait()
+        step = self.server.delete_steps.pop(0) if self.server.delete_steps else None
+        if step == "keep":
+            return
+        if step == "fail":
+            raise FakeConnectionError("delete lost")
+        if step == "lost":
+            self.server.boxes.pop(name, None)
+            raise FakeConnectionError("delete answer lost")
         if self.server.boxes.pop(name, None) is None:
             raise FakeNotFoundError(name)
+
+    async def get_sandbox(self, name: str) -> FakeBox:
+        """Return one box, or raise the lookup error or the not-found error."""
+        if self.server.get_error is not None:
+            raise self.server.get_error
+        if name not in self.server.boxes:
+            self.server.missing_at.append(time.monotonic())
+            raise FakeNotFoundError(name)
+        self.server.found_at.append(time.monotonic())
+        return self.server.boxes[name]
 
     async def aclose(self) -> None:
         """Record the close."""
@@ -900,3 +943,555 @@ async def test_broken_json_of_a_create_response_is_transient(transport_failures:
     with pytest.raises(SandboxTransientError) as caught:
         await env.start()
     assert isinstance(caught.value.__cause__, json.JSONDecodeError)
+
+
+_PROTECTED_SPEC = SandboxSpec(
+    lifetime_seconds=60,
+    resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048),
+    operation_key="op-1",
+)
+# A short start limit keeps the window in which a create without an answer can land short.
+_STARTUP_SECONDS = 0.2
+
+
+@pytest.fixture(autouse=True)
+def _fast_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll for the proof of a delete quickly, and end the create window at the start limit."""
+    monkeypatch.setattr(langsmith, "_GONE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(langsmith, "_CREATE_LANDING_GRACE_SECONDS", 0)
+
+
+class FakeUsage:
+    """Stand in for ``LangSmithUsageReservation``: record each billing call in order."""
+
+    events: list[Any]
+    ends: list[float | None]
+    error: BaseException | None = None
+    entered: threading.Event | None = None
+    gate: threading.Event | None = None
+
+    def __init__(self, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> None:
+        """Record the reservation, or raise the refusal that the test set.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced create parameters.
+            operation_key: The box identity.
+
+        Raises:
+            BaseException: The refusal that the test set.
+        """
+        if self.entered is not None:
+            self.entered.set()
+        if self.gate is not None:
+            self.gate.wait(5)
+        if self.error is not None:
+            raise self.error
+        self.request = dict(request)
+        self.deleted = False
+        self.events.append(("reserve", operation_key))
+
+    def confirm_created(self, box: Any) -> None:
+        """Record the confirm.
+
+        Args:
+            box: The created SDK box.
+        """
+        self.events.append(("confirm", box))
+
+    def mark_deleted(self, at: float | None = None) -> None:
+        """Record the confirmed delete and the end instant that the provider passed.
+
+        Args:
+            at: The end of the billed life; ``None`` means the proof time.
+        """
+        self.deleted = True
+        self.ends.append(at)
+
+    def release(self, reason: str) -> None:
+        """Record the release of the hold.
+
+        Args:
+            reason: Why no box exists.
+        """
+        self.events.append(("release", reason))
+
+    def settle(self) -> None:
+        """Record the settle, and fail like the real reservation when the delete is not confirmed.
+
+        Raises:
+            UsagePendingError: The delete is not confirmed.
+        """
+        self.events.append(("settle", self.deleted))
+        if not self.deleted:
+            raise UsagePendingError("not deleted")
+
+
+@pytest.fixture
+def usage() -> type[FakeUsage]:
+    """Give each test its own fake reservation class and event list.
+
+    Returns:
+        A ``FakeUsage`` subclass.
+    """
+    return type("BoundFakeUsage", (FakeUsage,), {"events": [], "ends": []})
+
+
+def _protected(usage: Any, spec: SandboxSpec = _PROTECTED_SPEC, **kwargs: Any) -> LangSmithEnvironment:
+    """Build a protected provider on the fake reservation.
+
+    Args:
+        usage: The reservation class.
+        spec: The sandbox spec.
+        **kwargs: More provider options.
+
+    Returns:
+        The provider.
+    """
+    kwargs.setdefault("startup_timeout_seconds", _STARTUP_SECONDS)
+    kwargs.setdefault("budget", object())
+    return LangSmithEnvironment(spec, usage_factory=usage, **kwargs)
+
+
+@pytest.fixture
+def ledger(tmp_path: Path) -> Iterator[BudgetRuntime]:
+    """Bind a real budget runtime to a private funded SQLite ledger.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite file.
+
+    Yields:
+        A runtime for a fresh 50-cent budget owned by ``alice``.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'langsmith.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    yield BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    engine.dispose()
+
+
+def _recording(made: list[LangSmithUsageReservation]) -> Any:
+    """Build a factory that makes real reservations and keeps each one.
+
+    Args:
+        made: Receives each reservation.
+
+    Returns:
+        The usage factory.
+    """
+
+    def factory(*args: Any, **kwargs: Any) -> LangSmithUsageReservation:
+        """Make one real reservation and keep it.
+
+        Returns:
+            The reservation.
+        """
+        reservation = LangSmithUsageReservation(*args, **kwargs)
+        made.append(reservation)
+        return reservation
+
+    return factory
+
+
+def _operation(runtime: BudgetRuntime, made: list[LangSmithUsageReservation]) -> Any:
+    """Return the ledger state of the one reservation that the provider made.
+
+    Args:
+        runtime: The budget runtime.
+        made: The reservations that the factory made.
+
+    Returns:
+        The operation snapshot.
+    """
+    (reservation,) = made
+    return runtime.service.get_operation(reservation.operation.id, "alice")
+
+
+def test_capabilities_are_billable_and_a_budget_makes_the_box_protected(usage: type[FakeUsage]) -> None:
+    """Declare the provider billable, so the bridge passes a budget, and mark a funded box protected."""
+    assert LangSmithEnvironment.capabilities.billable is True
+    assert LangSmithEnvironment(_SPEC).capabilities.protected is False
+    assert _protected(usage).capabilities.protected is True
+
+
+@pytest.mark.parametrize(
+    ("spec", "options"),
+    [
+        (SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048)), {}),
+        (SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=2), operation_key="op-1"), {}),
+        (
+            SandboxSpec(
+                lifetime_seconds=60,
+                resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048, mode=ResourceMode.IGNORE),
+                operation_key="op-1",
+            ),
+            {},
+        ),
+        (_PROTECTED_SPEC, {"idle_ttl_seconds": 0}),
+        (_PROTECTED_SPEC, {"delete_after_stop_seconds": 0}),
+    ],
+)
+def test_protected_box_refuses_a_spec_with_no_cost_bound(
+    usage: type[FakeUsage], spec: SandboxSpec, options: dict[str, Any]
+) -> None:
+    """Refuse a protected box with no operation key, no fixed size, or a TTL that turns the server bound off."""
+    with pytest.raises(SandboxSpecError):
+        _protected(usage, spec, **options)
+
+
+async def test_protected_box_reserves_before_create_and_settles_after_delete(
+    server: FakeServer, usage: type[FakeUsage]
+) -> None:
+    """Reserve, create, confirm, delete, then settle at the confirmed delete, once."""
+    env = _protected(usage)
+    await env.start()
+    reservation_request = env._usage.request
+    box = server.boxes[env.name]
+    assert usage.events == [("reserve", "op-1"), ("confirm", box)]
+    assert reservation_request["vcpus"] == server.creates[0]["vcpus"] == 2
+    assert reservation_request["mem_bytes"] == server.creates[0]["mem_bytes"] == 1024 * 1024 * 1024
+    assert reservation_request["fs_capacity_bytes"] == server.creates[0]["fs_capacity_bytes"] == 2048 * 1024 * 1024
+    assert reservation_request["lifetime_ms"] == 60_000
+    assert reservation_request["idle_ttl_seconds"] == server.creates[0]["idle_ttl_seconds"]
+    await env.stop()
+    await env.stop()
+    assert usage.events[2:] == [("settle", True)]
+    assert server.deletes == [env.name]
+
+
+async def test_failed_confirm_deletes_the_box_before_the_settle(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the created box, then settle, and raise the confirm error when the ledger refuses the confirm."""
+
+    def refuse(self: FakeUsage, box: Any) -> None:
+        """Fail like a refused ledger call.
+
+        Args:
+            self: The fake reservation.
+            box: The created SDK box.
+
+        Raises:
+            BudgetError: Always.
+        """
+        self.events.append(("confirm", box))
+        raise BudgetError("ledger refused")
+
+    usage.confirm_created = refuse  # type: ignore[method-assign]
+    env = _protected(usage)
+    with pytest.raises(BudgetError, match="ledger refused"):
+        await env.start()
+    assert len(server.deletes) == 1
+    assert usage.events[-1] == ("settle", True)
+    assert [event[0] for event in usage.events] == ["reserve", "confirm", "settle"]
+
+
+async def test_budget_refusal_creates_no_box(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Raise the budget refusal before any create call."""
+    usage.error = BudgetError("no headroom")
+    env = _protected(usage)
+    with pytest.raises(BudgetError):
+        await env.start()
+    assert server.creates == []
+    assert usage.events == []
+
+
+async def test_cancel_during_reserve_releases_the_hold(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Release the hold that a cancelled reservation still made, because no create left."""
+    usage.entered = threading.Event()
+    usage.gate = threading.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.to_thread(usage.entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    usage.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("release", "create-not-sent")]
+    assert server.creates == []
+
+
+async def test_cancel_during_a_refused_reserve_keeps_the_cancel(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Raise the cancel, not the budget refusal, when the reservation fails after a cancel."""
+    usage.entered = threading.Event()
+    usage.gate = threading.Event()
+    usage.error = BudgetError("no headroom")
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.to_thread(usage.entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    usage.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert usage.events == []
+    assert server.creates == []
+
+
+async def test_stop_during_reserve_releases_the_hold(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Release the hold when a stop() ends the start before the create call."""
+    usage.entered = threading.Event()
+    usage.gate = threading.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.to_thread(usage.entered.wait, 5)
+    await asyncio.wait_for(env.stop(), 5)
+    usage.gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("release", "create-not-sent")]
+    assert server.creates == []
+
+
+async def test_refused_create_with_no_box_releases_the_hold(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Release the hold when the server refused the create and has no box by its name."""
+    server.create_error = _caused_by_status(FakeValidationError("too large"), 422)
+    env = _protected(usage)
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    assert usage.events == [("reserve", "op-1"), ("release", "create-refused-422")]
+    assert server.deletes == []
+
+
+async def test_failed_create_settles_after_the_create_window(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the partial box of a create without an answer, and settle only after its create window."""
+    server.create_then_fail = True
+    env = _protected(usage)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert loop.time() - started >= _STARTUP_SECONDS
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert server.boxes == {}
+
+
+async def test_box_that_lands_late_is_deleted_before_the_settle(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Treat an early 404 as no proof, and delete a box that a create without an answer makes later."""
+    server.create_error = FakeConnectionError("lost")
+    server.late_box_seconds = 0.05
+    env = _protected(usage)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert server.boxes == {}
+    assert server.deletes.count(env.name) >= 2
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+
+
+async def test_gateway_error_on_create_waits_for_a_late_box(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Treat a gateway 504 as no answer: keep polling, delete the late box, and end at the proof."""
+    server.create_error = _caused_by_status(FakeAPIError("gateway timeout"), 504)
+    server.late_box_seconds = 0.05
+    env = _protected(usage)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert server.boxes == {}
+    assert server.deletes.count(env.name) >= 2
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert usage.ends == [None]
+
+
+async def test_answered_create_ends_at_the_delete_call(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """End the billed life of an answered create at the delete call, not at the later 404 proof."""
+    env = _protected(usage)
+    await env.start()
+    server.get_error = FakeConnectionError("lookup lost")
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.1, setattr, server, "get_error", None)
+    before = time.monotonic()
+    await env.stop()
+    proved = time.monotonic()
+    assert usage.events[-1] == ("settle", True)
+    [ended_at] = usage.ends
+    assert ended_at is not None
+    assert before <= ended_at <= proved - 0.05
+
+
+async def test_box_seen_after_the_delete_moves_the_end(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """End the billed life no earlier than a lookup that still found the box after a delete."""
+    env = _protected(usage)
+    await env.start()
+    server.delete_steps = ["keep", "lost"]
+    await env.stop()
+    assert usage.events[-1] == ("settle", True)
+    [seen_at] = server.found_at
+    [ended_at] = usage.ends
+    assert ended_at is not None
+    assert ended_at >= seen_at
+    assert ended_at >= server.missing_at[-1]
+
+
+async def test_box_seen_after_a_good_delete_ends_at_the_404(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """End at the 404 proof, not at a later delete's return, once a lookup found the box after a delete."""
+    env = _protected(usage)
+    await env.start()
+    server.delete_steps = ["keep"]
+    await env.stop()
+    [ended_at] = usage.ends
+    assert ended_at is not None
+    assert server.deletes == [env.name, env.name]
+    assert ended_at >= server.missing_at[-1]
+
+
+async def test_failed_first_delete_retries_until_proof(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Retry a failed first delete in the bounded poll, then settle on the 404 proof."""
+    env = _protected(usage)
+    await env.start()
+    server.delete_steps = ["fail"]
+    await env.stop()
+    assert server.boxes == {}
+    assert server.deletes == [env.name, env.name]
+    assert usage.events[-1] == ("settle", True)
+
+
+async def test_real_reservation_checks_the_size_after_a_stop_during_create(
+    server: FakeServer, ledger: BudgetRuntime
+) -> None:
+    """Record the reported size when a stop() comes during a create that still makes a larger box."""
+    server.box_fields = {"id": "sandbox-uuid", "vcpus": 4}
+    server.create_gate = asyncio.Event()
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    server.create_gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert made[0].reported == {"vcpus": 4}
+    assert server.boxes == {}
+    assert _operation(ledger, made).state == "settled"
+
+
+async def test_no_proof_keeps_the_hold_pending_and_the_start_error_carries_it(
+    server: FakeServer, usage: type[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the hold pending when no lookup proves the box gone, and attach that to the start error."""
+    monkeypatch.setattr(langsmith, "_DELETE_TIMEOUT_SECONDS", 0.1)
+    server.create_error = FakeConnectionError("lost")
+    server.get_error = FakeConnectionError("lookup lost")
+    env = _protected(usage)
+    with pytest.raises(SandboxTransientError) as caught:
+        await env.start()
+    assert usage.events == [("reserve", "op-1"), ("settle", False)]
+    assert any("stays pending" in note for note in caught.value.__notes__)
+    await env.stop()
+
+
+async def test_cancelled_create_settles_after_the_create_window(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the box and settle its reservation after the create window when the start is cancelled."""
+    server.create_gate = asyncio.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+
+
+async def test_stop_during_create_settles_only_after_the_last_delete(
+    server: FakeServer, usage: type[FakeUsage]
+) -> None:
+    """Hold the settle while a create runs, then settle once after the delete of the late box."""
+    server.create_gate = asyncio.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    assert usage.events == [("reserve", "op-1")]
+    server.create_gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("confirm", usage.events[1][1]), ("settle", True)]
+    assert server.boxes == {}
+
+
+async def test_failed_delete_keeps_the_reservation_pending(
+    server: FakeServer, usage: type[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settle without a confirmed delete, raise the pending error once, and keep later stops quiet."""
+    # The retry poll is bounded by the delete timeout; keep it short.
+    monkeypatch.setattr(langsmith, "_DELETE_TIMEOUT_SECONDS", 0.1)
+    env = _protected(usage)
+    await env.start()
+
+    async def broken_delete(name: str) -> None:
+        """Fail the delete like a lost connection.
+
+        Args:
+            name: The sandbox name.
+
+        Raises:
+            FakeConnectionError: Always.
+        """
+        raise FakeConnectionError(name)
+
+    env._client.delete_sandbox = broken_delete
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usage.events[-1] == ("settle", False)
+    await env.stop()
+
+
+async def test_protected_box_stops_when_its_funded_lifetime_ends(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete and settle a protected box when its funded lifetime ends without a stop call."""
+    spec = SandboxSpec(
+        lifetime_seconds=0.05,
+        resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048),
+        operation_key="op-1",
+    )
+    env = _protected(usage, spec)
+    await env.start()
+    await asyncio.wait_for(env._expiry, 5)
+    assert server.boxes == {}
+    assert usage.events[-1] == ("settle", True)
+    with pytest.raises(RuntimeError):
+        await env.exec("true")
+    await env.stop()
+
+
+async def test_real_reservation_settles_a_stopped_box(server: FakeServer, ledger: BudgetRuntime) -> None:
+    """Reserve, confirm and settle a box on the real ledger through the provider."""
+    server.box_fields = {"id": "sandbox-uuid", "vcpus": 2, "mem_bytes": 1024 * 1024 * 1024}
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    await env.start()
+    assert _operation(ledger, made).state == "dispatched"
+    await env.stop()
+    operation = _operation(ledger, made)
+    assert operation.state == "settled"
+    assert operation.provider_request_id == "sandbox-uuid"
+    assert operation.actual_cents <= operation.max_cents
+    assert operation.id not in ledger._pinned
+
+
+async def test_real_reservation_prices_a_larger_box_at_its_size(server: FakeServer, ledger: BudgetRuntime) -> None:
+    """Run a box larger than funded, then settle it at the reported size, inside the coverage."""
+    server.box_fields = {"id": "sandbox-uuid", "vcpus": 4}
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    await env.start()
+    await env.stop()
+    operation = _operation(ledger, made)
+    assert operation.state == "settled"
+    assert operation.actual_cents <= operation.max_cents
+    settled = ledger.service.get_reconciliation(operation.id, "alice")
+    (evidence,) = [item for item in settled.evidence if "priced_sizes" in item]
+    assert evidence["priced_sizes"]["vcpus"] == 4
+
+
+async def test_real_reservation_releases_a_refused_create(server: FakeServer, ledger: BudgetRuntime) -> None:
+    """Give the whole hold back on the real ledger when the server refused the create."""
+    server.create_error = _caused_by_status(FakeQuotaError("full"), 429)
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert _operation(ledger, made).state == "released"
+    assert ledger.service.get(ledger.budget_id, "alice").reserved_cents == 0
