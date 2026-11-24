@@ -1,0 +1,884 @@
+/*
+ * The live blog figures: the essay's chart cards, scoped under .bf.
+ *
+ * The figure HTML in content/<slug>.figures.json uses these class names.
+ * A card is always dark, in both app themes, like the essay it comes from.
+ * Each figure is a size container, so the phone layout follows the width of
+ * the figure, not of the window.
+ */
+
+.bf,
+.bf-tip,
+.bf-atip {
+  --bg: #1c1814;
+  --base: #221d19;
+  --card: #2c2621;
+  --popover: #312a24;
+  --ink: #f3ede6;
+  --text-2: #cdbfb1;
+  --muted: #a89a8c;
+  --primary: #e0935a;
+  --primary-hover: #f0b98a;
+  --primary-fill: #b4521f;
+  --border: #483d34;
+  --border-subtle: #3a312a;
+  --surface-2: #27211d;
+  --surface-3: #382f28;
+  --ghost: #8a7d70;
+  --ui: var(--font-ui);
+  --mono: var(--font-mono);
+}
+
+/* A figure is wider than the text column on a wide screen, and as wide as the column on a phone. */
+.bf {
+  --bf-w: min(720px, 100vw - 2rem);
+  width: var(--bf-w);
+  margin-inline: calc((100% - var(--bf-w)) / 2);
+  container-type: inline-size;
+}
+
+.bf .card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(72, 61, 52, 0.5);
+  border-radius: 16px;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--ui);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 40px -28px rgba(28, 24, 20, 0.55);
+  color-scheme: dark;
+}
+.bf .card *,
+.bf .card *::before,
+.bf .card *::after {
+  box-sizing: border-box;
+}
+.bf .card ::selection {
+  background: rgba(224, 147, 90, 0.3);
+}
+
+.bf .card-body {
+  position: relative;
+  padding: 24px 28px 26px;
+}
+.bf .nw {
+  white-space: nowrap;
+}
+.bf .fh {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  margin: 0 0 18px;
+  text-align: center;
+  text-wrap: balance;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+/* In the ARC-AGI-3 figure the score or cost toggle sits at the start of the title row. */
+.bf #fig-arc .fh {
+  padding: 0 96px;
+}
+.bf #fig-arc .ctl {
+  position: absolute;
+  top: 24px;
+  left: 28px;
+  margin: 0;
+}
+
+.bf .plot {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.bf .plot.narrow {
+  display: none;
+}
+.bf .plot text {
+  font-family: var(--ui);
+  font-size: 12px;
+  fill: var(--text-2);
+}
+.bf .plot .b {
+  font-weight: 600;
+  fill: var(--ink);
+}
+.bf .plot .s {
+  font-size: 11px;
+  fill: var(--muted);
+}
+.bf .plot .t {
+  font-size: 10px;
+  fill: var(--muted);
+}
+.bf .plot .m {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  fill: var(--ink);
+}
+.bf .plot .m.s {
+  font-size: 10.5px;
+  fill: var(--muted);
+}
+.bf .plot .yr {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  fill: var(--ink);
+}
+.bf .plot .k {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  fill: var(--muted);
+}
+.bf .plot .h {
+  paint-order: stroke;
+  stroke: var(--card);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+.bf .plot .row > rect {
+  fill: transparent;
+  transition: fill 0.15s;
+}
+.bf .plot .row:hover > rect {
+  fill: rgba(56, 47, 40, 0.5);
+}
+.bf .plot .row:hover .h {
+  stroke: #322b25;
+}
+.bf .plot .row:hover text {
+  fill: #fff;
+}
+
+.bf .pi {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.bf .ti {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+.bf .ti .pi {
+  color: var(--ghost);
+}
+.bf .tile.primary .ti .pi {
+  color: var(--primary);
+}
+.bf .ctl {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  margin-bottom: 14px;
+}
+
+/* The app's Segmented control at size "sm": equal columns on the muted track, and a pill that slides to the choice. */
+.bf .seg {
+  --w: calc((100% - 4px - 2px * (var(--n) - 1)) / var(--n));
+  position: relative;
+  display: inline-grid;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--surface-3);
+}
+.bf .seg .pill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: calc(2px + var(--i) * (var(--w) + 2px));
+  width: var(--w);
+  border-radius: 6px;
+  background: var(--primary-fill);
+  pointer-events: none;
+  transition: left 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.bf .seg button {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1rem;
+  text-align: center;
+  color: rgba(243, 237, 230, 0.6);
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.bf .seg button .pi {
+  margin-right: 6px;
+  vertical-align: -2px;
+  color: inherit;
+}
+.bf .seg button[aria-label] .pi {
+  margin-right: 0;
+}
+.bf .seg button:hover,
+.bf .seg button[aria-checked="true"] {
+  color: #fff;
+}
+.bf :is(.seg button, .legend button, .lev li):focus-visible {
+  outline: none;
+}
+.bf .seg button:focus-visible,
+.bf .legend button:focus-visible,
+.bf .lev li:focus-visible .lr {
+  box-shadow: 0 0 0 2px rgba(224, 147, 90, 0.55);
+}
+@media (hover: none) and (pointer: coarse) {
+  .bf .seg button {
+    min-height: 44px;
+  }
+  .bf .legend button {
+    min-height: 36px;
+  }
+}
+
+.bf .arcv[data-m="score"] .v-cost,
+.bf .arcv[data-m="cost"] .v-score {
+  display: none;
+}
+
+.bf .legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 18px;
+  margin-bottom: 12px;
+  font-size: 0.875rem;
+}
+.bf .legend span {
+  display: inline-flex;
+  align-items: center;
+}
+.bf .legend i {
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  border-radius: 50%;
+}
+.bf .legend button {
+  display: inline-flex;
+  align-items: center;
+  margin: -4px 0;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: opacity 0.2s, background-color 0.2s;
+}
+.bf .legend button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.bf .arcv[data-h="hs"] .legend [data-h="ha"],
+.bf .arcv[data-h="ha"] .legend [data-h="hs"] {
+  opacity: 0.45;
+}
+.bf .arcv svg :is(g.ha, g.hs, .hl) {
+  transition: opacity 0.25s ease-out;
+}
+.bf .arcv[data-h="hs"] svg g.ha,
+.bf .arcv[data-h="ha"] svg g.hs,
+.bf .arcv[data-h] svg .hl {
+  opacity: 0;
+}
+
+/* Stat tiles: the app's KPI tiles. */
+.bf .tiles {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+.bf .c2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+.bf .tile {
+  padding: 14px 14px 15px;
+  border: 1px solid rgba(72, 61, 52, 0.5);
+  border-radius: 12px;
+  background: var(--card);
+  text-align: center;
+}
+.bf .tile .v {
+  font-family: var(--mono);
+  font-size: 1.0625rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+}
+.bf .tile .l {
+  margin-top: 6px;
+  font-size: 0.75rem;
+  line-height: 1.42;
+  color: var(--muted);
+  text-wrap: balance;
+}
+.bf .tile.primary .v {
+  color: var(--primary);
+}
+.bf .tile.delta {
+  border-color: var(--border);
+  background: rgba(56, 47, 40, 0.5);
+}
+.bf .tile.delta .v {
+  color: var(--text-2);
+}
+
+.bf .nv {
+  margin-top: 6px;
+}
+.bf .nv-row {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
+  padding: 18px 0;
+}
+.bf .nv-row + .nv-row {
+  border-top: 1px solid var(--border-subtle);
+}
+.bf .nv-row .plot {
+  max-width: 400px;
+  margin: 0 auto;
+}
+.bf .nv-k .kv {
+  color: var(--text-2);
+}
+.bf .nv-row.hi .kv {
+  font-size: 2.25rem;
+  color: var(--primary);
+}
+.bf .nv-row.hi .kl {
+  color: var(--text-2);
+}
+.bf .nv-row.lo .meter i {
+  background: var(--ghost);
+}
+.bf .nv-k .meter {
+  max-width: 140px;
+  margin-top: 12px;
+}
+.bf .kl {
+  margin-bottom: 8px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.025em;
+  color: var(--muted);
+}
+.bf .kv {
+  font-family: var(--mono);
+  font-size: 1.875rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+/* Badges: .chip is the app's model badge, .chip.cfg its config badge with one width, so the column reads as one scale. */
+.bf .chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid rgba(84, 72, 61, 0.9);
+  border-radius: 6px;
+  background: var(--border);
+  font-family: var(--ui);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: var(--primary);
+}
+.bf .chip.cfg {
+  width: 4.25rem;
+  justify-content: center;
+  border-color: rgba(72, 61, 52, 0.6);
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.bf .num {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  place-items: center;
+  border: 1px solid rgba(84, 72, 61, 0.9);
+  border-radius: 6px;
+  background: var(--border);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+.bf .status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+.bf .status i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ghost);
+}
+.bf .st {
+  display: flex;
+  align-items: center;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.bf .sd {
+  margin: 4px 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.bf .meter {
+  flex: 1;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+.bf .meter.sm {
+  height: 4px;
+}
+.bf .meter i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+/* The six levers: a diagram of the layers and a list that names them. A clicked row dims the other layers. */
+.bf .levers {
+  display: grid;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  gap: 8px 32px;
+  align-items: center;
+}
+.bf .lev {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.bf .lev li {
+  margin: 0;
+  padding: 11px 0;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.875rem;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: opacity 0.2s ease-out;
+}
+.bf .lev li:first-child {
+  border-top: 0;
+}
+.bf .lr {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.bf .lr .num {
+  margin: 0;
+}
+.bf .lr .pi {
+  margin-top: 2px;
+}
+.bf .lr b {
+  display: block;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.bf .lr span:not(.num) {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.bf .lev .lr {
+  margin: -6px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  transition: background-color 0.2s;
+}
+.bf .lev li:hover .lr {
+  background: rgba(255, 255, 255, 0.06);
+}
+.bf .lg {
+  transition: opacity 0.2s ease-out;
+}
+.bf .levers[data-f] .lev li:not([aria-pressed="true"]) {
+  opacity: 0.5;
+}
+.bf .levers[data-f="1"] .lg:not(.l1),
+.bf .levers[data-f="2"] .lg:not(.l2),
+.bf .levers[data-f="3"] .lg:not(.l3),
+.bf .levers[data-f="4"] .lg:not(.l4),
+.bf .levers[data-f="5"] .lg:not(.l5),
+.bf .levers[data-f="6"] .lg:not(.l6) {
+  opacity: 0.3;
+}
+
+/* The app's table: a tinted head, 48px head cells and a row hover. */
+.bf .tbl {
+  width: 100%;
+  border-collapse: collapse;
+}
+.bf .tbl thead {
+  background: rgba(56, 47, 40, 0.4);
+}
+.bf .tbl th {
+  height: 48px;
+  padding: 0 8px;
+  border-bottom: 1px solid rgba(72, 61, 52, 0.6);
+  text-align: left;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.bf .tbl td {
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(72, 61, 52, 0.6);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+.bf .tbl tbody tr {
+  transition: background-color 0.15s;
+}
+.bf .tbl tbody tr:hover {
+  background: rgba(56, 47, 40, 0.5);
+}
+.bf .tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+.bf .sc {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.bf .sc span {
+  width: 3.4em;
+}
+
+.bf #fig-venn .plot.wide {
+  max-width: 440px;
+  margin: 0 auto;
+}
+.bf #fig-venn .vn {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  fill: var(--ink);
+}
+.bf #fig-venn .vn.big {
+  font-size: 24px;
+}
+.bf #fig-venn .vbars {
+  margin-top: 20px;
+}
+.bf #fig-venn .vin {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  fill: var(--base);
+}
+.bf #fig-venn .vout {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  fill: var(--text-2);
+}
+
+/* A kind of problem is a card of the app's engine picker. The selected card has the primary ring. */
+.bf .kinds {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.bf .kind {
+  overflow: hidden;
+  border: 1px solid rgba(72, 61, 52, 0.5);
+  border-radius: 12px;
+  background: rgba(34, 29, 25, 0.6);
+}
+.bf .kind.hot {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.bf .banner {
+  display: grid;
+  height: 96px;
+  place-items: center;
+  border-bottom: 1px solid rgba(72, 61, 52, 0.5);
+  background: rgba(56, 47, 40, 0.5);
+}
+.bf .banner .plot {
+  width: 146px;
+}
+.bf .kb {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  padding: 12px;
+  text-align: center;
+}
+.bf .kind .st {
+  font-size: 0.8125rem;
+  letter-spacing: -0.02em;
+}
+.bf .kind .sd {
+  margin: 0;
+  font-size: 0.75rem;
+  text-wrap: balance;
+}
+.bf .sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* The hover card of a chart mark: the app's plain tooltip. */
+.bf-tip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 40;
+  max-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  box-shadow: 0 10px 28px -6px rgba(0, 0, 0, 0.6), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
+  font-family: var(--ui);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ink);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease-out;
+}
+.bf-tip.on {
+  opacity: 1;
+}
+
+/* The app's tooltip: a card above its trigger with a stroked caret, flipped below when the top has no room. */
+.bf-atip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 50;
+  max-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 10px 28px -6px rgba(0, 0, 0, 0.6), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
+  font-family: var(--ui);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1rem;
+  white-space: nowrap;
+  color: var(--ink);
+  opacity: 0;
+  scale: 0.9;
+  filter: blur(4px);
+  transform-origin: var(--ox, 50%) 100%;
+  pointer-events: none;
+  transition: opacity 0.15s ease-in, scale 0.15s ease-in, filter 0.15s ease-in;
+}
+.bf-atip.b {
+  transform-origin: var(--ox, 50%) 0;
+}
+.bf-atip.on {
+  opacity: 1;
+  scale: 1;
+  filter: none;
+  transition-duration: 0.2s;
+  transition-timing-function: ease-out;
+}
+.bf-atip svg {
+  position: absolute;
+  top: 100%;
+  left: var(--ox, 50%);
+  margin-left: -6px;
+  overflow: visible;
+  fill: var(--card);
+  stroke: var(--border);
+  transform: translateY(-1px);
+}
+.bf-atip.b svg {
+  top: auto;
+  bottom: 100%;
+  transform: translateY(1px) rotate(180deg);
+}
+
+/*
+ * Motion: the marks of a figure arrive one time, when the figure scrolls into
+ * view. The script adds .motion to a figure that is out of view at load, and
+ * .in when it scrolls in. Without the script every mark is at its final state.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .bf.motion .a-draw {
+    stroke-dasharray: 1.01 2;
+    transition: stroke-dashoffset var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+  }
+  .bf.motion .a-grow {
+    transform-box: fill-box;
+    transform-origin: 0 50%;
+    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+  }
+  .bf.motion .a-rise {
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+  }
+  .bf.motion .a-move {
+    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+  }
+  .bf.motion .a-fade {
+    transition: opacity 0.3s ease-out calc(var(--d, 0ms) + 150ms);
+  }
+  .bf.motion .a-pop {
+    transform-box: fill-box;
+    transform-origin: 50% 50%;
+    transition:
+      opacity 0.25s ease-out calc(var(--d, 0ms) + 150ms),
+      transform 0.35s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+  }
+  .bf.motion .card:not(.in) .a-draw {
+    stroke-dashoffset: 1.02;
+  }
+  .bf.motion .card:not(.in) .a-grow {
+    transform: scaleX(0);
+  }
+  .bf.motion .card:not(.in) .a-rise {
+    transform: scaleY(0);
+  }
+  .bf.motion .card:not(.in) .a-move {
+    transform: translateX(var(--dx));
+  }
+  .bf.motion .card:not(.in) :is(.a-fade, .a-pop) {
+    opacity: 0;
+  }
+  .bf.motion .card:not(.in) .a-pop {
+    transform: scale(0.8);
+  }
+  .bf.motion .lev li {
+    transition: opacity 0.2s ease-out, border-color 0.3s ease-out calc(var(--d, 0ms) + 150ms);
+  }
+  .bf.motion .card:not(.in) .lev li {
+    border-top-color: transparent;
+  }
+  /* A new score or cost view fades in. */
+  .bf .arcv :is(.v-score, .v-cost) {
+    animation: bf-in 0.3s ease-out;
+  }
+  @keyframes bf-in {
+    from {
+      opacity: 0;
+    }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bf .seg .pill {
+    transition: none;
+  }
+  .bf-atip {
+    scale: 1;
+    filter: none;
+  }
+  .bf.motion .card :is(.a-draw, .a-grow, .a-rise, .a-move, .a-fade, .a-pop) {
+    transition: opacity 0.2s linear;
+  }
+  .bf.motion .card:not(.in) :is(.a-draw, .a-grow, .a-rise, .a-move, .a-fade, .a-pop) {
+    opacity: 0;
+  }
+}
+
+/* A narrower figure, in the text column of a tablet. */
+@container (max-width: 680px) {
+  .bf .levers {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+  .bf .levers .plot {
+    max-width: 340px;
+    margin: 0 auto;
+  }
+}
+@container (max-width: 600px) {
+  .bf .nv-row {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+/* Phones: each wide chart has a second layout on a canvas of 300 units, so its text keeps its size. */
+@container (max-width: 560px) {
+  .bf .card {
+    border-radius: 14px;
+  }
+  .bf .card-body {
+    padding: 18px 14px 20px;
+  }
+  .bf #fig-arc .fh {
+    padding: 0;
+  }
+  .bf #fig-arc .ctl {
+    position: static;
+    justify-content: center;
+    margin-bottom: 14px;
+  }
+  .bf .legend {
+    gap: 6px 14px;
+    font-size: 0.75rem;
+  }
+  .bf .legend button {
+    padding: 4px 8px;
+  }
+  .bf .plot.wide {
+    display: none;
+  }
+  .bf .plot.narrow {
+    display: block;
+    max-width: 380px;
+    margin: 0 auto;
+  }
+  .bf .kinds {
+    grid-template-columns: 1fr;
+  }
+}
+@container (max-width: 340px) {
+  .bf .card-body {
+    padding-inline: 10px;
+  }
+}

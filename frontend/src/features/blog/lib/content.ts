@@ -2,17 +2,15 @@
  * Server-side access to the blog post sources.
  *
  * Each post is content/<slug>.md, bundled as a string by the same `?raw`
- * Turbopack rule the docs use, plus content/<slug>.figures.json: the size
- * and alt text of each figure SVG under public/blog/<slug>/.
+ * Turbopack rule the docs use, plus content/<slug>.figures.json: the live
+ * HTML of each figure, styled by components/blog-figures.css.
  */
 
 import type { BlogPost } from "./posts";
 
 export interface BlogFigure {
-  title: string;
-  alt: string;
-  width: number;
-  height: number;
+  /** The inner HTML of the figure card, from the essay's figure export. */
+  html: string;
 }
 
 // Whole modules, not `import: "default"`: see features/docs/lib/content.ts.

@@ -19,8 +19,10 @@ import {
   referenceId,
   type PostBlock,
 } from "../lib/post-body";
-import { blogFigureSrc, blogHref, type BlogPost } from "../lib/posts";
+import { blogHref, type BlogPost } from "../lib/posts";
+import { BlogFigureBehavior } from "./blog-figures";
 import { BlogMeta } from "./blog-meta";
+import "./blog-figures.css";
 
 const CHROME = DOCS_CHROME.en;
 const LINK = "font-medium text-primary underline-offset-4 hover:underline";
@@ -46,31 +48,14 @@ function CaptionText({ text }: { text: string }) {
   });
 }
 
-/** One exported essay figure with its numbered caption. */
-function Figure({
-  slug,
-  block,
-  figure,
-}: {
-  slug: string;
-  block: Extract<PostBlock, { kind: "figure" }>;
-  figure?: BlogFigure;
-}) {
+/** One live essay figure: the dark chart card, wider than the text, and its numbered caption. */
+function Figure({ block, figure }: { block: Extract<PostBlock, { kind: "figure" }>; figure?: BlogFigure }) {
+  if (!figure) return null;
   return (
-    <figure id={`figure-${block.number}`} className="my-10 scroll-mt-6">
-      {/* A plain <img>: next/image adds nothing for a static SVG. The figures
-          are dark cards that read on both themes; the border marks their
-          edge on the dark theme. */}
-      <img
-        src={blogFigureSrc(slug, block.id)}
-        alt={figure?.alt || figure?.title || block.caption}
-        width={figure?.width}
-        height={figure?.height}
-        loading={block.number > 1 ? "lazy" : undefined}
-        decoding="async"
-        className="h-auto w-full rounded-xl border border-border"
-      />
-      <figcaption className="mt-3 text-sm leading-6 text-muted-foreground">
+    <figure id={`figure-${block.number}`} className="bf not-prose my-12 scroll-mt-6">
+      {/* The HTML is the essay's own figure export, a trusted file in this repository. */}
+      <div className="card" id={`fig-${block.id}`} dangerouslySetInnerHTML={{ __html: figure.html }} />
+      <figcaption className="mx-auto mt-3.5 max-w-[36rem] text-sm leading-6 text-muted-foreground">
         <span className="font-mono text-xs font-semibold uppercase tracking-wide text-foreground">
           {POST_WORDS.figure} {block.number}.
         </span>{" "}
@@ -117,7 +102,7 @@ export function BlogPostView({ post }: { post: BlogPost }) {
         <div className="docs-prose [&_h2]:text-balance [&_h3]:text-balance [&_li]:text-pretty [&_p]:text-pretty">
           {body.blocks.map((block, i) => {
             if (block.kind === "figure")
-              return <Figure key={i} slug={post.slug} block={block} figure={figures[block.id]} />;
+              return <Figure key={i} block={block} figure={figures[block.id]} />;
             if (block.kind === "lever") return <LeverHeading key={i} levers={block.levers} />;
             return <Prose key={i} source={block.text} />;
           })}
@@ -154,6 +139,7 @@ export function BlogPostView({ post }: { post: BlogPost }) {
           )}
         </div>
       </article>
+      <BlogFigureBehavior />
     </div>
   );
 }

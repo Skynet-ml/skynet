@@ -35,8 +35,3 @@ export function blogHref(slug = ""): string {
 export function findBlogPost(slug: string): BlogPost | undefined {
   return BLOG_POSTS.find((post) => post.slug === slug);
 }
-
-/** The URL path of a post's figure image, served from `public/`. */
-export function blogFigureSrc(slug: string, figureId: string): string {
-  return `/blog/${slug}/${figureId}.svg`;
-}

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { LEVER_NAMES, linkCitations, parsePostBody } from "./post-body.ts";
-import { BLOG_POSTS, blogFigureSrc, blogHref, findBlogPost } from "./posts.ts";
+import { BLOG_POSTS, blogHref, findBlogPost } from "./posts.ts";
 
 const SLUG = "the-most-valuable-skill-of-this-century";
 
@@ -19,21 +19,16 @@ test("the index lists the essay and the loader finds it", () => {
   assert.equal(blogHref(SLUG), `/blog/${SLUG}`);
 });
 
-test("every post has a source, and every figure marker has an SVG and a manifest entry", () => {
+test("every post has a source, and every figure marker has its HTML", () => {
   for (const post of BLOG_POSTS) {
     const body = parsePostBody(source(post.slug));
     const manifest = JSON.parse(
       readFileSync(new URL(`../content/${post.slug}.figures.json`, import.meta.url), "utf8"),
-    ) as Record<string, unknown>;
+    ) as Record<string, { html?: string }>;
     const figures = body.blocks.filter((block) => block.kind === "figure");
     assert.ok(figures.length > 0);
     for (const figure of figures) {
-      const svg = new URL(
-        `../../../../public${blogFigureSrc(post.slug, figure.id)}`,
-        import.meta.url,
-      );
-      assert.ok(existsSync(svg), `missing ${svg.pathname}`);
-      assert.ok(manifest[figure.id], `no manifest entry for ${figure.id}`);
+      assert.match(manifest[figure.id]?.html ?? "", /^<div class="card-body">/, figure.id);
     }
   }
 });
