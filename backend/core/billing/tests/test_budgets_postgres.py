@@ -277,6 +277,12 @@ def test_migration_applies_from_legacy_credit_ledger_and_is_idempotent(database:
     assert rename_spec.loader is not None
     rename = importlib.util.module_from_spec(rename_spec)
     rename_spec.loader.exec_module(rename)
+    setup_path = path.with_name("d6e8f0a2b4c7_add_execution_budget_setup_in_total.py")
+    setup_spec = importlib.util.spec_from_file_location("setup_in_total_migration_fixture", setup_path)
+    assert setup_spec is not None
+    assert setup_spec.loader is not None
+    setup_flag = importlib.util.module_from_spec(setup_spec)
+    setup_spec.loader.exec_module(setup_flag)
     with database.begin() as connection, Operations.context(MigrationContext.configure(connection)):
         rename.downgrade()
         migration.downgrade()
@@ -288,9 +294,12 @@ def test_migration_applies_from_legacy_credit_ledger_and_is_idempotent(database:
         rename.upgrade()
         # Migration c4f1a7e9d2b6 (SKY-710) adds this column, and ExecutionBudgetModel maps it.
         connection.execute(text("ALTER TABLE execution_budgets ADD COLUMN workspace_id VARCHAR(36)"))
+        setup_flag.upgrade()
+        setup_flag.upgrade()
     service = BudgetService(engine=database)
     budget = service.create("alice", 10, idempotency_key="migrated")
     assert budget.uncapped is False
+    assert budget.setup_in_total is False
     operation = _reserve(service, budget.id, "call", maximum=5)
     service.mark_dispatched(operation.id, "alice")
     result = service.settle(operation.id, "alice", evidence_key="usage", actual_cents=2, evidence={})

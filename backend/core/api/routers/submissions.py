@@ -201,8 +201,12 @@ def _ensure_api_budget(
         # Only an attempt that still holds the claim reads as incomplete:
         # a same-key retry reached a check another request is running.
         raise SubmissionInProgressError()
-    budget_stops = [check for check in checked.checks if check.key == BUDGET_CHECK_KEY and check.status == "failed"]
-    if checked.status == "failed" and budget_stops:
+    budget_stops = (
+        [check for check in checked.checks if check.key == BUDGET_CHECK_KEY and check.status == "failed"]
+        if checked.status == "failed"
+        else []
+    )
+    if budget_stops:
         # Setup bills the account balance only (SKY-925), so a budget stop in setup names the
         # balance rather than the optimizer, the columns or a limit that a higher value could not
         # fix. The limit of a setup_in_total budget (continuous-plan cycles, or accounts that turn
