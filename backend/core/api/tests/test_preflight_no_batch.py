@@ -69,7 +69,7 @@ def test_setup_check_forbids_a_batched_model_route(monkeypatch: pytest.MonkeyPat
         request,
         SimpleNamespace(username="alice"),
         object(),
-        SimpleNamespace(id="budget", generation=1),
+        SimpleNamespace(id="budget", generation=1, setup_in_total=False),
         {"id": "setup"},
         attempt=1,
         engine=object(),

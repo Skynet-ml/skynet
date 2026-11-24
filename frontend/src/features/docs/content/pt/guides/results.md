@@ -103,7 +103,7 @@ Substitua `message` pelos campos de entrada da sua execução. O **Código de in
 A resposta contém `outputs`, os `input_fields`, os `output_fields`, o `model_used`, `cents_charged` e `budget`.
 
 > [!TIP]
-> Cada chamada é cobrada separadamente, do saldo de quem faz a chamada. `max_cost_cents` define o máximo que esta única chamada pode custar, em centavos. Se você enviar a mesma `Idempotency-Key` de novo, o Skynet não cobra a chamada outra vez.
+> Cada chamada é cobrada separadamente, do saldo de quem faz a chamada. `max_cost_cents` é opcional. Ele registra o máximo que você aceita por esta única chamada, em centavos. O seu saldo limita a chamada. Se você enviar a mesma `Idempotency-Key` de novo, o Skynet não cobra a chamada outra vez.
 
 Leia [API](/docs/api) para ver a autenticação e os outros endpoints.
 

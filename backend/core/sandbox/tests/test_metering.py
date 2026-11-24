@@ -11,7 +11,12 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
 from core.billing.budget_amounts import CENT_SCALE
-from core.billing.budgets import MAX_LEASE_SLICES, BudgetConflictError, BudgetInsufficientError, BudgetService
+from core.billing.budgets import (
+    MAX_LEASE_SLICES,
+    AccountFundsError,
+    BudgetConflictError,
+    BudgetService,
+)
 from core.billing.runtime import BudgetRuntime
 from core.billing.vercel_usage import VercelSnapshotReservation, VercelUsage
 from core.config import settings
@@ -286,11 +291,18 @@ def test_failed_close_can_be_retried(database: Engine, monkeypatch: pytest.Monke
 
 
 def test_lease_that_does_not_fit_reserves_nothing(database: Engine) -> None:
-    """Check that admission refuses the whole lease, not a part of it."""
-    runtime = _runtime(database, limit=1)
+    """Check that admission refuses the whole lease, not a part of it.
+
+    Setup work is bounded by the wallet, not by the run's limit (SKY-925), so
+    a 1-cent balance refuses a lease just above 1 cent.
+    """
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 1
+        session.commit()
+    runtime = _runtime(database)
     per_box = VercelUsage().quote(CREATE).maximum.total
     boxes = int(Decimal(1) / per_box) + 1
-    with pytest.raises(BudgetInsufficientError):
+    with pytest.raises(AccountFundsError):
         PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-f", boxes=boxes)
     assert _reserved_units(runtime) == 0
     assert _states(database) == []

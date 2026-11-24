@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
-from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.budgets import AccountFundsError, BudgetService
 from core.billing.model_dispatch import OpenRouterDispatcher
 from core.billing.openrouter_quotes import price_decision_request
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
@@ -273,12 +273,16 @@ def test_a_refused_decision_releases_its_hold(database: Engine) -> None:
 
 
 def test_an_unfunded_budget_never_sends_the_decision(database: Engine) -> None:
-    """A budget too small for the hold refuses before the provider sees the call.
+    """A wallet too small for the hold refuses before the provider sees the call.
 
     A 300 KB state bills at most the 262,144-token context, about 1.16 cents,
-    which a 1-cent budget cannot hold.
+    which a 1-cent balance cannot hold. Setup work is bounded by the wallet,
+    not by the run's limit (SKY-925).
     """
-    runtime = _runtime(database, total=1)
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 1
+        session.commit()
+    runtime = _runtime(database)
     posts: list[httpx.Request] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -295,7 +299,7 @@ def test_an_unfunded_budget_never_sends_the_decision(database: Engine) -> None:
         posts.append(request)
         return httpx.Response(200, json=ANSWER)
 
-    with httpx.Client(transport=httpx.MockTransport(provider)) as client, pytest.raises(BudgetInsufficientError):
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client, pytest.raises(AccountFundsError):
         _dispatcher(runtime, client).dispatch("/decisions", {**REQUEST, "state": "x" * 300_000})
     assert posts == []
     assert runtime.service.get(runtime.budget_id, "alice").state == "open"

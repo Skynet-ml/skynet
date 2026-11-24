@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from ...billing import StripeBillingService
+from ...billing.budget_amounts import CENT_SCALE
 from ...billing.budgets import BudgetError, BudgetService
 from ...billing.byok_bridge import _model_config_dicts
 from ...billing.byok_vault import safe_connection_params
@@ -66,6 +67,8 @@ FIXED_MESSAGE_CODES = {
     "Provider or sandbox usage is awaiting final confirmation.": "submit.preflight.usage_pending",
     "Provider or sandbox usage is still awaiting final confirmation.": "submit.preflight.usage_still_pending",
     "Previous provider or sandbox usage is awaiting final confirmation.": "submit.preflight.previous_usage_pending",
+    # New checks no longer emit this text: setup bills the balance (SKY-925).
+    # The entry stays so stored older results still localize.
     "The spending limit cannot cover setup.": "submit.preflight.budget_setup",
     "The total budget has no remaining allowance.": "submit.preflight.budget_exhausted",
     "The account has no available funds.": "submit.preflight.no_funds",
@@ -81,9 +84,9 @@ FIXED_MESSAGE_CODES = {
     SETUP_NOT_CHECKED["metric"]: "submit.preflight.metric_setup_not_checked",
     SCORER_NOT_CHECKED: "submit.preflight.scorer_not_checked",
 }
-# The budget texts with amounts in them (``billing.budgets._admit`` and
-# ``billing.runtime.BudgetRuntime._wait_cannot_help``); their groups become the
-# catalog message's params.
+# The budget texts with amounts in them; their groups become the catalog
+# message's params. New setup checks no longer produce these texts (SKY-925).
+# The patterns stay to localize stored results from earlier checks.
 BUDGET_LIMIT_MESSAGE = re.compile(
     r"The next operation needs up to (?P<needed>\$[\d,]+\.\d{2}), but only "
     r"(?P<remaining>\$[\d,]+\.\d{2}) of the (?P<limit>\$[\d,]+\.\d{2}) limit remain\."
@@ -169,7 +172,7 @@ def localize_preflight(response: WizardPreflightResponse, locale: str) -> Wizard
 
 
 def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any) -> None:
-    """Refuse a budget whose unspent room cannot buy the run's first lease, as submit would.
+    """Refuse a budget that cannot buy the run's first lease, as submit would.
 
     An uncapped budget has no limit floor, but its first lease still draws on the balance.
 
@@ -182,11 +185,8 @@ def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUs
         DomainError: The budget's lookup error, or the refusal of
             :func:`require_funded_lease`.
     """
-    service = BudgetService(engine=job_store.engine)
     try:
-        budget = service.get(request.execution_budget_id, user.username)
-        # Earlier setup checks spend from this limit, so the first lease needs the room they left (SKY-923).
-        spent = 0 if budget.uncapped else service.spent_units(budget.id, user.username)
+        budget = BudgetService(engine=job_store.engine).get(request.execution_budget_id, user.username)
     except BudgetError as error:
         raise budget_http_error(error) from error
     # As at submit, local mode has no balance gate.
@@ -194,7 +194,9 @@ def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUs
         None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
     )
     if not budget.uncapped:
-        require_funded_lease(budget.total_cents, spendable, spent_units=spent)
+        # Count the spend against the limit as submit does, so that a
+        # setup_in_total budget gets the same answer here and at submit.
+        require_funded_lease(budget.total_cents, spendable, spent_units=int(budget.limit_spent_cents * CENT_SCALE))
     elif spendable is not None:
         require_one_lease(spendable, from_balance=True)
 

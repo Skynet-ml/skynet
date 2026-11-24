@@ -143,6 +143,7 @@ from .routers.registry import create_registry_router
 from .routers.saved_secrets import create_saved_secrets_router
 from .routers.scorer_dependencies import create_scorer_dependencies_router
 from .routers.serve import create_serve_router
+from .routers.setup_billing import create_setup_billing_router
 from .routers.setup_draft import create_setup_draft_router
 from .routers.share import create_share_router
 from .routers.shared_with_me import create_shared_with_me_router
@@ -1373,6 +1374,7 @@ def create_app(
     app.include_router(create_notifications_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_experience_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_model_privacy_router(job_store=job_store), tags=["Settings"])
+    app.include_router(create_setup_billing_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_package_registry_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_scorer_dependencies_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_datasets_router(job_store=job_store), tags=["Datasets"])

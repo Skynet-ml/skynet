@@ -288,8 +288,9 @@ def run_protected_interaction(
     Args:
         payload: Secret-free program, evaluator, and request data.
         kind: Serve, evaluation, or chat identity.
-        max_cost_cents: Maximum the caller accepted for this request, or ``None``
-            to let the request draw on the account balance instead.
+        max_cost_cents: The most the caller accepts for this request, kept as
+            the budget's total, or ``None``. Either way only the account balance
+            bounds the request.
         idempotency_key: Transport replay identity.
         user: Authenticated account funding model and sandbox work.
         job_store: Store whose engine owns budgets and credentials.
@@ -325,8 +326,9 @@ def run_protected_interaction(
     request_fingerprint = json_fingerprint(payload)
     try:
         if max_cost_cents is None:
-            # No caller cap: the budget stays uncapped so only the account balance
-            # bounds the request, and the fixed total keeps replays fingerprint-stable.
+            # No caller maximum: the fixed total keeps replays fingerprint-stable.
+            # A budget with no job bills the balance only (SKY-925), so the
+            # account balance bounds the request with or without a maximum.
             budget = service.create(user.username, MAX_CENTS, idempotency_key=creation_key, uncapped=True)
         else:
             budget = service.create(user.username, max_cost_cents, idempotency_key=creation_key)

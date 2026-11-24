@@ -3,6 +3,7 @@ import type {
   BlackboxRunRequest,
   ModelCatalogResponse,
   ModelPrivacySettings,
+  SetupBillingSettings,
   OptimizationPayloadResponse,
   OptimizationSubmissionResponse,
   OptimizationStatusResponse,
@@ -1499,6 +1500,19 @@ export function getModelPrivacy() {
 /** Persist the caller's model data-privacy policy. */
 export function updateModelPrivacy(settings: ModelPrivacySettings) {
   return request<ModelPrivacySettings>("/account/model-privacy", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
+/** Fetch whether the caller's new runs bill setup checks to the balance only. */
+export function getSetupBilling() {
+  return request<SetupBillingSettings>("/account/setup-billing");
+}
+
+/** Persist whether the caller's new runs bill setup checks to the balance only. */
+export function updateSetupBilling(settings: SetupBillingSettings) {
+  return request<SetupBillingSettings>("/account/setup-billing", {
     method: "PUT",
     body: JSON.stringify(settings),
   });

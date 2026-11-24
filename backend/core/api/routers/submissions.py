@@ -27,7 +27,7 @@ from ...billing import (
     byok_provider_for_litellm,
     cost_ceiling_budget,
 )
-from ...billing.budget_amounts import MAX_CENTS
+from ...billing.budget_amounts import CENT_SCALE, MAX_CENTS
 from ...billing.budgets import BudgetError, BudgetService
 from ...billing.byok_bridge import byok_upstream_routable
 from ...billing.byok_upstreams import UPSTREAMS, byok_model_prefix, resolve_upstream, validate_byok_novelty
@@ -102,6 +102,7 @@ from ._helpers import (
     strip_api_key,
 )
 from .execution_budgets import budget_http_error, require_funded_lease, require_one_lease
+from .setup_billing import bills_setup_from_wallet
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ def _ensure_api_budget(
     user: AuthenticatedUser,
     *,
     from_balance: bool = False,
+    setup_in_total: bool = False,
 ) -> None:
     """Give older API requests the same durable setup and run authority as the wizard.
 
@@ -141,6 +143,9 @@ def _ensure_api_budget(
         user: Authenticated submitter.
         from_balance: Whether the account balance, not the user's own limit,
             set the request's limit.
+        setup_in_total: Whether a new budget counts setup against its limit,
+            as a continuous-plan cycle needs (SKY-925). When False, the
+            owner's setup billing setting decides.
     """
     if payload.execution_budget_id is not None:
         return
@@ -152,18 +157,28 @@ def _ensure_api_budget(
         # A retry reuses the original approved total: the balance it would be
         # recomputed from moves once the first attempt's check reserves spend.
         budget = service.find_by_creation_key(user.username, budget_creation_key)
+        # The account's choice applies only to a new budget; a replay keeps its stored flag.
+        counts_setup = budget is None and (setup_in_total or not bills_setup_from_wallet(engine, user.username))
         if budget is None and settings.local_mode:
             # Local mode charges no managed spend or platform fee, so the
             # budget only records usage and never stops the run.
             total = payload.max_cost_cents or max(1, min(settings.local_grant_cents, MAX_CENTS))
-            budget = service.create(user.username, total, idempotency_key=budget_creation_key, uncapped=True)
+            budget = service.create(
+                user.username,
+                total,
+                idempotency_key=budget_creation_key,
+                uncapped=True,
+                setup_in_total=counts_setup,
+            )
         elif budget is None:
             spendable = _enforce_balance(job_store, user.username, payload.token_source)
             total = payload.max_cost_cents
             if total is None:
                 total = cost_ceiling_budget(spendable or 0, payload.token_source)
             require_funded_lease(total, spendable, from_balance=from_balance)
-            budget = service.create(user.username, total, idempotency_key=budget_creation_key)
+            budget = service.create(
+                user.username, total, idempotency_key=budget_creation_key, setup_in_total=counts_setup
+            )
     except BudgetError as error:
         raise budget_http_error(error) from error
     payload.execution_budget_id = budget.id
@@ -186,16 +201,20 @@ def _ensure_api_budget(
         # Only an attempt that still holds the claim reads as incomplete:
         # a same-key retry reached a check another request is running.
         raise SubmissionInProgressError()
-    if checked.status == "failed" and any(
-        check.key == BUDGET_CHECK_KEY and check.status == "failed" and check.field != BALANCE_FIELD
-        for check in checked.checks
-    ):
-        # The limit, not the account balance, stopped the check, so name the
-        # limit rather than the optimizer or the columns. A higher limit cannot
-        # help when the balance set it, so that refusal names the balance (SKY-923).
-        if from_balance:
-            raise DomainError("budget.insufficient", status=402)
-        raise DomainError("budget.below_minimum", status=409)
+    budget_stops = (
+        [check for check in checked.checks if check.key == BUDGET_CHECK_KEY and check.status == "failed"]
+        if checked.status == "failed"
+        else []
+    )
+    if budget_stops:
+        # Setup bills the account balance only (SKY-925), so a budget stop in setup names the
+        # balance rather than the optimizer, the columns or a limit that a higher value could not
+        # fix. The limit of a setup_in_total budget (continuous-plan cycles, or accounts that turn
+        # off wallet setup billing) still bounds setup, so its stop names the limit, unless the
+        # balance set that limit (SKY-923).
+        if budget.setup_in_total and not from_balance and any(check.field != BALANCE_FIELD for check in budget_stops):
+            raise DomainError("budget.below_minimum", status=409)
+        raise DomainError("budget.insufficient", status=402)
     if checked.status == "pending":
         raise DomainError("budget.pending", status=409)
     if checked.status != "succeeded":
@@ -233,19 +252,20 @@ def _protected_submission(payload, job_store, workflow: str, *, from_balance: bo
     if payload.seed is None:
         payload.seed = setup_seed(payload.execution_budget_id)
     try:
-        service = BudgetService(engine=job_store.engine)
-        budget = service.get(payload.execution_budget_id, payload.username)
+        budget = BudgetService(engine=job_store.engine).get(payload.execution_budget_id, payload.username)
         if budget.revision != payload.execution_budget_revision:
             raise DomainError("budget.conflict", status=409)
-        # The same gate as the wizard check: the setup check spends from this limit, so the first
-        # lease needs the room it left, and it draws on a balance that can fall after the check (SKY-923).
+        # The same gate as the wizard check: the first lease draws on a balance that can fall after
+        # the check, and the setup check billed that balance (SKY-923, SKY-925). The check of a
+        # setup_in_total budget (continuous-plan cycles, or accounts that turn off wallet setup
+        # billing) also spent from the limit, so its lease needs the room the check left.
         spendable = (
             None
             if settings.local_mode
             else StripeBillingService(engine=job_store.engine).spendable_cents(payload.username)
         )
         if not budget.uncapped:
-            spent = service.spent_units(budget.id, payload.username)
+            spent = int(budget.limit_spent_cents * CENT_SCALE)
             require_funded_lease(budget.total_cents, spendable, spent_units=spent, from_balance=from_balance)
         elif spendable is not None:
             require_one_lease(spendable, from_balance=True)
@@ -797,6 +817,7 @@ def submit_repo_payload(
     job_store,
     current_user: AuthenticatedUser,
     idempotency_key: str | None,
+    setup_in_total: bool = False,
 ) -> OptimizationSubmissionResponse:
     """Admit, fund, verify and enqueue one repository run for an authenticated owner.
 
@@ -809,6 +830,9 @@ def submit_repo_payload(
         job_store: Job store that persists the submission.
         current_user: Owner of the new run.
         idempotency_key: Dedup key; a repeat returns the original.
+        setup_in_total: Whether a new budget counts setup spend against its
+            limit, as before SKY-925. Continuous-plan cycles set it; when
+            False, the owner's setup billing setting decides.
 
     Returns:
         An ``OptimizationSubmissionResponse`` for the new or replayed run.
@@ -870,6 +894,7 @@ def submit_repo_payload(
         replay_keys.budget,
         current_user,
         from_balance=from_balance,
+        setup_in_total=setup_in_total,
     )
     verified = _protected_submission(payload, job_store, _BLACKBOX_WORKFLOW, from_balance=from_balance)
     try:

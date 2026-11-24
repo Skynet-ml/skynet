@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 回應包括 `outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged` 同 `budget`。
 
 > [!TIP]
-> 每次呼叫都會分開收費，由呼叫者嘅餘額扣。`max_cost_cents` 設定呢一次呼叫最多可以用幾多錢，以仙計。如果你再發送同一個 `Idempotency-Key`，Skynet 唔會再收一次費。
+> 每次呼叫都會分開收費，由呼叫者嘅餘額扣。`max_cost_cents` 係可選嘅。佢記錄你呢一次呼叫最多接受幾多錢，以仙計。呼叫嘅上限由你嘅餘額決定。如果你再發送同一個 `Idempotency-Key`，Skynet 唔會再收一次費。
 
 身份驗證同其他端點，睇 [API](/docs/api)。
 

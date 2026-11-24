@@ -103,7 +103,7 @@ Ersetzen Sie `message` durch die Eingabefelder Ihres Durchlaufs. Der **Integrati
 Die Antwort enthält `outputs`, die `input_fields`, die `output_fields`, das `model_used`, `cents_charged` und `budget`.
 
 > [!TIP]
-> Jeder Aufruf wird einzeln abgerechnet, vom Guthaben des Aufrufers. `max_cost_cents` legt fest, wie viel dieser eine Aufruf höchstens kosten darf, in Cent. Senden Sie denselben `Idempotency-Key` erneut, berechnet Skynet den Aufruf nicht noch einmal.
+> Jeder Aufruf wird einzeln abgerechnet, vom Guthaben des Aufrufers. `max_cost_cents` ist optional. Es hält fest, wie viel Sie für diesen einen Aufruf höchstens akzeptieren, in Cent. Ihr Guthaben begrenzt den Aufruf. Senden Sie denselben `Idempotency-Key` erneut, berechnet Skynet den Aufruf nicht noch einmal.
 
 Authentifizierung und die anderen Endpunkte beschreibt [API](/docs/api).
 

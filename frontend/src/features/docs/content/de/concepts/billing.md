@@ -22,7 +22,7 @@ Der gewählte Betrag ist der Betrag, der Ihrem Guthaben gutgeschrieben wird. Die
 
 ## Durchlaufbudgets
 
-Jeder Durchlauf hat ein Ausgabenlimit. Das Limit ist der Höchstbetrag, den der Durchlauf ausgeben darf. Es deckt Einrichtung und Optimierung ab.
+Jeder Durchlauf hat ein Ausgabenlimit. Das Limit ist der Höchstbetrag, den der Durchlauf ausgeben darf. Es deckt die Optimierung ab. Einrichtungsprüfungen werden aus Ihrem Guthaben bezahlt. Damit sie im Limit neuer Durchläufe zählen, schalten Sie **Einrichtung über mein Guthaben abrechnen** unter **Einstellungen → Optimierung** aus. Kontinuierliche Pläne zählen die Einrichtung immer zum Zyklusbudget.
 
 Ein Durchlauf hat vor dem Start keine Kostenschätzung. Er gibt bis zu seinem Limit aus, stoppt am Budget und behält seine beste Version. Unter [Durchläufe](/docs/concepts/runs) erfahren Sie, wie Skynet entscheidet, wann es stoppt.
 
@@ -45,7 +45,7 @@ Der Assistent lässt Sie nicht weitermachen, wenn das Limit unter diesem Betrag 
 
 ## Reservierungen
 
-Bevor Skynet kostenpflichtige Arbeit ausführt, reserviert es einen Teil des Limits des Durchlaufs. Skynet gibt die Reservierung frei, wenn die Arbeit abgerechnet ist, und berechnet nur die tatsächlichen Kosten.
+Bevor Skynet kostenpflichtige Arbeit ausführt, reserviert es einen Teil des Limits des Durchlaufs. Skynet gibt die Reservierung frei, wenn die Arbeit abgerechnet ist, und berechnet nur die tatsächlichen Kosten. Einrichtungsprüfungen reservieren stattdessen von Ihrem Guthaben, außer die Einrichtung zählt zum Limit.
 
 Wenn ein Budget bereits Aktivität hat, zeigt die Karte **Ausgabenlimit** im Assistenten dessen Kontoauszug:
 
@@ -106,11 +106,11 @@ Ihr Repository-Code und Ihr Scorer laufen in einer Sandbox. Skynet misst die San
 2. Wenn die Sandbox fertig ist, berechnet Skynet die endgültige Nutzung, die der Sandbox-Anbieter meldet.
 3. Der Nutzungsaufschlag gilt für Sandbox-Rechenzeit.
 
-Sandbox-Rechenzeit ist Teil des Ausgabenlimits des Durchlaufs, auch wenn die Modellaufrufe Ihren eigenen Schlüssel verwenden.
+Sandbox-Rechenzeit ist Teil des Ausgabenlimits des Durchlaufs, auch wenn die Modellaufrufe Ihren eigenen Schlüssel verwenden. Sandbox-Nutzung in Einrichtungsprüfungen wird von Ihrem Guthaben bezahlt, außer die Einrichtung zählt zum Limit.
 
 ## Bereitstellung (Serving)
 
-Jeder Aufruf des Serve-Endpunkts eines abgeschlossenen Durchlaufs wird einzeln abgerechnet. Der Aufrufer zahlt aus seinem eigenen Guthaben. Setzen Sie `max_cost_cents` in der Anfrage, um einen Aufruf zu begrenzen. Lesen Sie [Ergebnisse](/docs/guides/results).
+Jeder Aufruf des Serve-Endpunkts eines abgeschlossenen Durchlaufs wird einzeln abgerechnet. Der Aufrufer zahlt aus seinem eigenen Guthaben. Mit `max_cost_cents` in der Anfrage können Sie festhalten, wie viel Sie für einen Aufruf höchstens akzeptieren. Ihr Guthaben begrenzt den Aufruf. Lesen Sie [Ergebnisse](/docs/guides/results).
 
 ## Tarife
 

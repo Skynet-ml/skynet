@@ -903,6 +903,9 @@ def _submit_run(
             job_store=job_store,
             current_user=AuthenticatedUser(username, "user", ()),
             idempotency_key=_run_key(cycle_id),
+            # Gilad kept the pre-SKY-925 rule for plan cycles: the cycle's
+            # total caps its setup check as well as its run.
+            setup_in_total=True,
         )
     except DomainError as error:
         refused = error

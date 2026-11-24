@@ -228,7 +228,7 @@ test("finds declarations on an unimported injected helper", () => {
   }
 });
 
-test("the floor is the boxes' opening holds plus a dollar of spare and one lease", () => {
+test("the floor is the boxes' opening holds plus a dollar of spare, with no lease on top", () => {
   const floor = runFloor({ boxHoldCents: 18.08, callHoldCents: [4.6, 0.3, null] });
 
   assert.equal(RUN_SPARE_CENTS, 100);
@@ -236,8 +236,7 @@ test("the floor is the boxes' opening holds plus a dollar of spare and one lease
   assert.deepEqual(floor, {
     boxHoldCents: 19,
     spareCents: 100,
-    leaseCents: 100,
-    floorCents: 219,
+    floorCents: 119,
     unpriced: true,
   });
 });
@@ -245,24 +244,20 @@ test("the floor is the boxes' opening holds plus a dollar of spare and one lease
 test("a model whose one call holds more than the spare raises the spare to that hold", () => {
   assert.equal(
     runFloor({ boxHoldCents: 19, callHoldCents: [134.15] }).floorCents,
-    19 + 135 + RUN_LEASE_CENTS,
+    19 + 135,
   );
 });
 
-test("unknown holds still leave the spare and the lease as the floor", () => {
-  assert.equal(
-    runFloor({ boxHoldCents: null, callHoldCents: [] }).floorCents,
-    RUN_SPARE_CENTS + RUN_LEASE_CENTS,
-  );
+test("unknown holds still leave the spare as the floor", () => {
+  assert.equal(runFloor({ boxHoldCents: null, callHoldCents: [] }).floorCents, RUN_SPARE_CENTS);
 });
 
-test("a local run takes no lease, so its floor is the boxes and the spare", () => {
+test("a local run has no lease minimum, so its floor is the boxes and the spare", () => {
   const globals = globalThis as { window?: unknown };
   const previous = globals.window;
   globals.window = { __APP_ENV__: { localMode: true } };
   try {
     const floor = runFloor({ boxHoldCents: 18.08, callHoldCents: [4.6] });
-    assert.equal(floor.leaseCents, 0);
     assert.equal(floor.floorCents, 19 + RUN_SPARE_CENTS);
     assert.equal(
       runFloor({ boxHoldCents: 18.08, callHoldCents: [], tokenSource: "subscription" }).floorCents,
@@ -292,19 +287,22 @@ test("the job is BYOK only when every named model is", () => {
   assert.equal(aggregateTokenSource([]), "managed");
 });
 
-test("a subscription run holds nothing for its model calls, so its floor is the lease", () => {
+test("a subscription run holds nothing for its model calls, so its floor is one lease", () => {
   const floor = runFloor({ boxHoldCents: 0, callHoldCents: [134.15], tokenSource: "subscription" });
   assert.deepEqual(floor, {
     boxHoldCents: 0,
     spareCents: 0,
-    leaseCents: RUN_LEASE_CENTS,
     floorCents: RUN_LEASE_CENTS,
     unpriced: false,
   });
-  // Only the server's own box hold, if any, and the lease remain.
+  // A box hold below one lease keeps the lease as the floor; a larger hold is the floor.
   assert.equal(
     runFloor({ boxHoldCents: 18.08, callHoldCents: [], tokenSource: "subscription" }).floorCents,
-    19 + RUN_LEASE_CENTS,
+    RUN_LEASE_CENTS,
+  );
+  assert.equal(
+    runFloor({ boxHoldCents: 150.2, callHoldCents: [], tokenSource: "subscription" }).floorCents,
+    151,
   );
 });
 

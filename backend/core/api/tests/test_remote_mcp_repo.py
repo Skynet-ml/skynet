@@ -218,8 +218,8 @@ def test_data_tool_says_the_candidate_gets_only_input(harness: Any) -> None:
     assert "The candidate gets only input" in json.dumps(schema)
 
 
-def test_limit_argument_says_the_setup_check_spends_from_it(harness: Any) -> None:
-    """Tell the agent that the setup check spends from the limit and must leave one lease of it (SKY-923).
+def test_limit_argument_says_the_setting_decides_what_the_setup_check_bills(harness: Any) -> None:
+    """Tell the agent that the setup billing setting decides what setup bills, and the limit needs one lease (SKY-925).
 
     Args:
         harness: MCP client, database engine and recorded calls.
@@ -230,8 +230,8 @@ def test_limit_argument_says_the_setup_check_spends_from_it(harness: Any) -> Non
     tools = {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
     for name in ("repo_draft_preflight", "repo_draft_submit"):
         description = tools[name]["inputSchema"]["properties"]["max_cost_cents"]["description"]
-        assert "The setup check spends from it" in description
-        assert f"must leave {CHUNK_CENTS} cents of it for the run" in description
+        assert "setup billing setting decides whether the setup check bills the balance or this limit" in description
+        assert f"the limit must be at least {CHUNK_CENTS} cents" in description
 
 
 def test_budget_tool_has_no_stop_score_argument(harness: Any) -> None:
@@ -291,12 +291,12 @@ def test_another_account_cannot_load_the_draft(harness: Any) -> None:
 
 
 def test_review_prices_a_complete_draft(harness: Any) -> None:
-    """Price the minimum as the boxes' hold, one call of the dearest model, and the run's first lease."""
+    """Price the minimum as the boxes' hold and one call of the dearest model."""
     client, _engine, _calls = harness
     draft_id = _complete_draft(client)
     body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}, token=READ_TOKEN))
     assert body["ready"] is True
-    assert body["min_max_cost_cents"] == 41 + 151 + CHUNK_CENTS
+    assert body["min_max_cost_cents"] == 41 + 151
     assert body["suggested_max_cost_cents"] == 500
     assert body["spendable_cents"] == 2500
     assert body["next_tool"] == "repo_draft_submit"
@@ -600,14 +600,14 @@ def test_submit_refuses_a_limit_below_the_floor(harness: Any) -> None:
     )
     assert json.loads(text) == {
         "code": "budget.below_minimum",
-        "detail": "max_cost_cents 100 is below this run's minimum of 292 cents.",
-        "min_max_cost_cents": 41 + 151 + CHUNK_CENTS,
+        "detail": "max_cost_cents 100 is below this run's minimum of 192 cents.",
+        "min_max_cost_cents": 41 + 151,
     }
     assert calls["submits"] == []
 
 
-def test_review_and_submit_add_one_lease_to_a_small_floor(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Add one lease to a capped run's floor, as the setup check must leave that lease (SKY-923).
+def test_review_and_submit_raise_a_small_floor_to_one_lease(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise a capped run's floor below one lease to one lease; the setup check takes none of the limit (SKY-925).
 
     Args:
         harness: MCP client, database engine and recorded calls.
@@ -620,11 +620,39 @@ def test_review_and_submit_add_one_lease_to_a_small_floor(harness: Any, monkeypa
 
     review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
     text = _error_text(
-        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 129, "confirm": True})
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 99, "confirm": True})
     )
 
-    assert review["min_max_cost_cents"] == 30 + CHUNK_CENTS
-    assert json.loads(text)["min_max_cost_cents"] == 30 + CHUNK_CENTS
+    assert review["min_max_cost_cents"] == CHUNK_CENTS
+    assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS
+    assert calls["submits"] == []
+
+
+def test_review_and_submit_keep_one_lease_after_setup_when_setup_counts_in_the_limit(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add one lease to the floor when the account counts setup against the limit (SKY-925).
+
+    The setup check then spends up to the floor from the limit, and submit needs
+    one lease of the room left, so a lower minimum would pass review and fail at submit.
+
+    Args:
+        harness: MCP client, database engine and recorded calls.
+        monkeypatch: Sets a floor, turns local mode off and turns off wallet setup billing.
+    """
+    client, _engine, calls = harness
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(remote_mcp_repo, "repo_floor_cents", lambda spec, http_client: (30, []))
+    monkeypatch.setattr(remote_mcp_repo, "bills_setup_from_wallet", lambda engine, username: False)
+    draft_id = _complete_draft(client)
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    text = _error_text(
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": CHUNK_CENTS + 29, "confirm": True})
+    )
+
+    assert review["min_max_cost_cents"] == CHUNK_CENTS + 30
+    assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS + 30
     assert calls["submits"] == []
 
 
@@ -773,7 +801,9 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             """Return the budget the key made, if any."""
             return record["budgets"].get(idempotency_key)
 
-        def create(self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool) -> Any:
+        def create(
+            self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool, setup_in_total: bool
+        ) -> Any:
             """Make a budget for the key."""
             record["creates"].append((username, total_cents, idempotency_key, uncapped))
             budget = SimpleNamespace(id="budget-1", revision=3, total_cents=total_cents, job_id=None)
@@ -792,6 +822,7 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         return SimpleNamespace(status=status, may_advance=status == "succeeded")
 
     monkeypatch.setattr(remote_mcp_repo, "BudgetService", _Budgets)
+    monkeypatch.setattr(remote_mcp_repo, "bills_setup_from_wallet", lambda engine, username: True)
     monkeypatch.setattr(remote_mcp_repo, "resolve_submission_replay_keys", keys)
     monkeypatch.setattr(remote_mcp_repo, "_enforce_balance", lambda store, user, source: record["balance"].append(user))
     monkeypatch.setattr(remote_mcp_repo, "checked_preflight", check)

@@ -8,9 +8,10 @@
  * first calls and the calibration that prices the rest. One call's hold
  * (its prompt bytes plus its output cap at list price) is usually a few
  * cents, so a dollar of spare covers it; a model whose single call holds more
- * raises the spare to that hold. Outside local mode the limit also needs one
- * budget lease on top: the setup check keeps it unused, and submit refuses a
- * run without it (SKY-923).
+ * raises the spare to that hold. Outside local mode the limit is also at
+ * least one budget lease, because submit refuses a run without it (SKY-923).
+ * The setup check bills the balance, not the limit, so it needs no lease on
+ * top (SKY-925).
  */
 
 import { python } from "@codemirror/lang-python";
@@ -45,14 +46,12 @@ export interface RunFloorInput {
 export interface RunFloor {
   boxHoldCents: number;
   spareCents: number;
-  /** The lease a run takes first; local mode takes none. */
-  leaseCents: number;
   /** The least the limit can be, in whole cents. */
   floorCents: number;
   unpriced: boolean;
 }
 
-/** Add the boxes' opening holds, the spare the first calls need and the run's first lease. */
+/** Add the boxes' opening holds to the spare the first calls need, and keep at least one lease. */
 export function runFloor({
   boxHoldCents,
   callHoldCents,
@@ -65,8 +64,7 @@ export function runFloor({
     return {
       boxHoldCents: boxes,
       spareCents: 0,
-      leaseCents: lease,
-      floorCents: boxes + lease,
+      floorCents: Math.max(boxes, lease),
       unpriced: !!unknownModel,
     };
   const dearestCall = callHoldCents.reduce<number>(
@@ -77,8 +75,7 @@ export function runFloor({
   return {
     boxHoldCents: boxes,
     spareCents: spare,
-    leaseCents: lease,
-    floorCents: boxes + spare + lease,
+    floorCents: Math.max(boxes + spare, lease),
     unpriced: !!unknownModel || callHoldCents.some((hold) => hold === null),
   };
 }

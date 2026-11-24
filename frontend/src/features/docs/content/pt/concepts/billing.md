@@ -22,7 +22,7 @@ O valor que você escolhe é o valor que entra no seu saldo. A taxa de recarga �
 
 ## Orçamentos de execução
 
-Cada execução tem um limite de gastos. O limite é o máximo que a execução pode gastar. Ele cobre a configuração e a otimização.
+Cada execução tem um limite de gastos. O limite é o máximo que a execução pode gastar. Ele cobre a otimização. As verificações de configuração são pagas com o seu saldo. Para contá-las no limite das novas execuções, desative **Cobrar a configuração do meu saldo** em **Definições → Otimização**. Os planos contínuos sempre contam a configuração no orçamento do ciclo.
 
 Uma execução não tem uma estimativa de custo antes de começar. Ela gasta até o seu limite, para no orçamento e mantém a melhor versão. Leia [Execuções](/docs/concepts/runs) para ver como o Skynet decide quando parar.
 
@@ -45,7 +45,7 @@ O assistente não deixa você continuar quando o limite está abaixo desse valor
 
 ## Reservas
 
-Antes de o Skynet fazer trabalho pago, ele reserva parte do limite da execução. O Skynet libera a reserva quando o trabalho é liquidado e cobra apenas o custo real.
+Antes de o Skynet fazer trabalho pago, ele reserva parte do limite da execução. O Skynet libera a reserva quando o trabalho é liquidado e cobra apenas o custo real. As verificações de configuração reservam do seu saldo, a menos que a configuração conte no limite.
 
 Quando um orçamento já tem atividade, o cartão **Limite de gastos** no assistente mostra o seu extrato:
 
@@ -106,11 +106,11 @@ O código do seu repositório e o seu avaliador rodam em uma sandbox. O Skynet m
 2. Quando a sandbox termina, o Skynet cobra o uso final que o provedor da sandbox informa.
 3. O acréscimo sobre o uso se aplica à computação da sandbox.
 
-A computação da sandbox faz parte do limite de gastos da execução, mesmo quando as chamadas de modelo usam a sua própria chave.
+A computação da sandbox faz parte do limite de gastos da execução, mesmo quando as chamadas de modelo usam a sua própria chave. O uso da sandbox nas verificações de configuração é pago pelo seu saldo, a menos que a configuração conte no limite.
 
 ## Serviço
 
-Cada chamada ao endpoint de serviço de uma execução concluída é cobrada separadamente. Quem chama paga com o próprio saldo. Defina `max_cost_cents` na requisição para limitar uma chamada. Leia [Resultados](/docs/guides/results).
+Cada chamada ao endpoint de serviço de uma execução concluída é cobrada separadamente. Quem chama paga com o próprio saldo. Você pode definir `max_cost_cents` na requisição para registrar o máximo que aceita por uma chamada. O seu saldo limita a chamada. Leia [Resultados](/docs/guides/results).
 
 ## Planos
 

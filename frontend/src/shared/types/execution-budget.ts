@@ -19,6 +19,8 @@ export interface ExecutionBudget {
   pending_operations: number;
   blocked_reason: string | null;
   uncapped: boolean;
+  /** Whether the limit also counts setup checks (SKY-925); fixed when the budget is created. */
+  setup_in_total: boolean;
 }
 
 export interface ExecutionBudgetRef {

@@ -96,6 +96,7 @@ from .routers.connectors import connector_secret
 from .routers.execution_budgets import budget_http_error
 from .routers.hardening import _load as _load_hardening_job
 from .routers.models import box_hold_cents, call_hold_cents
+from .routers.setup_billing import bills_setup_from_wallet
 from .routers.submissions import (
     _BLACKBOX_WORKFLOW,
     _enforce_balance,
@@ -117,11 +118,13 @@ _DRAFT_MAX_AGE = timedelta(days=7)
 # default limit is at least five dollars.
 _MIN_CALL_HOLD_CENTS = 100
 _MIN_SUGGESTED_LIMIT_CENTS = 500
-# The setup check spends from the same limit and must leave one lease of it for the run, so a
-# client that picks a bare minimum gets a refused check (SKY-923).
+# The run takes its budget in leases, so a limit below one lease is refused. The account's setup
+# billing setting decides whether the setup check bills the balance or this limit (SKY-923, SKY-925).
 _LIMIT_DESCRIPTION = (
-    "Spending limit of this run, in cents. The setup check spends from it. Outside local mode, the check "
-    f"must leave {CHUNK_CENTS} cents of it for the run. Use suggested_max_cost_cents from repo_draft_review."
+    "Spending limit of this run, in cents. The account's setup billing setting decides whether the setup "
+    f"check bills the balance or this limit. Outside local mode, the limit must be at least {CHUNK_CENTS} cents, "
+    "and more when the setup check bills this limit. Use min_max_cost_cents and suggested_max_cost_cents from "
+    "repo_draft_review."
 )
 _PENDING_RETRY_SECONDS = 5
 # A score can take minutes, longer than an MCP client waits for one tool call, so the tool answers
@@ -918,10 +921,16 @@ def review_draft(
         validate_job(request)
     except ServiceError as error:
         issues.append(str(error))
-    # A capped run takes its budget in leases, and the setup check may not spend the first one,
-    # so the limit needs the check's floor plus one lease; a local run's budget is uncapped, and
-    # a judge session charges each scored call directly and takes no lease (SKY-923).
-    minimum = floor if settings.local_mode or judge_session else floor + CHUNK_CENTS
+    # A capped run takes its budget in leases, so the limit needs at least one lease. A setup check
+    # that bills the balance takes none of the limit; one that bills the limit spends up to the floor
+    # and must keep one lease for the run, as submit requires (SKY-925). A local run's budget is
+    # uncapped, and a judge session charges each scored call directly and takes no lease (SKY-923).
+    if settings.local_mode or judge_session:
+        minimum = floor
+    elif bills_setup_from_wallet(job_store.engine, user.username):
+        minimum = max(floor, CHUNK_CENTS)
+    else:
+        minimum = floor + CHUNK_CENTS
     price = {
         "min_max_cost_cents": minimum,
         "suggested_max_cost_cents": max(_MIN_SUGGESTED_LIMIT_CENTS, minimum),
@@ -1054,7 +1063,11 @@ def preflight_draft(
             if not settings.local_mode:
                 _enforce_balance(job_store, user.username, request.token_source)
             budget = budgets.create(
-                user.username, max_cost_cents, idempotency_key=budget_key, uncapped=settings.local_mode
+                user.username,
+                max_cost_cents,
+                idempotency_key=budget_key,
+                uncapped=settings.local_mode,
+                setup_in_total=not bills_setup_from_wallet(job_store.engine, user.username),
             )
     except BudgetError as error:
         raise budget_http_error(error) from error

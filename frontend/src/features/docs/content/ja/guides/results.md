@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 レスポンスには、`outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged`、`budget` が含まれます。
 
 > [!TIP]
-> 各呼び出しは個別に、呼び出し元の残高から請求されます。`max_cost_cents` は、この 1 回の呼び出しにかけられる最大コストをセント単位で設定します。同じ `Idempotency-Key` を再度送信しても、Skynet はその呼び出しを再度請求しません。
+> 各呼び出しは個別に、呼び出し元の残高から請求されます。`max_cost_cents` は省略可能です。この 1 回の呼び出しで許容する最大額をセント単位で記録します。呼び出しの上限は残高で決まります。同じ `Idempotency-Key` を再度送信しても、Skynet はその呼び出しを再度請求しません。
 
 認証とその他のエンドポイントについては、[API](/docs/api) をお読みください。
 

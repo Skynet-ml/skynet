@@ -23,7 +23,6 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1677,7 +1676,7 @@ class BackgroundWorker:
         """
         snapshot: dict[str, Any] | None = None
         try:
-            raw = asdict(gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username))
+            raw = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username).limit_view()
             raw.pop("username", None)
             raw.pop("account_available_cents", None)
             snapshot = json.loads(json.dumps(raw, default=str))
@@ -2021,7 +2020,9 @@ class BackgroundWorker:
             return
         if snapshot.uncapped:
             return
-        run_watcher.observe_spend(float(snapshot.setup_spent_cents + snapshot.run_spent_cents), snapshot.total_cents)
+        # Setup bills only the wallet, so only run spend counts against the limit, except for a
+        # continuous-plan budget (SKY-925).
+        run_watcher.observe_spend(float(snapshot.limit_spent_cents), snapshot.total_cents)
 
     def _build_cancelled(self, cancel_event: threading.Event | None, optimization_id: str) -> bool:
         """Tell an image build whether its run must stop (SKY-891).
