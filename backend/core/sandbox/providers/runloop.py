@@ -105,9 +105,11 @@ _UNBOUNDED_POLLS = 10**9
 _MAX_KEEP_ALIVE_SECONDS = 172_800
 _MAX_MEMORY_GB = 64
 _ENDED_STATUSES = frozenset({"failure", "shutdown"})
-# Answers that refuse a request before Runloop acts on it. Other 4xx codes,
+# Answers that refuse a request before Runloop acts on it. The client never
+# retries, so such an answer to the one create POST proves that no devbox
+# exists. A 409 may answer a create that already made a box, and 408, 499,
 # 5xx answers and transport errors leave the outcome unknown.
-_REFUSED_STATUSES = frozenset({400, 401, 403, 404, 409, 422, 429})
+_REFUSED_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
 # The SDK's devbox.create POSTs here, then polls wait_for_status while the box
 # boots. Only a refusal status from this POST shows that no devbox was made.
 _CREATE_PATH = "/v1/devboxes/create_and_await_running"
@@ -463,10 +465,11 @@ class RunloopEnvironment(SandboxEnvironment):
             self._usage = await asyncio.shield(reserving)
         except asyncio.CancelledError:
             # The thread cannot be cancelled and may still reserve; keep its
-            # result so the teardown releases it instead of leaking it.
+            # result so the teardown releases it instead of leaking it. The
+            # cancel goes on even when the reserve itself failed.
             while not reserving.done():
                 with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(reserving)
+                    await asyncio.wait({reserving})
             if not reserving.cancelled() and reserving.exception() is None:
                 self._usage = reserving.result()
             raise
@@ -780,7 +783,8 @@ class RunloopEnvironment(SandboxEnvironment):
             client: The SDK client.
             box_id: The devbox id, or ``None`` when no devbox was found.
             stopped_at: ``time.monotonic()`` of the confirmed shutdown or the
-                clean tag search, or ``None`` when neither is confirmed.
+                clean tag search, or ``None`` when neither is confirmed. A
+                refused create POST releases the hold without it.
         """
         usage = self._usage
         if self._binding is not None:
@@ -790,8 +794,9 @@ class RunloopEnvironment(SandboxEnvironment):
             if box_id is None:
                 if not self._create_dispatched:
                     await asyncio.to_thread(usage.release, "The create call was never sent.")
-                elif self._create_refused is not None and stopped_at is not None:
-                    # The tag search ran without an error and found no box.
+                elif self._create_refused is not None:
+                    # A refused create POST proves no box exists, even when
+                    # the tag search failed.
                     await asyncio.to_thread(usage.release, str(self._create_refused))
                 else:
                     # A lost create may still have made a devbox that the tag

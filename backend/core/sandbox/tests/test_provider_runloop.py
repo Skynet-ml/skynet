@@ -24,6 +24,7 @@ from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
 from core.sandbox.errors import (
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -1248,10 +1249,29 @@ async def test_a_4xx_from_the_status_poll_keeps_the_hold_pending(fake_sdk: FakeC
     assert reservation.events == ["pending"]
 
 
-async def test_a_refused_create_with_a_failed_tag_search_keeps_the_hold_pending(
-    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("kind", "events"),
+    [
+        (FakeBadRequestError, ["release"]),
+        (FakeRateLimitError, ["release"]),
+        (FakeConflictError, ["pending"]),
+        (FakeInternalServerError, ["pending"]),
+    ],
+)
+async def test_a_failed_tag_search_after_a_create_error(
+    fake_sdk: FakeCloud,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: type[FakeAPIStatusError],
+    events: list[str],
 ) -> None:
-    """Keep the hold when the tag search could not show that no devbox exists."""
+    """Release a refused create without the tag search, and keep any other create error pending.
+
+    Args:
+        fake_sdk: The fake cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+        kind: The SDK error class of the create POST.
+        events: The expected reservation events.
+    """
 
     async def broken(self: FakeSDK, *, limit: int) -> AsyncIterator[SimpleNamespace]:
         """Fail the listing."""
@@ -1259,12 +1279,12 @@ async def test_a_refused_create_with_a_failed_tag_search_keeps_the_hold_pending(
         yield  # pragma: no cover
 
     monkeypatch.setattr(FakeSDK, "_list_boxes", broken)
-    fake_sdk.create_error = _refusal("/v1/devboxes/create_and_await_running")
+    fake_sdk.create_error = _refusal("/v1/devboxes/create_and_await_running", kind)
     env = _protected()
-    with pytest.raises(SandboxRejectedError):
+    with pytest.raises(SandboxError):
         await env.start()
     (reservation,) = FakeReservation.made
-    assert reservation.events == ["pending"]
+    assert reservation.events == events
 
 
 async def test_a_rate_limited_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
@@ -1350,6 +1370,41 @@ async def test_a_cancel_during_a_slow_reserve_releases_the_hold(fake_sdk: FakeCl
         await start
     (reservation,) = FakeReservation.made
     assert reservation.events == ["release"]
+    assert "create" not in fake_sdk.calls
+
+
+async def test_a_cancel_during_a_failing_reserve_raises_the_cancel(fake_sdk: FakeCloud) -> None:
+    """Raise the cancel, not the reserve error, when the reserve fails after the start was cancelled."""
+    entered, finish = threading.Event(), threading.Event()
+
+    class FailingReservation(FakeReservation):
+        """Fail the reserve only after the test lets it go on."""
+
+        def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+            """Block until the test lets the reserve go on, then fail.
+
+            Args:
+                budget: The budget runtime.
+                request: The usage request.
+                operation_key: The operation key.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            entered.set()
+            finish.wait(5)
+            raise RuntimeError("budget reached")
+
+    env = _protected()
+    env._usage_factory = FailingReservation
+    start = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(entered.wait, 5)
+    start.cancel()
+    await asyncio.sleep(0.01)
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert FakeReservation.made == []
     assert "create" not in fake_sdk.calls
 
 

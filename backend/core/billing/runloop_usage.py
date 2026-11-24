@@ -393,7 +393,7 @@ class RunloopUsageReservation:
 
         The provider calls it only when the create call was never sent, or
         when Runloop answered the create POST with a status in its
-        ``_REFUSED_STATUSES`` and a clean tag search then found no devbox.
+        ``_REFUSED_STATUSES`` and the tag search found no devbox.
         Any other failure keeps the hold pending.
 
         Args:
