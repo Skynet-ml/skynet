@@ -50,7 +50,9 @@ On AutomationBench (200 workplace tasks), EnvOpt built one improved workspace us
 
 Extra attempts only pay off when your metric can separate the right answer from a plausible wrong one [19]. Researchers at Stanford, UC Berkeley, and NVIDIA showed how much the scoring method itself moves results: replacing a coarse discrete judge with continuous probability scores, checked repeatedly across clear sub-criteria, pushed frontier coding and medical agents to new highs and beat specialized trained reward models zero-shot [19].
 
-{{figure: metric | LLM-as-a-Verifier results across coding, medical, and robotics benchmarks [19]. Left: picking the best attempt from candidate pools versus one try and a perfect oracle. Right: RoboRewardBench preference accuracy, where changing only the scoring method on the same zero-shot model beats trained robotics reward models.}}
+{{figure: verifier | LLM-as-a-Verifier on coding and medical benchmarks [19]. Each row compares one try, the attempt the verifier picks from the same candidate pool, and a perfect oracle.}}
+
+{{figure: scoring | RoboRewardBench preference accuracy [19]. Only the scoring method changes on the same zero-shot model, and it beats trained robotics reward models.}}
 
 ## A benchmark score measures the harness too
 
@@ -92,7 +94,9 @@ Most real problems trace back to fixed rules you discover by running experiments
 
 Agent Plasticity, a benchmark from UC Berkeley, Meta Superintelligence Labs, Princeton, and the University of Washington, tests this exact loop on Dwarkesh Patel's question [4]: can frozen models learn on the job? Each round starts fresh, carrying forward only notes, code, tools, and strategies from earlier rounds, then scores the agent on unseen games [23]. Experience alone drove huge gains without changing model weights, yet raw strength and learning efficiency came apart: some models stalled, and the best learner gained over five times more points per dollar than the top final scorer [23].
 
-{{figure: plasticity | Agent Plasticity results with frozen model weights [23]. Left: held-out unseen game scores before and after learning from experience (Hard Chess averages checkpoints 16 to 20; Go and Hex show checkpoint 20). Right: score points gained per $1,000 of learning cost across Chess, Go, and Hex combined.}}
+{{figure: gains | Agent Plasticity results with frozen model weights [23]. Held-out unseen game scores before and after learning from experience (Hard Chess averages checkpoints 16 to 20; Go and Hex show checkpoint 20).}}
+
+{{figure: psat | Agent Plasticity learning efficiency [23]: score points gained per $1,000 of learning cost across Chess, Go, and Hex combined.}}
 
 A lot of software was built under old constraints that no longer hold, so rebuilding from first principles with agent swarms will become common. The only hard limits are the laws of physics; as Elon Musk says, everything else is a recommendation [24].
 
