@@ -131,6 +131,8 @@ def test_quote_covers_the_lifetime_and_grace_at_the_shape_rate(cpus: int, memory
         {"cpus": 3},
         {"memory_mib": 8192},
         {"cpus": True, "memory_mib": 2048},
+        {"cpus": 2.0},
+        {"memory_mib": 4096.0},
         {"lifetime_ms": 0},
         {"lifetime_ms": 43_200_001},
         {"lifetime_ms": 1.5},

@@ -52,12 +52,15 @@ import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import httpx
 
 from core.billing.sbx_usage import SbxUsageReservation
+
+if TYPE_CHECKING:
+    from core.billing.runtime import BudgetRuntime
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
@@ -922,7 +925,7 @@ class SbxEnvironment(SandboxEnvironment):
         spec: SandboxSpec,
         *,
         timeouts: PhaseTimeouts | None = None,
-        budget: Any | None = None,
+        budget: BudgetRuntime | None = None,
         usage_factory: Callable[..., Any] = SbxUsageReservation,
     ) -> None:
         """Check the spec and prepare the create call.
@@ -942,7 +945,7 @@ class SbxEnvironment(SandboxEnvironment):
         super().__init__(spec)
         self._budget = budget
         self._usage_factory = usage_factory
-        self._usage: Any | None = None
+        self._usage: SbxUsageReservation | None = None
         self._orphan_found = False
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
@@ -1029,7 +1032,13 @@ class SbxEnvironment(SandboxEnvironment):
             self._starting = None
 
     async def _open(self) -> None:
-        """Reserve the budget of a protected box, then create the sandbox."""
+        """Reserve the budget of a protected box, then create the sandbox.
+
+        A cancel or ``stop()`` during the reservation waits for it to end,
+        which can take up to the budget runtime's ``wait_timeout``. That wait
+        is accepted: a reservation that ends unseen would leak its hold, and
+        a ledger thread cannot be stopped from here.
+        """
         if self._budget is not None:
             reserving = asyncio.ensure_future(
                 asyncio.to_thread(
@@ -1060,15 +1069,23 @@ class SbxEnvironment(SandboxEnvironment):
                 self._create_dispatched = True
                 if self._usage is not None:
                     self._usage.start_clock()
-                response = await _call(
-                    client,
-                    "POST",
-                    "/v1/sandboxes",
-                    action="create the sandbox",
-                    accept=_CLIENT_ERRORS,
-                    json=self._create_body,
-                    headers={"Idempotency-Key": self._create_key},
-                )
+                try:
+                    response = await _call(
+                        client,
+                        "POST",
+                        "/v1/sandboxes",
+                        action="create the sandbox",
+                        accept=_CLIENT_ERRORS,
+                        json=self._create_body,
+                        headers={"Idempotency-Key": self._create_key},
+                    )
+                except SandboxTransientError as error:
+                    # A failed connect proves the create never reached sbx, so
+                    # the stop releases the hold. ``_call`` hides the httpx
+                    # error as the cause but keeps it as the context.
+                    if isinstance(error.__context__, (httpx.ConnectError, httpx.ConnectTimeout)):
+                        self._create_dispatched = False
+                    raise
                 if not response.is_success:
                     # A refusal is definite: sbx made no sandbox, so a stop
                     # has no lost sandbox to look for.
@@ -1378,19 +1395,21 @@ class SbxEnvironment(SandboxEnvironment):
                     if deleted:
                         self._stop_usage_clock()
         finally:
+            # The bill closes first and a cancel cannot cut it short, so a
+            # cancel during the slow client closes never skips it.
+            usage, self._usage = self._usage, None
+            if usage is not None:
+                await _uncancellable(asyncio.ensure_future(asyncio.to_thread(self._close_usage, usage, ended)))
             if runtime is not None:
                 await _bounded(runtime.aclose(), "close the runtime client")
             await _bounded(management.aclose(), "close the management client")
-            usage, self._usage = self._usage, None
-            if usage is not None:
-                await asyncio.to_thread(self._close_usage, usage, ended)
 
     def _stop_usage_clock(self) -> None:
         """End the measured runtime now, before the client closes can wait."""
         if self._usage is not None:
             self._usage.stop_clock()
 
-    def _close_usage(self, usage: Any, ended: str) -> None:
+    def _close_usage(self, usage: SbxUsageReservation, ended: str) -> None:
         """Settle, release or keep the box's hold by how the sandbox ended.
 
         Args:

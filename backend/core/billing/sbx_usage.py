@@ -36,6 +36,10 @@ SHAPE_USD_PER_HOUR = {
 # Skynet's sbx provider caps every sandbox timeout at 12 hours
 # (``_MAX_LIFETIME_SECONDS``); sbx itself allows 24. A test keeps the two equal.
 LIFETIME_CEILING_MS = 43_200_000
+# sbx bills from start to stop, but does not publish how long the create and
+# the delete take outside the box timeout. This grace covers that time: the
+# hold funds the lifetime plus the grace, and a box that runs longer settles
+# at that cap.
 # The sbx timeout is a deadline, not an idle timeout: the API calls it "the
 # initial TTL" of "deadline behavior"
 # (https://docs.docker.com/reference/api/sandboxes/latest/schemas/TimeoutOptions),
@@ -44,9 +48,7 @@ LIFETIME_CEILING_MS = 43_200_000
 # Neither says when the server starts that clock, so this assumes it starts
 # no later than this grace after the create call. A sandbox whose delete fails
 # then bills at most its lifetime plus the grace, and settle never charges
-# more than the hold. sbx bills from start to stop, but does not publish how
-# long the create and the delete take outside the box timeout. The hold funds this much more, and
-# a box that runs longer than its lifetime plus this grace settles at the cap.
+# more than the hold.
 BILLING_GRACE_MS = 600_000
 _MS_PER_HOUR = Decimal(3_600_000)
 
@@ -81,7 +83,7 @@ def quote_sbx_sandbox(request: Mapping[str, Any]) -> OperationQuote:
     lifetime_ms = request.get("lifetime_ms")
     if (
         shape not in SHAPE_USD_PER_HOUR
-        or any(isinstance(value, bool) for value in shape)
+        or any(type(value) is not int for value in shape)
         or isinstance(lifetime_ms, bool)
         or not isinstance(lifetime_ms, int)
         or not 0 < lifetime_ms <= LIFETIME_CEILING_MS
@@ -276,6 +278,9 @@ class SbxUsageReservation:
                 runtime_ms = ceiling_ms
             billed_ms = min(max(runtime_ms, 0), ceiling_ms)
             usd = _billed_usd(billed_ms, Decimal(snapshot["usd_per_hour"]))
+            # The Vercel helper is reused, not copied: it rebuilds the charge
+            # policy from any quote's price snapshot, so the settle uses the
+            # markup frozen at reservation time. Nothing in it is Vercel-only.
             charge = vercel_charge_policy(snapshot).convert(usd)
             self.runtime.service.settle(
                 self.operation.id,

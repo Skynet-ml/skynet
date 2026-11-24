@@ -1183,7 +1183,7 @@ async def test_measured_runtime_ends_before_the_clients_close(monkeypatch: pytes
 
     monkeypatch.setattr(httpx.AsyncClient, "aclose", recording_close)
     await env.stop()
-    assert RESERVED[0].calls == ["start", "confirm", "stop", "close", "close", "settle"]
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle", "close", "close"]
 
 
 async def test_cancel_during_the_confirm_waits_for_it_before_the_settle() -> None:
@@ -1227,3 +1227,52 @@ async def test_timed_out_create_answer_keeps_the_hold(monkeypatch: pytest.Monkey
         await env.start()
     assert CLOUD.calls("GET", "/v1/sandboxes")
     assert RESERVED[0].calls == ["start", "pending"]
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout])
+async def test_failed_connect_on_create_releases_the_hold(
+    monkeypatch: pytest.MonkeyPatch, error: type[httpx.TransportError]
+) -> None:
+    """Release the hold when the create never reached sbx, and look for no sandbox."""
+
+    async def unreachable_create(request: httpx.Request) -> httpx.Response:
+        """Fail the connection of the create, and serve every other call.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method == "POST" and request.url.path.endswith("/v1/sandboxes"):
+            raise error("unreachable", request=request)
+        return await _handle(request)
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(unreachable_create))
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert CLOUD.calls("GET", "/v1/sandboxes") == []
+    assert RESERVED[0].calls == ["start", "release"]
+
+
+async def test_cancel_during_the_client_closes_still_settles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle the bill before the client closes, so a cancel there cannot skip it."""
+    env = _protected()
+    await env.start()
+
+    async def cancelled_close(client: httpx.AsyncClient) -> None:
+        """Act as a close that a second cancel interrupts.
+
+        Args:
+            client: The client to close.
+
+        Raises:
+            asyncio.CancelledError: Always.
+        """
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", cancelled_close)
+    with pytest.raises(asyncio.CancelledError):
+        await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
