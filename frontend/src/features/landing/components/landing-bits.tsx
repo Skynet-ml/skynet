@@ -169,13 +169,13 @@ function Cross({ className }: { className?: string }) {
   );
 }
 
-/** A row of five cross marks with an optional label in the middle; the inner two hide on phones. */
-export function Marks({ label }: { label?: string }) {
+/** A row of five cross marks; the inner two hide on phones. */
+export function Marks() {
   return (
-    <div aria-hidden="true" className="flex items-center justify-between px-0.5 pt-3.5 text-[11px] font-semibold uppercase tracking-[.12em] text-muted-foreground">
+    <div aria-hidden="true" className="flex items-center justify-between px-0.5 pt-3.5">
       <Cross />
       <Cross className="max-[860px]:hidden" />
-      {label ? <span>{label}</span> : <Cross />}
+      <Cross />
       <Cross className="max-[860px]:hidden" />
       <Cross />
     </div>

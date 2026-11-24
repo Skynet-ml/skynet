@@ -53,7 +53,7 @@ export function LandingPage() {
             <HeroComposer goal={goal} onGoalChange={setGoal} textareaRef={textareaRef} titleId={TITLE_ID} />
           </div>
         </div>
-        <Marks label={msg("landing.scroll_hint")} />
+        <Marks />
       </section>
       <BigStatement />
       <Reel />

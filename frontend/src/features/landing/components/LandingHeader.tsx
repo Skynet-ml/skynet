@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * The landing header: the wordmark, a short statement, and a control bar with
+ * The landing header: the wordmark and a control bar with
  * the theme switch, "Start a run" and a menu that opens over the whole page.
  */
 
@@ -13,7 +13,7 @@ import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
 import { useColorTheme } from "@/shared/providers/theme-provider";
 import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
-import { DISPLAY, Dot, RollText, RUN_TARGET, useScrollFrame } from "./landing-bits";
+import { DISPLAY, Dot, RUN_TARGET, useScrollFrame } from "./landing-bits";
 
 const EASE = "ease-[cubic-bezier(.16,1,.3,1)]";
 const GLASS = "bg-background/85 backdrop-blur-[14px]";
@@ -142,12 +142,12 @@ export function LandingHeader() {
         aria-hidden={!open}
         inert={!open}
         className={cn(
-          "fixed inset-0 z-[25] grid grid-rows-[1fr_auto] bg-background px-[var(--pad)] pb-7 pt-[110px] text-foreground transition-[clip-path] duration-700 motion-reduce:transition-none",
+          "fixed inset-0 z-[25] flex flex-col bg-background px-[var(--pad)] pb-7 pt-[110px] text-foreground transition-[clip-path] duration-700 motion-reduce:transition-none",
           EASE,
           open ? "visible [clip-path:inset(0_0_0_0)]" : "invisible [clip-path:inset(0_0_100%_0)]",
         )}
       >
-        <nav aria-label={msg("landing.menu_nav_label")} className="flex flex-col items-start justify-center gap-1">
+        <nav aria-label={msg("landing.menu_nav_label")} className="flex flex-1 flex-col items-start justify-center gap-1">
           {links.map((link, n) => (
             <Link
               key={link.href}
@@ -167,23 +167,11 @@ export function LandingHeader() {
                   open ? "translate-y-0 opacity-100" : "translate-y-[40%] opacity-0",
                 )}
               >
-                <RollText text={link.label} />
+                {link.label}
               </span>
             </Link>
           ))}
         </nav>
-        <div className="flex justify-between gap-6 border-t border-border pt-5 text-sm text-muted-foreground">
-          <span>{msg("landing.tagline")}</span>
-          <span>
-            <Link href="/privacy" className="hover:text-foreground">
-              {msg("landing.footer_privacy")}
-            </Link>
-            {" · "}
-            <Link href="/terms" className="hover:text-foreground">
-              {msg("landing.footer_terms")}
-            </Link>
-          </span>
-        </div>
       </div>
     </>
   );

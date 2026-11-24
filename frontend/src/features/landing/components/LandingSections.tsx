@@ -238,15 +238,12 @@ export function WorkCards({ onPickGoal }: { onPickGoal: (goal: string) => void }
           <span className={CARD_TAG}>{msg("landing.card_essay_tag")}</span>
         </Link>
       </div>
-      <div className="relative flex justify-center pb-10 pt-[90px]">
+      <div className="relative pb-10 pt-[90px]">
         <Ribbon
           viewBox="0 0 1400 120"
           d="M300 30 C 520 -10, 700 30, 820 70 S 1150 110, 1440 90"
           className="-start-[var(--pad)] top-[50px] z-0 h-[120px] w-[calc(100%+var(--pad)*2)] max-[860px]:hidden"
         />
-        <Button asChild variant="outline" className="relative z-[3]">
-          <Link href="/blog">{msg("landing.read_blog")}</Link>
-        </Button>
       </div>
     </section>
   );
