@@ -42,8 +42,10 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
+from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.runloop_usage import DEFAULT_DISK_GB, RunloopUsageReservation
+from core.billing.runtime import UsagePendingError
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
@@ -102,6 +104,9 @@ _UNBOUNDED_POLLS = 10**9
 _MAX_KEEP_ALIVE_SECONDS = 172_800
 _MAX_MEMORY_GB = 64
 _ENDED_STATUSES = frozenset({"failure", "shutdown"})
+# The SDK's devbox.create POSTs here, then polls wait_for_status while the box
+# boots. Only a 4xx from this POST proves that no devbox exists.
+_CREATE_PATH = "/v1/devboxes/create_and_await_running"
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
 _TIMEOUT_EXIT_CODE = 124
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -256,6 +261,39 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
     )
 
 
+def _refused_create(error: SandboxRejectedError) -> bool:
+    """Tell whether Runloop refused the create POST itself.
+
+    Args:
+        error: The mapped 4xx error of ``client.devbox.create``.
+
+    Returns:
+        True when the SDK error came from the create POST, not from the
+        status poll that follows it once the devbox exists.
+    """
+    request = getattr(error.__cause__, "request", None)
+    path = getattr(getattr(request, "url", None), "path", None)
+    return isinstance(path, str) and path.endswith(_CREATE_PATH)
+
+
+def _settle_failure(error: Exception) -> Exception:
+    """Return the error that a failed settle raises from ``stop()``.
+
+    Args:
+        error: The settle failure.
+
+    Returns:
+        A billing error unchanged. Any other failure becomes a
+        ``UsagePendingError``, because the hold stays pending and the
+        original text can hold database details.
+    """
+    if isinstance(error, UsagePendingError | BudgetError):
+        return error
+    pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+    pending.__cause__ = error
+    return pending
+
+
 async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
     """Wait for a cleanup call for at most ``STOP_TIMEOUT`` seconds.
 
@@ -325,6 +363,7 @@ class RunloopEnvironment(SandboxEnvironment):
         self._binding: asyncio.Future[Any] | None = None
         self._create_sent_at: float | None = None
         self._create_refused: SandboxRejectedError | None = None
+        self._settle_error: Exception | None = None
         self._orphan_id: str | None = None
 
     @classmethod
@@ -373,7 +412,8 @@ class RunloopEnvironment(SandboxEnvironment):
         try:
             await self._starting
         except BaseException as error:
-            await self.stop()
+            # The start error goes on; a settle error stays for the next stop().
+            await self._stop_once()
             task = asyncio.current_task()
             if isinstance(error, asyncio.CancelledError) and task is not None and not task.cancelling():
                 raise SandboxInfraError("The Runloop sandbox stopped during its start.") from None
@@ -447,9 +487,8 @@ class RunloopEnvironment(SandboxEnvironment):
                             **params, polling_config=_polling(), idempotency_key=self._box_tag
                         )
                 except SandboxRejectedError as error:
-                    # A 4xx answer proves Runloop made no devbox, so the
-                    # teardown can release the hold.
-                    self._create_refused = error
+                    if _refused_create(error):
+                        self._create_refused = error
                     raise
         except TimeoutError:
             if not deadline.expired():
@@ -668,7 +707,20 @@ class RunloopEnvironment(SandboxEnvironment):
         return data.decode("utf-8")
 
     async def stop(self) -> None:
-        """Shut the devbox down once and close the client. Safe to call again."""
+        """Shut the devbox down once, settle its hold and close the client. Safe to call again.
+
+        Raises:
+            UsagePendingError: The settle failed, so the hold stays pending.
+            BudgetError: The usage violates the reserved bounds.
+        """
+        await self._stop_once()
+        # Like Vercel, only one stop caller gets a settle failure.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
+
+    async def _stop_once(self) -> None:
+        """Run the teardown once, shielded from the caller's cancel."""
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._teardown())
         await asyncio.shield(self._stop_task)
@@ -702,14 +754,15 @@ class RunloopEnvironment(SandboxEnvironment):
     async def _settle(self, client: Any, box_id: str | None, stopped_at: float | None) -> None:
         """Settle or release the budget hold of a protected devbox.
 
-        A billing failure is logged, not raised: the hold then stays pending
-        for reconciliation and never charges more than its reservation.
+        A failure to bind or settle a devbox that exists is kept for
+        ``stop()`` to raise; the hold stays pending. When no devbox was
+        found, a billing failure is only logged.
 
         Args:
             client: The SDK client.
             box_id: The devbox id, or ``None`` when no devbox was found.
-            stopped_at: ``time.monotonic()`` of the confirmed shutdown, or
-                ``None`` when the shutdown is not confirmed.
+            stopped_at: ``time.monotonic()`` of the confirmed shutdown or the
+                clean tag search, or ``None`` when neither is confirmed.
         """
         usage = self._usage
         if self._binding is not None:
@@ -719,7 +772,8 @@ class RunloopEnvironment(SandboxEnvironment):
             if box_id is None:
                 if not self._create_dispatched:
                     await asyncio.to_thread(usage.release, "The create call was never sent.")
-                elif self._create_refused is not None:
+                elif self._create_refused is not None and stopped_at is not None:
+                    # The tag search ran without an error and found no box.
                     await asyncio.to_thread(usage.release, str(self._create_refused))
                 else:
                     # A lost create may still have made a devbox that the tag
@@ -739,6 +793,8 @@ class RunloopEnvironment(SandboxEnvironment):
             await asyncio.to_thread(usage.settle)
         except Exception as error:
             logger.warning("Runloop devbox %s usage stays pending: %s", box_id, type(error).__name__)
+            if box_id is not None:
+                self._settle_error = _settle_failure(error)
 
     async def _shut_down_orphan(self, client: Any) -> None:
         """Shut down the devbox of a create that ended before it returned.

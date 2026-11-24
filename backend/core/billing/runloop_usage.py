@@ -28,7 +28,8 @@ from .vercel_usage import vercel_charge_policy
 # The page bills usage per second with no minimum, and its one usage table
 # applies to every plan. It publishes no creation fee and no network price.
 _PRICING_URL = "https://www.runloop.ai/pricing"
-_USAGE_API_URL = "https://docs.runloop.ai/api-reference/devboxes/get-devbox-resource-usage"
+# Operation getDevboxResourceUsage, GET /v1/devboxes/{id}/usage (read 2026-11-24).
+_USAGE_API_URL = "https://docs.runloop.ai/openapi-specs/stainless-processed-openapi.json"
 _PRICE_VERSION = "runloop-public-2026-11-24"
 _CPU_HOUR_USD = Decimal("0.108")
 _MEMORY_GB_HOUR_USD = Decimal("0.0252")

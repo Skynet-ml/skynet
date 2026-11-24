@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
@@ -1133,23 +1134,80 @@ async def test_an_unconfirmed_shutdown_settles_without_measured_time(
     assert reservation.events[1:] == ["settle"]
 
 
-async def test_a_failed_settle_does_not_fail_the_stop(fake_sdk: FakeCloud) -> None:
-    """Log a settle failure and still close the client."""
+async def test_a_failed_settle_raises_once_from_stop(fake_sdk: FakeCloud) -> None:
+    """Raise a settle failure from stop() as a pending-usage error, once, after the client closes."""
     env = _protected()
     await env.start()
     FakeReservation.made[0].settle_error = RuntimeError("ledger down")
-    await env.stop()
+    with pytest.raises(UsagePendingError, match="not yet settled") as raised:
+        await env.stop()
+    assert isinstance(raised.value.__cause__, RuntimeError)
     assert fake_sdk.calls[-1] == "aclose"
+    await env.stop()
+
+
+async def test_a_billing_error_from_settle_is_raised_unchanged(fake_sdk: FakeCloud) -> None:
+    """Pass a billing error from the settle through stop() as it is."""
+    env = _protected()
+    await env.start()
+    error = UsagePendingError("awaiting usage")
+    FakeReservation.made[0].settle_error = error
+    with pytest.raises(UsagePendingError) as raised:
+        await env.stop()
+    assert raised.value is error
+
+
+def _refusal(path: str) -> FakeBadRequestError:
+    """Return a 400 error whose request went to this API path.
+
+    Args:
+        path: The API path of the failed request.
+
+    Returns:
+        The error.
+    """
+    error = FakeBadRequestError("bad size")
+    error.request = SimpleNamespace(url=SimpleNamespace(path=path))
+    return error
 
 
 async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
-    """Release the hold when Runloop refuses the create with a 4xx answer."""
-    fake_sdk.create_error = FakeBadRequestError("bad size")
+    """Release the hold when Runloop refuses the create POST with a 4xx answer."""
+    fake_sdk.create_error = _refusal("/v1/devboxes/create_and_await_running")
     env = _protected()
     with pytest.raises(SandboxRejectedError):
         await env.start()
     (reservation,) = FakeReservation.made
     assert reservation.events == ["release"]
+
+
+async def test_a_4xx_from_the_status_poll_keeps_the_hold_pending(fake_sdk: FakeCloud) -> None:
+    """Keep the hold when the 4xx came from the poll after the create, where a devbox may exist."""
+    fake_sdk.create_error = _refusal("/v1/devboxes/dbx-9/wait_for_status")
+    env = _protected()
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["pending"]
+
+
+async def test_a_refused_create_with_a_failed_tag_search_keeps_the_hold_pending(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the hold when the tag search could not show that no devbox exists."""
+
+    async def broken(self: FakeSDK, *, limit: int) -> AsyncIterator[SimpleNamespace]:
+        """Fail the listing."""
+        raise FakeInternalServerError("500")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(FakeSDK, "_list_boxes", broken)
+    fake_sdk.create_error = _refusal("/v1/devboxes/create_and_await_running")
+    env = _protected()
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["pending"]
 
 
 async def test_a_lost_create_keeps_the_hold_pending(fake_sdk: FakeCloud) -> None:
