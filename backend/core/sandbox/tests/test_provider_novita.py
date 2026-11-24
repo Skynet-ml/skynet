@@ -1,0 +1,790 @@
+"""Tests for the Novita provider against a fake SDK and a fake clock, with no network and no cost."""
+
+from __future__ import annotations
+
+import asyncio
+import itertools
+from collections.abc import Callable, Iterator, Mapping
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, ClassVar
+
+import pytest
+from sqlalchemy import Engine, create_engine, select
+from sqlalchemy.orm import Session
+
+from core.billing.budgets import BudgetService
+from core.billing.runtime import BudgetRuntime, UsagePendingError
+from core.config import settings
+from core.sandbox.capabilities import SandboxSpecError
+from core.sandbox.environment import JOB_TAG, NetworkPolicy
+from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
+from core.sandbox.metering import usage_adapter
+from core.sandbox.providers import novita
+from core.sandbox.resources import ResourceRequest, SandboxSpec
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
+
+
+# The provider matches SDK errors by class name, so the fakes keep the SDK names.
+class SandboxException(Exception):  # noqa: N818
+    """Stand in for the SDK's base API error, which the provider matches by name."""
+
+
+class RateLimitException(SandboxException):
+    """Stand in for the SDK's 429 error."""
+
+
+class NotFoundException(SandboxException):
+    """Stand in for the SDK's missing-file error."""
+
+
+class CommandExitException(SandboxException):
+    """Stand in for the SDK's nonzero-exit error."""
+
+    def __init__(self, exit_code: int) -> None:
+        """Keep the exit code.
+
+        Args:
+            exit_code: The command's exit code.
+        """
+        super().__init__(f"exit {exit_code}")
+        self.exit_code = exit_code
+
+
+class FakeClock:
+    """Return a time that the test sets by hand."""
+
+    def __init__(self) -> None:
+        """Start the clock at zero."""
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        """Return the fake time.
+
+        Returns:
+            The current fake time in seconds.
+        """
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        """Move the fake time forward and yield once.
+
+        Args:
+            seconds: The requested delay.
+        """
+        self.now += seconds
+        await asyncio.sleep(0)
+
+
+class FakeHandle:
+    """Act as an SDK background command handle."""
+
+    def __init__(self, pid: int, outcome: Callable[[], Any]) -> None:
+        """Keep the pid and the wait behavior.
+
+        Args:
+            pid: The fake process id.
+            outcome: An async function that returns the result or raises.
+        """
+        self.pid = pid
+        self._outcome = outcome
+
+    async def wait(self) -> Any:
+        """Return the command result.
+
+        Returns:
+            An object with ``exit_code``.
+        """
+        return await self._outcome()
+
+
+class FakeCommands:
+    """Run fake commands: ``hang`` never ends, ``fail`` exits 3, anything else prints ``out``."""
+
+    def __init__(self) -> None:
+        """Start with no recorded calls."""
+        self.runs: list[tuple[str, dict[str, Any]]] = []
+        self.killed: list[int] = []
+        self._pids = itertools.count(1)
+
+    async def run(self, command: str, **options: Any) -> FakeHandle:
+        """Record a command and return its handle.
+
+        Args:
+            command: The shell command.
+            **options: The SDK options.
+
+        Returns:
+            The fake handle.
+        """
+        self.runs.append((command, options))
+
+        async def outcome() -> Any:
+            """End the fake command.
+
+            Returns:
+                The result with exit code 0.
+
+            Raises:
+                CommandExitException: For a ``fail`` command.
+            """
+            if "hang" in command:
+                await asyncio.Event().wait()
+            options["on_stdout"]("out")
+            if "fail" in command:
+                options["on_stderr"]("bad")
+                raise CommandExitException(3)
+            return SimpleNamespace(exit_code=0)
+
+        return FakeHandle(next(self._pids), outcome)
+
+    async def kill(self, pid: int) -> bool:
+        """Record a command kill.
+
+        Args:
+            pid: The process id.
+
+        Returns:
+            True.
+        """
+        self.killed.append(pid)
+        return True
+
+
+class FakeFiles:
+    """Keep files in a dict."""
+
+    def __init__(self) -> None:
+        """Start with no files."""
+        self.data: dict[str, bytes] = {}
+
+    async def write(self, path: str, data: bytes) -> None:
+        """Store one file.
+
+        Args:
+            path: The sandbox path.
+            data: The content.
+        """
+        self.data[path] = data
+
+    async def read(self, path: str, format: str = "text") -> Any:
+        """Return one file.
+
+        Args:
+            path: The sandbox path.
+            format: The SDK read format.
+
+        Returns:
+            The content.
+
+        Raises:
+            NotFoundException: The file does not exist.
+        """
+        if path not in self.data:
+            raise NotFoundException(f"404: {path}")
+        return bytearray(self.data[path])
+
+
+class FakePaginator:
+    """Return one page of listed boxes."""
+
+    def __init__(self, items: list[Any]) -> None:
+        """Keep the page.
+
+        Args:
+            items: The listed boxes.
+        """
+        self._items = items
+        self.has_next = True
+
+    async def next_items(self) -> list[Any]:
+        """Return the page once.
+
+        Returns:
+            The listed boxes.
+        """
+        self.has_next = False
+        return self._items
+
+
+class FakeQuery:
+    """Stand in for ``SandboxQuery``."""
+
+    def __init__(self, metadata: dict[str, str]) -> None:
+        """Keep the metadata filter.
+
+        Args:
+            metadata: The metadata that a box must carry.
+        """
+        self.metadata = metadata
+
+
+class FakeSandbox:
+    """Act as ``AsyncSandbox``, with a class-level registry of live boxes."""
+
+    live: ClassVar[dict[str, FakeSandbox]] = {}
+    calls: ClassVar[list[dict[str, Any]]] = []
+    create_error: ClassVar[BaseException | None] = None
+    leak_on_error: ClassVar[bool] = False
+    create_gate: ClassVar[asyncio.Event | None] = None
+    info_gate: ClassVar[asyncio.Event | None] = None
+    info_entered: ClassVar[asyncio.Event | None] = None
+    list_error: ClassVar[BaseException | None] = None
+    info_size: ClassVar[tuple[int, int]] = (2, 2048)
+    _ids: ClassVar[Iterator[int]] = itertools.count(1)
+
+    def __init__(self, metadata: Mapping[str, str]) -> None:
+        """Open one fake box.
+
+        Args:
+            metadata: The box metadata.
+        """
+        self.sandbox_id = f"sbx-{next(self._ids)}"
+        self.metadata = dict(metadata)
+        self.commands = FakeCommands()
+        self.files = FakeFiles()
+        self.networks: list[dict[str, Any]] = []
+        # The real SDK has a class and an instance ``kill``; the instance one shadows the classmethod here.
+        self.kill = self._kill_self
+        type(self).live[self.sandbox_id] = self
+
+    @classmethod
+    def reset(cls) -> None:
+        """Clear every class-level setting."""
+        cls.live = {}
+        cls.calls = []
+        cls.create_error = None
+        cls.leak_on_error = False
+        cls.create_gate = None
+        cls.info_gate = None
+        cls.info_entered = None
+        cls.list_error = None
+        cls.info_size = (2, 2048)
+
+    @classmethod
+    async def create(cls, **options: Any) -> FakeSandbox:
+        """Record a create and open a box, or fail as configured.
+
+        Args:
+            **options: The SDK create options.
+
+        Returns:
+            The new box.
+
+        Raises:
+            BaseException: The configured create error.
+        """
+        cls.calls.append(options)
+        if cls.create_gate is not None:
+            await cls.create_gate.wait()
+        if cls.create_error is not None:
+            if cls.leak_on_error:
+                cls(options["metadata"])
+            raise cls.create_error
+        return cls(options["metadata"])
+
+    @classmethod
+    def list(cls, *, query: FakeQuery) -> FakePaginator:
+        """List live boxes whose metadata matches.
+
+        Args:
+            query: The metadata filter.
+
+        Returns:
+            A paginator over the matches.
+
+        Raises:
+            BaseException: The configured list error.
+        """
+        if cls.list_error is not None:
+            raise cls.list_error
+        items = [
+            SimpleNamespace(sandbox_id=box.sandbox_id)
+            for box in cls.live.values()
+            if query.metadata.items() <= box.metadata.items()
+        ]
+        return FakePaginator(items)
+
+    @classmethod
+    async def kill(cls, sandbox_id: str) -> bool:
+        """Kill a box by id.
+
+        Args:
+            sandbox_id: The box id.
+
+        Returns:
+            True when the box existed.
+        """
+        return cls.live.pop(sandbox_id, None) is not None
+
+    async def _kill_self(self) -> bool:
+        """Kill this box.
+
+        Returns:
+            True when the box existed.
+        """
+        return type(self).live.pop(self.sandbox_id, None) is not None
+
+    async def get_info(self) -> SimpleNamespace:
+        """Return the box info with the configured size.
+
+        Returns:
+            A stand-in for ``SandboxInfo``.
+        """
+        if self.info_entered is not None:
+            self.info_entered.set()
+        if self.info_gate is not None:
+            await self.info_gate.wait()
+        cpus, memory = self.info_size
+        return SimpleNamespace(sandbox_id=self.sandbox_id, cpu_count=cpus, memory_mb=memory)
+
+    async def set_network(self, **options: Any) -> None:
+        """Record a network update.
+
+        Args:
+            **options: ``allow_out`` and ``deny_out``.
+        """
+        self.networks.append(options)
+
+
+class FakeUsage:
+    """Record the reservation calls of the provider."""
+
+    def __init__(self, request: Mapping[str, Any]) -> None:
+        """Keep the request.
+
+        Args:
+            request: The request that the provider funded.
+        """
+        self.request = dict(request)
+        self.calls: list[tuple[Any, ...]] = []
+
+    def start(self, at: float, name: str) -> None:
+        """Record the create start.
+
+        Args:
+            at: The clock time.
+            name: The box tag.
+        """
+        self.calls.append(("start", at, name))
+
+    def refused(self) -> None:
+        """Record a refusal."""
+        self.calls.append(("refused",))
+
+    def confirm(self, info: Any) -> None:
+        """Record the created box and refuse one larger than its funding, as the real reservation does.
+
+        Args:
+            info: The box info.
+
+        Raises:
+            SandboxSpecError: The box has more CPUs than the request.
+        """
+        self.calls.append(("confirm", info.sandbox_id))
+        if info.cpu_count > self.request["vcpus"]:
+            raise SandboxSpecError("too large")
+
+    def stopped(self, at: float, *, confirmed: bool, box_seen: bool) -> None:
+        """Record the stop.
+
+        Args:
+            at: The clock time.
+            confirmed: The stop was confirmed.
+            box_seen: A box was seen.
+        """
+        self.calls.append(("stopped", at, confirmed, box_seen))
+
+    def settle(self) -> None:
+        """Record the settle."""
+        self.calls.append(("settle",))
+
+
+@pytest.fixture(autouse=True)
+def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> type[FakeSandbox]:
+    """Swap the SDK classes for the fakes.
+
+    Args:
+        monkeypatch: Restores the classes after the test.
+
+    Returns:
+        The fake sandbox class.
+    """
+    FakeSandbox.reset()
+    monkeypatch.setattr(novita.NovitaEnvironment, "sandbox_cls", FakeSandbox)
+    monkeypatch.setattr(novita.NovitaEnvironment, "query_cls", FakeQuery)
+    monkeypatch.setattr(settings, "usage_markup", 1.0)
+    return FakeSandbox
+
+
+@pytest.fixture
+def database(tmp_path: Path) -> Iterator[Engine]:
+    """Create a private funded wallet and ledger.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite file.
+
+    Yields:
+        The engine bound to the funded ledger.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'novita.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    yield engine
+    engine.dispose()
+
+
+def _runtime(database: Engine) -> BudgetRuntime:
+    """Bind a real budget runtime to the local ledger.
+
+    Args:
+        database: Engine of the funded ledger.
+
+    Returns:
+        A runtime for a fresh 50-cent budget owned by ``alice``.
+    """
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    return BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+
+
+def _spec(**overrides: Any) -> SandboxSpec:
+    """Build a small protected spec.
+
+    Args:
+        **overrides: Spec fields to change.
+
+    Returns:
+        The spec.
+    """
+    values: dict[str, Any] = {
+        "lifetime_seconds": 600.5,
+        "resources": ResourceRequest(cpus=2, memory_mb=2048),
+        "image": "base",
+        "operation_key": "box-op",
+        "tags": {JOB_TAG: "job-1", novita.LONG_RUNNING_KEY: "true"},
+        "env": {"A": "1"},
+    }
+    values.update(overrides)
+    return SandboxSpec(**values)
+
+
+def _protected(clock: FakeClock, **overrides: Any) -> tuple[novita.NovitaEnvironment, list[FakeUsage]]:
+    """Build a protected environment with a recording usage factory.
+
+    Args:
+        clock: The fake clock.
+        **overrides: Spec fields to change.
+
+    Returns:
+        The environment and the list of usages it reserved.
+    """
+    usages: list[FakeUsage] = []
+
+    def factory(budget: Any, request: Mapping[str, Any], *, operation_key: str) -> FakeUsage:
+        """Record one reservation.
+
+        Args:
+            budget: The budget.
+            request: The funded request.
+            operation_key: The operation key.
+
+        Returns:
+            The recording usage.
+        """
+        usage = FakeUsage(request)
+        usages.append(usage)
+        return usage
+
+    env = novita.NovitaEnvironment(_spec(**overrides), clock=clock, budget=object(), usage_factory=factory)
+    return env, usages
+
+
+def _state(database: Engine, runtime: BudgetRuntime) -> Any:
+    """Read the only operation of the runtime's budget.
+
+    Args:
+        database: Engine of the ledger.
+        runtime: The runtime.
+
+    Returns:
+        The operation snapshot.
+    """
+    with Session(database) as session:
+        (operation_id,) = session.scalars(
+            select(ExecutionOperationModel.id).where(ExecutionOperationModel.budget_id == runtime.budget_id)
+        ).all()
+    return runtime.service.get_operation(operation_id, "alice")
+
+
+def test_capabilities_are_billable_and_adapter_exists() -> None:
+    """Mark the provider billable and find its usage adapter."""
+    assert novita.NovitaEnvironment.capabilities.billable is True
+    assert usage_adapter("novita") is not None
+
+
+def test_preflight_needs_the_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse to run without ``NOVITA_API_KEY``, and pass with it.
+
+    Args:
+        monkeypatch: Sets the variable.
+    """
+    monkeypatch.delenv(novita.API_KEY_ENV, raising=False)
+    with pytest.raises(SandboxFatalError):
+        novita.NovitaEnvironment.preflight()
+    monkeypatch.setenv(novita.API_KEY_ENV, "fixture")
+    novita.NovitaEnvironment.preflight()
+
+
+def test_protected_spec_needs_a_bounded_lifetime_and_a_key() -> None:
+    """Refuse a protected box with no operation key, or a lifetime past Novita's cap."""
+    with pytest.raises(SandboxSpecError):
+        novita.NovitaEnvironment(_spec(operation_key=None), budget=object())
+    with pytest.raises(SandboxSpecError):
+        novita.NovitaEnvironment(_spec(lifetime_seconds=24 * 3600.0), budget=object())
+
+
+async def test_create_sets_the_funded_lifetime_and_kill_on_timeout() -> None:
+    """Send the funded lifetime as the Novita timeout, kill at timeout, and drop ``long_running``."""
+    clock = FakeClock()
+    env, usages = _protected(clock)
+    await env.start()
+    (options,) = FakeSandbox.calls
+    assert options["timeout"] == 601
+    assert options["lifecycle"] == {"on_timeout": "kill", "auto_resume": False}
+    assert novita.LONG_RUNNING_KEY not in options["metadata"]
+    assert options["metadata"][novita.BOX_TAG] == env.name
+    assert options["metadata"][JOB_TAG] == "job-1"
+    assert options["template"] == "base"
+    assert options["envs"] == {"A": "1"}
+    (usage,) = usages
+    assert usage.request == {
+        "lifetime_ms": (601 + 120) * 1000,
+        "vcpus": 2,
+        "memory_mb": 2048,
+        "template": "base",
+    }
+    await env.stop()
+
+
+async def test_unprotected_timeout_is_capped_at_a_day() -> None:
+    """Cut an unprotected lifetime to Novita's 24-hour cap."""
+    env = novita.NovitaEnvironment(_spec(lifetime_seconds=200_000.0, operation_key=None), clock=FakeClock())
+    await env.start()
+    assert FakeSandbox.calls[0]["timeout"] == 24 * 3600
+    await env.stop()
+    assert FakeSandbox.live == {}
+
+
+async def test_reserve_to_settle_charges_the_measured_runtime(database: Engine) -> None:
+    """Reserve before the create, then settle ten minutes at the published rate after the kill.
+
+    Args:
+        database: The funded ledger.
+    """
+    runtime = _runtime(database)
+    clock = FakeClock()
+    env = novita.NovitaEnvironment(_spec(), clock=clock, budget=runtime)
+    clock.now = 100.0
+    await env.start()
+    clock.now = 100.0 + 599.2
+    await env.stop()
+    assert FakeSandbox.live == {}
+    operation = _state(database, runtime)
+    assert operation.state == "settled"
+    # 600 seconds * (2 * 0.0000098 + 2 * 0.0000032) USD = 1.56 cents.
+    assert operation.actual_cents == Decimal("1.56")
+
+
+async def test_failure_after_create_kills_and_settles() -> None:
+    """Kill the box and settle when the box is larger than its funding."""
+    FakeSandbox.info_size = (16, 2048)
+    clock = FakeClock()
+    env, usages = _protected(clock)
+    with pytest.raises(SandboxSpecError):
+        await env.start()
+    assert FakeSandbox.live == {}
+    (usage,) = usages
+    assert usage.calls[-2][0] == "stopped"
+    assert usage.calls[-2][2:] == (True, True)
+    assert usage.calls[-1] == ("settle",)
+
+
+async def test_cancel_after_create_kills_and_settles() -> None:
+    """Kill the box and settle when the caller cancels the start after the create."""
+    FakeSandbox.info_gate = asyncio.Event()
+    FakeSandbox.info_entered = asyncio.Event()
+    clock = FakeClock()
+    env, usages = _protected(clock)
+    task = asyncio.ensure_future(env.start())
+    await FakeSandbox.info_entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert FakeSandbox.live == {}
+    (usage,) = usages
+    assert ("stopped", 0.0, True, True) in usage.calls
+    assert usage.calls[-1] == ("settle",)
+
+
+async def test_stop_during_start_settles_and_raises_infra_error() -> None:
+    """End a start that ``stop()`` cancelled with an infra error, never a bare cancel."""
+    FakeSandbox.info_gate = asyncio.Event()
+    FakeSandbox.info_entered = asyncio.Event()
+    env, usages = _protected(FakeClock())
+    task = asyncio.ensure_future(env.start())
+    await FakeSandbox.info_entered.wait()
+    await env.stop()
+    with pytest.raises(SandboxInfraError):
+        await task
+    assert FakeSandbox.live == {}
+    assert usages[0].calls[-1] == ("settle",)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RateLimitException("429: slow down"), SandboxException("400: bad template")],
+)
+async def test_refused_create_releases_the_hold(database: Engine, error: BaseException) -> None:
+    """Release the hold when Novita refused the create and the sweep found no box.
+
+    Args:
+        database: The funded ledger.
+        error: The refusal.
+    """
+    FakeSandbox.create_error = error
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    await env.stop()
+    operation = _state(database, runtime)
+    assert operation.state == "released"
+    assert operation.actual_cents == 0
+
+
+async def test_unknown_create_outcome_stays_pending(database: Engine) -> None:
+    """Keep the hold pending when the create failed with an unknown outcome and no box is listed.
+
+    Args:
+        database: The funded ledger.
+    """
+    FakeSandbox.create_error = SandboxException("502: bad gateway")
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert _state(database, runtime).state == "pending"
+
+
+async def test_unknown_create_that_leaked_a_box_is_killed_and_settled(database: Engine) -> None:
+    """Kill a box that a failed create opened, and settle its runtime.
+
+    Args:
+        database: The funded ledger.
+    """
+    FakeSandbox.create_error = SandboxException("502: bad gateway")
+    FakeSandbox.leak_on_error = True
+    runtime = _runtime(database)
+    clock = FakeClock()
+    env = novita.NovitaEnvironment(_spec(), clock=clock, budget=runtime)
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert FakeSandbox.live == {}
+    assert _state(database, runtime).state == "settled"
+
+
+async def test_create_timeout_stays_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise a start timeout and keep the outcome unconfirmed when the create hangs.
+
+    Args:
+        monkeypatch: Shortens the create timeout.
+    """
+    monkeypatch.setattr(novita, "CREATE_TIMEOUT", 0.01)
+    FakeSandbox.create_gate = asyncio.Event()
+    env, usages = _protected(FakeClock())
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    (usage,) = usages
+    assert ("stopped", 0.0, False, False) in usage.calls
+
+
+async def test_failed_sweep_leaves_the_stop_unconfirmed() -> None:
+    """Treat a failed sweep as an unconfirmed stop."""
+    env, usages = _protected(FakeClock())
+    await env.start()
+    FakeSandbox.list_error = SandboxException("500: down")
+    await env.stop()
+    stopped = [call for call in usages[0].calls if call[0] == "stopped"]
+    assert stopped == [("stopped", 0.0, False, True)]
+
+
+async def test_exec_runs_in_the_cwd_and_reports_the_exit_code() -> None:
+    """Quote the working directory, run sudo as root and return the exit code of a failed command."""
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    seen: list[tuple[str, str]] = []
+    result = await env.exec("echo hi", cwd="/my dir", sudo=True, on_output=lambda s, t: seen.append((s, t)))
+    assert (result.exit_code, result.stdout) == (0, "out")
+    assert seen == [("stdout", "out")]
+    box = next(iter(FakeSandbox.live.values()))
+    command, options = box.commands.runs[-1]
+    assert command == "cd '/my dir' && echo hi"
+    assert options["user"] == "root"
+    assert options["background"] is True
+    failed = await env.exec("fail")
+    assert (failed.exit_code, failed.stderr) == (3, "bad")
+    await env.stop()
+
+
+async def test_exec_timeout_kills_the_command() -> None:
+    """Kill a command that passes its limit and report exit 124."""
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    result = await env.exec("hang", timeout_sec=0.01)
+    assert result.timed_out is True
+    assert result.exit_code == novita.TIMEOUT_EXIT_CODE
+    box = next(iter(FakeSandbox.live.values()))
+    assert box.commands.killed == [1]
+    await env.stop()
+
+
+async def test_files_round_trip_and_missing_file_is_none() -> None:
+    """Write and read a text file, and return ``None`` for a missing file."""
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    await env.upload_files({"/tmp/a.txt": "héllo"})
+    assert await env.download_file("/tmp/a.txt") == "héllo"
+    assert await env.download_file("/tmp/missing") is None
+    await env.stop()
+
+
+async def test_network_policy_uses_harbor_shapes() -> None:
+    """Send the deny-all, allowlist and open shapes to ``set_network``."""
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    await env.set_network_policy(NetworkPolicy(disabled=True))
+    await env.set_network_policy(NetworkPolicy(allowed_hosts=("api.example.com",)))
+    await env.set_network_policy(NetworkPolicy())
+    box = next(iter(FakeSandbox.live.values()))
+    assert box.networks == [
+        {"allow_out": [], "deny_out": [novita.ALL_TRAFFIC]},
+        {"allow_out": ["api.example.com"], "deny_out": [novita.ALL_TRAFFIC]},
+        {"allow_out": None, "deny_out": None},
+    ]
+    await env.stop()
+
+
+async def test_stop_job_sandboxes_kills_tagged_boxes() -> None:
+    """Kill only the boxes that carry the job tag."""
+    FakeSandbox({JOB_TAG: "job-1"})
+    FakeSandbox({JOB_TAG: "job-2"})
+    assert await novita.NovitaEnvironment.stop_job_sandboxes("job-1") == 1
+    assert [box.metadata[JOB_TAG] for box in FakeSandbox.live.values()] == ["job-2"]
