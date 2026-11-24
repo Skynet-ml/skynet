@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "Aus Ihrem Ziel vorgeschlagen",
   "submit.budget.label": "Ausgabenlimit",
   "submit.budget.explainer": "Deckt die Optimierung ab. Einrichtungsprüfungen werden aus Ihrem Guthaben bezahlt.",
+  "submit.budget.explainer.setup_in_limit": "Deckt die Optimierung und ihre Einrichtungsprüfungen ab. Einrichtungsprüfungen zählen zu diesem Limit.",
   "submit.budget.error.empty": "Gib ein Ausgabenlimit ein, um fortzufahren.",
   "submit.budget.error.invalid": "Gib einen Dollar-Betrag ein, zum Beispiel {suggested}.",
   "submit.budget.error.fraction": "Beträge gehen bis auf den Cent — verwende höchstens zwei Dezimalstellen.",

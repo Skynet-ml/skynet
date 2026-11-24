@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "根据您的目标建议",
   "submit.budget.label": "支出上限",
   "submit.budget.explainer": "涵盖优化。设置检查从你的余额中支付。",
+  "submit.budget.explainer.setup_in_limit": "涵盖优化及其设置检查。设置检查计入此限额。",
   "submit.budget.error.empty": "请输入支出上限以继续。",
   "submit.budget.error.invalid": "请输入美元金额，例如 {suggested}。",
   "submit.budget.error.fraction": "金额精确到分——最多使用两位小数。",

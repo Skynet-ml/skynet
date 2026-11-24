@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "Предложено из вашей цели",
   "submit.budget.label": "Лимит расходов",
   "submit.budget.explainer": "Покрывает оптимизацию. Проверки настройки оплачиваются с вашего баланса.",
+  "submit.budget.explainer.setup_in_limit": "Покрывает оптимизацию и её проверки настройки. Проверки настройки учитываются в этом лимите.",
   "submit.budget.error.empty": "Введите лимит расходов, чтобы продолжить.",
   "submit.budget.error.invalid": "Введите сумму в долларах, например {suggested}.",
   "submit.budget.error.fraction": "Суммы указываются с точностью до цента — используйте не более двух знаков после запятой.",

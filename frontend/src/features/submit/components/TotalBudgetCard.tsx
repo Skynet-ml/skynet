@@ -59,7 +59,8 @@ const BUDGET_STEP_CENTS = 100;
 /**
  * The tooltip of the limit option. An account that turns off wallet setup
  * billing counts setup checks in the limit (SKY-925). Until the setting loads,
- * the card shows the default, which bills the balance.
+ * the card shows the default, which bills the balance. Once a budget exists,
+ * its own ``setup_in_total`` flag decides, because the server applies that flag.
  */
 export function limitExplainerKey(setupFromWallet: boolean | null): MessageKey {
   return setupFromWallet === false
@@ -221,7 +222,7 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
               {
                 value: "limit",
                 label: msg("submit.budget.mode.limit"),
-                tip: msg(limitExplainerKey(setupFromWallet)),
+                tip: msg(limitExplainerKey(budget ? !budget.setup_in_total : setupFromWallet)),
               },
               {
                 value: "uncapped",

@@ -281,6 +281,7 @@ function IntakeSurface() {
   // rerun intake does not show wallet billing on for an account that turned it off.
   const [storedFromWallet, setStoredFromWallet] = React.useState<boolean | null>(null);
   React.useEffect(() => {
+    if (isLocalMode()) return;
     let cancelled = false;
     getSetupBilling()
       .then((result) => {
@@ -519,28 +520,31 @@ function IntakeSurface() {
                 );
               }}
             />
-            {/* Changes only the draft: the stop still moves on when a billing choice is picked. */}
-            <label className="mt-3 flex items-start gap-3 text-sm">
-              <Switch
-                checked={answers.setup_from_wallet ?? storedFromWallet ?? true}
-                onCheckedChange={(next) =>
-                  setDraft((prev) => ({
-                    ...prev,
-                    answers: { ...prev.answers, setup_from_wallet: next },
-                  }))
-                }
-                aria-describedby="intake-setup-billing-hint"
-              />
-              <span className="space-y-0.5">
-                <span className="block font-medium">{msg("settings.setup_billing.label")}</span>
-                <span
-                  id="intake-setup-billing-hint"
-                  className="block text-xs text-muted-foreground"
-                >
-                  {msg("settings.setup_billing.description")}
+            {/* Changes only the draft: the stop still moves on when a billing choice is picked.
+                Local budgets check no balance, so the switch would change nothing there. */}
+            {!isLocalMode() && (
+              <label className="mt-3 flex items-start gap-3 text-sm">
+                <Switch
+                  checked={answers.setup_from_wallet ?? storedFromWallet ?? true}
+                  onCheckedChange={(next) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      answers: { ...prev.answers, setup_from_wallet: next },
+                    }))
+                  }
+                  aria-describedby="intake-setup-billing-hint"
+                />
+                <span className="space-y-0.5">
+                  <span className="block font-medium">{msg("settings.setup_billing.label")}</span>
+                  <span
+                    id="intake-setup-billing-hint"
+                    className="block text-xs text-muted-foreground"
+                  >
+                    {msg("settings.setup_billing.description")}
+                  </span>
                 </span>
-              </span>
-            </label>
+              </label>
+            )}
           </>
         );
       }

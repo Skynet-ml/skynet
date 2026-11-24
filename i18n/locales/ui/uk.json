@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "Запропоновано з вашої мети",
   "submit.budget.label": "Ліміт витрат",
   "submit.budget.explainer": "Покриває оптимізацію. Перевірки налаштування оплачуються з вашого балансу.",
+  "submit.budget.explainer.setup_in_limit": "Покриває оптимізацію та її перевірки налаштування. Перевірки налаштування враховуються в цьому ліміті.",
   "submit.budget.error.empty": "Введіть ліміт витрат, щоб продовжити.",
   "submit.budget.error.invalid": "Введіть суму в доларах, наприклад {suggested}.",
   "submit.budget.error.fraction": "Суми враховуються до цента — використовуйте не більше двох знаків після коми.",

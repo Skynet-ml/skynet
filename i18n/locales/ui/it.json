@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "Suggerito dal tuo obiettivo",
   "submit.budget.label": "Limite di spesa",
   "submit.budget.explainer": "Copre l'ottimizzazione. I controlli di configurazione vengono pagati dal tuo saldo.",
+  "submit.budget.explainer.setup_in_limit": "Copre l'ottimizzazione e i suoi controlli di configurazione. I controlli di configurazione rientrano in questo limite.",
   "submit.budget.error.empty": "Inserisci un limite di spesa per continuare.",
   "submit.budget.error.invalid": "Inserisci un importo in dollari, ad esempio {suggested}.",
   "submit.budget.error.fraction": "Gli importi arrivano fino al centesimo — usa al massimo due decimali.",

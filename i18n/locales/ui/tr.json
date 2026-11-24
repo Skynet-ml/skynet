@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "Hedefinizden önerildi",
   "submit.budget.label": "Harcama limiti",
   "submit.budget.explainer": "Optimizasyonu kapsar. Kurulum kontrolleri bakiyenizden ödenir.",
+  "submit.budget.explainer.setup_in_limit": "Optimizasyonu ve kurulum kontrollerini kapsar. Kurulum kontrolleri bu limite dahildir.",
   "submit.budget.error.empty": "Devam etmek için bir harcama sınırı girin.",
   "submit.budget.error.invalid": "Bir dolar tutarı girin, örneğin {suggested}.",
   "submit.budget.error.fraction": "Tutarlar sent düzeyine kadar iner — en fazla iki ondalık basamak kullanın.",

@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "پیشنهادشده از هدف شما",
   "submit.budget.label": "سقف هزینه",
   "submit.budget.explainer": "بهینه‌سازی را پوشش می‌دهد. هزینهٔ بررسی‌های راه‌اندازی از موجودی شما پرداخت می‌شود.",
+  "submit.budget.explainer.setup_in_limit": "بهینه‌سازی و بررسی‌های راه‌اندازی آن را پوشش می‌دهد. بررسی‌های راه‌اندازی در این سقف حساب می‌شوند.",
   "submit.budget.error.empty": "برای ادامه، سقف هزینه را وارد کنید.",
   "submit.budget.error.invalid": "یک مبلغ دلاری وارد کنید، مثلاً {suggested}.",
   "submit.budget.error.fraction": "مبالغ تا سطح سنت هستند — حداکثر از دو رقم اعشار استفاده کنید.",

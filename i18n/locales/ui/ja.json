@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "目標から提案",
   "submit.budget.label": "支出上限",
   "submit.budget.explainer": "最適化をカバーします。セットアップチェックの費用は残高から支払われます。",
+  "submit.budget.explainer.setup_in_limit": "最適化とそのセットアップチェックをカバーします。セットアップチェックはこの上限に含まれます。",
   "submit.budget.error.empty": "続行するには支出上限を入力してください。",
   "submit.budget.error.invalid": "ドル金額を入力してください（例: {suggested}）。",
   "submit.budget.error.fraction": "金額はセント単位まで指定できます — 小数点以下は 2 桁までにしてください。",

@@ -118,7 +118,8 @@ function WizardTab() {
     <div className="space-y-1">
       <PackageRegistrySetting />
       <OptimizationDefaults />
-      <SetupBillingSetting />
+      {/* Local budgets are uncapped and check no balance, so the setting changes nothing there. */}
+      {!isLocalMode() && <SetupBillingSetting />}
     </div>
   );
 }

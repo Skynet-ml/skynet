@@ -3611,6 +3611,7 @@
   "submit.blackbox.review.name_suggested": "Suggéré à partir de votre objectif",
   "submit.budget.label": "Plafond de dépenses",
   "submit.budget.explainer": "Couvre l'optimisation. Les vérifications de configuration sont payées sur votre solde.",
+  "submit.budget.explainer.setup_in_limit": "Couvre l'optimisation et ses vérifications de configuration. Les vérifications de configuration comptent dans cette limite.",
   "submit.budget.error.empty": "Saisissez une limite de dépense pour continuer.",
   "submit.budget.error.invalid": "Saisissez un montant en dollars, par exemple {suggested}.",
   "submit.budget.error.fraction": "Les montants vont jusqu'au centime — utilisez au maximum deux décimales.",
