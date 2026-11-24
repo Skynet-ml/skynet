@@ -806,10 +806,11 @@ class PrimeEnvironment(SandboxEnvironment):
             The last record read, and the seconds to charge when the record
             cannot give them. That is ``None`` when Prime showed the end time.
             It is the local time since the create was sent when Prime no
-            longer knows the box (HTTP 404). When Prime accepted the delete,
-            it is the local time from the create sent to the delete answer.
-            Otherwise it is the whole funded lifetime: the box exists, and
-            Prime ends it at its timeout.
+            longer knows the box (HTTP 404). When Prime accepted the delete
+            and the last record shows an ended status, it is the local time
+            from the create sent to the delete answer. Otherwise it is the
+            whole funded lifetime: the box may run until Prime ends it at
+            its timeout. prime-sandboxes 0.5.8 has no stopping status.
         """
         record: dict[str, Any] = {}
         try:
@@ -831,8 +832,11 @@ class PrimeEnvironment(SandboxEnvironment):
                     await asyncio.sleep(POLL_INTERVAL)
         except Exception as read_error:
             logger.warning("Prime did not show the sandbox end: %s", type(read_error).__name__)
-        if self._deleted_at is not None and self._create_sent_at is not None:
-            # The accepted delete ended the box, so it ran no longer than this.
+        ended = record.get("status") in _ENDED_STATUSES
+        if ended and self._deleted_at is not None and self._create_sent_at is not None:
+            # The box shows an ended status after the accepted delete, so it
+            # ran no longer than the delete answer. A box that still shows a
+            # live status, or no record, may run until its timeout.
             return record, math.ceil(self._deleted_at - self._create_sent_at)
         return record, full_seconds
 

@@ -1157,7 +1157,7 @@ async def test_a_stop_after_a_refused_create_but_before_start_handles_it_release
 
 
 async def test_a_sandbox_with_no_end_time_settles_until_the_delete_answer(fake_sdk: FakeCloud) -> None:
-    """Charge the local time from the create to the accepted delete when Prime shows no end time."""
+    """Charge the local time to the accepted delete when the box shows TERMINATED with no end time."""
     fake_sdk.run_seconds = None
     recorder = UsageRecorder()
     async with _protected(recorder):
@@ -1165,15 +1165,16 @@ async def test_a_sandbox_with_no_end_time_settles_until_the_delete_answer(fake_s
     (usage,) = recorder.made
     assert [name for name, _ in usage.calls] == ["confirm", "settle"]
     assert usage.calls[-1][1]["terminated_at"] is None
+    assert usage.calls[-1][1]["status"] == "TERMINATED"
     (seconds,) = usage.seconds
     assert 0 <= seconds <= 5
     assert fake_sdk.calls.count("get:sbx-1") > 1
 
 
-async def test_a_sandbox_whose_reads_fail_settles_until_the_delete_answer(
+async def test_a_sandbox_whose_reads_fail_settles_at_its_whole_lifetime(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Charge the local time to the accepted delete, not the whole lifetime, when every read gets a 5xx."""
+    """Charge the whole funded lifetime after an accepted delete when every read gets a 5xx: no record shows an end."""
 
     async def unavailable(self: FakeClient, sandbox_id: str) -> SimpleNamespace:
         """Fail the read with a 5xx answer.
@@ -1192,8 +1193,30 @@ async def test_a_sandbox_whose_reads_fail_settles_until_the_delete_answer(
         pass
     (usage,) = recorder.made
     assert [name for name, _ in usage.calls] == ["confirm", "settle"]
-    (seconds,) = usage.seconds
-    assert 0 <= seconds <= 5
+    assert usage.seconds == [5 * 60]
+
+
+async def test_a_sandbox_still_running_after_an_accepted_delete_settles_at_its_whole_lifetime(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Charge the whole funded lifetime when Prime accepts the delete but the box still shows RUNNING."""
+
+    async def accept(self: FakeClient, sandbox_id: str) -> None:
+        """Accept the delete and leave the box running.
+
+        Args:
+            sandbox_id: The sandbox id.
+        """
+        CLOUD.calls.append(f"delete:{sandbox_id}")
+
+    monkeypatch.setattr(FakeClient, "delete", accept)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1]["status"] == "RUNNING"
+    assert usage.seconds == [5 * 60]
 
 
 async def test_a_sandbox_with_no_end_and_no_delete_settles_at_its_whole_lifetime(
