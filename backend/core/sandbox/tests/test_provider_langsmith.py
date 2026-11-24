@@ -1652,23 +1652,42 @@ async def test_cancel_of_the_background_wait_marks_the_hold_pending_once(
     assert not langsmith._SETTLE_TASKS
 
 
-async def test_cancel_during_the_background_settle_logs_its_error_and_closes(
-    server: FakeServer, usage: type[FakeUsage], clock: FakeClock, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("fails", "logged"),
+    [(True, "usage stays pending: UsagePendingError"), (False, "usage settled before the cancel")],
+)
+async def test_cancel_during_the_background_settle_logs_its_outcome_and_closes(
+    server: FakeServer,
+    usage: type[FakeUsage],
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+    fails: bool,
+    logged: str,
 ) -> None:
-    """Re-raise a cancel that comes while the settle thread runs, log the settle error and close the client once."""
+    """Re-raise a cancel that comes while the settle thread runs, log the settle outcome and close the client once.
+
+    Args:
+        server: The fake server state.
+        usage: The fake reservation class.
+        clock: The shifted provider clock.
+        caplog: The log capture.
+        fails: True when the settle raises.
+        logged: The log text the outcome must give.
+    """
     entered = threading.Event()
     gate = threading.Event()
 
     def settle(self: FakeUsage) -> None:
-        """Hold the settle thread until the test lets it fail.
+        """Hold the settle thread until the test lets it end.
 
         Raises:
-            UsagePendingError: Always, after the gate opens.
+            UsagePendingError: The test makes the settle fail.
         """
         self.events.append(("settle", self.deleted))
         entered.set()
         gate.wait(5)
-        raise UsagePendingError("not settled")
+        if fails:
+            raise UsagePendingError("not settled")
 
     usage.settle = settle  # type: ignore[method-assign]
     env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
@@ -1677,11 +1696,11 @@ async def test_cancel_during_the_background_settle_logs_its_error_and_closes(
     assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     gate.set()
-    with caplog.at_level(logging.WARNING, logger=langsmith.logger.name), pytest.raises(asyncio.CancelledError):
+    with caplog.at_level(logging.INFO, logger=langsmith.logger.name), pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 5)
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
     assert server.closed == 1
-    assert "usage stays pending: UsagePendingError" in caplog.text
+    assert logged in caplog.text
 
 
 async def test_settle_error_after_a_hand_off_is_only_logged(

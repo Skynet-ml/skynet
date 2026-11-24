@@ -374,8 +374,9 @@ class LangSmithEnvironment(SandboxEnvironment):
         pending without a proof, and closes the client. That task owns the
         hold alone, so a later ``stop``, the job sweep and the lifetime stop
         do not touch it. Its settle error goes to the log, not to a caller.
-        A cancel of that task (an event-loop shutdown) marks the hold pending
-        and ends the task.
+        A cancel of that task (an event-loop shutdown) marks the hold pending,
+        unless the settle already runs (then the settle decides). A cancel
+        before the task starts does not mark the hold at all.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the delete.
@@ -876,7 +877,10 @@ async def _settle_late(
     Raises:
         asyncio.CancelledError: The event loop cancelled the wait; the hold
             is marked pending first, except a cancel before the task starts,
-            which leaves the hold dispatched and is only logged.
+            which leaves the hold dispatched and the client open, and is
+            only logged.
+        UsagePendingError: No delete proof came, so the hold stays pending.
+        BudgetError: The ledger refused the settlement.
     """
     settling: asyncio.Future[None] | None = None
     try:
@@ -902,6 +906,8 @@ async def _settle_late(
         elif settling.done() and not settling.cancelled() and settling.exception() is not None:
             # The cancel replaces the settle error, so log it here or nobody reads it.
             logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(settling.exception()).__name__)
+        elif settling.done() and not settling.cancelled():
+            logger.info("LangSmith sandbox %s usage settled before the cancel.", name)
         raise
     finally:
         await _close(client)
@@ -917,7 +923,10 @@ def _on_settle_done(name: str, task: asyncio.Future[None]) -> None:
     _SETTLE_TASKS.discard(task)
     if task.cancelled():
         # A cancel before the first step skips the pending mark, so this log is the only trace of that hold.
-        logger.warning("LangSmith sandbox %s proof wait was cancelled; check its usage hold.", name)
+        logger.warning(
+            "Background settle for LangSmith sandbox %s was cancelled; its usage hold may be dispatched or pending.",
+            name,
+        )
     elif task.exception() is not None:
         logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(task.exception()).__name__)
 
