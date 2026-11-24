@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -25,7 +26,7 @@ from core.sandbox import bridge
 from core.sandbox.errors import SandboxFatalError
 from core.sandbox.factory import PROVIDERS, ProviderEntry
 from core.sandbox.image_registry import RegistryCredentials
-from core.sandbox.metering import USAGE_ADAPTERS
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import vercel as vercel_provider
 from core.sandbox.providers.vercel import VercelEnvironment
 from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeCopier, FakeUsage, make_env, readback
@@ -552,7 +553,7 @@ def test_a_provider_appears_once_it_is_metered_and_allowed_in_production(
         ProviderEntry("core.sandbox.tests.fake_provider", "InMemorySandbox", None, production_allowed),
     )
     if metered:
-        monkeypatch.setitem(USAGE_ADAPTERS, "fake", USAGE_ADAPTERS["vercel"])
+        monkeypatch.setitem(sys.modules, "core.billing.fake_usage", SimpleNamespace(USAGE=usage_adapter("vercel")))
 
     assert ("fake" in _offered_ids(_hosted())) is offered
     assert bridge.provider_offered(_hosted(), "fake") is offered

@@ -728,6 +728,9 @@ class VercelUsage:
         reservation.settle()
 
 
+USAGE = VercelUsage()
+
+
 def _snapshot_usd(size_bytes: int, retained_ms: int, rate: Decimal) -> Decimal:
     """Price stored snapshot bytes for a retention time.
 
