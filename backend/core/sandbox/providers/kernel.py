@@ -34,9 +34,11 @@ from there. Changes:
   reported uptime and settles the reservation.
 - Known gap: every command gets ``KERNEL_CDP_WS_URL``, and the exec timeout
   does not end background processes. A background process that holds a CDP
-  connection can keep the browser active past the funded end. The delete in
-  ``stop()`` bounds that time, and the settle clamps the charge to the
-  reservation, so the user never pays more than the quote.
+  connection keeps the browser active past the funded end, so it does not go
+  idle. The delete in ``stop()`` bounds that time, and the settle clamps the
+  charge to the reservation, so the user never pays more than the quote. A
+  worker that dies before ``stop()`` leaves no bound, so close this gap
+  before ``production_allowed`` becomes True.
 """
 
 from __future__ import annotations
@@ -257,6 +259,10 @@ class KernelEnvironment(SandboxEnvironment):
         self._at_capacity = at_capacity
         self._clock = clock or SYSTEM_CLOCK
         self.name = spec.name or f"skynet-{uuid.uuid4().hex[:12]}"
+        # ``spec.name`` is not unique, so the stop sweep finds this box's
+        # browsers by an id of their own. Otherwise two boxes with one name
+        # could delete, and bill, each other's browser.
+        self._box_tag = uuid.uuid4().hex
         self.timings = BoxTimings(self.name, clock=self._clock.monotonic)
         self._container = spec.image is not None
         self._client: Any | None = None
@@ -349,7 +355,7 @@ class KernelEnvironment(SandboxEnvironment):
             "headless": False,
             "timeout_seconds": max(MIN_SESSION_TIMEOUT, min(MAX_SESSION_TIMEOUT, math.ceil(spec.lifetime_seconds))),
             "name": self.name,
-            "tags": {**spec.tags, BOX_TAG: self.name},
+            "tags": {**spec.tags, BOX_TAG: self._box_tag},
             "timeout": CREATE_TIMEOUT,
         }
         # Kernel prices the 8 and 16 GiB headful browsers, so a protected box
@@ -549,7 +555,9 @@ class KernelEnvironment(SandboxEnvironment):
             # environment never saw. A known browser whose delete failed gets
             # a second delete here.
             try:
-                swept = await asyncio.wait_for(_delete_tagged(client, {BOX_TAG: self.name}, skip=skip), STOP_TIMEOUT)
+                swept = await asyncio.wait_for(
+                    _delete_tagged(client, {BOX_TAG: self._box_tag}, skip=skip), STOP_TIMEOUT
+                )
             except Exception as sweep_error:
                 logger.warning("Kernel browser %s sweep failed: %s", self.name, type(sweep_error).__name__)
             else:

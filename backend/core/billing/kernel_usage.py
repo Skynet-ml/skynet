@@ -1,9 +1,9 @@
 """Reserve Kernel browser VMs and settle them from Kernel's reported uptime.
 
-Kernel bills a headful browser at a flat rate for each second it is active,
-with no per-browser fee and no network charge. The adapter funds a headful
-8 or 16 GiB browser for its whole possible uptime and settles from the ``usage.uptime_ms`` that
-Kernel reports for the deleted session. When that report is not ready, it
+Kernel bills a browser for each GiB-second it is active, with no
+per-browser fee and no network charge. The adapter funds a headful 8 or
+16 GiB browser for its whole possible uptime and settles from the
+``usage.uptime_ms`` that Kernel reports for the deleted session. When that report is not ready, it
 settles from the measured time between the create call and the delete.
 """
 
@@ -26,14 +26,17 @@ from .vercel_usage import vercel_charge_policy
 
 logger = logging.getLogger(__name__)
 
-# Read on 2026-11-24 from _PRICING_URL: a headful browser costs a flat
-# $0.0001333336 per second. The rate does not depend on memory, so both
-# headful sizes in the SDK's ``BrowserMemoryRequest`` docs (8 and 16 GiB) use
-# it. A GPU browser costs more and is refused here.
+# Read on 2026-11-24 from _PRICING_URL. Every rate on the page is a multiple
+# of $0.0000166667 per GB-second: a 1 GiB headless browser is 1x, the 8 GiB
+# headful default ($0.0001333336/s) is 8x and a 4 GB app invocation is 4x.
+# The browser-pool FAQ says pools pay the standard price per GB-second. The
+# page lists no 16 GiB price, so a headful browser is priced at its memory
+# times the GiB-second rate (16 GiB costs twice the 8 GiB rate). A GPU
+# browser costs more and is refused here.
 _PRICING_URL = "https://www.kernel.sh/docs/info/pricing"
 _USAGE_URL = "https://kernel.sh/docs/api-reference/browsers/get-browser-session-details"
 _PRICE_VERSION = "kernel-public-2026-11-24"
-HEADFUL_SECOND_USD = Decimal("0.0001333336")
+GIB_SECOND_USD = Decimal("0.0000166667")
 HEADFUL_MEMORY_GIB = frozenset({8, 16})
 # Kernel's longest inactivity timeout (72 hours).
 MAX_LIFETIME_MS = 259_200_000
@@ -63,9 +66,13 @@ def _maximum_usd(request: Mapping[str, Any]) -> Decimal:
     """Bound the uptime cost of one browser.
 
     Kernel's create call has no hard session lifetime, only an inactivity
-    timeout. A worker that never stops the browser leaves it idle, and Kernel
-    deletes it after that timeout. So the browser can run for its funded
-    lifetime, then for one more timeout, then for the stop margin.
+    timeout. The bound assumes that the browser goes idle after its funded
+    lifetime, so Kernel deletes it one timeout later, and adds the stop
+    margin. A background process that holds a CDP connection keeps the
+    browser active, so that assumption can fail. Then the delete in the
+    provider's ``stop()`` ends the browser, and the settle clamp keeps the
+    charge at this bound. Close this gap before ``production_allowed``
+    becomes True.
 
     Args:
         request: A request accepted by :func:`quote_kernel_browser`.
@@ -74,19 +81,32 @@ def _maximum_usd(request: Mapping[str, Any]) -> Decimal:
         The most the browser can cost in USD.
     """
     ceiling_ms = request["lifetime_ms"] + request["timeout_seconds"] * 1000 + STOP_MARGIN_MS
-    return _uptime_usd(ceiling_ms)
+    return _uptime_usd(ceiling_ms, request["memory_gib"])
 
 
-def _uptime_usd(uptime_ms: int) -> Decimal:
+def _second_usd(memory_gib: int) -> Decimal:
+    """Return the price of one second of a headful browser.
+
+    Args:
+        memory_gib: The browser memory in GiB.
+
+    Returns:
+        The USD price per second.
+    """
+    return memory_gib * GIB_SECOND_USD
+
+
+def _uptime_usd(uptime_ms: int, memory_gib: int) -> Decimal:
     """Price a headful browser's uptime.
 
     Args:
         uptime_ms: The uptime in milliseconds.
+        memory_gib: The browser memory in GiB.
 
     Returns:
         The cost in USD.
     """
-    return Decimal(uptime_ms) * HEADFUL_SECOND_USD / 1000
+    return Decimal(uptime_ms) * _second_usd(memory_gib) / 1000
 
 
 def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
@@ -126,7 +146,8 @@ def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
             "provider": "kernel",
             "price_version": _PRICE_VERSION,
             "source": _PRICING_URL,
-            "headful_second_usd": str(HEADFUL_SECOND_USD),
+            "gib_second_usd": str(GIB_SECOND_USD),
+            "headful_second_usd": str(_second_usd(request["memory_gib"])),
             "stop_margin_ms": STOP_MARGIN_MS,
             "request": dict(request),
         },
@@ -395,7 +416,7 @@ class KernelUsageReservation:
                         "Kernel has not reported the browser's usage, and its delete is unconfirmed."
                     )
                 uptime, basis = self.measured_ms, "measured"
-            reported = _uptime_usd(uptime)
+            reported = _uptime_usd(uptime, self.request["memory_gib"])
             maximum = _maximum_usd(self.request)
             if reported > maximum:
                 # A longer uptime than the funded ceiling means a bound did not

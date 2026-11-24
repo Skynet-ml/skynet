@@ -524,14 +524,14 @@ def test_capabilities_reject_more_than_eight_vcpus() -> None:
 async def test_create_turns_off_sdk_retries_and_sends_the_spec() -> None:
     """Send max_retries=0, a headful browser, the tags and the clamped timeout."""
     spec = _spec(name="box-a", tags={JOB_TAG: "job-1"}, env={"A": "1"})
-    async with kernel.KernelEnvironment(spec):
+    async with kernel.KernelEnvironment(spec) as env:
         pass
     assert FakeState.clients[0]["max_retries"] == 0
     (call,) = FakeState.create_calls
     assert call["headless"] is False
     assert call["name"] == "box-a"
     assert call["timeout_seconds"] == 300
-    assert call["tags"] == {JOB_TAG: "job-1", kernel.BOX_TAG: "box-a"}
+    assert call["tags"] == {JOB_TAG: "job-1", kernel.BOX_TAG: env._box_tag}
     assert "memory" not in call
 
 
@@ -754,10 +754,10 @@ async def test_stop_sweeps_other_browsers_with_the_box_tag() -> None:
     """Delete the known browser and any other browser with the same box tag."""
     env = kernel.KernelEnvironment(_spec(name="box-b"))
     await env.start()
-    FakeState.new_browser({"name": "box-b", "tags": {kernel.BOX_TAG: "box-b"}})
-    FakeState.new_browser({"name": "keep", "tags": {kernel.BOX_TAG: "keep"}})
+    FakeState.new_browser({"name": "box-b", "tags": {kernel.BOX_TAG: env._box_tag}})
+    FakeState.new_browser({"name": "box-b", "tags": {kernel.BOX_TAG: "another-box"}})
     await env.stop()
-    assert [b.name for b in FakeState.browsers.values()] == ["keep"]
+    assert len(FakeState.browsers) == 1
     assert len(FakeState.deleted) == 2
     assert FakeState.closed == 1
 
@@ -841,7 +841,7 @@ async def test_stop_sweep_deletes_box_browsers_on_every_page() -> None:
     env = kernel.KernelEnvironment(_spec(name="box-p"))
     await env.start()
     for _ in range(5):
-        FakeState.new_browser({"name": "box-p", "tags": {kernel.BOX_TAG: "box-p"}})
+        FakeState.new_browser({"name": "box-p", "tags": {kernel.BOX_TAG: env._box_tag}})
     await env.stop()
     assert FakeState.browsers == {}
     assert len(FakeState.deleted) == 6
@@ -1233,14 +1233,29 @@ async def test_failed_create_with_one_swept_browser_settles_it() -> None:
 
 async def test_failed_create_with_two_swept_browsers_keeps_the_hold() -> None:
     """Keep the hold when the sweep finds more than one browser, because the funded one is unknown."""
-    FakeState.new_browser({"name": "twin", "tags": {kernel.BOX_TAG: "twin"}})
     FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
     FakeState.leak_on_error = True
     env, usages = _protected(_spec(name="twin", operation_key="box-op"))
+    FakeState.new_browser({"name": "twin", "tags": {kernel.BOX_TAG: env._box_tag}})
     with pytest.raises(kernel.APIStatusError):
         await env.start()
     assert usages[0].calls == ["reserve", "fail"]
     assert usages[0].no_browser is False
+
+
+async def test_boxes_with_one_name_do_not_sweep_each_other() -> None:
+    """Keep and leave unbilled the browser of another box that shares ``spec.name``."""
+    other, _ = _protected(_spec(name="same", operation_key="box-a"))
+    await other.start()
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    env, usages = _protected(_spec(name="same", operation_key="box-b"))
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    assert usages[0].calls == ["reserve", "fail"]
+    assert usages[0].no_browser is True
+    assert len(FakeState.browsers) == 1
+    await other.stop()
+    assert FakeState.browsers == {}
 
 
 async def test_failed_fail_is_raised_from_stop_once() -> None:

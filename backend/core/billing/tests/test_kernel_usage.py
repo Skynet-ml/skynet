@@ -145,9 +145,11 @@ def test_quote_refuses_an_unbounded_or_unpriced_browser(change: dict[str, Any]) 
         quote_kernel_browser({**REQUEST, **change})
 
 
-def test_sixteen_gib_browser_uses_the_same_flat_rate() -> None:
-    """Price a 16 GiB headful browser at the flat headful rate, as Kernel's rate does not depend on memory."""
-    assert quote_kernel_browser({**REQUEST, "memory_gib": 16}).maximum == quote_kernel_browser(REQUEST).maximum
+def test_sixteen_gib_browser_costs_twice_the_eight_gib_rate() -> None:
+    """Price a 16 GiB headful browser per GiB-second, so it costs twice the 8 GiB browser."""
+    quote = quote_kernel_browser({**REQUEST, "memory_gib": 16})
+    assert quote.maximum.total == 2 * quote_kernel_browser(REQUEST).maximum.total
+    assert quote.price_snapshot["headful_second_usd"] == "0.0002666672"
 
 
 def test_reserve_then_settle_charges_the_reported_uptime(database: Engine) -> None:
