@@ -6,6 +6,10 @@ Changes:
 
 - The provider implements the async ``SandboxEnvironment`` contract. The
   factory refuses it in production (``production_allowed=False``).
+- A box with a budget is protected (SKY-544). It reserves its first lifetime
+  slice after the capacity wait and before the create, funds each extension
+  before the renew call, and settles its measured runtime after the kill,
+  also after a failed or cancelled start.
 - The create call goes through ``create_with_capacity``. A 429, 502 or 503
   answer is a capacity signal, and the capacity wait has no attempt limit.
   The SDK's own create retries are off (``retries=0``), so the capacity wait
@@ -33,11 +37,17 @@ import contextlib
 import logging
 import math
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
-from ..capabilities import EnvironmentCapabilities, NetworkMode
+from core.billing.budgets import BudgetError
+from core.billing.e2b_usage import MAX_MEMORY_MB, USAGE
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
+
+from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
@@ -99,6 +109,7 @@ CAPACITY_STATUSES = frozenset({429, 502, 503})
 
 E2B_CAPABILITIES = EnvironmentCapabilities(
     name="e2b",
+    billable=True,
     network_modes=frozenset(NetworkMode),
     dynamic_network_policy=True,
 )
@@ -211,8 +222,8 @@ def network_update(policy: NetworkPolicy) -> dict[str, Any]:
 class E2BEnvironment(SandboxEnvironment):
     """Run commands in one E2B sandbox through the async SDK.
 
-    The provider is for development: the factory refuses it in production,
-    and Skynet does not meter or fund its usage.
+    The factory refuses the provider in production. With a budget, each
+    box reserves, extends and settles its usage against that budget.
     """
 
     capabilities: ClassVar[EnvironmentCapabilities] = E2B_CAPABILITIES
@@ -226,6 +237,8 @@ class E2BEnvironment(SandboxEnvironment):
         pacing: ProviderPacing | None = None,
         at_capacity: Callable[[], Awaitable[bool]] | None = None,
         clock: Clock | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = USAGE.reserve,
     ) -> None:
         """Check the spec and prepare the box without a network call.
 
@@ -234,8 +247,20 @@ class E2BEnvironment(SandboxEnvironment):
             pacing: The read and create buckets of the provider.
             at_capacity: Returns True while the provider has no capacity.
             clock: The clock for waits, renewals and timings.
+            budget: The ``BudgetRuntime`` that funds the box, or ``None``.
+            usage_factory: Makes the usage reservation of a protected box.
+
+        Raises:
+            SandboxSpecError: A protected box has no operation key.
         """
+        if budget is not None and spec.operation_key is None:
+            raise SandboxSpecError("A protected E2B sandbox needs an operation key.")
         super().__init__(spec)
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._billing_call: asyncio.Future[Any] | None = None
+        self._settle_error: Exception | None = None
         self._pacing = pacing
         self._at_capacity = at_capacity
         self._clock = clock or SYSTEM_CLOCK
@@ -292,7 +317,7 @@ class E2BEnvironment(SandboxEnvironment):
         with self.timings.phase("create"):
             await create_with_capacity(
                 self._create,
-                _no_reservation,
+                self._reserve,
                 at_capacity=self._at_capacity,
                 bucket=self._pacing.creates if self._pacing else None,
                 clock=self._clock,
@@ -301,6 +326,69 @@ class E2BEnvironment(SandboxEnvironment):
         if first_slice < self.spec.lifetime_seconds:
             deadline = self._clock.monotonic() + self.spec.lifetime_seconds
             self._renewer = asyncio.create_task(self._renew_loop(self._clock.monotonic() + first_slice, deadline))
+
+    @contextlib.asynccontextmanager
+    async def _reserve(self) -> AsyncIterator[Any | None]:
+        """Reserve the first lifetime slice of a protected box once.
+
+        A capacity retry reuses the reservation; the teardown settles it.
+
+        Yields:
+            The usage reservation, or ``None`` for an unprotected box.
+        """
+        if self._budget is not None and self._usage is None:
+            reserving = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._usage_factory, self._budget, self._usage_request(), operation_key=self.spec.operation_key
+                )
+            )
+            try:
+                self._usage = await asyncio.shield(reserving)
+            except asyncio.CancelledError:
+                # The thread cannot be cancelled and may still reserve; keep
+                # its result so the teardown settles it instead of leaking it.
+                while not reserving.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(reserving)
+                if not reserving.cancelled() and reserving.exception() is None:
+                    self._usage = reserving.result()
+                raise
+        yield self._usage
+
+    def _usage_request(self) -> dict[str, Any]:
+        """Build the request that the reservation prices.
+
+        The template sets the size of an E2B box, so the request funds the
+        spec's CPU count and memory, or E2B's largest memory when the spec
+        sets none. The reservation checks the created box against it.
+
+        Returns:
+            The first lifetime slice, the CPU count, the memory and the template.
+        """
+        resources = self.spec.resources
+        return {
+            "lifetime_ms": self._first_slice() * 1000,
+            "vcpus": resources.cpus,
+            "memory_mb": resources.memory_mb or MAX_MEMORY_MB,
+            "template": self.spec.image,
+        }
+
+    async def _billing(self, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run one reservation call in a thread that a cancel cannot cut short.
+
+        The teardown awaits the same call before it settles, so a settle never
+        races an extend that is still running.
+
+        Args:
+            call: The reservation method.
+            *args: Its positional arguments.
+            **kwargs: Its keyword arguments.
+
+        Returns:
+            The result of the call.
+        """
+        self._billing_call = asyncio.ensure_future(asyncio.to_thread(call, *args, **kwargs))
+        return await asyncio.shield(self._billing_call)
 
     def _first_slice(self) -> int:
         """Return the first E2B timeout of the box, in whole seconds.
@@ -335,17 +423,22 @@ class E2BEnvironment(SandboxEnvironment):
             options["network"] = {"allow_out": list(spec.allowed_hosts), "deny_out": [ALL_TRAFFIC]}
         return options
 
-    async def _create(self, _reservation: None) -> None:
-        """Send the create call and keep the box.
+    async def _create(self, usage: Any | None) -> None:
+        """Send the create call, keep the box and confirm its funded size.
 
         Args:
-            _reservation: Unused; the provider holds no budget reservation.
+            usage: The usage reservation, or ``None`` for an unprotected box.
 
         Raises:
             ProviderAtCapacityError: E2B answered 429, 502 or 503.
             StartTimeoutError: The create did not finish in time.
+            UsagePendingError: The box is larger than its funding.
         """
         self._create_dispatched = True
+        if usage is not None:
+            # A capacity refusal opens no box, so the runtime counts from the
+            # last create call.
+            usage.start(self._clock.monotonic())
         try:
             async with asyncio.timeout(CREATE_TIMEOUT) as deadline:
                 self._box = await self.sandbox_cls.create(**self._create_options())
@@ -359,6 +452,10 @@ class E2BEnvironment(SandboxEnvironment):
             if _is_capacity_error(error):
                 raise ProviderAtCapacityError(f"E2B has no capacity: {type(error).__name__}") from error
             raise
+        if usage is not None:
+            await self._pace_read()
+            info = await self._box.get_info()
+            await self._billing(usage.confirm, info)
 
     async def _renew_loop(self, expires_at: float, deadline: float) -> None:
         """Extend the E2B timeout one slice at a time until the spec lifetime ends.
@@ -376,6 +473,8 @@ class E2BEnvironment(SandboxEnvironment):
             if box is None:
                 return
             seconds = max(1, min(LIFETIME_SLICE, math.ceil(deadline - self._clock.monotonic())))
+            if not await self._fund(seconds, expires_at):
+                return
             await self._pace_read()
             try:
                 await box.set_timeout(seconds)
@@ -387,8 +486,39 @@ class E2BEnvironment(SandboxEnvironment):
                 continue
             expires_at = self._clock.monotonic() + seconds
 
+    async def _fund(self, seconds: int, expires_at: float) -> bool:
+        """Fund a new E2B timeout of a protected box before the renew call.
+
+        Args:
+            seconds: The new timeout, counted from now.
+            expires_at: When the current E2B timeout ends, on the clock.
+
+        Returns:
+            True when the new timeout is funded or the box is unprotected.
+            False when the budget refused it; the box then ends at its
+            current timeout.
+        """
+        usage = self._usage
+        if usage is None or usage.started_at is None:
+            return True
+        lifetime_ms = math.ceil((self._clock.monotonic() - usage.started_at + seconds) * 1000)
+        if lifetime_ms <= usage.lifetime_ms:
+            return True
+        deadline = time.monotonic() + max(0.0, expires_at - RENEW_LEAD / 2 - self._clock.monotonic())
+        try:
+            await self._billing(usage.extend, lifetime_ms, deadline=deadline)
+        except (Exception, BudgetReached) as error:
+            logger.warning("E2B sandbox %s slice was not funded: %s", self.name, type(error).__name__)
+            return False
+        return True
+
     async def stop(self) -> None:
-        """Stop the box once. Safe to call again."""
+        """Stop the box once and settle its reservation. Safe to call again.
+
+        Raises:
+            UsagePendingError: The settle failed, so the reservation stays pending.
+            BudgetError: The ledger refused the settlement.
+        """
         if self._stop_task is None and self._starting is None and self._box is None:
             # A stop before any start does nothing. A stop task set here would
             # make the stop after a later start return without a kill.
@@ -396,6 +526,10 @@ class E2BEnvironment(SandboxEnvironment):
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._timed_teardown())
         await asyncio.shield(self._stop_task)
+        # Only one stop caller gets a settle failure, so a second stop returns quietly.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
 
     async def _timed_teardown(self) -> None:
         """Run the teardown inside the stop phase."""
@@ -403,7 +537,7 @@ class E2BEnvironment(SandboxEnvironment):
             await self._teardown()
 
     async def _teardown(self) -> None:
-        """End the start and the renew loop, then kill every box of this environment."""
+        """End the start and the renew loop, kill every box of this environment, then settle."""
         if self._starting is not None and not self._starting.done():
             # A stop during the start: end the start first, so no box appears
             # after this teardown has looked for it.
@@ -414,13 +548,18 @@ class E2BEnvironment(SandboxEnvironment):
             self._renewer.cancel()
             with contextlib.suppress(BaseException):
                 await self._renewer
+        if self._billing_call is not None:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(self._billing_call)
         box, self._box = self._box, None
         known = None
+        confirmed = True
         if box is not None:
             known = getattr(box, "sandbox_id", None)
             try:
                 await asyncio.wait_for(box.kill(), STOP_TIMEOUT)
             except Exception as error:
+                confirmed = False
                 logger.warning("E2B sandbox %s did not stop: %s", self.name, type(error).__name__)
         if self._create_dispatched:
             # A create that timed out, or that answered 502 after the box
@@ -428,7 +567,32 @@ class E2BEnvironment(SandboxEnvironment):
             try:
                 await asyncio.wait_for(self._kill_tagged({BOX_TAG: self.name}, skip=known), STOP_TIMEOUT)
             except Exception as error:
+                confirmed = False
                 logger.warning("E2B sandbox %s sweep failed: %s", self.name, type(error).__name__)
+        await self._settle(confirmed)
+
+    async def _settle(self, confirmed: bool) -> None:
+        """Settle the reservation of a protected box after its kill.
+
+        A failure keeps the reservation pending, and ``stop()`` raises it.
+
+        Args:
+            confirmed: True when every kill call answered.
+        """
+        usage, self._usage = self._usage, None
+        if usage is None:
+            return
+        usage.stopped(self._clock.monotonic(), confirmed=confirmed)
+        try:
+            await asyncio.to_thread(usage.settle)
+        except Exception as error:
+            logger.warning("E2B sandbox %s usage stays pending: %s", self.name, type(error).__name__)
+            if isinstance(error, UsagePendingError | BudgetError):
+                self._settle_error = error
+            else:
+                pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+                pending.__cause__ = error
+                self._settle_error = pending
 
     @classmethod
     async def _kill_tagged(cls, metadata: Mapping[str, str], *, skip: str | None = None) -> int:
@@ -685,13 +849,3 @@ class E2BEnvironment(SandboxEnvironment):
         box = self._require_box()
         await self._pace_read()
         await box.update_network(network_update(policy))
-
-
-@contextlib.asynccontextmanager
-async def _no_reservation() -> AsyncIterator[None]:
-    """Hold no budget reservation, because Skynet does not fund E2B boxes.
-
-    Yields:
-        ``None``.
-    """
-    yield None
