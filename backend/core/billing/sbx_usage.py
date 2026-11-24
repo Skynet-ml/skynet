@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from .budget_amounts import cent_units
-from .budgets import BudgetConflictError, OperationSnapshot
+from .budgets import BudgetConflictError, BudgetError, OperationSnapshot
 from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationError, operation_quote
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
@@ -33,7 +33,8 @@ SHAPE_USD_PER_HOUR = {
     (8, 16384): Decimal("0.56"),
     (16, 32768): Decimal("1.12"),
 }
-# The sbx provider caps every sandbox timeout at 12 hours.
+# Skynet's sbx provider caps every sandbox timeout at 12 hours
+# (``_MAX_LIFETIME_SECONDS``); sbx itself allows 24. A test keeps the two equal.
 LIFETIME_CEILING_MS = 43_200_000
 # sbx bills from start to stop, but does not publish how long the create and
 # the delete take outside the box timeout. The hold funds this much more, and
@@ -179,6 +180,7 @@ class SbxUsageReservation:
         if (
             resources.get("cpus") != self.request["cpus"]
             or resources.get("memoryMib") != self.request["memory_mib"]
+            or not isinstance(timeout, str)
             or not timeout.endswith("s")
             or not timeout[:-1].isdecimal()
             or int(timeout[:-1]) * 1000 > self.lifetime_ms
@@ -224,13 +226,20 @@ class SbxUsageReservation:
             )
 
     def release(self) -> None:
-        """Release the hold of a create that sbx refused or that never went out."""
-        self.runtime.service.reject(
-            self.operation.id,
-            self.runtime.username,
-            evidence_key=f"sbx-refusal:{self.operation.id}",
-            evidence={"provider": "sbx", "sent": self.started_at is not None},
-        )
+        """Release the hold of a create that sbx refused or that never went out.
+
+        If the ledger refuses the release, the hold stays pending instead.
+        """
+        try:
+            self.runtime.service.reject(
+                self.operation.id,
+                self.runtime.username,
+                evidence_key=f"sbx-refusal:{self.operation.id}",
+                evidence={"provider": "sbx", "sent": self.started_at is not None},
+            )
+        except BudgetError:
+            self.pending()
+            return
         self.runtime.unpin(self.operation.id)
 
     def settle(self) -> None:

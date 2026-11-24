@@ -1163,3 +1163,23 @@ async def test_cancel_during_the_reservation_releases_it(monkeypatch: pytest.Mon
     await env.stop()
     assert CLOUD.calls("POST", "/v1/sandboxes") == []
     assert RESERVED[0].calls == ["release"]
+
+
+async def test_measured_runtime_ends_before_the_clients_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the clock at the confirmed delete, so slow client closes are not billed."""
+    env = _protected()
+    await env.start()
+    close = httpx.AsyncClient.aclose
+
+    async def recording_close(client: httpx.AsyncClient) -> None:
+        """Record the close, then close the client.
+
+        Args:
+            client: The client to close.
+        """
+        RESERVED[0].calls.append("close")
+        await close(client)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", recording_close)
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "close", "close", "settle"]

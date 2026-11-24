@@ -12,16 +12,18 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
 from core.billing import sbx_usage
-from core.billing.budgets import BudgetConflictError, BudgetService
+from core.billing.budgets import BudgetConflictError, BudgetError, BudgetService
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.sbx_usage import (
     BILLING_GRACE_MS,
+    LIFETIME_CEILING_MS,
     SbxUsageReservation,
     quote_sbx_sandbox,
 )
 from core.config import settings
 from core.sandbox.metering import usage_adapter
+from core.sandbox.providers import sbx
 from core.storage.models import Base, BillingCustomerModel
 
 REQUEST = {"cpus": 2, "memory_mib": 4096, "lifetime_ms": 120_000}
@@ -232,6 +234,8 @@ def test_refused_create_releases_the_hold(database: Engine) -> None:
         {**BODY, "resources": {"cpus": 4, "memoryMib": 8192}},
         {**BODY, "features": {"timeouts": {"timeout": "121s"}}},
         {**BODY, "features": {"timeouts": {"timeout": "two minutes"}}},
+        {**BODY, "features": {"timeouts": {"timeout": 120}}},
+        {**BODY, "features": {"timeouts": {}}},
     ],
 )
 def test_confirm_refuses_a_create_body_outside_the_funded_envelope(database: Engine, body: dict[str, Any]) -> None:
@@ -265,3 +269,30 @@ def test_hosted_skynet_finds_the_sbx_adapter() -> None:
     """Expose the adapter where the provider list looks for it."""
     assert usage_adapter("sbx") is sbx_usage.USAGE
     assert sbx_usage.USAGE.name == "sbx"
+
+
+def test_refused_release_keeps_the_hold_pending(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the hold pending, not lost, when the ledger refuses the release."""
+    runtime = _runtime(database)
+    reservation = SbxUsageReservation(runtime, REQUEST, operation_key="box")
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        """Refuse the release.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            BudgetError: Always.
+        """
+        raise BudgetError("refused")
+
+    monkeypatch.setattr(runtime.service, "reject", refuse)
+    reservation.release()
+    assert _state(runtime, reservation) == "pending"
+
+
+def test_lifetime_ceiling_matches_the_provider_cap() -> None:
+    """Keep the quote ceiling equal to the cap the sbx provider puts on every timeout."""
+    assert LIFETIME_CEILING_MS == sbx._MAX_LIFETIME_SECONDS * 1000

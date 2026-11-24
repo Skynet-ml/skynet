@@ -1345,20 +1345,26 @@ class SbxEnvironment(SandboxEnvironment):
                 ended = "leaked"
                 if await _bounded(_delete(management, path, uid), "delete the sandbox"):
                     ended = "deleted"
+                    self._stop_usage_clock()
             elif self._create_dispatched:
                 ended = "unknown"
                 deleted = await _bounded(self._delete_orphan(management), "delete the lost sandbox")
                 if self._orphan_found:
                     ended = "deleted" if deleted else "leaked"
+                    if deleted:
+                        self._stop_usage_clock()
         finally:
             if runtime is not None:
                 await _bounded(runtime.aclose(), "close the runtime client")
             await _bounded(management.aclose(), "close the management client")
             usage, self._usage = self._usage, None
             if usage is not None:
-                if ended == "deleted":
-                    usage.stop_clock()
                 await asyncio.to_thread(self._close_usage, usage, ended)
+
+    def _stop_usage_clock(self) -> None:
+        """End the measured runtime now, before the client closes can wait."""
+        if self._usage is not None:
+            self._usage.stop_clock()
 
     def _close_usage(self, usage: Any, ended: str) -> None:
         """Settle, release or keep the box's hold by how the sandbox ended.
