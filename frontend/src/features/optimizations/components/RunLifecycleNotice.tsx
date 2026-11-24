@@ -14,7 +14,12 @@ import { TERMS } from "@/shared/lib/terms";
 import { formatBlackboxScore, formatPercent } from "@/shared/lib/formatters";
 import { centsToUsd, formatBudgetUsd, usdToCents } from "@/features/billing";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
-import { budgetResultKind, isBudgetPause, isBudgetStop } from "../lib/run-lifecycle";
+import {
+  budgetResultKind,
+  committedLimitFloorCents,
+  isBudgetPause,
+  isBudgetStop,
+} from "../lib/run-lifecycle";
 import { Label } from "@/shared/ui/primitives/label";
 
 const RESULT_COPY = {
@@ -108,10 +113,7 @@ export function RunLifecycleNotice({
   // Continuing needs a limit the run can actually spend under: above the
   // measured projection for a pause, and above what is already committed for
   // a hard stop, or the worker would halt again before its next evaluation.
-  // Setup spend bills the balance, not the limit (SKY-925), so it is left out.
-  const committed = budget
-    ? Math.floor(Number(budget.run_spent_cents) + Number(budget.reserved_cents)) + 1
-    : 0;
+  const committed = budget ? committedLimitFloorCents(budget) : 0;
   const minimumLimit = Math.max(committed, projection ? projection.projected_cents + 1 : 0);
   const suggestedLimit = Math.max(
     minimumLimit,

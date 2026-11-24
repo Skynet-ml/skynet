@@ -30,7 +30,7 @@ import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { OptimizationStatusResponse } from "@/shared/types/api";
 import { cn } from "@/shared/lib/utils";
 import { budgetPaceLine } from "../lib/budget-pace";
-import { isBudgetPause, isBudgetStop } from "../lib/run-lifecycle";
+import { isBudgetPause, isBudgetStop, limitPaceCents } from "../lib/run-lifecycle";
 import {
   availableGroupings,
   groupUsage,
@@ -245,11 +245,9 @@ function BudgetPace({ job }: { job: OptimizationStatusResponse }) {
   const budget = job.execution_budget;
   const pace = budgetPaceLine(job.latest_metrics ?? {});
   if (!budget && !pace) return null;
-  // Setup checks bill the balance, not the limit (SKY-925), so the block counts
-  // only the run's own spend. The bar adds the run's holds, as the server does
-  // for the limit; the text shows only what is spent.
-  const spentCents = budget ? Number(budget.run_spent_cents) : 0;
-  const usedCents = budget?.job_id ? spentCents + Number(budget.reserved_cents) : spentCents;
+  const { spentCents, usedCents } = budget
+    ? limitPaceCents(budget)
+    : { spentCents: 0, usedCents: 0 };
   const spent = formatCentsUsd(spentCents, locale);
   const capped = budget != null && !budget.uncapped;
   return (

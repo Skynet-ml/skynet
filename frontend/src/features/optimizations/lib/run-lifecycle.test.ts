@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   budgetResultKind,
+  committedLimitFloorCents,
   isBudgetPause,
   isBudgetStop,
+  limitPaceCents,
 } from "./run-lifecycle.ts";
 
 test("budget stops require a structured terminal reason", () => {
@@ -45,5 +47,30 @@ test("a seed or score without completed selection never becomes an evaluated res
       terminal_evidence: { candidate_origin: "optimized" },
     }),
     "evaluated",
+  );
+});
+
+// SKY-925: setup checks bill the balance, so setup_spent_cents never counts
+// against the limit; run_spent_cents already holds what does.
+const ledger = {
+  job_id: "job",
+  setup_spent_cents: "40",
+  run_spent_cents: "12.5",
+  reserved_cents: "7",
+};
+
+test("the budget block counts run spend and, once a job owns it, the run's holds", () => {
+  assert.deepEqual(limitPaceCents(ledger), { spentCents: 12.5, usedCents: 19.5 });
+  assert.deepEqual(limitPaceCents({ ...ledger, job_id: null }), {
+    spentCents: 12.5,
+    usedCents: 12.5,
+  });
+});
+
+test("the limit to continue sits one cent above run spend and holds, without setup spend", () => {
+  assert.equal(committedLimitFloorCents(ledger), 20);
+  assert.equal(
+    committedLimitFloorCents({ ...ledger, run_spent_cents: "0", reserved_cents: "0" }),
+    1,
   );
 });
