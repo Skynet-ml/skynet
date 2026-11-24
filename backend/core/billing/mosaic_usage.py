@@ -6,7 +6,8 @@ egress are free, and no creation fee is published. The quote funds the box's who
 its units, so the funded hold is a ceiling. The settle reads Mosaic's
 per-sandbox usage history. When that history is not final and complete,
 the settle charges the measured wall time from the create call to the
-confirmed destroy, which is never less than the awake time. A known box
+confirmed destroy, plus a two-second margin for Mosaic's whole-second
+timestamps, which is never less than the awake time. A known box
 without a confirmed destroy, or whose shape Mosaic did not confirm, is
 charged the whole hold, because it may still run or run larger. Every charge
 is clamped to the reserved hold.
@@ -44,6 +45,11 @@ _HISTORY_LIMIT = 500
 # Mosaic's create accepts 1 to 64 vCPUs and 128 MiB to 256 GiB of memory.
 _MAX_VCPU = 64
 _MEMORY_MB_RANGE = (128, 262_144)
+# Mosaic stamps a usage segment in whole seconds, and opens it at the create's
+# accounting intent, which can come before this worker reads its clock. The
+# DELETE answers 204 only after the destroy, so one second of rounding at each
+# end covers the gap. The settle still clamps the charge to the hold.
+_WALL_MARGIN_MS = 2_000
 
 _clock = time.monotonic
 
@@ -282,12 +288,12 @@ class MosaicUsageReservation:
     def confirm_created(self, sandbox: Any) -> None:
         """Bind the created box and check that Mosaic gave it the funded shape.
 
-        Args:
-            sandbox: The SDK ``Sandbox`` that the create returned.
-
         A failed or different answer marks the shape unconfirmed, so the
         settle charges the whole hold. The SDK reports a missing shape as 0,
         which never equals a funded shape.
+
+        Args:
+            sandbox: The SDK ``Sandbox`` that the create returned.
 
         Raises:
             UsagePendingError: Mosaic reports another vCPU count or memory size.
@@ -338,11 +344,12 @@ class MosaicUsageReservation:
         """Return the measured lifetime, or ``None`` before a confirmed destroy.
 
         Returns:
-            Whole milliseconds from the create call to the confirmed destroy.
+            Whole milliseconds from the create call to the confirmed destroy,
+            plus ``_WALL_MARGIN_MS``.
         """
         if self._dispatched_at is None or self._stopped_at is None:
             return None
-        return math.ceil((self._stopped_at - self._dispatched_at) * 1000)
+        return math.ceil((self._stopped_at - self._dispatched_at) * 1000) + _WALL_MARGIN_MS
 
     def pending(self) -> None:
         """Retain the hold when the box's create, destroy or usage is uncertain."""

@@ -245,13 +245,13 @@ def test_settle_charges_the_metered_usage_history(database: Engine, monkeypatch:
 def test_settle_falls_back_to_measured_time_when_the_history_fails(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Charge the measured wall time when the usage history cannot be read.
+    """Charge the measured wall time plus its margin when the usage history cannot be read.
 
     Args:
         database: Engine of the funded ledger.
         monkeypatch: The pytest monkeypatch fixture.
     """
-    _clock(monkeypatch, 0.0, 1800.0)
+    _clock(monkeypatch, 0.0, 1800.0 - mosaic_usage._WALL_MARGIN_MS / 1000)
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
     _run_box(reservation, FakeHandle(history=RuntimeError("billing:read scope missing")))

@@ -1245,7 +1245,7 @@ async def test_a_cancelled_start_still_destroys_and_settles(fake_sdk: FakeCloud,
 
 
 async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Release the hold when Mosaic refused the create with a 4xx answer.
+    """Release the hold when Mosaic refused the create with a 400 answer.
 
     Args:
         fake_sdk: The fake Mosaic account.
@@ -1276,7 +1276,7 @@ async def test_a_lost_create_settles_the_box_found_by_its_tag(fake_sdk: FakeClou
 
 
 async def test_a_cancel_during_a_slow_create_settles_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Wait for the cancelled create's box, destroy it and settle its hold.
+    """Wait for the cancelled create's box, confirm its shape, destroy it and settle its hold.
 
     Args:
         fake_sdk: The fake Mosaic account.
@@ -1290,7 +1290,40 @@ async def test_a_cancel_during_a_slow_create_settles_the_hold(fake_sdk: FakeClou
         await start
     (box,) = fake_sdk.boxes.values()
     assert box.state == "destroyed"
-    assert usages[0].calls == ["dispatched", f"bind:{box.id}", "stopped", "settle"]
+    assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
+
+
+async def test_a_late_create_binds_its_box_when_the_confirm_fails(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Bind the cancelled create's box by its id, and still destroy and settle it, when its confirm fails.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    fake_sdk.create_delay = 0.2
+    start = asyncio.ensure_future(_protected().start())
+    await asyncio.sleep(0.02)
+    usage = usages[0]
+
+    def failed_confirm(sandbox: Any) -> None:
+        """Fail before the box is bound.
+
+        Args:
+            sandbox: The sync sandbox.
+
+        Raises:
+            FakeMosaicError: Always.
+        """
+        usage.calls.append(f"confirm:{sandbox.id}")
+        raise FakeMosaicError("500", status=500)
+
+    usage.confirm_created = failed_confirm
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert usage.calls == ["dispatched", f"confirm:{box.id}", f"bind:{box.id}", "stopped", "settle"]
 
 
 async def test_a_lost_create_without_a_listed_box_keeps_the_hold_pending(
