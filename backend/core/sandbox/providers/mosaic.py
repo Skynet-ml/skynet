@@ -841,6 +841,7 @@ class MosaicEnvironment(SandboxEnvironment):
                 confirming
                 and destroyed
                 and box_id is not None
+                and usage is not None
                 and usage.sandbox_id == box_id
                 and not confirm.cancelled()
                 and _is_gone(confirm.exception())

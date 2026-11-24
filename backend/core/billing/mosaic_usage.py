@@ -19,7 +19,7 @@ import math
 import time
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, cast
 
 from .budget_amounts import cent_units
 from .budgets import BudgetConflictError, OperationSnapshot
@@ -412,13 +412,13 @@ class MosaicUsageReservation:
             except Exception:
                 history = None
         usd = history_usd(history, units=self.units) if isinstance(history, Mapping) else None
-        if usd is not None:
+        if usd is not None and isinstance(history, Mapping):
             records = history["records"]
+            # history_usd() returned a price, so every record's unit_seconds
+            # is a valid amount and none is None.
+            unit_seconds = sum(cast(Decimal, _amount(record["unit_seconds"])) for record in records)
             # A summary, not the up to 500 raw records, keeps the audit row small.
-            summary = {
-                "records": len(records),
-                "unit_seconds": str(sum(_amount(record["unit_seconds"]) for record in records)),
-            }
+            summary = {"records": len(records), "unit_seconds": str(unit_seconds)}
             return usd, "usage_history", summary
         return mosaic_measured_usd(self.units, wall_ms), "measured_wall_time", wall_ms
 
