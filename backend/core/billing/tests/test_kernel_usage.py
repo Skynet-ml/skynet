@@ -131,7 +131,6 @@ def test_quote_covers_lifetime_idle_timeout_and_stop_margin() -> None:
         {"lifetime_ms": 259_200_001},
         {"timeout_seconds": True},
         {"memory_gib": 4},
-        {"memory_gib": 16},
         {"headless": True},
         {"gpu": True},
     ],
@@ -144,6 +143,11 @@ def test_quote_refuses_an_unbounded_or_unpriced_browser(change: dict[str, Any]) 
     """
     with pytest.raises(UnpricedOperationError):
         quote_kernel_browser({**REQUEST, **change})
+
+
+def test_sixteen_gib_browser_uses_the_same_flat_rate() -> None:
+    """Price a 16 GiB headful browser at the flat headful rate, as Kernel's rate does not depend on memory."""
+    assert quote_kernel_browser({**REQUEST, "memory_gib": 16}).maximum == quote_kernel_browser(REQUEST).maximum
 
 
 def test_reserve_then_settle_charges_the_reported_uptime(database: Engine) -> None:
@@ -297,10 +301,44 @@ def test_lost_create_response_keeps_the_hold_and_refuses_a_replay(database: Engi
         USAGE.reserve(runtime, REQUEST, operation_key="box-one")
 
 
-def test_server_error_on_create_keeps_the_hold(database: Engine) -> None:
-    """Keep the hold when a 5xx answer may still have made a browser."""
+@pytest.mark.parametrize("status", [502, 503])
+def test_server_error_on_create_keeps_the_hold(database: Engine, status: int) -> None:
+    """Keep the hold when a 5xx answer may still have made a browser.
+
+    Args:
+        database: Engine of the funded ledger.
+        status: The server error status.
+    """
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-one")
-    reservation.fail(_http_error(502), no_browser=True)
+    reservation.fail(_http_error(status), no_browser=True)
+    assert _state(database) == "pending"
+
+
+def test_ledger_error_on_reject_marks_the_hold_pending(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mark the hold pending and raise the error when the ledger fails to reject it.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: Replaces the ledger reject call.
+    """
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
+
+    def broken_reject(*args: Any, **kwargs: Any) -> None:
+        """Fail as a database error would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(runtime.service, "reject", broken_reject)
+    with pytest.raises(RuntimeError, match="database down"):
+        reservation.fail(_http_error(429), no_browser=True)
     assert _state(database) == "pending"
 
 

@@ -181,6 +181,7 @@ class FakeState:
     deleted: ClassVar[list[str]] = []
     retrieves: ClassVar[list[str]] = []
     retrieve_errors: ClassVar[list[BaseException]] = []
+    delete_errors: ClassVar[list[BaseException]] = []
     usage_statuses: ClassVar[list[str]] = []
     uptime_ms: ClassVar[int] = 60_000
     closed: ClassVar[int] = 0
@@ -204,6 +205,7 @@ class FakeState:
         cls.deleted = []
         cls.retrieves = []
         cls.retrieve_errors = []
+        cls.delete_errors = []
         cls.usage_statuses = []
         cls.uptime_ms = 60_000
         cls.closed = 0
@@ -407,8 +409,11 @@ class FakeBrowsers:
             session_id: The browser id.
 
         Raises:
+            Exception: The next scripted delete error.
             NotFoundError: The browser does not exist.
         """
+        if FakeState.delete_errors:
+            raise FakeState.delete_errors.pop(0)
         if FakeState.browsers.pop(session_id, None) is None:
             raise _status_error(kernel.NotFoundError, 404)
         FakeState.deleted.append(session_id)
@@ -1310,6 +1315,74 @@ async def test_protected_commands_stop_at_the_funded_end() -> None:
         clock.now += 200
         with pytest.raises(SandboxInfraError, match="funded"):
             await env.exec("true")
+
+
+class _ClockReads:
+    """Move a fake clock forward on each read wait once armed."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        """Keep the clock and start disarmed.
+
+        Args:
+            clock: The fake clock of the box.
+        """
+        self.clock = clock
+        self.step = 0.0
+
+    async def acquire(self) -> None:
+        """Advance the clock by the armed step."""
+        self.clock.now += self.step
+
+
+class _ClockPacing:
+    """Hold a clock-moving read bucket and an open create bucket."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        """Create the buckets.
+
+        Args:
+            clock: The fake clock of the box.
+        """
+        self.reads = _ClockReads(clock)
+        self.creates = _GateBucket()
+
+
+async def test_protected_command_cap_counts_the_read_wait() -> None:
+    """Compute the funded cap after the read wait, so the wait does not extend a command."""
+    clock = FakeClock()
+    pacing = _ClockPacing(clock)
+    env, _ = _protected(clock=clock, pacing=pacing)
+    async with env:
+        pacing.reads.step = 100
+        await env.exec("true", timeout_sec=1000)
+        pacing.reads.step = 0
+        assert FakeState.execs[-1]["timeout_sec"] == 200
+
+
+async def test_stopped_box_cannot_start_again() -> None:
+    """Refuse a start after a stop, so no second browser runs on a settled reservation."""
+    env, usages = _protected()
+    await env.start()
+    await env.stop()
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    assert len(FakeState.create_calls) == 1
+    assert len(usages) == 1
+
+
+async def test_failed_delete_gets_a_second_delete_from_the_sweep() -> None:
+    """Delete the known browser again in the sweep after its first delete fails, then settle it."""
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    await env.start()
+    clock.now += 30
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    await env.stop()
+    usage = usages[0]
+    assert FakeState.browsers == {}
+    assert FakeState.deleted == [usage.browser.session_id]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.measured_ms == 30_000
 
 
 async def test_protected_box_settles_on_a_real_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,7 +2,7 @@
 
 Kernel bills a headful browser at a flat rate for each second it is active,
 with no per-browser fee and no network charge. The adapter funds a headful
-8 GiB browser for its whole possible uptime and settles from the ``usage.uptime_ms`` that
+8 or 16 GiB browser for its whole possible uptime and settles from the ``usage.uptime_ms`` that
 Kernel reports for the deleted session. When that report is not ready, it
 settles from the measured time between the create call and the delete.
 """
@@ -19,20 +19,22 @@ from .budgets import BudgetConflictError, BudgetError, OperationSnapshot
 from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationError, json_fingerprint, operation_quote
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
+
+# Kernel usage is sandbox usage, so it reuses the shared sandbox markup and
+# wallet split instead of a second policy that could drift from it.
 from .vercel_usage import vercel_charge_policy
 
 logger = logging.getLogger(__name__)
 
 # Read on 2026-11-24 from _PRICING_URL: a headful browser costs a flat
-# $0.0001333336 per second. The page gives no memory size for that rate and
-# no price for a 16 GiB headful browser, so only the 8 GiB default (the SDK's
-# ``BrowserMemoryRequest`` docs) is priced. A GPU browser costs more and is
-# refused here.
+# $0.0001333336 per second. The rate does not depend on memory, so both
+# headful sizes in the SDK's ``BrowserMemoryRequest`` docs (8 and 16 GiB) use
+# it. A GPU browser costs more and is refused here.
 _PRICING_URL = "https://www.kernel.sh/docs/info/pricing"
 _USAGE_URL = "https://kernel.sh/docs/api-reference/browsers/get-browser-session-details"
 _PRICE_VERSION = "kernel-public-2026-11-24"
 HEADFUL_SECOND_USD = Decimal("0.0001333336")
-HEADFUL_MEMORY_GIB = 8
+HEADFUL_MEMORY_GIB = frozenset({8, 16})
 # Kernel's longest inactivity timeout (72 hours).
 MAX_LIFETIME_MS = 259_200_000
 # Covers the provider's delete call (``STOP_TIMEOUT`` in the Kernel provider)
@@ -40,6 +42,8 @@ MAX_LIFETIME_MS = 259_200_000
 STOP_MARGIN_MS = 120_000
 # Statuses on the create call that prove Kernel made no browser. A 408 or a
 # 409 can follow a create that Kernel still finishes, so they stay pending.
+# A 502 or 503 stays pending by choice: Kernel does not document whether a
+# create that gets one made a browser.
 _REFUSED_CREATE_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
 
 
@@ -90,7 +94,7 @@ def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
 
     Args:
         request: ``lifetime_ms``, ``timeout_seconds`` (the inactivity
-            timeout), ``memory_gib`` (8), ``headless`` (False) and
+            timeout), ``memory_gib`` (8 or 16), ``headless`` (False) and
             ``gpu`` (False).
 
     Returns:
@@ -106,12 +110,14 @@ def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
         or lifetime_ms > MAX_LIFETIME_MS
         or not _positive_int(timeout_seconds)
         or timeout_seconds * 1000 > MAX_LIFETIME_MS
-        or request.get("memory_gib") != HEADFUL_MEMORY_GIB
+        or request.get("memory_gib") not in HEADFUL_MEMORY_GIB
         or isinstance(request.get("memory_gib"), bool)
         or request.get("headless") is not False
         or request.get("gpu") is not False
     ):
-        raise UnpricedOperationError("Protected Kernel runs need a bounded headful browser with 8 GiB and no GPU.")
+        raise UnpricedOperationError(
+            "Protected Kernel runs need a bounded headful browser with 8 or 16 GiB and no GPU."
+        )
     return operation_quote(
         request,
         _maximum_usd(request),
@@ -308,6 +314,10 @@ class KernelUsageReservation:
 
         Returns:
             True when the ledger released the hold.
+
+        Raises:
+            Exception: A ledger or database error, after the hold is marked
+                pending, so the hold never stays in the dispatched state.
         """
         try:
             self.runtime.service.reject(
@@ -318,6 +328,16 @@ class KernelUsageReservation:
             )
         except BudgetError:
             return False
+        except Exception:
+            try:
+                self.pending()
+            except Exception as pending_error:
+                logger.warning(
+                    "Kernel hold %s could not be marked pending: %s",
+                    self.operation.id,
+                    type(pending_error).__name__,
+                )
+            raise
         self.runtime.unpin(self.operation.id)
         return True
 

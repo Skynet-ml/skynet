@@ -25,13 +25,18 @@ from there. Changes:
   is written. Harbor's ``playwright_execute``, directory transfers,
   profiles, proxies, viewports and other browser options are left out.
 - ``stop_job_sandboxes`` finds the browsers of a job by their tags.
-- With a budget the box is protected (SKY-553). It reserves a headful 8 GiB
-  browser before the create call and confirms it after. A capacity answer
-  fails the start, because the capacity wait must not hold a reservation.
-  Commands stop at the funded end. Kernel has no hard session lifetime, so a
-  browser that no stop deletes ends at its inactivity timeout, which the
-  reservation funds. After the delete, the box reads Kernel's reported uptime
-  and settles the reservation.
+- With a budget the box is protected (SKY-553). It reserves a headful 8 or
+  16 GiB browser before the create call and confirms it after. A capacity
+  answer fails the start, because the capacity wait must not hold a
+  reservation. Commands stop at the funded end. Kernel has no hard session
+  lifetime, so a browser that no stop deletes ends at its inactivity timeout,
+  which the reservation funds. After the delete, the box reads Kernel's
+  reported uptime and settles the reservation.
+- Known gap: every command gets ``KERNEL_CDP_WS_URL``, and the exec timeout
+  does not end background processes. A background process that holds a CDP
+  connection can keep the browser active past the funded end. The delete in
+  ``stop()`` bounds that time, and the settle clamps the charge to the
+  reservation, so the user never pays more than the quote.
 """
 
 from __future__ import annotations
@@ -293,10 +298,13 @@ class KernelEnvironment(SandboxEnvironment):
         Raises:
             SandboxFatalError: The SDK is not installed or the memory is too large.
             StartTimeoutError: The create did not finish in time.
-            SandboxInfraError: A ``stop()`` ended the start, or the container did not start.
+            SandboxInfraError: The box is already stopped, a ``stop()`` ended the
+                start, or the container did not start.
         """
         if self.client_cls is None:
             raise SandboxFatalError("The kernel package is not installed: install the `kernel` extra.")
+        if self._stop_task is not None:
+            raise SandboxInfraError("The Kernel sandbox is stopped; it cannot start again.")
         self._starting = asyncio.ensure_future(self._start())
         try:
             await self._starting
@@ -344,8 +352,8 @@ class KernelEnvironment(SandboxEnvironment):
             "tags": {**spec.tags, BOX_TAG: self.name},
             "timeout": CREATE_TIMEOUT,
         }
-        # Kernel prices only the 8 GiB headful browser, so a protected box asks
-        # for its size explicitly; a larger request fails at the reservation.
+        # Kernel prices the 8 and 16 GiB headful browsers, so a protected box
+        # asks for its size explicitly; any other size fails at the reservation.
         memory = _memory_request(spec.resources.memory_mb, container=self._container or self._budget is not None)
         if memory is not None:
             options["memory"] = memory
@@ -522,6 +530,7 @@ class KernelEnvironment(SandboxEnvironment):
         known = None
         measured_ms = None
         swept: tuple[list[Any], list[Any]] | None = None
+        skip = None
         if browser is not None:
             known = browser.session_id
             try:
@@ -529,17 +538,23 @@ class KernelEnvironment(SandboxEnvironment):
             except Exception as delete_error:
                 if NotFoundError is not None and isinstance(delete_error, NotFoundError):
                     measured_ms = self._measured_ms()
+                    skip = known
                 else:
                     logger.warning("Kernel browser %s did not stop: %s", self.name, type(delete_error).__name__)
             else:
                 measured_ms = self._measured_ms()
+                skip = known
         if self._create_dispatched:
             # A create that timed out can leave a browser that this
-            # environment never saw.
+            # environment never saw. A known browser whose delete failed gets
+            # a second delete here.
             try:
-                swept = await asyncio.wait_for(_delete_tagged(client, {BOX_TAG: self.name}, skip=known), STOP_TIMEOUT)
+                swept = await asyncio.wait_for(_delete_tagged(client, {BOX_TAG: self.name}, skip=skip), STOP_TIMEOUT)
             except Exception as sweep_error:
                 logger.warning("Kernel browser %s sweep failed: %s", self.name, type(sweep_error).__name__)
+            else:
+                if measured_ms is None and known is not None and any(item.session_id == known for item in swept[1]):
+                    measured_ms = self._measured_ms()
         if self._usage is not None:
             await self._settle(client, known, measured_ms, error, swept)
         with contextlib.suppress(Exception):
@@ -740,6 +755,8 @@ class KernelEnvironment(SandboxEnvironment):
             SandboxInfraError: The browser is not running or the API call failed.
         """
         self._require_browser()
+        # The read wait can be long, so the funded cap is computed after it.
+        client, browser = await self._ready()
         funded = self._funded_seconds()
         if funded is not None:
             # A command must not keep a protected browser busy past its funded end.
@@ -756,7 +773,6 @@ class KernelEnvironment(SandboxEnvironment):
         # Without an explicit value the SDK applies its 60 s default, which
         # would cut a command that has no limit.
         options["timeout"] = http_timeout
-        client, browser = await self._ready()
         try:
             async with asyncio.timeout(http_timeout) as deadline:
                 response = await client.browsers.process.exec(browser.session_id, **options)
