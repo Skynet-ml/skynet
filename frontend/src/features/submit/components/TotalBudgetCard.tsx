@@ -35,10 +35,9 @@ import { StepCard } from "./blackbox/shared";
  * optimization. Setup checks bill the account balance, not the limit
  * (SKY-925), so the ledger shows the run's own spend and holds. A run has no
  * upfront cost estimate; it spends up to the limit and stops at the budget
- * with its best version. The
- * card names the least the limit can be (what the run's boxes hold before
- * the first model call, plus spare for its first calls), and once the
- * budget exists, the server's ledger for it.
+ * with its best version. The card names the least the limit can be (what the
+ * run's boxes hold before the first model call, plus spare for its first
+ * calls), and once the budget exists, the server's ledger for it.
  *
  * The limit can also be switched off: the run then draws on the account
  * balance until it finishes, and stops in place if that balance runs out. Each

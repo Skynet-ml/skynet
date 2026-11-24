@@ -176,8 +176,9 @@ def _canonical_execution_payload(request: WizardPreflightRequest, username: str,
 
 
 BUDGET_CHECK_KEY = "budget"
-# A failed budget check names the balance as what to fix when the account,
-# not the spending limit, refused the work: raising the limit cannot help then.
+# A failed budget check names the balance as what to fix when the account
+# balance refused the work. Setup bills the balance only (SKY-925), so raising
+# the spending limit cannot help then.
 BALANCE_FIELD = "balance"
 # A runtime reports a budget stop only by its type name; these rebuild it.
 _BUDGET_STOPS = {stop.__name__: stop for stop in (BudgetInsufficientError, AccountFundsError)}
@@ -372,29 +373,29 @@ class _Events:
         """Return the runtime's setup evidence, or raise the failure it reported.
 
         Args:
-            gateway: The setup's model gateway, which saw any call the limit refused.
+            gateway: The setup's model gateway, which saw any call the budget refused.
 
         Returns:
             The guest's terminal preflight result.
 
         Raises:
-            BudgetInsufficientError: When the spending limit or the account
-                balance stopped the runtime.
+            BudgetInsufficientError: When the account balance cannot fund
+                setup.
             ValueError: For any other runtime failure, or when no result came back.
         """
         # ``run_vercel_dspy`` turns every exception into an error event, so the
         # budget stop has to be rebuilt from its type name to reach the
         # ``budget`` check instead of the generic ``setup`` one. A guest model
-        # call the limit refused only reaches the guest as a 402, which its
+        # call the balance refused only reaches the guest as a 402, which its
         # client raises under its own type, so the gateway's record of the
         # refusal decides that case.
         # The guest sees an account-funds refusal as a plain budget stop, so
-        # the gateway's record keeps the balance from reading as the limit.
+        # the gateway's record keeps the refusal on the balance.
         if self.error and isinstance(gateway.budget_refusal, AccountFundsError):
             raise gateway.budget_refusal
         stop = _BUDGET_STOPS.get(self.error_type or "")
         if stop is not None:
-            raise stop(self.error or "The spending limit cannot cover setup.")
+            raise stop(self.error or "The account cannot fund the next operation.")
         if self.error and gateway.budget_refusal is not None:
             raise gateway.budget_refusal
         if self.error or self.result is None:

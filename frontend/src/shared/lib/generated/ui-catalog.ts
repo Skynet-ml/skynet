@@ -8136,7 +8136,7 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.budget.error.empty": "הזינו מגבלת הוצאה כדי להמשיך.",
   "submit.budget.error.fraction": "הסכומים הם עד רמת הסנט — השתמשו בשתי ספרות עשרוניות לכל היותר.",
   "submit.budget.error.invalid": "הזינו סכום בדולרים, לדוגמה {suggested}.",
-  "submit.budget.explainer": "מכסה את האופטימיזציה. בדיקות ההגדרה מחויבות מהיתרה שלך.",
+  "submit.budget.explainer": "מכסה את האופטימיזציה. בדיקות ההגדרה מחויבות מהיתרה שלכם.",
   "submit.budget.external_endpoint_fees": "עמלות שגובה ספק הניקוד החיצוני או ספק ה-MCP שלכם משולמות ישירות לספק, מחוץ לתקציב הכולל הזה.",
   "submit.budget.label": "תקרת הוצאה",
   "submit.budget.limit_too_low": "התקציב נמוך מדי. תקרת ההוצאה צריכה להיות לפחות {amount}.",

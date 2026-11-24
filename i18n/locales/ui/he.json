@@ -3113,7 +3113,7 @@
   "submit.blackbox.review.models": "מודלים",
   "submit.blackbox.review.name_suggested": "הוצע מהמטרה שלכם",
   "submit.budget.label": "תקרת הוצאה",
-  "submit.budget.explainer": "מכסה את האופטימיזציה. בדיקות ההגדרה מחויבות מהיתרה שלך.",
+  "submit.budget.explainer": "מכסה את האופטימיזציה. בדיקות ההגדרה מחויבות מהיתרה שלכם.",
   "submit.budget.error.empty": "הזינו מגבלת הוצאה כדי להמשיך.",
   "submit.budget.error.invalid": "הזינו סכום בדולרים, לדוגמה {suggested}.",
   "submit.budget.error.fraction": "הסכומים הם עד רמת הסנט — השתמשו בשתי ספרות עשרוניות לכל היותר.",
