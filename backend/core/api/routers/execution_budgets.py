@@ -132,7 +132,9 @@ def require_one_lease(total_cents: int, *, from_balance: bool = False, spent_uni
     )
 
 
-def require_funded_lease(total_cents: int, spendable_cents: int | None, *, spent_units: int = 0) -> None:
+def require_funded_lease(
+    total_cents: int, spendable_cents: int | None, *, spent_units: int = 0, from_balance: bool = False
+) -> None:
     """Refuse a capped run whose balance or limit cannot buy the run's first budget lease.
 
     Args:
@@ -141,16 +143,19 @@ def require_funded_lease(total_cents: int, spendable_cents: int | None, *, spent
             balance applies.
         spent_units: Settled spending already charged to this limit, in
             budget units.
+        from_balance: Whether the account balance, not the user's own
+            limit, sets this limit.
 
     Raises:
-        DomainError: 402 ``budget.insufficient`` when the balance is below one
-            lease, or 409 ``budget.below_minimum`` when the limit's room is.
+        DomainError: 402 ``budget.insufficient`` when the balance, or a limit
+            the balance sets, is below one lease; or 409
+            ``budget.below_minimum`` when the user's own limit's room is.
     """
     # Every run's first lease holds one full lease of the balance, also for BYOK. A higher limit cannot help a
     # balance below that, so the balance is checked first (SKY-923).
     if spendable_cents is not None:
         require_one_lease(spendable_cents, from_balance=True)
-    require_one_lease(total_cents, spent_units=spent_units)
+    require_one_lease(total_cents, from_balance=from_balance, spent_units=spent_units)
 
 
 def create_execution_budgets_router(*, job_store: Any) -> APIRouter:

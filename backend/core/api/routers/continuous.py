@@ -37,6 +37,7 @@ from ...worker.repo_staging import is_repo_payload
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..converters import job_owner
 from ..errors import DomainError
+from . import execution_budgets
 from ._helpers import get_job_no_payload
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
@@ -438,7 +439,7 @@ def create_continuous_router(*, job_store) -> APIRouter:
         Raises:
             DomainError: 409 when the run did not succeed, is not a repository
                 run with inline cases, keeps no test cases apart, or already has a plan;
-                and, outside local mode, when its run budget is below 500 cents.
+                and, outside local mode, when its run budget is below one lease.
         """
         job = _owned_job(job_store, optimization_id, current_user, payload=True)
         # A run still in flight takes a waiting plan, set up from the submit wizard.
@@ -450,9 +451,10 @@ def create_continuous_router(*, job_store) -> APIRouter:
         cycle_budget = body.cycle_budget_cents or _source_budget_cents(job_store, job, current_user.username)
         if cycle_budget is None:
             raise DomainError("continuous.not_eligible", status=409)
+        # Submit refuses a run limit below one lease, so each check of such a plan would fail.
         # A local check's run gets an uncapped budget, which has no lease floor (SKY-923).
-        if not settings.local_mode and cycle_budget < engine_mod.MIN_CYCLE_BUDGET_CENTS:
-            raise DomainError("budget.below_minimum", status=409, minimum_total_cents=engine_mod.MIN_CYCLE_BUDGET_CENTS)
+        if not settings.local_mode and cycle_budget < execution_budgets.CHUNK_CENTS:
+            raise DomainError("budget.below_minimum", status=409, minimum_total_cents=execution_budgets.CHUNK_CENTS)
         now = datetime.now(UTC)
         plan = ContinuousPlanModel(
             username=current_user.username,

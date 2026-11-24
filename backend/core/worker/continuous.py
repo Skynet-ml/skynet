@@ -44,7 +44,6 @@ from ..billing.budgets import BudgetError, BudgetService
 from ..billing.operation_pricing import json_fingerprint
 from ..billing.protected_credentials import scrub_execution_credentials
 from ..billing.service import StripeBillingService
-from ..config import settings
 from ..constants import PAYLOAD_OVERVIEW_NAME
 from ..models import BlackboxRunRequest
 from ..models.blackbox import STORED_PAYLOAD_CONTEXT
@@ -79,9 +78,6 @@ SYSTEM_PAUSES = frozenset({PAUSE_ALLOWANCE, PAUSE_FUNDS})
 PLAN_ENDED = "ended"
 # This many failed checks in a row pause the plan.
 FAILURE_STREAK = 3
-# Each check's setup spends from the cycle budget, so a budget near one lease (CHUNK_CENTS) pays for setups whose
-# runs submit then refuses. Five dollars leaves room for setup and the first lease (SKY-923).
-MIN_CYCLE_BUDGET_CENTS = 500
 # A check that lost its worker this many times is closed as failed instead of retried again.
 MAX_CHECK_ATTEMPTS = 3
 # A candidate must beat the incumbent by this much on a 0..1 score, so scoring noise cannot win.
@@ -832,12 +828,6 @@ def process_cycle(
             # Without the incumbent's own test cases the new run's score could never be compared,
             # so it would be paid for and never judged.
             _fail_cycle(session, plan, cycle, "continuous.no_test_split")
-            return
-        if not settings.local_mode and plan.cycle_budget_cents < MIN_CYCLE_BUDGET_CENTS:
-            # A plan made before the floor would pay for setup on each check, and submit would then refuse its run.
-            _fail_cycle(
-                session, plan, cycle, "continuous.run_rejected", reason="the run budget is below the 5-dollar minimum"
-            )
             return
         if gate is not None:
             _pause(plan, gate)

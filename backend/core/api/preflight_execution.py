@@ -54,7 +54,6 @@ from .errors import DomainError
 from .model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from .preflight_progress import report_preflight_phase
 from .routers import execution_budgets
-from .routers.execution_budgets import ExecutionBudgetResponse, budget_http_error, budget_response
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +109,7 @@ class WizardPreflightResponse(BaseModel):
     may_advance: bool
     pending_reason: WizardPreflightPendingReason | None = None
     checks: list[WizardPreflightCheck]
-    budget: ExecutionBudgetResponse
+    budget: execution_budgets.ExecutionBudgetResponse
     scorer_result: dict[str, Any] | None = None
     workflow_result: dict[str, Any] | None = None
     terminal: dict[str, Any] | None = None
@@ -463,10 +462,10 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
         if snapshot.generation != claim.generation:
             raise BudgetConflictError("Another setup attempt replaced this execution generation.")
     except BudgetError as error:
-        raise budget_http_error(error) from error
+        raise execution_budgets.budget_http_error(error) from error
     if claim.token is None:
         return WizardPreflightResponse.model_validate(
-            {**claim.document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+            {**claim.document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
         )
     try:
         with evidence.heartbeat(claim.document["id"], claim_token=claim.token):
@@ -496,7 +495,7 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
                     result={"checks": [_check("setup", "failed", str(error))]},
                 )
                 return WizardPreflightResponse.model_validate(
-                    {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+                    {**document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
                 )
             parent_request = request.model_copy(update={"payload": parent_payload})
             status, result = _perform_preflight(
@@ -517,9 +516,9 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
                 )
             document = evidence.finish(claim.document["id"], claim_token=claim.token, status=status, result=result)
     except BudgetError as error:
-        raise budget_http_error(error) from error
+        raise execution_budgets.budget_http_error(error) from error
     return WizardPreflightResponse.model_validate(
-        {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+        {**document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
     )
 
 

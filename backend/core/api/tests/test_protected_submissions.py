@@ -743,6 +743,32 @@ def test_a_balance_below_one_lease_is_refused_as_a_balance_problem(
     assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 0
 
 
+def test_a_limit_the_balance_sets_below_one_lease_is_refused_as_a_balance_problem(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Name the balance when a request without its own limit gets one below one lease from it (SKY-923).
+
+    A balance of one lease and a cent buys the lease, but the limit it sets after fees does not.
+
+    Args:
+        harness: Real legacy submission routes and spending authority.
+        monkeypatch: Restores the real lease size.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    with Session(harness.store.engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = budgets.CHUNK_CENTS + 1
+        session.commit()
+    payload = _payload()
+    payload.pop("max_cost_cents")
+
+    response = harness.client.post(ROUTE, json=payload)
+
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+    assert harness.calls == []
+    assert harness.count(JobModel) == 0
+
+
 def test_a_byok_run_with_a_balance_below_one_lease_is_refused(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -14,7 +14,12 @@ from sqlalchemy.orm import Session
 
 from core.billing.budget_amounts import wallet_reserved_cents
 from core.billing.budgets import BudgetConflictError
-from core.billing.model_dispatch import GenerationNotFoundError, OpenRouterDispatcher, generation_charge
+from core.billing.model_dispatch import (
+    GenerationNotFoundError,
+    OpenRouterDispatcher,
+    generation_charge,
+    lookup_generation,
+)
 from core.billing.model_reconciliation import OpenRouterUsageReconciler, UnsettleableUsageError
 from core.billing.openrouter_quotes import price_text_request, resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy, json_fingerprint, operation_quote
@@ -466,10 +471,16 @@ def test_sweep_releases_a_generation_that_openrouter_does_not_find_after_a_short
 
     Args:
         database: Ledger database.
-        monkeypatch: Replaces the provider lookup.
+        monkeypatch: Sends the provider lookup to a stand-in OpenRouter that answers 404.
         caplog: Captures the release log line.
     """
-    monkeypatch.setattr(OpenRouterDispatcher, "_lookup_generation", lambda self, identity: (None, "HTTP 404", True))
+    # The real lookup builds the reason from the response, so the test breaks if its text and the 404 check part.
+    not_found = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+    monkeypatch.setattr(
+        OpenRouterDispatcher,
+        "_lookup_generation",
+        lambda self, identity: lookup_generation(not_found, "key", identity, self.model),
+    )
     runtime = _runtime(database)
     operation_id = _park_model_call(runtime, "gen-missing")
     reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private")
