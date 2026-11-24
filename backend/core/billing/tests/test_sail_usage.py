@@ -185,7 +185,7 @@ def _created(reservation: SailUsageReservation, *, memory_mib: int = 16 * 1024) 
         reservation: The box's reservation.
         memory_mib: The memory limit that Sail reports.
     """
-    reservation.begin_create()
+    reservation.begin_create("skynet-box-1")
     reservation.confirm_created(
         SimpleNamespace(sailbox_id="sb-1", vcpu_count=1, memory_mib=memory_mib, state_disk_size_gib=32)
     )
@@ -719,11 +719,27 @@ def test_a_cancelled_create_keeps_the_hold_pending(database: Engine) -> None:
         database: Engine of the funded ledger.
     """
     reservation = _reservation(database, FakeSpend(SPEND))
-    reservation.begin_create()
+    reservation.begin_create("skynet-box-1")
     reservation.release()
     assert _state(database) == "pending"
     with pytest.raises(UsagePendingError, match="no box identity"):
         reservation.settle()
+
+
+def test_a_pending_hold_without_a_box_id_keeps_the_box_name(database: Engine) -> None:
+    """Keep the box name in the pending evidence, as the only link to a box with no id.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    reservation = _reservation(database, FakeSpend(SPEND))
+    reservation.begin_create("skynet-box-1")
+    reservation.release()
+    assert _state(database) == "pending"
+    with Session(database) as session:
+        evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence
+    assert evidence["sailbox_id"] is None
+    assert evidence["sailbox_name"] == "skynet-box-1"
 
 
 def test_a_refused_create_releases_the_hold(database: Engine) -> None:
@@ -733,7 +749,7 @@ def test_a_refused_create_releases_the_hold(database: Engine) -> None:
         database: Engine of the funded ledger.
     """
     reservation = _reservation(database, FakeSpend(SPEND))
-    reservation.begin_create()
+    reservation.begin_create("skynet-box-1")
     reservation.release(refused=True)
     assert _state(database) == "released"
     assert reservation.runtime._pinned == {}

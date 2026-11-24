@@ -113,6 +113,8 @@ _REFUSED_CREATE_STATUSES = frozenset({400, 401, 402, 403, 404, 413, 422})
 _REFUSED_CREATE_ERRORS = frozenset(
     {"InvalidArgumentError", "PermissionDeniedError", "NotFoundError", "ImageBuildError"}
 )
+# The SDK 0.17.2 statuses (``SailboxStatus``) of a box that no longer runs.
+_GONE_STATUSES = frozenset({"failed", "terminated"})
 # Strong references to the creates that outlive their start, and to the
 # terminate calls of their late boxes, so the event loop does not drop them.
 _LATE_TASKS: set[asyncio.Future[Any]] = set()
@@ -437,7 +439,7 @@ class SailEnvironment(SandboxEnvironment):
                     if limit is not None:
                         params["image_build_timeout"] = math.ceil(limit)
                 if self._usage is not None:
-                    self._usage.begin_create()
+                    self._usage.begin_create(self._name)
                 try:
                     with _mapped("create the Sailbox"):
                         # Inside the mapping, so an argument error that the SDK
@@ -741,9 +743,14 @@ class SailEnvironment(SandboxEnvironment):
             # this wait, or after a cancel of the teardown, is released later.
             try:
                 await asyncio.wait({billing}, timeout=max(0.0, waits_end - loop.time()))
-            finally:
-                if not billing.done():
+            except BaseException:
+                # The reserve can finish at the moment of the cancel; its hold
+                # still needs a release, and a finished call is fine here.
+                if self._usage is None:
                     _release_late(billing)
+                raise
+            if not billing.done():
+                _release_late(billing)
             if billing.done() and self._usage is None and not billing.cancelled() and billing.exception() is None:
                 self._usage = billing.result()
         sailbox, self._sailbox = self._sailbox, None
@@ -853,7 +860,9 @@ class SailEnvironment(SandboxEnvironment):
             return None
         # Together, so several boxes still take one STOP_TIMEOUT.
         results = await asyncio.gather(*(_bounded(box.terminate.aio(), "terminate the Sailbox") for box in found))
-        self._terminated = all(results)
+        # A box that Sail lists as failed or terminated no longer runs, so it
+        # cannot spend even when this terminate call fails.
+        self._terminated = all(ended or box.status in _GONE_STATUSES for box, ended in zip(found, results, strict=True))
         if len(found) > 1:
             await self._mark_pending(usage)
             raise UsagePendingError("Sail lists more than one box with the name, so the hold stays.")

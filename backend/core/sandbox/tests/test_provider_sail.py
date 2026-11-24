@@ -82,6 +82,7 @@ class BoxState:
     id: str
     params: dict[str, Any]
     terminated: bool = False
+    status: str = "running"
     egress: Any = None
     files: dict[str, bytes] = field(default_factory=dict)
     dirs: set[str] = field(default_factory=lambda: {"/", "/tmp"})
@@ -99,6 +100,7 @@ class FakeCloud:
     create_started: asyncio.Event = field(default_factory=asyncio.Event)
     create_error: BaseException | None = None
     create_makes_box: bool = False
+    lost_box_status: str = "running"
     create_delay: float = 0.0
     list_error: BaseException | None = None
     exec_hangs: bool = False
@@ -285,6 +287,7 @@ class FakeSailbox:
         """
         self.sailbox_id = box.id
         self.name = box.params.get("name")
+        self.status = box.status
         self._box = box
         self.run = _aio(self._run)
         self.terminate = _aio(self._terminate)
@@ -328,7 +331,7 @@ class FakeSailbox:
         if CLOUD.create_error is not None:
             if CLOUD.create_makes_box:
                 # Sail made the box, but the answer that names it was lost.
-                CLOUD.boxes.append(BoxState(id=f"sb-{next(CLOUD.ids)}", params=params))
+                CLOUD.boxes.append(BoxState(id=f"sb-{next(CLOUD.ids)}", params=params, status=CLOUD.lost_box_status))
             raise CLOUD.create_error
         box = BoxState(id=f"sb-{next(CLOUD.ids)}", params=params, egress=params["egress_policy"])
         CLOUD.boxes.append(box)
@@ -1049,14 +1052,20 @@ class FakeUsage:
         self.operation_key = operation_key
         self.calls: list[tuple[str, Any]] = []
         self.sailbox_id: str | None = None
+        self.sailbox_name: str | None = None
         self.confirm_error: BaseException | None = None
         self.settle_error: BaseException | None = None
         self.spending: list[int] | None = None
         self.spend_gate: asyncio.Event | None = None
         self.budgets: list[float | None] = []
 
-    def begin_create(self) -> None:
-        """Record the create call, with the boxes that existed before it."""
+    def begin_create(self, name: str) -> None:
+        """Record the create call, with the boxes that existed before it.
+
+        Args:
+            name: The unique name of the box.
+        """
+        self.sailbox_name = name
         self.calls.append(("begin_create", CLOUD.create_calls))
 
     def bind(self, sailbox_id: str) -> None:
@@ -1863,6 +1872,96 @@ async def test_a_cancelled_teardown_during_the_start_releases_a_late_hold(fake_s
         await asyncio.sleep(0.01)
     assert made[0].calls == [("release", False)]
     assert fake_sdk.create_calls == 0
+
+
+async def test_the_create_names_the_box_in_its_hold(fake_sdk: FakeCloud) -> None:
+    """Give the reservation the box name before the create, as a link when no id comes back.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+    await env.start()
+    await env.stop()
+    assert made[0].sailbox_name == env._name == fake_sdk.boxes[0].params["name"]
+
+
+async def test_a_reserve_that_ends_with_the_cancel_still_releases_its_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold when the teardown is cancelled at the moment the reserve returns.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    made: list[FakeUsage] = []
+
+    def slow(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation after the test opens the gate.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        entered.set()
+        gate.wait(5)
+        made.append(FakeUsage(request, operation_key))
+        return made[-1]
+
+    def cancel_teardown(_: asyncio.Future[Any]) -> None:
+        """Cancel the teardown before its wait sees the finished reserve.
+
+        Args:
+            _: The finished reserve call.
+        """
+        assert env._stop_task is not None
+        env._stop_task.cancel()
+
+    env = SailEnvironment(_spec(operation_key="box-1"), budget="budget", usage_factory=slow)
+    starting = asyncio.ensure_future(env.start())
+    try:
+        await asyncio.to_thread(entered.wait, 5)
+        billing = env._billing_call
+        assert billing is not None
+        # Added before the teardown waits, so this callback runs first.
+        billing.add_done_callback(cancel_teardown)
+        stopping = asyncio.ensure_future(env.stop())
+        await asyncio.sleep(0.05)
+        assert not stopping.done()
+    finally:
+        gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    with contextlib.suppress(BaseException):
+        await starting
+    for _ in range(100):
+        if made and made[0].calls:
+            break
+        await asyncio.sleep(0.01)
+    assert made[0].calls == [("release", False)]
+    assert fake_sdk.create_calls == 0
+
+
+async def test_a_failed_box_that_will_not_terminate_still_settles(fake_sdk: FakeCloud) -> None:
+    """Settle the box of a failed create when Sail lists it as failed and its terminate fails.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    fake_sdk.create_error = FakeApiError(500)
+    fake_sdk.create_makes_box = True
+    fake_sdk.lost_box_status = "failed"
+    fake_sdk.terminate_fails.add("sb-1")
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError, match="create the Sailbox"):
+        await env.start()
+    await env.stop()
+    assert [box.terminated for box in fake_sdk.boxes] == [False]
+    assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [False])]
 
 
 async def test_a_lookup_that_finds_two_boxes_keeps_the_hold(fake_sdk: FakeCloud) -> None:

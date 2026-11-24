@@ -422,11 +422,18 @@ class SailUsageReservation:
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This sandbox was already dispatched; reconcile it by hand.")
         self.sailbox_id: str | None = None
+        self.sailbox_name: str | None = None
         self.create_sent_at: dt.datetime | None = None
         self.spend: dict[str, Any] | None = None
 
-    def begin_create(self) -> None:
-        """Record that the create call may now open a box."""
+    def begin_create(self, name: str) -> None:
+        """Record that the create call may now open a box.
+
+        Args:
+            name: The unique name of the box. When no box id comes back, the
+                name is the only link from the hold to the box.
+        """
+        self.sailbox_name = name
         self.create_sent_at = dt.datetime.now(dt.UTC)
 
     def bind(self, sailbox_id: str) -> None:
@@ -493,7 +500,12 @@ class SailUsageReservation:
                 self.operation.id,
                 self.runtime.username,
                 evidence_key=f"sail-pending:{self.operation.id}",
-                evidence={"provider": "sail", "sailbox_id": self.sailbox_id, "spend": self.spend},
+                evidence={
+                    "provider": "sail",
+                    "sailbox_id": self.sailbox_id,
+                    "sailbox_name": self.sailbox_name,
+                    "spend": self.spend,
+                },
             )
 
     def release(self, *, refused: bool = False) -> None:
@@ -514,7 +526,7 @@ class SailUsageReservation:
             self.operation.id,
             self.runtime.username,
             evidence_key=f"sail-unsent:{self.operation.id}",
-            evidence={"provider": "sail", "reason": reason},
+            evidence={"provider": "sail", "reason": reason, "sailbox_name": self.sailbox_name},
         )
         self.runtime.unpin(self.operation.id)
 
