@@ -14,6 +14,7 @@ import itertools
 import json
 import shlex
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1194,6 +1195,94 @@ async def test_box_that_never_shows_for_the_delete_settles_the_whole_lifetime() 
     await env.stop()
     assert CLOUD.calls("DELETE", "") == []
     assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+def _hide_after_delete(monkeypatch: pytest.MonkeyPatch, answer: Callable[[], httpx.Response] | None) -> None:
+    """Hide the box from the read and the list after its first DELETE answer.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        answer: Makes the DELETE answer, or ``None`` to let the fake answer.
+    """
+
+    async def hiding(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and hide every box after a DELETE.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method != "DELETE":
+            return await _handle(request)
+        if answer is None:
+            response = await _handle(request)
+        else:
+            CLOUD.requests.append(request)
+            response = answer()
+        for box in CLOUD.boxes.values():
+            box.status = "running"
+            CLOUD.hidden.add(box.id)
+        CLOUD.list_hides = 10**6
+        return response
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(hiding))
+
+
+async def test_box_missing_after_a_412_delete_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle without a stop time when the box goes missing after sbx refused the DELETE with a 412."""
+    _hide_after_delete(monkeypatch, None)
+    env = _protected()
+    await env.start()
+    CLOUD.delete_answers = [412]
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_box_missing_after_a_404_delete_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle without a stop time when the DELETE answers 404 and the box then goes missing."""
+    _hide_after_delete(monkeypatch, _not_found)
+    env = _protected()
+    await env.start()
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_box_deleting_from_another_delete_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send no DELETE for a box that another delete already removes, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    box.status = "deleting"
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.1
+    await env.stop()
+    assert CLOUD.calls("DELETE", "") == []
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_delete_sets_no_sent_flag_for_a_box_another_delete_removes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave ``sent`` clear when the box is already deleting and then goes away."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = SbxEnvironment(_spec())
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    box.status = "deleting"
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.1
+    sent = asyncio.Event()
+    management, path = env._management, env._path
+    assert management is not None
+    assert path is not None
+    await sbx._delete(management, path, env._uid, sent)
+    assert not sent.is_set()
+    assert CLOUD.boxes == {}
+    await env.stop()
 
 
 async def test_failed_start_settles_the_sandbox_it_made() -> None:

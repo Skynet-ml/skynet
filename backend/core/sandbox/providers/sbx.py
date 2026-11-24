@@ -586,9 +586,9 @@ async def _delete(
         client: The management client.
         path: The API path of the sandbox.
         uid: The uid of the sandbox, when known, to find it in the list.
-        sent: Set before the DELETE goes out, so a caller whose wait for
-            the delete ends early, even while the call is in flight, knows
-            sbx may be deleting the sandbox.
+        sent: Set while a DELETE is in flight or after sbx accepted it, so a
+            caller whose wait for the delete ends early knows sbx may be
+            deleting the sandbox. A 404, 409 or 412 answer clears it.
 
     Raises:
         SandboxInfraError: The sandbox has no ETag, stopped deleting, or never
@@ -596,8 +596,8 @@ async def _delete(
         SandboxError: A request failed; see ``_call``.
     """
     deleting = refreshed = False
-    # A missing sandbox is gone only after a DELETE went out or it showed as
-    # deleting. Before that, a miss can be list lag, so wait for it to show.
+    # A missing sandbox is gone only after sbx accepted a DELETE or showed it
+    # as deleting. Before that, a miss can be list lag, so wait for it to show.
     on_its_way = False
     missing_since: float | None = None
     while True:
@@ -621,7 +621,6 @@ async def _delete(
             etag = _core(sandbox).get("etag")
             if not isinstance(etag, str) or not etag:
                 raise SandboxInfraError("sbx gave no ETag for the sandbox delete.")
-            on_its_way = True
             if sent is not None:
                 sent.set()
             response = await _call(
@@ -633,7 +632,13 @@ async def _delete(
                 accept=_PRECONDITION_FAILED,
                 headers={"If-Match": etag, "Idempotency-Key": str(uuid.uuid4())},
             )
-            if response is not None and response.status_code in _PRECONDITION_FAILED:
+            if response is None or response.status_code in _PRECONDITION_FAILED:
+                # sbx did not accept this DELETE, so it proves nothing about
+                # the sandbox: a 404 can be a routing miss, as for a read.
+                if sent is not None:
+                    sent.clear()
+                if response is None:
+                    continue
                 if refreshed:
                     raise _status_error(response, "delete the sandbox")
                 # The ETag changed or another delete runs: read the sandbox once
@@ -641,7 +646,7 @@ async def _delete(
                 # it does not retry a failed call blindly.
                 refreshed = True
                 continue
-            deleting = True
+            on_its_way = deleting = True
         await asyncio.sleep(POLL_INTERVAL)
 
 
