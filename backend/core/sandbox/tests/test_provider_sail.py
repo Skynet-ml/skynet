@@ -1052,6 +1052,7 @@ class FakeUsage:
         self.settle_error: BaseException | None = None
         self.spending: list[int] | None = None
         self.spend_gate: asyncio.Event | None = None
+        self.budgets: list[float | None] = []
 
     def begin_create(self) -> None:
         """Record the create call, with the boxes that existed before it."""
@@ -1096,8 +1097,11 @@ class FakeUsage:
         """Record a pending hold."""
         self.calls.append(("pending", None))
 
-    async def final_spend(self) -> dict[str, Any]:
+    async def final_spend(self, budget: float | None = None) -> dict[str, Any]:
         """Wait a moment for the spend, or fail as the test sets.
+
+        Args:
+            budget: The seconds that the teardown can still wait.
 
         Returns:
             A fake spend line.
@@ -1105,6 +1109,7 @@ class FakeUsage:
         Raises:
             BaseException: The error that the test sets.
         """
+        self.budgets.append(budget)
         if self.spend_gate is not None:
             await self.spend_gate.wait()
         if self.spending is not None:
@@ -1468,17 +1473,18 @@ async def test_a_failed_start_returns_before_the_spend_wait_ends(fake_sdk: FakeC
     gate = asyncio.Event()
     original = FakeUsage.final_spend
 
-    async def waiting(self: FakeUsage) -> dict[str, Any]:
+    async def waiting(self: FakeUsage, budget: float | None = None) -> dict[str, Any]:
         """Wait for the gate, then return the fake spend.
 
         Args:
             self: The fake reservation.
+            budget: The seconds that the teardown can still wait.
 
         Returns:
             The fake spend line.
         """
         await gate.wait()
-        return await original(self)
+        return await original(self, budget)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(FakeUsage, "final_spend", waiting)
@@ -1496,12 +1502,14 @@ async def test_a_stop_during_a_slow_reserve_releases_the_late_reservation(
 ) -> None:
     """Wait for a reserve that outlasts the start grace, and release the hold it returns.
 
+    The reserve wait shares ``CREATE_GRACE + STOP_TIMEOUT``, so the 60 s stop
+    timeout keeps this stop waiting.
+
     Args:
         fake_sdk: The fake Sail cloud.
         monkeypatch: Shortens the start grace.
     """
     monkeypatch.setattr(sail, "CREATE_GRACE", 0.01)
-    monkeypatch.setattr(sail, "STOP_TIMEOUT", 0.01)
     entered = threading.Event()
     gate = threading.Event()
     made: list[FakeUsage] = []
@@ -1536,6 +1544,69 @@ async def test_a_stop_during_a_slow_reserve_releases_the_late_reservation(
         await starting
     assert made[0].calls == [("release", False)]
     assert fake_sdk.create_calls == 0
+
+
+async def test_a_reserve_that_outlives_the_teardown_releases_its_hold_later(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End the stop at the wait limit, and release the hold when the slow reserve returns.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Shortens the start and reserve waits.
+    """
+    monkeypatch.setattr(sail, "CREATE_GRACE", 0.01)
+    monkeypatch.setattr(sail, "STOP_TIMEOUT", 0.01)
+    entered = threading.Event()
+    gate = threading.Event()
+    made: list[FakeUsage] = []
+
+    def slow(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation after the test opens the gate.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        entered.set()
+        gate.wait(5)
+        made.append(FakeUsage(request, operation_key))
+        return made[-1]
+
+    env = SailEnvironment(_spec(operation_key="box-1"), budget="budget", usage_factory=slow)
+    starting = asyncio.ensure_future(env.start())
+    try:
+        await asyncio.to_thread(entered.wait, 5)
+        await asyncio.wait_for(env.stop(), 1)
+        with pytest.raises(SandboxInfraError, match="stopped during its start"):
+            await starting
+        assert made == []
+    finally:
+        gate.set()
+    for _ in range(100):
+        if made and made[0].calls:
+            break
+        await asyncio.sleep(0.01)
+    assert made[0].calls == [("release", False)]
+    assert fake_sdk.create_calls == 0
+
+
+async def test_the_spend_wait_gets_the_rest_of_the_teardown_budget(fake_sdk: FakeCloud) -> None:
+    """Give the spend wait only the time that is left of the teardown budget.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+    await env.start()
+    await env.stop()
+    (budget,) = made[0].budgets
+    assert budget is not None
+    assert sail.TEARDOWN_SECONDS - 5 < budget <= sail.TEARDOWN_SECONDS
 
 
 async def test_a_create_that_fails_in_its_grace_is_looked_up(fake_sdk: FakeCloud) -> None:

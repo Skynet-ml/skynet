@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 from collections.abc import Iterator, Mapping
@@ -188,12 +189,13 @@ def _state(database: Engine) -> str:
         The operation state.
     """
     with Session(database) as session:
-        return session.scalar(select(ExecutionOperationModel)).state
+        return session.scalars(select(ExecutionOperationModel)).one().state
 
 
 def test_sail_has_a_usage_adapter() -> None:
     """Let hosted Skynet offer Sail: the metering registry finds its adapter."""
     adapter = usage_adapter("sail")
+    assert adapter is not None
     assert adapter is sail_usage.USAGE
     assert adapter.name == "sail"
 
@@ -267,6 +269,7 @@ def test_reserve_then_settle_charges_sails_reported_cost(database: Engine) -> No
     assert runtime.service.get_operation(reservation.operation.id, "alice").actual_cents == Decimal("2.20")
     assert reservation.operation.id not in runtime._pinned
     assert {read[0] for read in spend.reads} == {"sb-1"}
+    assert reservation.create_sent_at is not None
     assert spend.reads[0][1] < reservation.create_sent_at
     # The line first shows at the second read; equal reads 15 and 30 s
     # apart are not enough, so the settle waits until it held for 60 s.
@@ -410,6 +413,22 @@ def test_a_spend_that_never_arrives_stays_pending(database: Engine) -> None:
         reservation.settle()
     assert _state(database) == "pending"
     assert spend.now <= sail_usage.SPEND_DEADLINE_SECONDS
+
+
+def test_a_short_budget_ends_the_spend_wait_with_its_last_read(database: Engine) -> None:
+    """Stop the spend wait so the last read ends inside the caller's budget.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    spend = FakeSpend(SPEND)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    with pytest.raises(UsagePendingError, match="final spend"):
+        asyncio.run(reservation.final_spend(budget=100.0))
+    # 100 s less the 30 s read timeout leaves room for the first read only.
+    assert len(spend.reads) == 1
+    assert spend.now + sail_usage._SPEND_TIMEOUT_SECONDS <= 100.0
 
 
 def test_a_line_that_never_settles_stays_pending_with_its_last_read(database: Engine) -> None:

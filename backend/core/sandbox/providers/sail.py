@@ -81,6 +81,9 @@ CREATE_GRACE = 30.0
 # The SDK timeout should end a command first; this margin only catches a
 # hung SDK call.
 EXEC_GRACE = 30.0
+# A session close gives one stop 240 s (``_ASYNC_CLOSE_BUDGET_SECONDS`` in the
+# blackbox sandbox runtime). The teardown keeps 15 s of it for the ledger calls.
+TEARDOWN_SECONDS = 225.0
 OUTPUT_BUFFER_BYTES = 64 * 1024 * 1024
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
 _TIMEOUT_EXIT_CODE = 124
@@ -197,6 +200,44 @@ def _on_late_create(create: asyncio.Future[Any]) -> None:
     terminate = asyncio.ensure_future(_bounded(create.result().terminate.aio(), "terminate a late Sailbox"))
     _LATE_TASKS.add(terminate)
     terminate.add_done_callback(_LATE_TASKS.discard)
+
+
+def _release_late(reserving: asyncio.Future[Any]) -> None:
+    """Release the hold of a reserve that outlives its teardown, when it arrives.
+
+    The create starts only after the reserve returns, so no box exists for
+    this hold.
+
+    Args:
+        reserving: The reserve call. It can still run or be done already.
+    """
+    _LATE_TASKS.add(reserving)
+    reserving.add_done_callback(_on_late_reserve)
+
+
+def _on_late_reserve(reserving: asyncio.Future[Any]) -> None:
+    """Start the release call for the hold of a late reserve.
+
+    Args:
+        reserving: The finished reserve call.
+    """
+    _LATE_TASKS.discard(reserving)
+    if reserving.cancelled() or reserving.exception() is not None:
+        return
+    release = asyncio.ensure_future(asyncio.to_thread(reserving.result().release, refused=False))
+    _LATE_TASKS.add(release)
+    release.add_done_callback(_on_late_release)
+
+
+def _on_late_release(release: asyncio.Future[Any]) -> None:
+    """Log a failed release of a late hold, which then stays for the ledger sweep.
+
+    Args:
+        release: The finished release call.
+    """
+    _LATE_TASKS.discard(release)
+    if not release.cancelled() and release.exception() is not None:
+        logger.warning("Sail could not release a late hold: %s", type(release.exception()).__name__)
 
 
 def _egress_policy(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> Any:
@@ -372,8 +413,9 @@ class SailEnvironment(SandboxEnvironment):
         spec = self.spec
         limit = self._start_limit
         await self._reserve()
+        deadline = asyncio.timeout(limit)
         try:
-            async with asyncio.timeout(limit) as deadline:
+            async with deadline:
                 with _mapped("find the Sail app"):
                     app = await App.find.aio(APP_NAME, mint_if_missing=True)
                 with _mapped("prepare the Sailbox"):
@@ -395,10 +437,10 @@ class SailEnvironment(SandboxEnvironment):
                     with _mapped("create the Sailbox"):
                         # Inside the mapping, so an argument error that the SDK
                         # raises before any request is seen as a refused create.
-                        self._create_task = asyncio.ensure_future(Sailbox.create.aio(**params))
+                        create = self._create_task = asyncio.ensure_future(Sailbox.create.aio(**params))
                         # The shield keeps the create running through a cancel,
                         # so the grace below can still get the box handle.
-                        self._keep(await asyncio.shield(self._create_task))
+                        self._keep(await asyncio.shield(create))
                 except asyncio.CancelledError:
                     await self._settle_create()
                     raise
@@ -409,7 +451,7 @@ class SailEnvironment(SandboxEnvironment):
                 if self._usage is not None:
                     await self._confirm(self._usage)
         except TimeoutError:
-            if not deadline.expired():
+            if limit is None or not deadline.expired():
                 raise
             raise StartTimeoutError(limit) from None
 
@@ -659,7 +701,14 @@ class SailEnvironment(SandboxEnvironment):
             raise settle_error
 
     async def _teardown(self) -> None:
-        """End a running start, terminate the Sailbox, then settle its reservation."""
+        """End a running start, terminate the Sailbox, then settle its reservation.
+
+        The start and reserve waits share ``CREATE_GRACE + STOP_TIMEOUT``, and
+        the whole teardown stays inside ``TEARDOWN_SECONDS``.
+        """
+        loop = asyncio.get_running_loop()
+        end = loop.time() + TEARDOWN_SECONDS
+        waits_end = loop.time() + CREATE_GRACE + STOP_TIMEOUT
         starting = self._starting
         if starting is not None and not starting.done():
             # A stop during the start: end the create first, so its box handle
@@ -668,30 +717,33 @@ class SailEnvironment(SandboxEnvironment):
             # grace before the handle arrives.
             if not self._settling:
                 starting.cancel()
-            with contextlib.suppress(BaseException):
-                await asyncio.wait_for(asyncio.shield(starting), CREATE_GRACE + STOP_TIMEOUT)
+            await asyncio.wait({starting}, timeout=waits_end - loop.time())
         billing, self._billing_call = self._billing_call, None
         if billing is not None:
-            # A reserve can wait longer than the start grace; a reservation
-            # that arrives after the start ended must still be released.
-            with contextlib.suppress(BaseException):
-                await asyncio.shield(billing)
-            if self._usage is None and not billing.cancelled() and billing.exception() is None:
+            # The reserve thread cannot be cancelled. A hold that arrives after
+            # this wait, or after a cancel of the teardown, is released later.
+            try:
+                await asyncio.wait({billing}, timeout=max(0.0, waits_end - loop.time()))
+            finally:
+                if not billing.done():
+                    _release_late(billing)
+            if billing.done() and self._usage is None and not billing.cancelled() and billing.exception() is None:
                 self._usage = billing.result()
         sailbox, self._sailbox = self._sailbox, None
         if sailbox is not None:
-            boxes = _JOB_BOXES.get(self._job_id) if self._job_id is not None else None
-            if boxes is not None:
+            job_id = self._job_id
+            boxes = _JOB_BOXES.get(job_id) if job_id is not None else None
+            if job_id is not None and boxes is not None:
                 boxes.discard(self)
                 if not boxes:
-                    del _JOB_BOXES[self._job_id]
+                    del _JOB_BOXES[job_id]
             self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
         try:
-            await self._settle(sailbox)
+            await self._settle(sailbox, end)
         finally:
             self._box_gone.set()
 
-    async def _settle(self, sailbox: Any) -> None:
+    async def _settle(self, sailbox: Any, end: float) -> None:
         """Settle, release or keep pending the reservation of a protected box.
 
         A box that did not terminate can still run and spend, so its hold
@@ -701,6 +753,7 @@ class SailEnvironment(SandboxEnvironment):
 
         Args:
             sailbox: The SDK handle of the box, or ``None`` when no box came back.
+            end: The event loop time when the teardown must end.
         """
         usage, self._usage = self._usage, None
         if usage is None:
@@ -719,7 +772,7 @@ class SailEnvironment(SandboxEnvironment):
                 raise UsagePendingError("The Sailbox did not terminate, so its usage stays pending.")
             self._box_gone.set()
             try:
-                spend = await usage.final_spend()
+                spend = await usage.final_spend(budget=end - asyncio.get_running_loop().time())
             except BaseException:
                 await asyncio.to_thread(usage.pending)
                 raise
@@ -752,7 +805,8 @@ class SailEnvironment(SandboxEnvironment):
             raise UsagePendingError("Sail could not list boxes after a failed create, so the hold stays.") from error
         if not found:
             return None
-        results = [await _bounded(box.terminate.aio(), "terminate the Sailbox") for box in found]
+        # Together, so several boxes still take one STOP_TIMEOUT.
+        results = await asyncio.gather(*(_bounded(box.terminate.aio(), "terminate the Sailbox") for box in found))
         self._terminated = all(results)
         if len(found) > 1:
             await asyncio.to_thread(usage.pending)

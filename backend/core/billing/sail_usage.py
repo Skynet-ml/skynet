@@ -507,11 +507,15 @@ class SailUsageReservation:
             raise UsagePendingError("The Sail create returned no box identity to settle.")
         return self.sailbox_id, self.create_sent_at - _WINDOW_MARGIN
 
-    async def final_spend(self) -> dict[str, Any]:
+    async def final_spend(self, budget: float | None = None) -> dict[str, Any]:
         """Poll the spend report until the box's line stays the same for a minute.
 
         Only the short spend reads run in threads; the waits do not hold one.
         A 429 or 5xx answer, or a transport error, is read again later.
+
+        Args:
+            budget: The seconds that the caller can still wait, including the
+                last read; ``None`` waits up to ``SPEND_DEADLINE_SECONDS``.
 
         Returns:
             The box's final spend line.
@@ -522,7 +526,11 @@ class SailUsageReservation:
             httpx.HTTPStatusError: When Sail refuses the read for good.
         """
         sailbox_id, since = self._identity()
-        give_up = self._clock() + SPEND_DEADLINE_SECONDS
+        wait_for = SPEND_DEADLINE_SECONDS
+        if budget is not None:
+            # The last read starts before the deadline and can take its timeout.
+            wait_for = min(wait_for, budget - _SPEND_TIMEOUT_SECONDS)
+        give_up = self._clock() + wait_for
         wait = SPEND_DELAY_SECONDS
         previous: dict[str, Any] | None = None
         first_seen = 0.0
