@@ -104,6 +104,10 @@ REATTACH_DELAY = 1.0
 LIFETIME_SLICE = 3600
 RENEW_LEAD = 300.0
 RENEW_RETRY = 30.0
+# The longest wait for one set_timeout call. A protected box funds this much
+# beyond each new timeout, because E2B starts the timeout when the call
+# arrives, which can be up to this long after it is sent.
+RENEW_CALL_TIMEOUT = 30.0
 TIMEOUT_EXIT_CODE = 124
 CAPACITY_STATUSES = frozenset({429, 502, 503})
 
@@ -164,6 +168,24 @@ def _is_capacity_error(error: BaseException) -> bool:
         return True
     status = getattr(error, "status_code", None)
     return SandboxException is not None and isinstance(error, SandboxException) and status in CAPACITY_STATUSES
+
+
+def _is_rate_limit(error: BaseException) -> bool:
+    """Tell whether a create error is a rate-limit refusal, which opens no box.
+
+    Args:
+        error: The error of the create call.
+
+    Returns:
+        True for a rate-limit error or a 429 answer.
+    """
+    if RateLimitException is not None and isinstance(error, RateLimitException):
+        return True
+    return (
+        SandboxException is not None
+        and isinstance(error, SandboxException)
+        and getattr(error, "status_code", None) == 429
+    )
 
 
 def _is_dispatch_retryable(error: BaseException) -> bool:
@@ -261,6 +283,11 @@ class E2BEnvironment(SandboxEnvironment):
         self._usage: Any | None = None
         self._billing_call: asyncio.Future[Any] | None = None
         self._settle_error: Exception | None = None
+        # The earliest time the box's current E2B timeout can end, and the
+        # budget refusal that stopped the renewals (SKY-587 for Vercel).
+        self._funded_until: float | None = None
+        self._budget_stop: BudgetReached | None = None
+        self._create_sent_at: float | None = None
         self._pacing = pacing
         self._at_capacity = at_capacity
         self._clock = clock or SYSTEM_CLOCK
@@ -323,15 +350,18 @@ class E2BEnvironment(SandboxEnvironment):
                 clock=self._clock,
             )
         first_slice = self._first_slice()
+        # E2B starts the timeout when the create arrives, never before it was sent.
+        self._funded_until = self._create_sent_at + first_slice
         if first_slice < self.spec.lifetime_seconds:
             deadline = self._clock.monotonic() + self.spec.lifetime_seconds
-            self._renewer = asyncio.create_task(self._renew_loop(self._clock.monotonic() + first_slice, deadline))
+            self._renewer = asyncio.create_task(self._renew_loop(self._funded_until, deadline))
 
     @contextlib.asynccontextmanager
     async def _reserve(self) -> AsyncIterator[Any | None]:
         """Reserve the first lifetime slice of a protected box once.
 
-        A capacity retry reuses the reservation; the teardown settles it.
+        A protected box retries only a rate-limit refusal, which opens no
+        box, so the retry reuses the reservation; the teardown settles it.
 
         Yields:
             The usage reservation, or ``None`` for an unprotected box.
@@ -360,14 +390,16 @@ class E2BEnvironment(SandboxEnvironment):
 
         The template sets the size of an E2B box, so the request funds the
         spec's CPU count and memory, or E2B's largest memory when the spec
-        sets none. The reservation checks the created box against it.
+        sets none. The reservation checks the created box against it. The
+        runtime counts from before the create call and the box's timeout from
+        when the create arrives, so the lifetime adds the create time limit.
 
         Returns:
             The first lifetime slice, the CPU count, the memory and the template.
         """
         resources = self.spec.resources
         return {
-            "lifetime_ms": self._first_slice() * 1000,
+            "lifetime_ms": math.ceil((self._first_slice() + CREATE_TIMEOUT) * 1000),
             "vcpus": resources.cpus,
             "memory_mb": resources.memory_mb or MAX_MEMORY_MB,
             "template": self.spec.image,
@@ -430,15 +462,17 @@ class E2BEnvironment(SandboxEnvironment):
             usage: The usage reservation, or ``None`` for an unprotected box.
 
         Raises:
-            ProviderAtCapacityError: E2B answered 429, 502 or 503.
+            ProviderAtCapacityError: E2B answered 429, 502 or 503. A protected
+                box waits only after a rate limit.
             StartTimeoutError: The create did not finish in time.
             UsagePendingError: The box is larger than its funding.
         """
         self._create_dispatched = True
+        self._create_sent_at = self._clock.monotonic()
         if usage is not None:
-            # A capacity refusal opens no box, so the runtime counts from the
-            # last create call.
-            usage.start(self._clock.monotonic())
+            # Only a rate-limit refusal is retried for a protected box, and it
+            # opens no box, so the runtime counts from the last create call.
+            usage.start(self._create_sent_at)
         try:
             async with asyncio.timeout(CREATE_TIMEOUT) as deadline:
                 self._box = await self.sandbox_cls.create(**self._create_options())
@@ -449,7 +483,10 @@ class E2BEnvironment(SandboxEnvironment):
         except Exception as error:
             if _is_request_timeout(error):
                 raise StartTimeoutError(CREATE_TIMEOUT) from error
-            if _is_capacity_error(error):
+            # A 502 or 503 can come after E2B opened the box. A protected box
+            # must not wait for capacity while that box runs unmetered, so it
+            # fails the start; the teardown sweeps the box and settles.
+            if _is_capacity_error(error) and (usage is None or _is_rate_limit(error)):
                 raise ProviderAtCapacityError(f"E2B has no capacity: {type(error).__name__}") from error
             raise
         if usage is not None:
@@ -476,15 +513,22 @@ class E2BEnvironment(SandboxEnvironment):
             if not await self._fund(seconds, expires_at):
                 return
             await self._pace_read()
+            seconds = self._funded_seconds(seconds)
+            if seconds < 1:
+                # The read pacing used up the funded time; fund again from now.
+                continue
+            sent = self._clock.monotonic()
             try:
-                await box.set_timeout(seconds)
+                async with asyncio.timeout(RENEW_CALL_TIMEOUT):
+                    await box.set_timeout(seconds)
             except Exception as error:
                 logger.warning("E2B sandbox %s did not extend: %s", self.name, type(error).__name__)
                 if self._clock.monotonic() + RENEW_RETRY >= expires_at:
                     return
                 await self._clock.sleep(RENEW_RETRY)
                 continue
-            expires_at = self._clock.monotonic() + seconds
+            expires_at = sent + seconds
+            self._funded_until = expires_at
 
     async def _fund(self, seconds: int, expires_at: float) -> bool:
         """Fund a new E2B timeout of a protected box before the renew call.
@@ -495,13 +539,13 @@ class E2BEnvironment(SandboxEnvironment):
 
         Returns:
             True when the new timeout is funded or the box is unprotected.
-            False when the budget refused it; the box then ends at its
-            current timeout.
+            False when the funding failed; the box then ends at its current
+            timeout, and a budget refusal is kept for the next box call.
         """
         usage = self._usage
         if usage is None or usage.started_at is None:
             return True
-        lifetime_ms = math.ceil((self._clock.monotonic() - usage.started_at + seconds) * 1000)
+        lifetime_ms = math.ceil((self._clock.monotonic() - usage.started_at + seconds + RENEW_CALL_TIMEOUT) * 1000)
         if lifetime_ms <= usage.lifetime_ms:
             return True
         deadline = time.monotonic() + max(0.0, expires_at - RENEW_LEAD / 2 - self._clock.monotonic())
@@ -509,8 +553,28 @@ class E2BEnvironment(SandboxEnvironment):
             await self._billing(usage.extend, lifetime_ms, deadline=deadline)
         except (Exception, BudgetReached) as error:
             logger.warning("E2B sandbox %s slice was not funded: %s", self.name, type(error).__name__)
+            if isinstance(error, BudgetReached):
+                self._budget_stop = error
             return False
         return True
+
+    def _funded_seconds(self, seconds: int) -> int:
+        """Cut a new timeout so that it ends inside the funded lifetime.
+
+        The read pacing runs after the funding, so it can use up part of the
+        funded time.
+
+        Args:
+            seconds: The wanted timeout, counted from now.
+
+        Returns:
+            The timeout to ask for, or less than 1 when no funded time is left.
+        """
+        usage = self._usage
+        if usage is None or usage.started_at is None:
+            return seconds
+        left = usage.started_at + usage.lifetime_ms / 1000 - RENEW_CALL_TIMEOUT - self._clock.monotonic()
+        return min(seconds, math.floor(left))
 
     async def stop(self) -> None:
         """Stop the box once and settle its reservation. Safe to call again.
@@ -642,10 +706,33 @@ class E2BEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The box is not running.
+            BudgetReached: The budget refused the next slice and the funded
+                timeout is over.
         """
         if self._box is None or self._stop_task is not None:
             raise SandboxInfraError("The E2B sandbox is not running.")
+        self._raise_budget_stop()
         return self._box
+
+    def _raise_budget_stop(self, error: BaseException | None = None) -> None:
+        """Raise the stored budget refusal once the funded timeout is over.
+
+        E2B ends the box at its last funded timeout, so a box call after that
+        fails; the run must see a budget stop, not an infra error (SKY-587).
+
+        Args:
+            error: The box call error that this budget stop explains, if any.
+
+        Raises:
+            BudgetReached: The budget refused the next slice and the funded
+                timeout is over.
+        """
+        if (
+            self._budget_stop is not None
+            and self._funded_until is not None
+            and self._clock.monotonic() >= self._funded_until
+        ):
+            raise BudgetReached(str(self._budget_stop)) from error
 
     async def _pace_read(self) -> None:
         """Wait for the read bucket of the provider, when there is one."""
@@ -681,6 +768,8 @@ class E2BEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The box is not running, or the command did not
                 start or its connection could not reattach.
+            BudgetReached: The box ended on its last funded timeout after a
+                budget refusal.
         """
         box = self._require_box()
         sink = on_output or current_output_sink()
@@ -708,24 +797,28 @@ class E2BEnvironment(SandboxEnvironment):
                 sink("stderr", text)
 
         with self.timings.phase("run"):
-            handle = await self._dispatch(
-                box,
-                command,
-                cwd=cwd,
-                envs=dict(env or {}),
-                user="root" if sudo else None,
-                on_stdout=on_stdout,
-                on_stderr=on_stderr,
-            )
             try:
-                async with asyncio.timeout(timeout_sec) as deadline:
-                    exit_code = await self._wait(box, handle, on_stdout, on_stderr)
-            except TimeoutError:
-                if not deadline.expired():
-                    raise
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(box.commands.kill(handle.pid), STOP_TIMEOUT)
-                return ExecResult(TIMEOUT_EXIT_CODE, "".join(stdout), "".join(stderr), timed_out=True)
+                handle = await self._dispatch(
+                    box,
+                    command,
+                    cwd=cwd,
+                    envs=dict(env or {}),
+                    user="root" if sudo else None,
+                    on_stdout=on_stdout,
+                    on_stderr=on_stderr,
+                )
+                try:
+                    async with asyncio.timeout(timeout_sec) as deadline:
+                        exit_code = await self._wait(box, handle, on_stdout, on_stderr)
+                except TimeoutError:
+                    if not deadline.expired():
+                        raise
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(box.commands.kill(handle.pid), STOP_TIMEOUT)
+                    return ExecResult(TIMEOUT_EXIT_CODE, "".join(stdout), "".join(stderr), timed_out=True)
+            except Exception as error:
+                self._raise_budget_stop(error)
+                raise
         return ExecResult(exit_code, "".join(stdout), "".join(stderr))
 
     async def _dispatch(self, box: Any, command: str, **options: Any) -> Any:
@@ -810,11 +903,17 @@ class E2BEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The box is not running.
+            BudgetReached: The box ended on its last funded timeout after a
+                budget refusal.
         """
         box = self._require_box()
         for path, text in files.items():
             await self._pace_read()
-            await box.files.write(path, text)
+            try:
+                await box.files.write(path, text)
+            except Exception as error:
+                self._raise_budget_stop(error)
+                raise
 
     async def download_file(self, path: str) -> str | None:
         """Read one UTF-8 text file from the box.
@@ -827,12 +926,15 @@ class E2BEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The box is not running.
+            BudgetReached: The box ended on its last funded timeout after a
+                budget refusal.
         """
         box = self._require_box()
         await self._pace_read()
         try:
             return await box.files.read(path, format="text")
         except Exception as error:
+            self._raise_budget_stop(error)
             if NotFoundException is not None and isinstance(error, NotFoundException):
                 return None
             raise
@@ -845,7 +947,13 @@ class E2BEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The box is not running.
+            BudgetReached: The box ended on its last funded timeout after a
+                budget refusal.
         """
         box = self._require_box()
         await self._pace_read()
-        await box.update_network(network_update(policy))
+        try:
+            await box.update_network(network_update(policy))
+        except Exception as error:
+            self._raise_budget_stop(error)
+            raise

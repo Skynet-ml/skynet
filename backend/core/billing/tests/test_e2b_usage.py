@@ -165,6 +165,29 @@ def test_unconfirmed_kill_charges_the_whole_funded_lifetime(database: Engine) ->
     assert _operation(reservation).actual_cents == Decimal("13.32")
 
 
+def test_settle_prices_the_created_box_not_the_funded_size(database: Engine) -> None:
+    """Charge the real box size when the template is smaller than the funding."""
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
+    reservation.start(0.0)
+    USAGE.confirm(reservation, _info(cpu_count=1, memory_mb=1024))
+    reservation.stopped(3600.0, confirmed=True)
+    USAGE.settle(reservation)
+    # One hour at 1 vCPU and 1 GiB: 3600 * (0.000014 + 0.0000045) USD = 6.66 cents.
+    assert _operation(reservation).actual_cents == Decimal("6.66")
+
+
+@pytest.mark.parametrize("missing", ["lifetime_ms", "vcpus", "memory_mb"])
+def test_reserve_refuses_a_request_with_a_missing_field(missing: str) -> None:
+    """Refuse a request with a missing field as unpriced, before any ledger call.
+
+    Args:
+        missing: The request field to leave out.
+    """
+    request = {key: value for key, value in REQUEST.items() if key != missing}
+    with pytest.raises(UnpricedOperationError):
+        USAGE.reserve(None, request, operation_key="box")
+
+
 def test_box_that_never_started_settles_at_zero(database: Engine) -> None:
     """Release the whole hold when no create call went out."""
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")

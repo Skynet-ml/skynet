@@ -1012,7 +1012,7 @@ async def test_protected_box_reserves_before_create_and_settles_after_kill() -> 
         assert (await env.exec("true")).ok
         sandbox_id = _the_box().sandbox_id
     (usage,) = made.made
-    assert usage.request == {"lifetime_ms": 300_000, "vcpus": 2, "memory_mb": 2048, "template": None}
+    assert usage.request == {"lifetime_ms": 420_000, "vcpus": 2, "memory_mb": 2048, "template": None}
     assert usage.operation_key == "op-1"
     assert usage.events == [("reserve", 0), ("start", 0), ("confirm", sandbox_id), ("stopped", True, 0), ("settle",)]
     assert FakeBox.boxes == {}
@@ -1027,8 +1027,8 @@ async def test_spec_without_memory_funds_the_largest_e2b_memory() -> None:
 
 
 async def test_capacity_retries_reuse_one_reservation() -> None:
-    """Keep one reservation across capacity waits and count from the last create."""
-    FakeBox.create_errors = [_status_error(503), _status_error(503)]
+    """Keep one reservation across rate-limit waits and count from the last create."""
+    FakeBox.create_errors = [_status_error(429), e2b.RateLimitException("429")]
     made = UsageFactory()
     async with _protected(made):
         pass
@@ -1039,6 +1039,24 @@ async def test_capacity_retries_reuse_one_reservation() -> None:
         ("start", 1),
         ("start", 2),
     ]
+
+
+@pytest.mark.parametrize("status", [502, 503])
+async def test_protected_box_fails_the_start_on_a_gateway_error(status: int) -> None:
+    """Fail the start on a 502 or 503, so the teardown sweeps a box E2B opened and settles.
+
+    Args:
+        status: The gateway status that E2B answers.
+    """
+    FakeBox.leak_on_error = True
+    FakeBox.create_errors = [_status_error(status)]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(e2b.SandboxException):
+        await env.start()
+    assert len(FakeBox.create_calls) == 1
+    assert FakeBox.boxes == {}
+    assert made.made[0].events[-2:] == [("stopped", True, 0), ("settle",)]
 
 
 async def test_failed_create_still_settles() -> None:
@@ -1128,10 +1146,11 @@ async def test_renew_loop_funds_each_extension_before_it_asks_e2b() -> None:
         await asyncio.wait_for(env._renewer, 1)
         (usage,) = made.made
         extends = [event[1] for event in usage.events if event[0] == "extend"]
-        assert usage.request["lifetime_ms"] == e2b.LIFETIME_SLICE * 1000
-        # Each renewal funds the time already used plus the new timeout.
+        # The first slice also funds the create time limit.
+        assert usage.request["lifetime_ms"] == (e2b.LIFETIME_SLICE + e2b.CREATE_TIMEOUT) * 1000
+        # Each renewal funds the time already used, the new timeout and the call time limit.
         assert box.timeouts == [e2b.LIFETIME_SLICE, 600]
-        assert extends == [6_900_000, 2 * 3600 * 1000]
+        assert extends == [6_930_000, 7_230_000]
     finally:
         await env.stop()
 
@@ -1167,3 +1186,79 @@ async def test_budget_refusal_stops_the_renew_loop() -> None:
     finally:
         await env.stop()
     assert made.made[0].events[-1] == ("settle",)
+
+
+async def _refused_box(made: UsageFactory) -> e2b.E2BEnvironment:
+    """Start a two-hour protected box whose first extension the budget refuses.
+
+    Args:
+        made: The usage factory.
+
+    Returns:
+        The started environment, with its renew loop ended.
+    """
+    env = _protected(made, lifetime_seconds=2 * 3600)
+    original = UsageFactory.__call__
+
+    def refusing(self: UsageFactory, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve a box whose extensions the budget refuses.
+
+        Args:
+            self: The factory.
+            budget: The budget runtime.
+            request: The funded request.
+            operation_key: The box's logical identity.
+
+        Returns:
+            The fake reservation.
+        """
+        usage = original(self, budget, request, operation_key=operation_key)
+        usage.extend_error = BudgetReached("no funds")
+        return usage
+
+    env._usage_factory = refusing.__get__(made)
+    await env.start()
+    await asyncio.wait_for(env._renewer, 1)
+    return env
+
+
+async def test_budget_refusal_raises_budget_reached_after_the_funded_timeout() -> None:
+    """Raise BudgetReached, not an infra error, once the last funded timeout is over."""
+    made = UsageFactory()
+    env = await _refused_box(made)
+    try:
+        assert (await env.exec("true")).ok
+        env._clock.now = e2b.LIFETIME_SLICE
+        with pytest.raises(BudgetReached):
+            await env.exec("true")
+        with pytest.raises(BudgetReached):
+            await env.download_file("/tmp/x")
+    finally:
+        await env.stop()
+
+
+async def test_box_error_after_the_funded_timeout_raises_budget_reached() -> None:
+    """Turn a box call error into BudgetReached when the box ended on a budget stop."""
+    made = UsageFactory()
+    env = await _refused_box(made)
+    clock = env._clock
+
+    async def expired(*args: Any, **kwargs: Any) -> Any:
+        """Fail as a box that E2B ended at its timeout, after the funded time.
+
+        Args:
+            *args: The dispatch arguments.
+            **kwargs: The dispatch keywords.
+
+        Raises:
+            SandboxInfraError: Always.
+        """
+        clock.now = e2b.LIFETIME_SLICE
+        raise SandboxInfraError("sandbox not found")
+
+    env._dispatch = expired
+    try:
+        with pytest.raises(BudgetReached):
+            await env.exec("true")
+    finally:
+        await env.stop()

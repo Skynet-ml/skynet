@@ -110,15 +110,17 @@ class E2BUsageReservation:
 
         Raises:
             BudgetConflictError: When the lease slice was reserved for another request.
+            UnpricedOperationError: When the request has no bounded lifetime or size.
             OperationCompletedError: When the box operation already settled.
             UsagePendingError: When another caller already dispatched the box.
         """
+        # The quote checks every field first, so a missing one is unpriced, not a KeyError.
+        self.quote = quote_e2b_sandbox(request)
         self.runtime = runtime
         self.request = dict(request)
         self.vcpus = request["vcpus"]
         self.memory_mb = request["memory_mb"]
         self.lifetime_ms = request["lifetime_ms"]
-        self.quote = quote_e2b_sandbox(request)
         self.box = box_tag(operation_key)
         if reserved is None:
             self.operation = runtime.reserve(
@@ -145,6 +147,8 @@ class E2BUsageReservation:
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This sandbox was already dispatched; reconcile it by hand.")
         self.sandbox_id: str | None = None
+        self.box_vcpus: int | None = None
+        self.box_memory_mb: int | None = None
         self.started_at: float | None = None
         self.stopped_at: float | None = None
         self.stop_confirmed = False
@@ -158,7 +162,9 @@ class E2BUsageReservation:
         self.started_at = at
 
     def confirm(self, info: Any) -> None:
-        """Bind the created box and check that it fits its funded size.
+        """Bind the created box, keep its real size and check that it fits its funding.
+
+        The settle prices the real size, which can be smaller than the funded one.
 
         Args:
             info: The SDK ``SandboxInfo`` of the created box.
@@ -170,6 +176,8 @@ class E2BUsageReservation:
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, info.sandbox_id)
         if info.cpu_count > self.vcpus or info.memory_mb > self.memory_mb:
             raise UsagePendingError("The E2B template is larger than the funded CPU and memory size.")
+        self.box_vcpus = info.cpu_count
+        self.box_memory_mb = info.memory_mb
 
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
         """Fund the box up to ``lifetime_ms`` before E2B is asked to keep it alive that long.
@@ -241,7 +249,10 @@ class E2BUsageReservation:
             except (KeyError, UnpricedOperationError) as error:
                 raise UsagePendingError("The E2B admission has no usable price snapshot.") from error
             seconds = self.billed_seconds()
-            usd = _usd(seconds, self.vcpus, self.memory_mb, cpu_rate, memory_rate)
+            # An unconfirmed box has no known size, so it pays the funded size.
+            vcpus = self.box_vcpus if self.box_vcpus is not None else self.vcpus
+            memory_mb = self.box_memory_mb if self.box_memory_mb is not None else self.memory_mb
+            usd = _usd(seconds, vcpus, memory_mb, cpu_rate, memory_rate)
             charge = vercel_charge_policy(snapshot).convert(usd)
             # Kill latency or a create that started before the box can make
             # the measured time pass the funded lifetime; the charge must stay
@@ -259,6 +270,8 @@ class E2BUsageReservation:
                     "source": _PRICING_URL,
                     "sandbox_id": self.sandbox_id,
                     "billed_seconds": seconds,
+                    "vcpus": vcpus,
+                    "memory_mb": memory_mb,
                     "stop_confirmed": self.stop_confirmed,
                     "provider_usd": str(usd),
                 },
