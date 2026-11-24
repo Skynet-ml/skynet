@@ -19,9 +19,13 @@ Adapted from Harbor 0.25.0 (Apache-2.0), langsmith.py. Changes:
   cannot change after start.
 
 With a budget the box is protected (SKY-552). It reserves its whole lifetime
-before the create call, confirms the created size, stops itself when the
-lifetime ends, and settles the measured time after the delete, also after a
-failed or cancelled start. The box has no keepalive, so it never extends.
+before the create call, confirms the created size, and stops itself when the
+lifetime ends. It settles the measured time only on proof that the box is
+gone: a get by name returns 404 after the delete, and, when the create had
+no answer, only after the time in which that create can still land. A
+create that never left, or that the server refused with no box by its name,
+releases the hold. Any other case keeps the hold pending. The box has no
+keepalive, so it never extends.
 
 The factory refuses this provider in production (SKY-406 D1).
 """
@@ -37,6 +41,7 @@ import logging
 import math
 import os
 import re
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any, ClassVar
@@ -119,6 +124,12 @@ _MIN_COMMAND_TTL_SECONDS = 600
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
 _TIMEOUT_EXIT_CODE = 124
 _DELETE_TIMEOUT_SECONDS = 60
+# The SDK gives a create call the server timeout plus 30 s, so a create without
+# an answer can still make a box until a little after the server timeout.
+_CREATE_LANDING_GRACE_SECONDS = 60
+_GONE_POLL_SECONDS = 2
+# The server answered these before it made a box, unless a lookup finds one.
+_REFUSED_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
 
 
 class LangSmithEnvironment(SandboxEnvironment):
@@ -201,6 +212,9 @@ class LangSmithEnvironment(SandboxEnvironment):
         self._settle_error: Exception | None = None
         self._expiry: asyncio.Task[None] | None = None
         self._create_running = False
+        # None until the create call leaves; then the instant after which a 404 proves the box gone.
+        self._proof_after: float | None = None
+        self._refused: int | None = None
         self._api_key = api_key
         self._api_url = api_url or os.environ.get(_API_URL_ENV) or None
         self._snapshot = snapshot or spec.image
@@ -255,36 +269,66 @@ class LangSmithEnvironment(SandboxEnvironment):
         # A stop() while this is set leaves the settle to the start cleanup,
         # because the box can still appear after that stop's delete.
         self._create_running = True
+        self._proof_after = None
+        self._refused = None
+        deadline: asyncio.Timeout | None = None
+        error: BaseException | None = None
         try:
             await self._reserve()
             if self._client is not client:
                 raise SandboxInfraError("The LangSmith sandbox stopped during start.")
             async with asyncio.timeout(self._startup_timeout) as deadline:
                 with _mapped_errors(start_timeout=self._startup_timeout):
-                    box = await client.create_sandbox(**self._create_kwargs())
+                    box = await self._create(client)
             if self._usage is not None and self._client is client:
-                await asyncio.shield(asyncio.to_thread(self._usage.confirm_created, box))
-        except TimeoutError:
-            await self._stop_failed_start(client)
-            if not deadline.expired():
-                raise
-            raise StartTimeoutError(self._startup_timeout) from None
+                # The confirm thread cannot be cancelled; the cleanup must see its mismatch flag.
+                confirming = asyncio.ensure_future(asyncio.to_thread(self._usage.confirm_created, box))
+                await _wait_through_cancels(confirming)
+                confirming.result()
+        except TimeoutError as exc:
+            # Raised after this block, so a local timeout is not its context.
+            error = StartTimeoutError(self._startup_timeout) if deadline is not None and deadline.expired() else exc
         except BaseException as exc:
-            stopped = self._client is not client
-            await self._stop_failed_start(client)
+            error = exc
             # A stop() closes the client, so the create can fail with any error,
             # also a raw "client has been closed" RuntimeError.
-            if stopped and isinstance(exc, Exception):
-                raise SandboxInfraError("The LangSmith sandbox stopped during start.") from exc
-            raise
-        if self._client is not client:
-            await self._stop_failed_start(client)
-            raise SandboxInfraError("The LangSmith sandbox stopped during start.")
+            if self._client is not client and isinstance(exc, Exception):
+                error = SandboxInfraError("The LangSmith sandbox stopped during start.")
+                error.__cause__ = exc
+        if error is None and self._client is not client:
+            error = SandboxInfraError("The LangSmith sandbox stopped during start.")
+        if error is not None:
+            # The cleanup runs outside the except blocks, so the start error can carry its settle error as the cause.
+            settle_error = await self._stop_failed_start(client)
+            raise _with_settle_error(error, settle_error)
         self._create_running = False
         self._box = box
         type(self)._running.add(self)
         if self._usage is not None:
             self._expiry = asyncio.ensure_future(self._expire())
+
+    async def _create(self, client: Any) -> Any:
+        """Send the create call and record what its outcome proves about the box.
+
+        Args:
+            client: The client of this start.
+
+        Returns:
+            The SDK sandbox.
+        """
+        sent_at = time.monotonic()
+        self._proof_after = sent_at + self._startup_timeout + _CREATE_LANDING_GRACE_SECONDS
+        try:
+            box = await client.create_sandbox(**self._create_kwargs())
+        except Exception as exc:
+            status = _http_status(exc)
+            if status is not None:
+                # The server answered, so a delete after this sees every box it made.
+                self._proof_after = sent_at
+                self._refused = status if status in _REFUSED_STATUSES else None
+            raise
+        self._proof_after = sent_at
+        return box
 
     async def stop(self) -> None:
         """Delete the sandbox, settle its reservation and close the client.
@@ -325,26 +369,36 @@ class LangSmithEnvironment(SandboxEnvironment):
         await _wait_through_cancels(self._stop_task)
 
     async def _delete_and_settle(self, client: Any, name: str | None, *, settle: bool = True) -> None:
-        """Delete the sandbox by name, then settle its reservation.
+        """Delete the sandbox by name, then release or settle its reservation on proof.
 
         Args:
-            client: The SDK client; the delete closes it.
+            client: The SDK client; this closes it.
             name: The sandbox name.
             settle: False while a create still runs, because the box can
                 appear after this delete.
         """
-        gone = await _teardown(client, name)
-        usage = self._usage
-        if not settle or usage is None:
-            return
-        self._usage = None
-        if gone:
-            usage.mark_deleted()
+        usage = self._usage if settle else None
         try:
-            await asyncio.to_thread(usage.settle)
-        except Exception as error:
-            logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(error).__name__)
-            self._settle_error = error
+            if usage is None:
+                await _teardown(client, name)
+                return
+            self._usage = None
+            try:
+                if self._proof_after is None:
+                    await asyncio.to_thread(usage.release, "create-not-sent")
+                    return
+                if self._refused is not None and await _absent(client, name):
+                    await asyncio.to_thread(usage.release, f"create-refused-{self._refused}")
+                    return
+                if await _teardown(client, name, proof_after=self._proof_after):
+                    usage.mark_deleted()
+                await asyncio.to_thread(usage.settle)
+            except Exception as error:
+                logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(error).__name__)
+                self._settle_error = error
+        finally:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(client.aclose(), _DELETE_TIMEOUT_SECONDS)
 
     async def _reserve(self) -> None:
         """Reserve the whole lifetime of a protected box before its create call.
@@ -553,11 +607,14 @@ class LangSmithEnvironment(SandboxEnvironment):
             max_retries=0,
         )
 
-    async def _stop_failed_start(self, client: Any) -> None:
+    async def _stop_failed_start(self, client: Any) -> Exception | None:
         """Delete the sandbox of a start that failed or that a ``stop()`` ended.
 
         Args:
             client: The client of this start.
+
+        Returns:
+            The release or settle error, which the start error carries, or None.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the delete.
@@ -570,8 +627,9 @@ class LangSmithEnvironment(SandboxEnvironment):
             # made the sandbox, and it closed this client, so delete by name
             # again with a new client.
             await _wait_through_cancels(asyncio.ensure_future(self._delete_and_settle(self._new_client(), self._name)))
-        # The start error goes on to the caller; the reservation stays pending.
-        self._settle_error = None
+        # The start error carries the settle error, so a later stop() does not raise it again.
+        settle_error, self._settle_error = self._settle_error, None
+        return settle_error
 
     def _require_running(self) -> Any:
         """Return the SDK sandbox, or raise when the sandbox is stopped.
@@ -706,29 +764,115 @@ def _http_status(exc: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
-async def _teardown(client: Any, name: str | None) -> bool:
-    """Delete one sandbox by name and close the client, and log a failure instead of raising it.
+async def _teardown(client: Any, name: str | None, *, proof_after: float | None = None) -> bool:
+    """Delete one sandbox by name, and log a failure instead of raising it.
 
     Args:
         client: The SDK ``AsyncSandboxClient``.
         name: The sandbox name; ``None`` when no create call ran.
+        proof_after: For a protected box, the instant after which a 404 on a
+            get proves the box gone; ``None`` trusts the delete alone.
 
     Returns:
-        True when the sandbox is gone, False when the delete failed.
+        True when the sandbox is gone, False when the delete failed or no proof came.
+    """
+    if name is None:
+        return True
+    if not await _delete(client, name):
+        return False
+    if proof_after is None:
+        return True
+    return await _gone(client, name, proof_after)
+
+
+async def _delete(client: Any, name: str) -> bool:
+    """Send one delete by name, and log a failure instead of raising it.
+
+    Args:
+        client: The SDK ``AsyncSandboxClient``.
+        name: The sandbox name.
+
+    Returns:
+        True when the server deleted the box or has none by that name.
     """
     try:
-        if name is not None:
-            await asyncio.wait_for(client.delete_sandbox(name), _DELETE_TIMEOUT_SECONDS)
-        return True
+        await asyncio.wait_for(client.delete_sandbox(name), _DELETE_TIMEOUT_SECONDS)
     except ResourceNotFoundError:
         return True
     except Exception as exc:
         # Only the class name: SDK messages can carry request details.
         logger.warning("Could not delete the LangSmith sandbox %s: %s.", name, type(exc).__name__)
         return False
-    finally:
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(client.aclose(), _DELETE_TIMEOUT_SECONDS)
+    return True
+
+
+async def _gone(client: Any, name: str, proof_after: float) -> bool:
+    """Poll by name until a get sent after ``proof_after`` returns 404, and delete a box that appears.
+
+    The SDK does not say that billing stops when the delete returns, and a
+    create without an answer can still make a box, so only a later 404 is proof.
+
+    Args:
+        client: The SDK ``AsyncSandboxClient``.
+        name: The sandbox name.
+        proof_after: The instant after which a 404 proves the box gone.
+
+    Returns:
+        True on proof, False when no proof came in the bounded time.
+    """
+    give_up_at = max(proof_after, time.monotonic()) + _DELETE_TIMEOUT_SECONDS
+    while time.monotonic() < give_up_at:
+        checked_at = time.monotonic()
+        try:
+            await asyncio.wait_for(client.get_sandbox(name), _DELETE_TIMEOUT_SECONDS)
+        except ResourceNotFoundError:
+            if checked_at >= proof_after:
+                return True
+        except Exception as exc:
+            logger.warning("Could not look up the LangSmith sandbox %s: %s.", name, type(exc).__name__)
+        else:
+            # A late create made this box, or the first delete is still in progress.
+            await _delete(client, name)
+        await asyncio.sleep(_GONE_POLL_SECONDS)
+    return False
+
+
+async def _absent(client: Any, name: str) -> bool:
+    """Look up one sandbox by name after the server answered its create.
+
+    Args:
+        client: The SDK ``AsyncSandboxClient``.
+        name: The sandbox name.
+
+    Returns:
+        True only when the server reports no box by that name.
+    """
+    try:
+        await asyncio.wait_for(client.get_sandbox(name), _DELETE_TIMEOUT_SECONDS)
+    except ResourceNotFoundError:
+        return True
+    except Exception as exc:
+        logger.warning("Could not look up the LangSmith sandbox %s: %s.", name, type(exc).__name__)
+    return False
+
+
+def _with_settle_error(error: BaseException, settle_error: Exception | None) -> BaseException:
+    """Attach the release or settle error of a failed start to the start error.
+
+    Args:
+        error: The error that ``start`` raises.
+        settle_error: The cleanup's release or settle error, or None.
+
+    Returns:
+        The same start error.
+    """
+    if settle_error is not None:
+        if error.__cause__ is None:
+            error.__cause__ = settle_error
+        else:
+            # The cause already holds the SDK error that callers map; keep both.
+            error.add_note(f"The LangSmith usage stays pending: {settle_error!r}")
+    return error
 
 
 async def _wait_through_cancels(task: asyncio.Future[None]) -> None:

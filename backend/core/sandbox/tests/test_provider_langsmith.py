@@ -9,14 +9,19 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
-from collections.abc import AsyncIterator, Mapping
+import threading
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
-from core.billing.budgets import BudgetError
-from core.billing.runtime import UsagePendingError
+from core.billing.budgets import BudgetError, BudgetService
+from core.billing.langsmith_usage import LangSmithUsageReservation
+from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.sandbox import SandboxSpec, factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.errors import (
@@ -31,6 +36,7 @@ from core.sandbox.providers import langsmith
 from core.sandbox.providers.langsmith import LangSmithEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+from core.storage.models import Base, BillingCustomerModel
 
 try:
     from langsmith import sandbox as sdk
@@ -219,6 +225,8 @@ class FakeBox:
         """
         self.server = server
         self.files: dict[str, bytes] = {}
+        for field, value in server.box_fields.items():
+            setattr(self, field, value)
 
     async def write(self, path: str, content: bytes, **kwargs: Any) -> None:
         """Store one file."""
@@ -291,6 +299,9 @@ class FakeServer:
         self.create_gate: asyncio.Event | None = None
         self.delete_started = asyncio.Event()
         self.delete_gate: asyncio.Event | None = None
+        self.box_fields: dict[str, Any] = {}
+        self.get_error: BaseException | None = None
+        self.late_box_seconds: float | None = None
 
 
 class FakeClient:
@@ -311,6 +322,11 @@ class FakeClient:
         if self.server.create_hangs:
             await asyncio.Event().wait()
         if self.server.create_error is not None:
+            if self.server.late_box_seconds is not None:
+                name = kwargs["name"]
+                asyncio.get_running_loop().call_later(
+                    self.server.late_box_seconds, self.server.boxes.__setitem__, name, FakeBox(self.server)
+                )
             raise self.server.create_error
         box = FakeBox(self.server)
         self.server.boxes[kwargs["name"]] = box
@@ -326,6 +342,14 @@ class FakeClient:
             await self.server.delete_gate.wait()
         if self.server.boxes.pop(name, None) is None:
             raise FakeNotFoundError(name)
+
+    async def get_sandbox(self, name: str) -> FakeBox:
+        """Return one box, or raise the lookup error or the not-found error."""
+        if self.server.get_error is not None:
+            raise self.server.get_error
+        if name not in self.server.boxes:
+            raise FakeNotFoundError(name)
+        return self.server.boxes[name]
 
     async def aclose(self) -> None:
         """Record the close."""
@@ -910,6 +934,15 @@ _PROTECTED_SPEC = SandboxSpec(
     resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048),
     operation_key="op-1",
 )
+# A short start limit keeps the window in which a create without an answer can land short.
+_STARTUP_SECONDS = 0.2
+
+
+@pytest.fixture(autouse=True)
+def _fast_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll for the proof of a delete quickly, and end the create window at the start limit."""
+    monkeypatch.setattr(langsmith, "_GONE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(langsmith, "_CREATE_LANDING_GRACE_SECONDS", 0)
 
 
 class FakeUsage:
@@ -917,6 +950,8 @@ class FakeUsage:
 
     events: list[Any]
     error: BaseException | None = None
+    entered: threading.Event | None = None
+    gate: threading.Event | None = None
 
     def __init__(self, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> None:
         """Record the reservation, or raise the refusal that the test set.
@@ -929,6 +964,10 @@ class FakeUsage:
         Raises:
             BaseException: The refusal that the test set.
         """
+        if self.entered is not None:
+            self.entered.set()
+        if self.gate is not None:
+            self.gate.wait(5)
         if self.error is not None:
             raise self.error
         self.request = dict(request)
@@ -946,6 +985,14 @@ class FakeUsage:
     def mark_deleted(self) -> None:
         """Record the confirmed delete."""
         self.deleted = True
+
+    def release(self, reason: str) -> None:
+        """Record the release of the hold.
+
+        Args:
+            reason: Why no box exists.
+        """
+        self.events.append(("release", reason))
 
     def settle(self) -> None:
         """Record the settle, and fail like the real reservation when the delete is not confirmed.
@@ -968,18 +1015,80 @@ def usage() -> type[FakeUsage]:
     return type("BoundFakeUsage", (FakeUsage,), {"events": []})
 
 
-def _protected(usage: type[FakeUsage], spec: SandboxSpec = _PROTECTED_SPEC, **kwargs: Any) -> LangSmithEnvironment:
+def _protected(usage: Any, spec: SandboxSpec = _PROTECTED_SPEC, **kwargs: Any) -> LangSmithEnvironment:
     """Build a protected provider on the fake reservation.
 
     Args:
-        usage: The fake reservation class.
+        usage: The reservation class.
         spec: The sandbox spec.
         **kwargs: More provider options.
 
     Returns:
         The provider.
     """
-    return LangSmithEnvironment(spec, budget=object(), usage_factory=usage, **kwargs)
+    kwargs.setdefault("startup_timeout_seconds", _STARTUP_SECONDS)
+    kwargs.setdefault("budget", object())
+    return LangSmithEnvironment(spec, usage_factory=usage, **kwargs)
+
+
+@pytest.fixture
+def ledger(tmp_path: Path) -> Iterator[BudgetRuntime]:
+    """Bind a real budget runtime to a private funded SQLite ledger.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite file.
+
+    Yields:
+        A runtime for a fresh 50-cent budget owned by ``alice``.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'langsmith.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    yield BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    engine.dispose()
+
+
+def _recording(made: list[LangSmithUsageReservation]) -> Any:
+    """Build a factory that makes real reservations and keeps each one.
+
+    Args:
+        made: Receives each reservation.
+
+    Returns:
+        The usage factory.
+    """
+
+    def factory(*args: Any, **kwargs: Any) -> LangSmithUsageReservation:
+        """Make one real reservation and keep it.
+
+        Returns:
+            The reservation.
+        """
+        reservation = LangSmithUsageReservation(*args, **kwargs)
+        made.append(reservation)
+        return reservation
+
+    return factory
+
+
+def _operation(runtime: BudgetRuntime, made: list[LangSmithUsageReservation]) -> Any:
+    """Return the ledger state of the one reservation that the provider made.
+
+    Args:
+        runtime: The budget runtime.
+        made: The reservations that the factory made.
+
+    Returns:
+        The operation snapshot.
+    """
+    (reservation,) = made
+    return runtime.service.get_operation(reservation.operation.id, "alice")
 
 
 def test_capabilities_are_billable_and_a_budget_makes_the_box_protected(usage: type[FakeUsage]) -> None:
@@ -1044,18 +1153,89 @@ async def test_budget_refusal_creates_no_box(server: FakeServer, usage: type[Fak
     assert usage.events == []
 
 
-async def test_failed_create_settles_the_reservation(server: FakeServer, usage: type[FakeUsage]) -> None:
-    """Delete the partial box and settle its reservation when the create fails, and raise the create error."""
+async def test_cancel_during_reserve_releases_the_hold(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Release the hold that a cancelled reservation still made, because no create left."""
+    usage.entered = threading.Event()
+    usage.gate = threading.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.to_thread(usage.entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    usage.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("release", "create-not-sent")]
+    assert server.creates == []
+
+
+async def test_stop_during_reserve_releases_the_hold(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Release the hold when a stop() ends the start before the create call."""
+    usage.entered = threading.Event()
+    usage.gate = threading.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.to_thread(usage.entered.wait, 5)
+    await asyncio.wait_for(env.stop(), 5)
+    usage.gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("release", "create-not-sent")]
+    assert server.creates == []
+
+
+async def test_refused_create_with_no_box_releases_the_hold(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Release the hold when the server refused the create and has no box by its name."""
+    server.create_error = _caused_by_status(FakeValidationError("too large"), 422)
+    env = _protected(usage)
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    assert usage.events == [("reserve", "op-1"), ("release", "create-refused-422")]
+    assert server.deletes == []
+
+
+async def test_failed_create_settles_after_the_create_window(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the partial box of a create without an answer, and settle only after its create window."""
     server.create_then_fail = True
     env = _protected(usage)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     with pytest.raises(SandboxTransientError):
         await env.start()
+    assert loop.time() - started >= _STARTUP_SECONDS
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
     assert server.boxes == {}
 
 
-async def test_cancelled_create_settles_the_reservation(server: FakeServer, usage: type[FakeUsage]) -> None:
-    """Delete the box and settle its reservation when the start is cancelled during the create."""
+async def test_box_that_lands_late_is_deleted_before_the_settle(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Treat an early 404 as no proof, and delete a box that a create without an answer makes later."""
+    server.create_error = FakeConnectionError("lost")
+    server.late_box_seconds = 0.05
+    env = _protected(usage)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert server.boxes == {}
+    assert server.deletes.count(env.name) >= 2
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+
+
+async def test_no_proof_keeps_the_hold_pending_and_the_start_error_carries_it(
+    server: FakeServer, usage: type[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the hold pending when no lookup proves the box gone, and attach that to the start error."""
+    monkeypatch.setattr(langsmith, "_DELETE_TIMEOUT_SECONDS", 0.1)
+    server.create_error = FakeConnectionError("lost")
+    server.get_error = FakeConnectionError("lookup lost")
+    env = _protected(usage)
+    with pytest.raises(SandboxTransientError) as caught:
+        await env.start()
+    assert usage.events == [("reserve", "op-1"), ("settle", False)]
+    assert any("stays pending" in note for note in caught.value.__notes__)
+    await env.stop()
+
+
+async def test_cancelled_create_settles_after_the_create_window(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the box and settle its reservation after the create window when the start is cancelled."""
     server.create_gate = asyncio.Event()
     env = _protected(usage)
     task = asyncio.create_task(env.start())
@@ -1087,9 +1267,6 @@ async def test_failed_delete_keeps_the_reservation_pending(server: FakeServer, u
     """Settle without a confirmed delete, raise the pending error once, and keep later stops quiet."""
     env = _protected(usage)
     await env.start()
-    server.boxes.clear()
-    server.delete_gate = asyncio.Event()
-    server.delete_gate.set()
 
     async def broken_delete(name: str) -> None:
         """Fail the delete like a lost connection.
@@ -1124,3 +1301,43 @@ async def test_protected_box_stops_when_its_funded_lifetime_ends(server: FakeSer
     with pytest.raises(RuntimeError):
         await env.exec("true")
     await env.stop()
+
+
+async def test_real_reservation_settles_a_stopped_box(server: FakeServer, ledger: BudgetRuntime) -> None:
+    """Reserve, confirm and settle a box on the real ledger through the provider."""
+    server.box_fields = {"id": "sandbox-uuid", "vcpus": 2, "mem_bytes": 1024 * 1024 * 1024}
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    await env.start()
+    assert _operation(ledger, made).state == "dispatched"
+    await env.stop()
+    operation = _operation(ledger, made)
+    assert operation.state == "settled"
+    assert operation.provider_request_id == "sandbox-uuid"
+    assert operation.actual_cents <= operation.max_cents
+    assert operation.id not in ledger._pinned
+
+
+async def test_real_reservation_keeps_a_too_large_box_pending(server: FakeServer, ledger: BudgetRuntime) -> None:
+    """Delete a box larger than funded, keep its hold pending, and raise the settle error as the cause."""
+    server.box_fields = {"id": "sandbox-uuid", "vcpus": 4}
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    with pytest.raises(UsagePendingError, match="vcpus") as caught:
+        await env.start()
+    assert isinstance(caught.value.__cause__, UsagePendingError)
+    assert "larger than funded" in str(caught.value.__cause__)
+    assert server.boxes == {}
+    assert _operation(ledger, made).state == "pending"
+    await env.stop()
+
+
+async def test_real_reservation_releases_a_refused_create(server: FakeServer, ledger: BudgetRuntime) -> None:
+    """Give the whole hold back on the real ledger when the server refused the create."""
+    server.create_error = _caused_by_status(FakeQuotaError("full"), 429)
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert _operation(ledger, made).state == "released"
+    assert ledger.service.get(ledger.budget_id, "alice").reserved_cents == 0

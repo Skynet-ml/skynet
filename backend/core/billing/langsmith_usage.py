@@ -19,10 +19,14 @@ from decimal import Decimal
 from typing import Any
 
 from .budget_amounts import cent_units
-from .budgets import BudgetConflictError, OperationSnapshot
+from .budgets import BudgetConflictError, BudgetError, OperationSnapshot
 from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationError, json_fingerprint, operation_quote
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
+
+# Every sandbox quote records the same "sandbox" charge policy, and this helper
+# rebuilds it from the snapshot. It lives in vercel_usage only because Vercel
+# was the first metered sandbox; LangSmith reuses it so both convert alike.
 from .vercel_usage import vercel_charge_policy
 
 # Published LangSmith Sandbox rates, read on 2026-11-24 from
@@ -179,6 +183,7 @@ class LangSmithUsageReservation:
         self.sandbox_id: str | None = None
         self.opened_at = time.monotonic()
         self.deleted_at: float | None = None
+        self.mismatch = False
 
     def confirm_created(self, box: Any) -> None:
         """Record the sandbox id and check the created sizes against the funded ones.
@@ -197,6 +202,9 @@ class LangSmithUsageReservation:
             # call sent the funded value.
             value = getattr(box, field, None)
             if value is not None and value != self.request[field]:
+                # The measured time is priced at the funded size, so a larger
+                # box must never settle from it.
+                self.mismatch = True
                 raise UsagePendingError(f"The LangSmith sandbox did not confirm the funded {field}.")
 
     def mark_deleted(self) -> None:
@@ -229,6 +237,30 @@ class LangSmithUsageReservation:
         self.runtime.pin(self.operation.id, cent_units(extended.max_cents), box=self.box)
         self.request["lifetime_ms"] = lifetime_ms
 
+    def release(self, reason: str) -> None:
+        """Give the coverage back when no create reached the provider, otherwise keep it held.
+
+        A create that was never sent, or that the server refused while no box
+        by its name exists, cannot bill. This mirrors ``VercelUsageReservation.fail``.
+
+        Args:
+            reason: Why no box exists, for the ledger evidence.
+
+        Raises:
+            BudgetError: When the ledger refuses the release; the coverage stays held.
+        """
+        try:
+            self.runtime.service.reject(
+                self.operation.id,
+                self.runtime.username,
+                evidence_key=f"langsmith-release:{self.operation.id}",
+                evidence={"provider": "langsmith", "name": self.request.get("name"), "reason": reason},
+            )
+        except BudgetError:
+            self.pending()
+            raise
+        self.runtime.unpin(self.operation.id)
+
     def pending(self) -> None:
         """Keep the coverage held when the delete or the usage is uncertain."""
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
@@ -245,7 +277,7 @@ class LangSmithUsageReservation:
         """Settle a deleted sandbox at its measured lifetime, inside its coverage.
 
         Raises:
-            UsagePendingError: When the delete is not confirmed.
+            UsagePendingError: When the delete is not confirmed, or the box was larger than funded.
             BudgetError: When the ledger refuses the settlement.
         """
         try:
@@ -255,6 +287,8 @@ class LangSmithUsageReservation:
                 return
             if self.deleted_at is None:
                 raise UsagePendingError("The LangSmith sandbox delete is not confirmed; its coverage stays held.")
+            if self.mismatch:
+                raise UsagePendingError("The LangSmith sandbox was larger than funded; its coverage stays held.")
             # The vendor bills whole seconds, so round the measured time up.
             elapsed_ms = math.ceil(max(0.0, self.deleted_at - self.opened_at)) * 1000
             usd = _usd(
@@ -264,6 +298,7 @@ class LangSmithUsageReservation:
                 running_ms=elapsed_ms,
                 stored_ms=elapsed_ms,
             )
+            # The shared sandbox policy applies the same markup and wallet split as Vercel boxes.
             charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
             # A slow delete can pass the funded time; the vendor's own idle stop
             # bounds the real bill, so the charge never leaves the coverage.
