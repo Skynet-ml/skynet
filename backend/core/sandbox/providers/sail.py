@@ -769,7 +769,16 @@ class SailEnvironment(SandboxEnvironment):
                 boxes.discard(self)
                 if not boxes:
                     del _JOB_BOXES[job_id]
-            self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
+            try:
+                self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
+            except BaseException:
+                # The box can still run, so its hold stays pending, and a
+                # later stop() gets the handle to try the terminate again.
+                self._sailbox = sailbox
+                usage, self._usage = self._usage, None
+                self._pending_marked = False
+                await self._pend_after_cancel(usage)
+                raise
         try:
             await self._settle(sailbox, end)
         finally:
@@ -834,6 +843,10 @@ class SailEnvironment(SandboxEnvironment):
                 pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
                 pending.__cause__ = error
                 self._settle_error = pending
+        except BaseException:
+            # A cancel during a ledger call must not leave the hold reserved.
+            await self._pend_after_cancel(usage)
+            raise
 
     async def _mark_pending(self, usage: Any) -> None:
         """Keep the hold pending, and note it, so a failure path does not mark it twice.
@@ -843,6 +856,22 @@ class SailEnvironment(SandboxEnvironment):
         """
         self._pending_marked = True
         await asyncio.to_thread(usage.pending)
+
+    async def _pend_after_cancel(self, usage: Any) -> None:
+        """Keep the hold pending, best effort, after a cancel ends the teardown.
+
+        Args:
+            usage: The usage reservation of the box, or ``None`` when there is none.
+        """
+        # A cancelled task cannot run again, so a later stop() needs a new one.
+        # It finds no usage, so it cannot settle or mark the hold again.
+        self._stop_task = None
+        if usage is None or self._pending_marked:
+            return
+        try:
+            await self._mark_pending(usage)
+        except Exception as pending_error:
+            logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
 
     async def _find_failed_create(self, usage: Any) -> Any:
         """Look up the box of a failed create by its name, and terminate it.
