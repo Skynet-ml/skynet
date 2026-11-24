@@ -6,8 +6,9 @@ egress and creation are free. The quote funds the box's whole lifetime at
 its units, so the funded hold is a ceiling. The settle reads Mosaic's
 per-sandbox usage history. When that history is not final and complete,
 the settle charges the measured wall time from the create call to the
-confirmed destroy, which is never less than the awake time. Either charge
-is clamped to the reserved hold.
+confirmed destroy, which is never less than the awake time. A known box
+without a confirmed destroy is charged the whole hold, because it may still
+run. Every charge is clamped to the reserved hold.
 """
 
 from __future__ import annotations
@@ -122,19 +123,35 @@ def quote_mosaic_sandbox(request: Mapping[str, Any]) -> OperationQuote:
 
 
 def history_usd(history: Mapping[str, Any], *, units: int) -> Decimal | None:
-    """Price a stopped box from Mosaic's usage history, when the history is complete.
+    """Price a stopped box from Mosaic's usage history, when the history is final and complete.
+
+    The SDK's ``Sandbox.usage_history`` returns the API JSON unchanged
+    (``mosaic_sandbox/client.py:3197-3222`` in mosaic-sandbox 0.15.8). The
+    field names are those of the response and ``SandboxUsageHistoryRecord``
+    schemas in https://sandbox.mosaicos.com/openapi.json (read 2026-11-24):
+    the response has ``records``, ``next_cursor`` and ``billing_final``; a
+    record has ``ended_at``, ``billing_units``, ``unit_seconds``,
+    ``accounting_status``, ``running_seconds``, ``pricing_status`` and
+    ``billing_snapshot.rate``. ``unit_seconds`` is already shape-weighted:
+    ``running_seconds`` is ``unit_seconds / billing_units`` for a metered
+    record, so a 2-unit box's ``unit_seconds`` is twice its awake seconds.
 
     Args:
         history: One ``usage_history`` page of the box.
         units: The box's funded billing units.
 
     Returns:
-        The billed USD, or ``None`` when any record is open, not metered,
-        has another shape, has no quantity, uses a non-USD tariff, or the
-        history has more pages.
+        The billed USD, or ``None`` when the page is not ``billing_final``,
+        has more pages, or any record is open, not metered, has no recorded
+        USD tariff, has another shape, or has inconsistent quantities.
     """
     records = history.get("records")
-    if not isinstance(records, list) or not records or history.get("next_cursor") is not None:
+    if (
+        history.get("billing_final") is not True
+        or not isinstance(records, list)
+        or not records
+        or history.get("next_cursor") is not None
+    ):
         return None
     total = Decimal(0)
     for record in records:
@@ -142,27 +159,42 @@ def history_usd(history: Mapping[str, Any], *, units: int) -> Decimal | None:
             not isinstance(record, Mapping)
             or record.get("ended_at") is None
             or record.get("accounting_status") != "metered"
+            or record.get("pricing_status") != "recorded"
             or record.get("billing_units") != units
-            or isinstance(record.get("unit_seconds"), bool)
-            or not isinstance(record.get("unit_seconds"), int | float)
-            or record["unit_seconds"] < 0
         ):
+            return None
+        unit_seconds, running_seconds = _amount(record.get("unit_seconds")), _amount(record.get("running_seconds"))
+        # A one-second gap allows the vendor's rounding; a larger gap means
+        # the record does not use the shape multiplier this code expects.
+        if unit_seconds is None or running_seconds is None or abs(unit_seconds - running_seconds * units) > 1:
             return None
         snapshot = record.get("billing_snapshot")
         rate = snapshot.get("rate") if isinstance(snapshot, Mapping) else None
-        hour_usd = _UNIT_HOUR_USD
-        if rate is not None:
-            if not isinstance(rate, Mapping) or rate.get("currency") != "USD":
-                return None
-            micros = rate.get("micros_per_unit_hour")
-            if not _positive_int(micros, 0):
-                return None
-            hour_usd = Decimal(micros) / _MICROS_PER_USD
-        try:
-            total += Decimal(str(record["unit_seconds"])) * hour_usd / _SECONDS_PER_HOUR
-        except InvalidOperation:
+        if not isinstance(rate, Mapping) or rate.get("currency") != "USD":
             return None
+        micros = rate.get("micros_per_unit_hour")
+        if not _positive_int(micros, 0):
+            return None
+        total += unit_seconds * Decimal(micros) / _MICROS_PER_USD / _SECONDS_PER_HOUR
     return total
+
+
+def _amount(value: Any) -> Decimal | None:
+    """Read one non-negative history quantity.
+
+    Args:
+        value: The JSON number, or anything else.
+
+    Returns:
+        The quantity, or ``None`` when it is missing, not a number or negative.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return amount if amount.is_finite() and amount >= 0 else None
 
 
 class MosaicUsageReservation:
@@ -230,6 +262,17 @@ class MosaicUsageReservation:
         if self._dispatched_at is None:
             self._dispatched_at = _clock()
 
+    def bind(self, sandbox_id: str, handle: Any = None) -> None:
+        """Record the id of this operation's box, so the settle can charge it.
+
+        Args:
+            sandbox_id: The Mosaic sandbox id.
+            handle: The SDK ``Sandbox``, or ``None`` when only the id is known.
+        """
+        self.sandbox_id = sandbox_id
+        self._handle = handle
+        self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, sandbox_id)
+
     def confirm_created(self, sandbox: Any) -> None:
         """Bind the created box and check that Mosaic gave it the funded shape.
 
@@ -239,9 +282,7 @@ class MosaicUsageReservation:
         Raises:
             UsagePendingError: Mosaic reports another vCPU count or memory size.
         """
-        self.sandbox_id = sandbox.id
-        self._handle = sandbox
-        self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, sandbox.id)
+        self.bind(sandbox.id, sandbox)
         summary = sandbox.info()
         if summary.vcpu != self.request["vcpu"] or summary.memory_mb != self.request["memory_mb"]:
             raise UsagePendingError("The cloud sandbox did not confirm the admitted CPU and memory.")
@@ -322,20 +363,27 @@ class MosaicUsageReservation:
         """Return the box's cost, its source and the raw evidence.
 
         Returns:
-            The USD cost, ``"usage_history"`` or ``"measured_wall_time"``, and
-            the history page or the wall time.
+            The USD cost, its source (``"usage_history"``,
+            ``"measured_wall_time"`` or ``"funded_ceiling"``), and the history
+            records, the wall time or the funded lifetime.
 
         Raises:
-            UsagePendingError: The destroy is not confirmed.
+            UsagePendingError: No box id is known.
         """
+        if self.sandbox_id is None:
+            raise UsagePendingError("The cloud sandbox is unknown; its usage stays pending.")
         wall_ms = self._wall_ms()
-        if self.sandbox_id is None or wall_ms is None:
-            raise UsagePendingError("The cloud sandbox has no confirmed destroy; its usage stays pending.")
-        try:
-            # Needs the billing:read scope; without it the measured time applies.
-            history = self._handle.usage_history(limit=_HISTORY_LIMIT)
-        except Exception:
-            history = None
+        if wall_ms is None:
+            # No reconciler reads this box later, and it may still run, so
+            # the whole hold is the only safe charge.
+            return mosaic_measured_usd(self.units, self.lifetime_ms), "funded_ceiling", self.lifetime_ms
+        history = None
+        if self._handle is not None:
+            try:
+                # Needs the billing:read scope; without it the measured time applies.
+                history = self._handle.usage_history(limit=_HISTORY_LIMIT, include_daily_finality=True)
+            except Exception:
+                history = None
         usd = history_usd(history, units=self.units) if isinstance(history, Mapping) else None
         if usd is not None:
             return usd, "usage_history", history.get("records")
@@ -345,7 +393,7 @@ class MosaicUsageReservation:
         """Settle the destroyed box inside its hold, retaining the hold on any doubt.
 
         Raises:
-            UsagePendingError: The box has no confirmed destroy.
+            UsagePendingError: No box id is known.
             BudgetError: The settle write failed.
         """
         try:

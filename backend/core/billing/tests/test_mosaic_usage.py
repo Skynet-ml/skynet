@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -48,10 +47,25 @@ def _record(**overrides: Any) -> dict[str, Any]:
         "memory_mb": 4096,
         "billing_units": 1,
         "unit_seconds": 1800,
+        "running_seconds": 1800,
         "accounting_status": "metered",
+        "pricing_status": "recorded",
         "billing_snapshot": {"rate": {"currency": "USD", "micros_per_unit_hour": 50_000}},
         **overrides,
     }
+
+
+def _page(*records: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """Return one final, complete usage-history page.
+
+    Args:
+        *records: The page's records.
+        **overrides: Page fields to replace.
+
+    Returns:
+        The page.
+    """
+    return {"records": list(records), "next_cursor": None, "billing_final": True, **overrides}
 
 
 class FakeHandle:
@@ -77,11 +91,12 @@ class FakeHandle:
         """
         return self._summary
 
-    def usage_history(self, *, limit: int) -> Any:
+    def usage_history(self, *, limit: int, include_daily_finality: bool) -> Any:
         """Return the usage history, or raise the configured error.
 
         Args:
             limit: The page size.
+            include_daily_finality: Whether Mosaic reports billing finality.
 
         Returns:
             The history page.
@@ -90,6 +105,7 @@ class FakeHandle:
             Exception: The configured history error.
         """
         assert limit == 500
+        assert include_daily_finality is True
         if isinstance(self._history, Exception):
             raise self._history
         return self._history
@@ -147,7 +163,7 @@ def _clock(monkeypatch: pytest.MonkeyPatch, *seconds: float) -> None:
         monkeypatch: The pytest monkeypatch fixture.
         *seconds: The instants, in seconds.
     """
-    instants = itertools.chain(seconds)
+    instants = iter(seconds)
     monkeypatch.setattr(mosaic_usage, "_clock", lambda: next(instants))
 
 
@@ -210,11 +226,16 @@ def test_an_unbounded_request_is_not_quoted(change: dict[str, Any]) -> None:
 
 
 def test_settle_charges_the_metered_usage_history(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Settle at Mosaic's own metered unit-seconds, not at the longer wall time."""
+    """Settle at Mosaic's own metered unit-seconds, not at the longer wall time.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     _clock(monkeypatch, 0.0, 3000.0)
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
-    _run_box(reservation, FakeHandle(history={"records": [_record()], "next_cursor": None}))
+    _run_box(reservation, FakeHandle(history=_page(_record())))
     USAGE.settle(reservation)
     operation = _operation(runtime, reservation)
     assert operation.state == "settled"
@@ -224,7 +245,12 @@ def test_settle_charges_the_metered_usage_history(database: Engine, monkeypatch:
 def test_settle_falls_back_to_measured_time_when_the_history_fails(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Charge the measured wall time when the usage history cannot be read."""
+    """Charge the measured wall time when the usage history cannot be read.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     _clock(monkeypatch, 0.0, 1800.0)
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
@@ -236,30 +262,80 @@ def test_settle_falls_back_to_measured_time_when_the_history_fails(
 
 
 def test_settle_clamps_to_the_reservation(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Charge no more than the hold when the box ran past its funded lifetime."""
+    """Charge no more than the hold when the box ran past its funded lifetime.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     _clock(monkeypatch, 0.0, 7200.0)
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
-    _run_box(reservation, FakeHandle(history={"records": [_record(unit_seconds=9000)], "next_cursor": None}))
+    history = _page(_record(unit_seconds=9000, running_seconds=9000))
+    _run_box(reservation, FakeHandle(history=history))
     USAGE.settle(reservation)
     operation = _operation(runtime, reservation)
     assert operation.state == "settled"
     assert operation.actual_cents == operation.max_cents == Decimal(5)
 
 
-def test_settle_without_a_confirmed_destroy_keeps_the_hold(database: Engine) -> None:
-    """Keep the hold pending when the destroy of the box is not confirmed."""
+def test_a_box_without_a_confirmed_destroy_is_charged_the_whole_hold(database: Engine) -> None:
+    """Settle a known box whose destroy is not confirmed at the whole hold, because it may still run.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
     reservation.dispatched()
     USAGE.confirm(reservation, FakeHandle())
+    USAGE.settle(reservation)
+    operation = _operation(runtime, reservation)
+    assert operation.state == "settled"
+    assert operation.actual_cents == operation.max_cents == Decimal(5)
+
+
+def test_settle_without_a_known_box_keeps_the_hold(database: Engine) -> None:
+    """Keep the hold pending when no box id is known.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
+    reservation.dispatched()
     with pytest.raises(UsagePendingError):
         USAGE.settle(reservation)
     assert _operation(runtime, reservation).state == "pending"
 
 
+def test_a_lost_box_bound_by_its_id_settles_at_the_measured_time(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Charge the measured time of a box that the provider found only by its tag.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    _clock(monkeypatch, 0.0, 1800.0)
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
+    reservation.dispatched()
+    reservation.bind("sbx-lost")
+    reservation.stopped()
+    USAGE.settle(reservation)
+    operation = _operation(runtime, reservation)
+    assert operation.state == "settled"
+    assert operation.actual_cents == Decimal("2.5")
+
+
 def test_a_box_with_another_shape_is_not_confirmed(database: Engine) -> None:
-    """Refuse a created box whose shape differs from the funded one."""
+    """Refuse a created box whose shape differs from the funded one.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
     with pytest.raises(UsagePendingError):
@@ -267,7 +343,11 @@ def test_a_box_with_another_shape_is_not_confirmed(database: Engine) -> None:
 
 
 def test_release_returns_the_hold_of_a_refused_create(database: Engine) -> None:
-    """Release the hold when Mosaic refused the create, so no box exists."""
+    """Release the hold when Mosaic refused the create, so no box exists.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
     reservation.release("SandboxRejectedError")
@@ -279,17 +359,23 @@ def test_release_returns_the_hold_of_a_refused_create(database: Engine) -> None:
 @pytest.mark.parametrize(
     "history",
     [
-        {"records": [], "next_cursor": None},
-        {"records": [_record()], "next_cursor": "more"},
-        {"records": [_record(ended_at=None)], "next_cursor": None},
-        {"records": [_record(accounting_status="estimated")], "next_cursor": None},
-        {"records": [_record(billing_units=2)], "next_cursor": None},
-        {"records": [_record(unit_seconds=None)], "next_cursor": None},
-        {"records": [_record(billing_snapshot={"rate": {"currency": "EUR", "micros_per_unit_hour": 1}})]},
+        _page(),
+        _page(_record(), billing_final=False),
+        {"records": [_record()], "next_cursor": None},
+        _page(_record(), next_cursor="more"),
+        _page(_record(ended_at=None)),
+        _page(_record(accounting_status="estimated")),
+        _page(_record(pricing_status="unavailable")),
+        _page(_record(billing_units=2)),
+        _page(_record(unit_seconds=None)),
+        _page(_record(running_seconds=None)),
+        _page(_record(unit_seconds=3600)),
+        _page(_record(billing_snapshot={"rate": None})),
+        _page(_record(billing_snapshot={"rate": {"currency": "EUR", "micros_per_unit_hour": 1}})),
     ],
 )
 def test_an_incomplete_history_is_not_used(history: dict[str, Any]) -> None:
-    """Use the history only when every record is closed, metered, the funded shape and in USD.
+    """Use the history only when it is final and every record is closed, metered, priced in USD and the funded shape.
 
     Args:
         history: A history page that must not settle the box.
@@ -297,7 +383,7 @@ def test_an_incomplete_history_is_not_used(history: dict[str, Any]) -> None:
     assert history_usd(history, units=1) is None
 
 
-def test_a_record_without_a_tariff_uses_the_published_rate() -> None:
-    """Price a record with no recorded tariff at the published unit rate."""
-    history = {"records": [_record(billing_snapshot={"rate": None})], "next_cursor": None}
-    assert history_usd(history, units=1) == Decimal("0.025")
+def test_a_two_unit_box_is_priced_from_its_shape_weighted_seconds() -> None:
+    """Charge a two-unit box's unit-seconds, which are twice its awake seconds."""
+    record = _record(vcpu=4, memory_mb=8192, billing_units=2, unit_seconds=3600, running_seconds=1800)
+    assert history_usd(_page(record), units=2) == Decimal("0.05")

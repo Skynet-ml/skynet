@@ -865,7 +865,7 @@ class FakeUsage:
         self.calls: list[str] = []
         self.confirm_delay = 0.0
         self.confirm_error: Exception | None = None
-        self.is_stopped = False
+        self.sandbox_id: str | None = None
         USAGES.append(self)
 
     def dispatched(self) -> None:
@@ -882,25 +882,35 @@ class FakeUsage:
             Exception: The test's confirm error.
         """
         self.calls.append(f"confirm:{sandbox.id}")
+        self.sandbox_id = sandbox.id
         if self.confirm_delay:
             time.sleep(self.confirm_delay)
         if self.confirm_error is not None:
             raise self.confirm_error
 
+    def bind(self, sandbox_id: str, handle: Any = None) -> None:
+        """Record the box id of a lost create.
+
+        Args:
+            sandbox_id: The box id.
+            handle: The SDK box, or ``None``.
+        """
+        self.sandbox_id = sandbox_id
+        self.calls.append(f"bind:{sandbox_id}")
+
     def stopped(self) -> None:
         """Record the confirmed destroy."""
-        self.is_stopped = True
         self.calls.append("stopped")
 
     def settle(self) -> None:
-        """Record the settle, and fail it like the real one without a confirmed destroy.
+        """Record the settle, and fail it like the real one when no box id is known.
 
         Raises:
-            UsagePendingError: No confirmed destroy exists.
+            UsagePendingError: No box id is known.
         """
         self.calls.append("settle")
-        if not self.is_stopped:
-            raise UsagePendingError("no confirmed destroy")
+        if self.sandbox_id is None:
+            raise UsagePendingError("no known box")
 
     def release(self, reason: str) -> None:
         """Record the release.
@@ -1048,29 +1058,106 @@ async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud, usages: l
     assert usages[0].calls == ["dispatched", "release:SandboxRejectedError"]
 
 
-async def test_a_lost_create_keeps_the_hold_pending(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Keep the hold pending when the create may have made a box that Skynet never saw."""
+async def test_a_lost_create_settles_the_box_found_by_its_tag(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Bind, destroy and settle the box of a create that failed after Mosaic made the box.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
     fake_sdk.create_error = FakeMosaicError("lost", code="transport")
     fake_sdk.create_error_after_box = True
     env = _protected()
     with pytest.raises(SandboxTransientError):
         await env.start()
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert usages[0].calls == ["dispatched", f"bind:{box.id}", "stopped", "settle"]
+
+
+async def test_a_cancel_during_a_slow_create_settles_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Wait for the cancelled create's box, destroy it and settle its hold.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    fake_sdk.create_delay = 0.2
+    start = asyncio.ensure_future(_protected().start())
+    await asyncio.sleep(0.02)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert usages[0].calls == ["dispatched", f"bind:{box.id}", "stopped", "settle"]
+
+
+async def test_a_lost_create_without_a_box_releases_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Release the hold when the box-tag list proves that the failed create made no box.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    fake_sdk.create_error = FakeMosaicError("lost", code="transport")
+    with pytest.raises(SandboxTransientError):
+        await _protected().start()
+    assert usages[0].calls == ["dispatched", "release:SandboxTransientError"]
+
+
+async def test_a_rate_limited_create_releases_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Release the hold of a 429 create even when the box-tag list fails, because Mosaic made no box.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    fake_sdk.create_error = FakeRateLimitError("429", status=429)
+    fake_sdk.list_error = FakeMosaicError("500", status=500)
+    with pytest.raises(SandboxTransientError):
+        await _protected().start()
+    assert usages[0].calls == ["dispatched", "release:SandboxTransientError"]
+
+
+async def test_a_release_without_a_start_error_uses_the_default_reason(usages: list[FakeUsage]) -> None:
+    """Release with the default reason, never "NoneType", when no start error exists.
+
+    Args:
+        usages: The fake reservations of the test.
+    """
+    usage = FakeUsage(None, {}, operation_key=None)
+    await _protected()._close_usage(usage, [])
+    assert usage.calls == ["release:no_box_created"]
+
+
+async def test_an_unknown_lost_create_keeps_the_hold_pending(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Keep the hold pending only when neither the create nor the box-tag list tells whether a box exists.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    fake_sdk.create_error = FakeMosaicError("lost", code="transport")
+    fake_sdk.list_error = FakeMosaicError("500", status=500)
+    with pytest.raises(SandboxTransientError):
+        await _protected().start()
     assert usages[0].calls == ["dispatched", "pending"]
 
 
-async def test_a_failed_destroy_keeps_the_hold_and_the_stop_reports_it(
-    fake_sdk: FakeCloud, usages: list[FakeUsage]
-) -> None:
-    """Raise the settle failure from one stop when Mosaic did not confirm the destroy."""
+async def test_a_failed_destroy_still_settles_the_known_box(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Settle a known box without a confirmed destroy, so the adapter charges the whole hold.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
     env = _protected()
     await env.start()
     (box,) = fake_sdk.boxes.values()
     fake_sdk.destroy_fails = {box.id}
-    with pytest.raises(UsagePendingError):
-        await env.stop()
     await env.stop()
-    assert usages[0].calls[-1] == "settle"
-    assert "stopped" not in usages[0].calls
+    assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "settle"]
 
 
 async def test_the_box_is_destroyed_when_its_funded_lifetime_ends(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
