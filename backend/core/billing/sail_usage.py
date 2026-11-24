@@ -42,10 +42,12 @@ logger = logging.getLogger(__name__)
 # https://docs.sailresearch.com/sailboxes-billing.md. The creation charge
 # applies on the Free plan only; Pro and Enterprise waive it. The spend API
 # has a creation rate for each size (``rates.<size>_creation_usd_nanos``),
-# but the pricing page publishes only one fee, so the quote funds that fee
-# and the measured settle uses the reported rate of the size when present.
+# but the pricing page publishes only one fee, so the quote and the measured
+# settle use that fee. Without account prices the reported rates are likely
+# zero, so they would drop the creation charge; with account prices Sail's
+# own cost is used. The rates go into the settle evidence for audit.
 _PRICING_URL = "https://docs.sailresearch.com/pricing.md"
-_SPEND_URL = "https://docs.sailresearch.com/sailboxes-billing.md"
+_SPEND_URL = "https://docs.sailresearch.com/api-reference/usage/get-sailbox-spend.md"
 _PRICE_VERSION = "sail-public-2026-11-24"
 _VCPU_HOUR_USD = Decimal("0.015")
 _MEMORY_GIB_HOUR_USD = Decimal("0.008")
@@ -55,10 +57,14 @@ _SECONDS_PER_HOUR = Decimal(3600)
 _MS_PER_HOUR = Decimal(3_600_000)
 _NANOS_PER_USD = Decimal(1_000_000_000)
 # The size ladder of the sail SDK 0.17.2 core, the version that uv.lock
-# pins: vCPUs, then the default and the most memory and disk in GiB. Sail
-# rounds a limit up to the next power of two. A create without a size gets
-# "l". A size that is not in this table (ultra, or a size of a newer SDK)
-# raises UnpricedOperationError at the reserve, before the create call.
+# pins: vCPUs, then the default and the most memory and disk in GiB. The
+# public docs do not list it; it comes from the size checks in that SDK's
+# compiled core (``validate_size_limits``), so it can drift from the server.
+# That is why ``confirm_created`` compares the created box's real limits
+# with its funding and refuses a larger box. Sail rounds a limit up to the
+# next power of two. A create without a size gets "l". A size that is not in
+# this table (ultra, or a size of a newer SDK) raises UnpricedOperationError
+# at the reserve, before the create call.
 _SIZES = {
     "s": (1, 16, 64, 32, 128),
     "m": (4, 32, 128, 128, 512),
@@ -272,8 +278,7 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
 
     Sail's own cost is used when Sail has prices set for the account.
     Otherwise the measured usage is priced at the admitted rates, and the
-    creation at the reported rate of the box's size, or at the admitted fee
-    when the report has no rate.
+    creation at the admitted fee.
 
     Args:
         spend: The box's spend line with the report's pricing flags.
@@ -296,15 +301,7 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
         ) / _SECONDS_PER_HOUR
         creation = Decimal(0)
         if spend.get("creation_fees_waived") is not True:
-            size = price_snapshot["request"].get("size") or _DEFAULT_SIZE
-            rates = spend.get("rates")
-            rate = rates.get(f"{size}_creation_usd_nanos") if isinstance(rates, Mapping) else None
-            fee = (
-                exact_nonnegative(price_snapshot["creation_usd"])
-                if rate is None
-                else exact_nonnegative(rate) / _NANOS_PER_USD
-            )
-            creation = exact_nonnegative(spend["creation_count"]) * fee
+            creation = exact_nonnegative(spend["creation_count"]) * exact_nonnegative(price_snapshot["creation_usd"])
         return usage + creation
     except (KeyError, TypeError, ValueError) as error:
         raise UsagePendingError("The Sail spend report has no usable cost for the box.") from error

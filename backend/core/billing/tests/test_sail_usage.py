@@ -289,17 +289,17 @@ def test_settle_prices_measured_usage_when_sail_has_no_prices() -> None:
     assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == usage
 
 
-def test_settle_uses_the_reported_creation_rate_of_the_box_size() -> None:
-    """Price the creation at the report's rate for the box's size, not at the published flat fee."""
+def test_settle_ignores_zero_creation_rates_when_sail_has_no_prices() -> None:
+    """Charge the published creation fee when the account has no prices and the reported rates are zero."""
     snapshot = quote_sail_sandbox(CREATE).price_snapshot
     line = {
         **SPEND,
         "pricing_configured": False,
         "creation_fees_waived": False,
-        "rates": {"s_creation_usd_nanos": 5_000_000, "l_creation_usd_nanos": 40_000_000},
+        "rates": {"s_creation_usd_nanos": 0, "m_creation_usd_nanos": 0, "l_creation_usd_nanos": 0},
     }
     usage = (600 * Decimal("0.015") + 1200 * Decimal("0.008") + 2400 * Decimal("0.0007")) / 3600
-    assert sail_actual_usd(line, snapshot) == usage + Decimal("0.005")
+    assert sail_actual_usd(line, snapshot) == usage + Decimal("0.01")
 
 
 def test_settle_clamps_to_the_reservation(database: Engine, caplog: pytest.LogCaptureFixture) -> None:

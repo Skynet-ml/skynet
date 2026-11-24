@@ -9,9 +9,12 @@ from ``harbor/environments/sail.py``. Changes:
 - A box with a budget is protected (SKY-554). It reserves its whole
   lifetime before the create, checks the created box against its funding,
   and settles Sail's reported spend after the terminate, also after a
-  failed or cancelled start. A create that Sail clearly refused releases
-  the hold; any other failed create keeps it pending. Sail has no lifetime
-  extension, so the box never extends its funding.
+  failed or cancelled start. The SDK retries a create under one
+  idempotency key, so a create error alone does not prove that no box
+  exists. After a failed create the provider looks up the box by its unique
+  name: a found box is terminated and settled, and the hold is released
+  only when Sail clearly refused the create and the lookup finds no box.
+  Sail has no lifetime extension, so the box never extends its funding.
 - The provider adds no retry of its own (SKY-406 D3, D10). An SDK error
   maps to ``SandboxInfraError``, because the SDK error classes are not known.
 - The start and run phase timeouts bound the create and each command. A
@@ -89,11 +92,16 @@ SAIL_CAPABILITIES = EnvironmentCapabilities(
 
 # Process-local: the sweep sees only the boxes that this process started.
 _JOB_BOXES: dict[str, set[SailEnvironment]] = {}
-# A create that failed with one of these HTTP statuses, or with one of the
-# SDK errors below, made no box, so its hold is released. Any other create
-# failure can come after Sail made the box, so its hold stays pending.
-_REFUSED_CREATE_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
-_REFUSED_CREATE_ERRORS = frozenset({"InvalidArgumentError", "PermissionDeniedError", "NotFoundError"})
+# The Sail create docs list these statuses as answers that make no box. 429
+# is left out: an earlier attempt of the SDK's create retry can make the box
+# and lose its answer, and the retry then gets the 429. A refused create
+# still releases its hold only when the name lookup finds no box.
+_REFUSED_CREATE_STATUSES = frozenset({400, 401, 402, 403, 404, 409, 413, 422})
+# InvalidArgumentError and TypeError come from the SDK's argument checks, and
+# ImageBuildError from the image build, all before the create request.
+_REFUSED_CREATE_ERRORS = frozenset(
+    {"InvalidArgumentError", "PermissionDeniedError", "NotFoundError", "ImageBuildError", "TypeError"}
+)
 # Strong references to the creates that outlive their start, and to the
 # terminate calls of their late boxes, so the event loop does not drop them.
 _LATE_TASKS: set[asyncio.Future[Any]] = set()
@@ -124,8 +132,9 @@ def _refused_create(error: BaseException | None) -> bool:
     """Tell whether a create failure shows that Sail made no box.
 
     The SDK maps no HTTP status to an error class, so the check uses the
-    class name, the ``status_code`` attribute, and ``TypeError`` for a call
-    that the SDK refused before any request.
+    class name and the ``status_code`` attribute. A ``TypeError`` can also
+    come from reading the answer after Sail made the box, so this check
+    alone never frees a hold; the name lookup must also find no box.
 
     Args:
         error: The SDK error of the create, or ``None``.
@@ -135,7 +144,7 @@ def _refused_create(error: BaseException | None) -> bool:
     """
     if error is None:
         return False
-    if isinstance(error, TypeError) or type(error).__name__ in _REFUSED_CREATE_ERRORS:
+    if type(error).__name__ in _REFUSED_CREATE_ERRORS:
         return True
     return getattr(error, "status_code", None) in _REFUSED_CREATE_STATUSES
 
@@ -282,6 +291,7 @@ class SailEnvironment(SandboxEnvironment):
         self._settling = False
         self._started = False
         self._terminated = False
+        self._create_failed = False
         self._create_refused = False
         self._stop_task: asyncio.Future[None] | None = None
 
@@ -374,6 +384,7 @@ class SailEnvironment(SandboxEnvironment):
                     await self._settle_create()
                     raise
                 except SandboxInfraError as error:
+                    self._create_failed = True
                     self._create_refused = _refused_create(error.__cause__)
                     raise
                 if self._usage is not None:
@@ -669,8 +680,10 @@ class SailEnvironment(SandboxEnvironment):
         if usage is None:
             return
         try:
+            if sailbox is None and self._create_failed:
+                sailbox = await self._find_failed_create(usage)
             if sailbox is None:
-                await asyncio.to_thread(usage.release, refused=self._create_refused)
+                await asyncio.to_thread(usage.release, refused=self._create_failed and self._create_refused)
                 return
             if usage.sailbox_id is None:
                 # A create in its grace returns the handle without a confirm.
@@ -692,6 +705,32 @@ class SailEnvironment(SandboxEnvironment):
                 pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
                 pending.__cause__ = error
                 self._settle_error = pending
+
+    async def _find_failed_create(self, usage: Any) -> Any:
+        """Look up the box of a failed create by its unique name, and terminate it.
+
+        Args:
+            usage: The usage reservation of the box.
+
+        Returns:
+            The SDK handle of the box, or ``None`` when Sail lists no box with the name.
+
+        Raises:
+            UsagePendingError: The lookup failed, or it found more than one box.
+        """
+        try:
+            found = await asyncio.wait_for(Sailbox.list.aio(name=self._name), STOP_TIMEOUT)
+        except Exception as error:
+            await asyncio.to_thread(usage.pending)
+            raise UsagePendingError("Sail could not list boxes after a failed create, so the hold stays.") from error
+        if not found:
+            return None
+        results = [await _bounded(box.terminate.aio(), "terminate the Sailbox") for box in found]
+        self._terminated = all(results)
+        if len(found) > 1:
+            await asyncio.to_thread(usage.pending)
+            raise UsagePendingError("Sail lists more than one box with the name, so the hold stays.")
+        return found[0]
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:

@@ -56,6 +56,10 @@ class InvalidArgumentError(Exception):
     """Stand in for the SDK error of a call that the client refused before any request."""
 
 
+class ImageBuildError(Exception):
+    """Stand in for the SDK error of an image build that failed before the create request."""
+
+
 def _aio(fn: Any) -> SimpleNamespace:
     """Wrap a coroutine function like an SDK method with an ``.aio`` form.
 
@@ -91,7 +95,9 @@ class FakeCloud:
     create_calls: int = 0
     create_started: asyncio.Event = field(default_factory=asyncio.Event)
     create_error: BaseException | None = None
+    create_makes_box: bool = False
     create_delay: float = 0.0
+    list_error: BaseException | None = None
     exec_hangs: bool = False
     exec_times_out: bool = False
     exec_truncates: bool = False
@@ -309,6 +315,9 @@ class FakeSailbox:
         CLOUD.create_calls += 1
         CLOUD.create_started.set()
         if CLOUD.create_error is not None:
+            if CLOUD.create_makes_box:
+                # Sail made the box, but the answer that names it was lost.
+                CLOUD.boxes.append(BoxState(id=f"sb-{next(CLOUD.ids)}", params=params))
             raise CLOUD.create_error
         if CLOUD.create_delay:
             await asyncio.sleep(CLOUD.create_delay)
@@ -417,8 +426,26 @@ async def _get(sailbox_id: str) -> SimpleNamespace:
     return SimpleNamespace(sailbox_id=sailbox_id, vcpu_count=vcpus, memory_mib=memory_mib, state_disk_size_gib=disk_gib)
 
 
+async def _list(*, name: str) -> list[FakeSailbox]:
+    """List the fake boxes with the name, or fail as the fake cloud sets.
+
+    Args:
+        name: The whole box name.
+
+    Returns:
+        The handles of the boxes with that name.
+
+    Raises:
+        BaseException: The list error that the fake cloud sets.
+    """
+    if CLOUD.list_error is not None:
+        raise CLOUD.list_error
+    return [FakeSailbox(box) for box in CLOUD.boxes if box.params.get("name") == name]
+
+
 FakeSailbox.create = _aio(FakeSailbox._create)
 FakeSailbox.get = _aio(_get)
+FakeSailbox.list = _aio(_list)
 
 
 @pytest.fixture(autouse=True)
@@ -1072,10 +1099,18 @@ async def test_a_failed_create_releases_the_reservation(fake_sdk: FakeCloud) -> 
 
 @pytest.mark.parametrize(
     "error",
-    [FakeApiError(429), FakeApiError(403), InvalidArgumentError("bad size"), TypeError("bad keyword")],
+    [
+        FakeApiError(402),
+        FakeApiError(403),
+        FakeApiError(409),
+        FakeApiError(413),
+        InvalidArgumentError("bad size"),
+        ImageBuildError("build failed"),
+        TypeError("bad keyword"),
+    ],
 )
 async def test_a_refused_create_frees_the_reservation(fake_sdk: FakeCloud, error: BaseException) -> None:
-    """Free the hold when Sail or the SDK clearly refused the create, so no box exists.
+    """Free the hold when Sail or the SDK refused the create and no box has the name.
 
     Args:
         fake_sdk: The fake Sail cloud.
@@ -1088,13 +1123,53 @@ async def test_a_refused_create_frees_the_reservation(fake_sdk: FakeCloud, error
     assert made[0].calls[-1] == ("release", True)
 
 
-async def test_a_server_error_on_the_create_keeps_the_hold(fake_sdk: FakeCloud) -> None:
-    """Keep the hold for a 5xx create, because Sail may have made the box."""
-    fake_sdk.create_error = FakeApiError(502)
+@pytest.mark.parametrize("error", [FakeApiError(502), FakeApiError(429)])
+async def test_an_unclear_create_error_keeps_the_hold(fake_sdk: FakeCloud, error: BaseException) -> None:
+    """Keep the hold for a 5xx or a 429, because an earlier SDK retry may have made the box.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        error: The final create error.
+    """
+    fake_sdk.create_error = error
     env, made = _protected()
     with pytest.raises(SandboxInfraError):
         await env.start()
     assert made[0].calls[-1] == ("release", False)
+
+
+@pytest.mark.parametrize("error", [FakeApiError(429), FakeApiError(403), TypeError("bad answer row")])
+async def test_a_failed_create_that_made_a_box_is_terminated_and_settled(
+    fake_sdk: FakeCloud, error: BaseException
+) -> None:
+    """Find the box of a failed create by its name, terminate it and settle it.
+
+    A retry can get a 429 after an earlier attempt made the box, and reading
+    the answer can raise a TypeError after Sail made the box.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        error: The final create error.
+    """
+    fake_sdk.create_error = error
+    fake_sdk.create_makes_box = True
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
+
+
+async def test_a_failed_lookup_after_a_refused_create_keeps_the_hold(fake_sdk: FakeCloud) -> None:
+    """Keep the hold, and raise it from the next stop, when Sail cannot list the boxes."""
+    fake_sdk.create_error = FakeApiError(403)
+    fake_sdk.list_error = FakeSailError("list down")
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert made[0].names() == ["begin_create", "pending"]
+    with pytest.raises(UsagePendingError, match="could not list"):
+        await env.stop()
 
 
 async def test_a_cancelled_protected_start_settles_the_box(fake_sdk: FakeCloud) -> None:
