@@ -420,6 +420,24 @@ def test_settle_prices_measured_usage_when_sail_has_no_prices() -> None:
     assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == usage
 
 
+def test_settle_rounds_usage_up_to_whole_minutes_when_sail_has_no_prices() -> None:
+    """Price 61 seconds of each counter as 2 minutes, because Sail bills in one-minute increments."""
+    snapshot = quote_sail_sandbox(CREATE).price_snapshot
+    line = {
+        **SPEND,
+        "vcpu_seconds": 61,
+        "memory_gib_seconds": 61,
+        "state_disk_gib_seconds": 61,
+        "pricing_configured": False,
+        "creation_fees_waived": True,
+    }
+    two_minutes = {**line, "vcpu_seconds": 120, "memory_gib_seconds": 120, "state_disk_gib_seconds": 120}
+    assert sail_actual_usd(line, snapshot) == sail_actual_usd(two_minutes, snapshot)
+    expected = 120 * (Decimal("0.015") + Decimal("0.008") + Decimal("0.0007")) / 3600
+    assert abs(sail_actual_usd(line, snapshot) - expected) < Decimal("1e-20")
+    assert sail_actual_usd({**line, "vcpu_seconds": 60}, snapshot) < sail_actual_usd(line, snapshot)
+
+
 def test_settle_recomputes_sails_cost_with_one_creation_charge() -> None:
     """Price the counters at Sail's rates plus one creation charge, with Sail's cost as the floor."""
     snapshot = quote_sail_sandbox(CREATE).price_snapshot

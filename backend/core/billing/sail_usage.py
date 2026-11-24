@@ -19,7 +19,7 @@ import email.utils
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
 import httpx
@@ -314,7 +314,7 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
     The measured usage is priced per second, plus the creation charge
     unless Sail waives it. With account prices, Sail's reported rates are
     used and the result is never below Sail's own cost. Otherwise the
-    admitted rates are used.
+    admitted rates are used, on counters rounded up to whole minutes.
 
     Args:
         spend: The box's spend line with the report's pricing flags.
@@ -344,9 +344,18 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
             # With account prices, a zero rate is the account's real price.
             if rate is not None:
                 fee = exact_nonnegative(rate) / _NANOS_PER_USD
-        cost = sum(
-            (exact_nonnegative(spend[counter]) * price for counter, price in per_second.items()), Decimal(0)
-        ) + _creation_usd(spend, fee)
+        measured = {counter: exact_nonnegative(spend[counter]) for counter in per_second}
+        if not configured:
+            # Sail adds usage to the bill "in one-minute increments"
+            # (_PRICING_URL). Without account prices no Sail cost is the
+            # floor, so each counter rounds up to whole minutes here.
+            measured = {
+                counter: (value / 60).to_integral_value(rounding=ROUND_CEILING) * 60
+                for counter, value in measured.items()
+            }
+        cost = sum((measured[counter] * price for counter, price in per_second.items()), Decimal(0)) + _creation_usd(
+            spend, fee
+        )
         if configured:
             # The spend docs (_SPEND_URL) call cost_usd_nanos "the cost of the
             # Sailbox's usage" and list creation_count apart from it; they do

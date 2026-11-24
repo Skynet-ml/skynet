@@ -374,7 +374,6 @@ class SailEnvironment(SandboxEnvironment):
         self._usage_factory = usage_factory
         self._usage: Any | None = None
         self._billing_call: asyncio.Future[Any] | None = None
-        self._settle_error: Exception | None = None
         self._pending_marked = False
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
@@ -395,7 +394,7 @@ class SailEnvironment(SandboxEnvironment):
         self._terminated = False
         self._create_failed = False
         self._create_refused = False
-        self._stop_task: asyncio.Future[None] | None = None
+        self._stop_task: asyncio.Future[list[Exception]] | None = None
 
     @classmethod
     def preflight(cls) -> None:
@@ -746,20 +745,20 @@ class SailEnvironment(SandboxEnvironment):
         """
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._teardown())
-        await asyncio.shield(self._stop_task)
-        # Only one stop caller gets a settle failure, so a second stop returns quietly.
-        settle_error, self._settle_error = self._settle_error, None
-        if settle_error is not None:
-            raise settle_error
+        errors = await asyncio.shield(self._stop_task)
+        # The callers of one teardown share its list, so only the first one
+        # raises its failure, and a later teardown cannot clear it.
+        if errors:
+            raise errors.pop()
 
-    async def _teardown(self) -> None:
+    async def _teardown(self) -> list[Exception]:
         """End a running start, terminate the Sailbox, then settle its reservation.
 
         The start and reserve waits share ``CREATE_GRACE + STOP_TIMEOUT``.
+
+        Returns:
+            The settle failure of this teardown, or an empty list.
         """
-        # A new teardown replaces the outcome of an earlier one, so a stop
-        # that settles never raises an older failure.
-        self._settle_error = None
         loop = asyncio.get_running_loop()
         waits_end = loop.time() + CREATE_GRACE + STOP_TIMEOUT
         starting = self._starting
@@ -834,9 +833,10 @@ class SailEnvironment(SandboxEnvironment):
                     boxes.discard(self)
                     if not boxes:
                         del _JOB_BOXES[job_id]
-        await self._settle(sailbox)
+        error = await self._settle(sailbox)
+        return [error] if error is not None else []
 
-    async def _settle(self, sailbox: Any) -> None:
+    async def _settle(self, sailbox: Any) -> Exception | None:
         """Release, keep pending or start the settle of the reservation of a protected box.
 
         A box that did not terminate can still run and spend, so its hold
@@ -846,26 +846,31 @@ class SailEnvironment(SandboxEnvironment):
 
         Args:
             sailbox: The SDK handle of the box, or ``None`` when no box came back.
+
+        Returns:
+            The failure that keeps the reservation pending, or ``None``.
         """
         usage, self._usage = self._usage, None
         if usage is None:
-            return
+            return None
         try:
             if sailbox is None and self._create_failed:
                 sailbox = await self._find_failed_create(usage)
             if sailbox is None:
                 await asyncio.to_thread(usage.release, refused=self._create_failed and self._create_refused)
-                return
+                return None
+            if not self._terminated:
+                # The box can still run. Keep its handle, its job entry and its
+                # usage before any ledger call can fail, so a later stop() or
+                # the job sweep terminates and settles it; a found box of a
+                # failed create has no handle yet.
+                self._keep(sailbox)
+                self._usage = usage
+                self._stop_task = None
             if usage.sailbox_id is None:
                 # A create in its grace returns the handle without a confirm.
                 await asyncio.to_thread(usage.bind, sailbox.sailbox_id)
             if not self._terminated:
-                # The box can still run. Keep its handle, its job entry and its
-                # usage, so a later stop() or the job sweep terminates and
-                # settles it; a found box of a failed create has no handle yet.
-                self._keep(sailbox)
-                self._usage = usage
-                self._stop_task = None
                 await self._mark_pending(usage)
                 raise UsagePendingError("The Sailbox did not terminate, so its usage stays pending.")
             # Sail shows the spend minutes after the terminate, longer than a
@@ -873,6 +878,7 @@ class SailEnvironment(SandboxEnvironment):
             task = asyncio.ensure_future(_settle_spend(usage))
             _SPEND_TASKS.add(task)
             task.add_done_callback(_on_spend_done)
+            return None
         except Exception as error:
             logger.warning("Sail sandbox %s usage stays pending: %s", self._name, type(error).__name__)
             # Any error, a BudgetError too, can come before a pending call;
@@ -883,11 +889,10 @@ class SailEnvironment(SandboxEnvironment):
                 except Exception as pending_error:
                     logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
             if isinstance(error, UsagePendingError | BudgetError):
-                self._settle_error = error
-            else:
-                pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
-                pending.__cause__ = error
-                self._settle_error = pending
+                return error
+            pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+            pending.__cause__ = error
+            return pending
         except BaseException:
             # A cancel during a ledger call must not leave the hold reserved.
             await self._pend_after_cancel(usage)

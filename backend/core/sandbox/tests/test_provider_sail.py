@@ -1569,6 +1569,121 @@ async def test_a_budget_error_from_the_bind_marks_the_hold_pending_once(
     assert "settle" not in made[0].names()
 
 
+def _bind_fails_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the first bind of every fake reservation fail, like a ledger that is down once.
+
+    Args:
+        monkeypatch: Replaces the bind.
+    """
+    bind = FakeUsage.bind
+    failed: list[str] = []
+
+    def flaky_bind(self: FakeUsage, sailbox_id: str) -> None:
+        """Fail the first call, then bind.
+
+        Args:
+            self: The fake reservation.
+            sailbox_id: The Sail id of the box.
+
+        Raises:
+            RuntimeError: On the first call.
+        """
+        if not failed:
+            failed.append(sailbox_id)
+            raise RuntimeError("ledger down")
+        bind(self, sailbox_id)
+
+    monkeypatch.setattr(FakeUsage, "bind", flaky_bind)
+
+
+async def test_a_found_box_whose_bind_and_terminate_fail_is_settled_by_the_sweep(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the found box of a failed create when its terminate and its bind fail.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the first bind fail.
+    """
+    _bind_fails_once(monkeypatch)
+    fake_sdk.create_error = FakeApiError(500)
+    fake_sdk.create_makes_box = True
+    fake_sdk.terminate_fails.add("sb-1")
+    env, made = _protected(tags={JOB_TAG: "job-bind"})
+    with pytest.raises(SandboxInfraError, match="create the Sailbox"):
+        await env.start()
+    assert [box.terminated for box in fake_sdk.boxes] == [False]
+    assert sail._JOB_BOXES["job-bind"] == {env}
+    fake_sdk.terminate_fails.clear()
+    assert await SailEnvironment.stop_job_sandboxes("job-bind") == 1
+    await _spent()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].names().count("pending") == 1
+    assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
+
+
+async def test_a_grace_box_whose_bind_and_terminate_fail_is_settled_by_a_later_stop(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the usage of a box that a cancelled create returns in its grace, when its terminate and bind fail.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the first bind fail.
+    """
+    _bind_fails_once(monkeypatch)
+    fake_sdk.create_delay = 0.05
+    fake_sdk.terminate_fails.add("sb-1")
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    await fake_sdk.create_started.wait()
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    assert [box.terminated for box in fake_sdk.boxes] == [False]
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    fake_sdk.terminate_fails.clear()
+    await env.stop()
+    await _spent()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].names().count("pending") == 1
+    assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
+
+
+async def test_each_stop_sees_the_failure_of_the_teardown_it_awaited(fake_sdk: FakeCloud) -> None:
+    """Raise a failed teardown to its caller, even when a new teardown starts before the caller resumes.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+    await env.start()
+    fake_sdk.terminate_fails.add("sb-1")
+    first_teardown = asyncio.ensure_future(env._teardown())
+    env._stop_task = first_teardown
+
+    def start_second(_: asyncio.Future[Any]) -> None:
+        """Start a second teardown before the first stop caller resumes.
+
+        Args:
+            _: The first teardown.
+        """
+        fake_sdk.terminate_fails.clear()
+        env._stop_task = asyncio.ensure_future(env._teardown())
+
+    # This callback runs before the first stop() awaits the teardown, so the
+    # second teardown runs before that caller resumes.
+    first_teardown.add_done_callback(start_second)
+    with pytest.raises(UsagePendingError, match="did not terminate"):
+        await env.stop()
+    await env.stop()
+    await _spent()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].names().count("pending") == 1
+    assert made[0].names().count("settle") == 1
+
+
 async def test_a_failed_pending_mark_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
     """Try the pending mark again after it fails, and stop once it works.
 
