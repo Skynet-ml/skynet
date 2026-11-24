@@ -164,6 +164,9 @@ def _limit(value: Any, default: int, maximum: int) -> int:
     """
     if value is None:
         return default
+    # A whole float such as 20.0 is the same limit; Sail takes only whole GiB.
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
     if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= maximum:
         raise UnpricedOperationError("Sail requires whole memory and disk limits within the box size.")
     return max(default, _power_of_two(value))
@@ -542,8 +545,9 @@ class SailUsageReservation:
             The box's final spend line.
 
         Raises:
-            UsagePendingError: When there is no box identity, or the line does
-                not settle before the deadline.
+            UsagePendingError: When there is no box identity, the line does
+                not settle before the deadline, or the read fails in a way
+                that no retry can fix.
             httpx.HTTPStatusError: When Sail refuses the read for good.
         """
         sailbox_id, since = self._identity()
@@ -576,9 +580,15 @@ class SailUsageReservation:
                     # A zero or past Retry-After must not make reads back to back.
                     wait = max(retry_after, SPEND_POLL_SECONDS)
                 continue
-            except (httpx.TransportError, TimeoutError, ValueError):
+            except (httpx.RequestError, TimeoutError, ValueError):
                 # ValueError: the body is not JSON, which a proxy error page can cause.
                 continue
+            except UsagePendingError:
+                raise
+            except Exception as error:
+                # An SDK or code error repeats on every read; the caller keeps
+                # the hold pending with its evidence.
+                raise UsagePendingError("Sail spend could not be read; the hold stays pending.") from error
             line = _box_spend(report, sailbox_id)
             if line is None:
                 continue

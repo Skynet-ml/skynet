@@ -237,6 +237,7 @@ def test_quote_rounds_a_raised_limit_up_to_a_power_of_two_and_defaults_to_size_l
         {"size": "ultra_experimental"},
         {"memory_limit_gib": 65},
         {"disk_limit_gib": 1.5},
+        {"memory_limit_gib": 20.5},
     ],
 )
 def test_quote_refuses_an_unbounded_box(change: dict[str, Any]) -> None:
@@ -247,6 +248,111 @@ def test_quote_refuses_an_unbounded_box(change: dict[str, Any]) -> None:
     """
     with pytest.raises(UnpricedOperationError):
         quote_sail_sandbox({**CREATE, **change})
+
+
+def test_quote_takes_a_whole_float_limit() -> None:
+    """Fund a whole float limit, such as 20.0 GiB, like the same whole number."""
+    raised = quote_sail_sandbox({**CREATE, "memory_limit_gib": 20.0, "disk_limit_gib": 64.0})
+    assert raised.price_snapshot["envelope"]["memory_gib"] == 32
+    assert raised.price_snapshot["envelope"]["disk_gib"] == 64
+
+
+class FakeConfig:
+    """Stand in for ``sail.Config`` with the attribute names of SDK 0.17.2."""
+
+    error: Exception | None = None
+
+    def __init__(self) -> None:
+        """Set the endpoint and the key."""
+        self.sailbox_api_url = "https://sailbox.example/"
+        self.api_key = "test-key"
+
+    @classmethod
+    def from_env(cls) -> FakeConfig:
+        """Return a config, or fail as the test sets.
+
+        Returns:
+            The fake config.
+
+        Raises:
+            Exception: The error that the test sets.
+        """
+        if cls.error is not None:
+            raise cls.error
+        return cls()
+
+
+def test_fetch_sail_spend_reads_the_spend_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send the box id, the window start and the key to Sail's spend endpoint.
+
+    Args:
+        monkeypatch: Replaces the SDK config and the HTTP transport.
+    """
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Record the request and answer a report.
+
+        Args:
+            request: The spend request.
+
+        Returns:
+            A JSON spend report.
+        """
+        seen.append(request)
+        return httpx.Response(200, json={"sailboxes": [SPEND]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(sail_usage, "Config", FakeConfig)
+    monkeypatch.setattr(sail_usage.httpx, "get", client.get)
+    since = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
+    assert sail_usage.fetch_sail_spend("sb-1", since) == {"sailboxes": [SPEND]}
+    (request,) = seen
+    assert request.url.copy_with(query=None) == "https://sailbox.example/v1/sailboxes/spend"
+    assert dict(request.url.params) == {"sailbox_id": "sb-1", "from": "2026-01-02T03:04:05Z"}
+    assert request.headers["Authorization"] == "Bearer test-key"
+
+
+def test_fetch_sail_spend_without_credentials_is_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the usage pending when the SDK finds no API key.
+
+    Args:
+        monkeypatch: Replaces the SDK config.
+    """
+    monkeypatch.setattr(FakeConfig, "error", ValueError("Set SAIL_API_KEY"))
+    monkeypatch.setattr(sail_usage, "Config", FakeConfig)
+    with pytest.raises(UsagePendingError, match="credentials"):
+        sail_usage.fetch_sail_spend("sb-1", dt.datetime.now(dt.UTC))
+
+
+def test_an_unexpected_read_error_keeps_the_hold_pending(database: Engine) -> None:
+    """Stop at once and keep the hold, with its evidence, when the read has a code error.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    spend = FakeSpend(AttributeError("no sailbox_api_url"))
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    with pytest.raises(UsagePendingError, match="could not be read") as raised:
+        reservation.settle()
+    assert isinstance(raised.value.__cause__, AttributeError)
+    assert len(spend.reads) == 1
+    assert _state(database) == "pending"
+
+
+def test_a_body_that_does_not_decode_is_read_again(database: Engine) -> None:
+    """Read again when httpx cannot decode the spend body, then settle.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    spend = FakeSpend(httpx.DecodingError("bad gzip"), SPEND)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    reservation.settle()
+    assert _state(database) == "settled"
+    assert len(spend.reads) > 1
 
 
 def _status_error(status: int, retry_after: str | None = None) -> httpx.HTTPStatusError:

@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from core.billing.runtime import UsagePendingError
-from core.billing.sail_usage import SailUsageReservation
+from core.billing.sail_usage import SailUsageReservation, quote_sail_sandbox
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -1695,6 +1695,173 @@ async def test_a_size_error_before_the_reserve_leaves_no_hold(
         await env.start()
     await env.stop()
     assert made == []
+    assert fake_sdk.create_calls == 0
+
+
+async def test_an_unfunded_size_is_a_spec_error(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Map a quote that refuses the size to a spec error, with no hold and no create.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the size fit name a size that Skynet does not fund.
+    """
+
+    def unfunded(**limits: Any) -> SimpleNamespace:
+        """Fit a size that Skynet does not fund.
+
+        Args:
+            **limits: The size limits.
+
+        Returns:
+            The size fit.
+        """
+        return SimpleNamespace(size="xl", memory_limit_gib=None, disk_limit_gib=None)
+
+    def quoting(budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+        """Price the request like the real reservation does.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+        """
+        quote_sail_sandbox(request)
+
+    monkeypatch.setattr(FakeSailbox, "size_for", staticmethod(unfunded))
+    env = SailEnvironment(_spec(operation_key="box-1"), budget="budget", usage_factory=quoting)
+    with pytest.raises(SandboxSpecError, match="cannot fund"):
+        await env.start()
+    await env.stop()
+    assert fake_sdk.create_calls == 0
+
+
+async def test_a_failed_pending_call_does_not_hide_a_cancel(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the cancel of the spend wait when the pending write then fails.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the pending write fail.
+    """
+
+    def failing_pending(self: FakeUsage) -> None:
+        """Record the call, then fail like a ledger that cannot write.
+
+        Args:
+            self: The fake reservation.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        self.calls.append(("pending", None))
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(FakeUsage, "pending", failing_pending)
+    env, made = _protected()
+    await env.start()
+    made[0].settle_error = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await env.stop()
+    assert made[0].names().count("pending") == 1
+
+
+@pytest.mark.parametrize("path", ["settle", "terminate"])
+async def test_a_ledger_error_marks_the_hold_pending_once(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """Call pending once when a ledger write fails after a pending call.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the ledger writes fail.
+        path: ``settle`` for a failed settle, ``terminate`` for a box that did not terminate.
+    """
+
+    def failing_pending(self: FakeUsage) -> None:
+        """Record the call, then fail like a ledger that cannot write.
+
+        Args:
+            self: The fake reservation.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        self.calls.append(("pending", None))
+        raise RuntimeError("ledger down")
+
+    def failing_settle(self: FakeUsage, spend: dict[str, Any]) -> None:
+        """Fail like the real settle, which marks the hold pending first.
+
+        Args:
+            self: The fake reservation.
+            spend: The spend line.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        self.calls.append(("pending", None))
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(FakeUsage, "pending", failing_pending)
+    monkeypatch.setattr(FakeUsage, "settle_spend", failing_settle)
+    env, made = _protected()
+    await env.start()
+    if path == "terminate":
+        fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert made[0].names().count("pending") == 1
+
+
+async def test_a_cancelled_teardown_during_the_start_releases_a_late_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold of a slow reserve when the teardown is cancelled while it waits for the start.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    made: list[FakeUsage] = []
+
+    def slow(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation after the test opens the gate.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        entered.set()
+        gate.wait(5)
+        made.append(FakeUsage(request, operation_key))
+        return made[-1]
+
+    env = SailEnvironment(_spec(operation_key="box-1"), budget="budget", usage_factory=slow)
+    starting = asyncio.ensure_future(env.start())
+    try:
+        await asyncio.to_thread(entered.wait, 5)
+        stopping = asyncio.ensure_future(env.stop())
+        # The first loop turn runs stop(), which makes the teardown task; the
+        # second lets the teardown reach its wait for the start.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert env._stop_task is not None
+        env._stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        with contextlib.suppress(BaseException):
+            await starting
+    finally:
+        gate.set()
+    for _ in range(100):
+        if made and made[0].calls:
+            break
+        await asyncio.sleep(0.01)
+    assert made[0].calls == [("release", False)]
     assert fake_sdk.create_calls == 0
 
 
