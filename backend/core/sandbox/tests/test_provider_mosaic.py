@@ -451,7 +451,11 @@ def _timeouts(*, start: float = 30, run: float = 30) -> PhaseTimeouts:
 
 
 def test_mosaic_is_not_allowed_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refuse the Mosaic provider in production before its import (D1)."""
+    """Refuse the Mosaic provider in production before its import (D1).
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     assert factory.PROVIDERS["mosaic"].production_allowed is False
     assert factory.PROVIDERS["mosaic"].extra == "mosaic"
     monkeypatch.setattr(factory.settings, "app_environment", "production")
@@ -460,27 +464,43 @@ def test_mosaic_is_not_allowed_in_production(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_factory_loads_mosaic_outside_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Load the Mosaic class from the registry outside production."""
+    """Load the Mosaic class from the registry outside production.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(factory.settings, "app_environment", "staging")
     assert factory.load_provider("mosaic") is MosaicEnvironment
 
 
 def test_preflight_needs_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Name the extra when the SDK is not installed."""
+    """Name the extra when the SDK is not installed.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(mosaic, "Sandbox", None)
     with pytest.raises(SandboxFatalError, match="`mosaic` extra"):
         MosaicEnvironment.preflight()
 
 
 def test_preflight_needs_a_token(fake_sdk: FakeCloud) -> None:
-    """Name the variable when Mosaic finds no API token."""
+    """Name the variable when Mosaic finds no API token.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.token = None
     with pytest.raises(SandboxFatalError, match=mosaic.API_TOKEN_ENV):
         MosaicEnvironment.preflight()
 
 
 async def test_start_without_a_token_creates_nothing(fake_sdk: FakeCloud) -> None:
-    """Fail the start before any create call when the token is missing."""
+    """Fail the start before any create call when the token is missing.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.token = None
     with pytest.raises(SandboxFatalError):
         await MosaicEnvironment(_spec()).start()
@@ -508,7 +528,13 @@ async def test_start_without_a_token_creates_nothing(fake_sdk: FakeCloud) -> Non
 async def test_sdk_errors_map_to_sandbox_errors(
     fake_sdk: FakeCloud, error: Exception, expected: type[Exception]
 ) -> None:
-    """Map each SDK error group to its sandbox error, keep the cause and never retry."""
+    """Map each SDK error group to its sandbox error, keep the cause and never retry.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        error: The SDK error that the create raises.
+        expected: The sandbox error group that the error maps to.
+    """
     fake_sdk.create_error = error
     with pytest.raises(expected) as caught:
         await MosaicEnvironment(_spec()).start()
@@ -517,7 +543,11 @@ async def test_sdk_errors_map_to_sandbox_errors(
 
 
 async def test_create_sends_the_tags_ttl_and_idempotency_key(fake_sdk: FakeCloud) -> None:
-    """Tag the box, round the lifetime up and use the box tag as the idempotency key."""
+    """Tag the box, round the lifetime up and use the box tag as the idempotency key.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     env = MosaicEnvironment(_spec(tags={JOB_TAG: "job-1"}, lifetime_seconds=10.5))
     async with env:
         (box,) = fake_sdk.boxes.values()
@@ -553,7 +583,11 @@ def test_network_modes_map_to_the_create_fields() -> None:
 
 
 async def test_a_second_start_is_refused(fake_sdk: FakeCloud) -> None:
-    """Refuse a second start, while the box runs and after the stop."""
+    """Refuse a second start, while the box runs and after the stop.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     env = MosaicEnvironment(_spec())
     await env.start()
     with pytest.raises(SandboxInfraError, match="cannot start again"):
@@ -565,7 +599,11 @@ async def test_a_second_start_is_refused(fake_sdk: FakeCloud) -> None:
 
 
 async def test_a_stop_before_the_start_still_lets_the_box_stop(fake_sdk: FakeCloud) -> None:
-    """Start after an early stop, then destroy the box at the next stop."""
+    """Start after an early stop, then destroy the box at the next stop.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     env = MosaicEnvironment(_spec())
     await env.stop()
     await env.start()
@@ -598,14 +636,22 @@ async def test_exec_before_start_is_an_infra_error() -> None:
 
 
 async def test_exec_reads_the_exit_code_from_info(fake_sdk: FakeCloud) -> None:
-    """Ask for the process info when the logs give no exit code."""
+    """Ask for the process info when the logs give no exit code.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.exit_code_in_info = True
     async with MosaicEnvironment(_spec()) as env:
         assert (await env.exec("exit 4")).exit_code == 4
 
 
 async def test_a_missing_exit_code_is_an_infra_error(fake_sdk: FakeCloud) -> None:
-    """Raise when neither the logs nor the info give an exit code."""
+    """Raise when neither the logs nor the info give an exit code.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.no_exit_code = True
     async with MosaicEnvironment(_spec()) as env:
         with pytest.raises(SandboxInfraError, match="no exit code"):
@@ -614,7 +660,11 @@ async def test_a_missing_exit_code_is_an_infra_error(fake_sdk: FakeCloud) -> Non
 
 
 async def test_a_timed_out_command_is_killed(fake_sdk: FakeCloud) -> None:
-    """Kill the command and return a timed-out result at the time limit."""
+    """Kill the command and return a timed-out result at the time limit.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     async with MosaicEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
         result = await env.exec("true", timeout_sec=0.05)
@@ -623,7 +673,11 @@ async def test_a_timed_out_command_is_killed(fake_sdk: FakeCloud) -> None:
 
 
 async def test_the_run_timeout_is_the_default_limit(fake_sdk: FakeCloud) -> None:
-    """Use the run phase timeout when the call sets no limit."""
+    """Use the run phase timeout when the call sets no limit.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     async with MosaicEnvironment(_spec(), timeouts=_timeouts(run=0.05)) as env:
         fake_sdk.exec_hangs = True
         result = await env.exec("true")
@@ -632,7 +686,11 @@ async def test_the_run_timeout_is_the_default_limit(fake_sdk: FakeCloud) -> None
 
 
 async def test_a_cancelled_command_is_killed(fake_sdk: FakeCloud) -> None:
-    """Kill the command when the caller cancels the exec."""
+    """Kill the command when the caller cancels the exec.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     async with MosaicEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
         task = asyncio.ensure_future(env.exec("true"))
@@ -644,7 +702,11 @@ async def test_a_cancelled_command_is_killed(fake_sdk: FakeCloud) -> None:
 
 
 async def test_upload_makes_the_parent_directories_once(fake_sdk: FakeCloud) -> None:
-    """Make every parent directory in one command before the writes."""
+    """Make every parent directory in one command before the writes.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     async with MosaicEnvironment(_spec()) as env:
         await env.upload_files({"/w/a/x.txt": "x", "/w/b/y.txt": "y", "/top.txt": "t"})
         assert await env.download_file("/w/b/y.txt") == "y"
@@ -653,10 +715,19 @@ async def test_upload_makes_the_parent_directories_once(fake_sdk: FakeCloud) -> 
 
 
 async def test_a_read_error_other_than_not_found_is_raised(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Raise the mapped error when a read fails for another reason."""
+    """Raise the mapped error when a read fails for another reason.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
 
     async def failing(self: FakeAsyncSandbox, path: str) -> bytes:
-        """Fail every read."""
+        """Fail every read.
+
+        Args:
+            self: The fake box.
+            path: The file path.
+        """
         raise FakeMosaicError("500", status=500)
 
     monkeypatch.setattr(FakeAsyncSandbox, "_read_bytes", failing)
@@ -666,7 +737,11 @@ async def test_a_read_error_other_than_not_found_is_raised(monkeypatch: pytest.M
 
 
 async def test_start_timeout_destroys_the_lost_box(fake_sdk: FakeCloud) -> None:
-    """Raise StartTimeoutError and destroy the box that the create thread made."""
+    """Raise StartTimeoutError and destroy the box that the create thread made.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.create_delay = 0.3
     env = MosaicEnvironment(_spec(), timeouts=_timeouts(start=0.05))
     with pytest.raises(StartTimeoutError):
@@ -676,7 +751,11 @@ async def test_start_timeout_destroys_the_lost_box(fake_sdk: FakeCloud) -> None:
 
 
 async def test_a_failed_create_with_a_server_box_is_found_by_its_tag(fake_sdk: FakeCloud) -> None:
-    """Find and destroy, by the box tag, a box whose create answer was lost."""
+    """Find and destroy, by the box tag, a box whose create answer was lost.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.create_error = FakeMosaicError("lost", code="transport")
     fake_sdk.create_error_after_box = True
     with pytest.raises(SandboxTransientError):
@@ -687,7 +766,11 @@ async def test_a_failed_create_with_a_server_box_is_found_by_its_tag(fake_sdk: F
 
 
 async def test_stop_during_start_destroys_the_box(fake_sdk: FakeCloud) -> None:
-    """End a running start from another task and leak no box."""
+    """End a running start from another task and leak no box.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.create_delay = 0.2
     env = MosaicEnvironment(_spec())
     start = asyncio.ensure_future(env.start())
@@ -700,7 +783,11 @@ async def test_stop_during_start_destroys_the_box(fake_sdk: FakeCloud) -> None:
 
 
 async def test_cancelled_start_destroys_the_box(fake_sdk: FakeCloud) -> None:
-    """Keep the cancel and leak no box when the caller cancels the start."""
+    """Keep the cancel and leak no box when the caller cancels the start.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.create_delay = 0.2
     start = asyncio.ensure_future(MosaicEnvironment(_spec()).start())
     await asyncio.sleep(0.02)
@@ -712,7 +799,11 @@ async def test_cancelled_start_destroys_the_box(fake_sdk: FakeCloud) -> None:
 
 
 async def test_orphan_sweep_leaves_other_boxes_running(fake_sdk: FakeCloud) -> None:
-    """Destroy only the box with this provider's own box tag."""
+    """Destroy only the box with this provider's own box tag.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     other = MosaicEnvironment(_spec())
     await other.start()
     fake_sdk.create_error = FakeMosaicError("lost", code="transport")
@@ -725,7 +816,11 @@ async def test_orphan_sweep_leaves_other_boxes_running(fake_sdk: FakeCloud) -> N
 
 
 async def test_stop_job_sandboxes_skips_ended_boxes(fake_sdk: FakeCloud) -> None:
-    """Count only the running boxes of the job."""
+    """Count only the running boxes of the job.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     envs = [MosaicEnvironment(_spec(tags={JOB_TAG: "job-9"})) for _ in range(2)]
     for env in envs:
         await env.start()
@@ -735,14 +830,22 @@ async def test_stop_job_sandboxes_skips_ended_boxes(fake_sdk: FakeCloud) -> None
 
 
 async def test_stop_job_sandboxes_skips_other_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skip a listed box whose job tag does not match, even when the list returns it."""
+    """Skip a listed box whose job tag does not match, even when the list returns it.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     stray = SimpleNamespace(id="sbx-stray", state="running", metadata={JOB_TAG: "other"})
     monkeypatch.setattr(FakeSandbox, "list_page", classmethod(lambda cls, **_: ([stray], None)))
     assert await MosaicEnvironment.stop_job_sandboxes("job-3") == 0
 
 
 async def test_stop_job_sandboxes_counts_only_successful_destroys(fake_sdk: FakeCloud) -> None:
-    """Leave a failed destroy out of the count and go on."""
+    """Leave a failed destroy out of the count and go on.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     envs = [MosaicEnvironment(_spec(tags={JOB_TAG: "job-7"})) for _ in range(2)]
     for env in envs:
         await env.start()
@@ -754,21 +857,34 @@ async def test_stop_job_sandboxes_counts_only_successful_destroys(fake_sdk: Fake
 
 
 async def test_stop_job_sandboxes_bounds_the_list(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Log a list that runs past the limit and destroy nothing."""
+    """Log a list that runs past the limit and destroy nothing.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.05)
     fake_sdk.list_delay = 0.2
     assert await MosaicEnvironment.stop_job_sandboxes("job-5") == 0
 
 
 async def test_stop_job_sandboxes_raises_a_list_error(fake_sdk: FakeCloud) -> None:
-    """Raise the mapped error when the list call fails."""
+    """Raise the mapped error when the list call fails.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.list_error = FakeAuthenticationError("401", status=401)
     with pytest.raises(SandboxFatalError):
         await MosaicEnvironment.stop_job_sandboxes("job-6")
 
 
 async def test_sudo_runs_the_command_as_root(fake_sdk: FakeCloud) -> None:
-    """Ask Mosaic for the root user with sudo, and for no user without it."""
+    """Ask Mosaic for the root user with sudo, and for no user without it.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     async with MosaicEnvironment(_spec()) as env:
         await env.exec("true", sudo=True)
         await env.exec("true")
@@ -776,7 +892,11 @@ async def test_sudo_runs_the_command_as_root(fake_sdk: FakeCloud) -> None:
 
 
 async def test_stop_job_sandboxes_reads_every_page(fake_sdk: FakeCloud) -> None:
-    """Destroy the job boxes of every list page, when ended boxes fill the first page."""
+    """Destroy the job boxes of every list page, when ended boxes fill the first page.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.page_size = 2
     for index in range(2):
         fake_sdk.boxes[f"old-{index}"] = BoxState(
@@ -791,7 +911,11 @@ async def test_stop_job_sandboxes_reads_every_page(fake_sdk: FakeCloud) -> None:
 
 
 async def test_the_orphan_lookup_reads_every_page(fake_sdk: FakeCloud) -> None:
-    """Find the lost box by its tag when it is not on the first list page."""
+    """Find the lost box by its tag when it is not on the first list page.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+    """
     fake_sdk.page_size = 1
     fake_sdk.create_error = FakeMosaicError("lost", code="transport")
     fake_sdk.create_error_after_box = True
@@ -818,7 +942,12 @@ async def _wait_for_the_background_cleanup() -> None:
 async def test_a_create_slower_than_the_stop_limit_is_destroyed_later(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Destroy the box of a stop-during-start create that returns after the stop limit."""
+    """Destroy the box of a stop-during-start create that returns after the stop limit.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.1)
     fake_sdk.create_delay = 0.4
     env = MosaicEnvironment(_spec())
@@ -837,7 +966,12 @@ async def test_a_create_slower_than_the_stop_limit_is_destroyed_later(
 async def test_a_start_timeout_slower_than_the_stop_limit_is_destroyed_later(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Destroy the box of a timed-out create that returns after the stop limit."""
+    """Destroy the box of a timed-out create that returns after the stop limit.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.1)
     fake_sdk.create_delay = 0.4
     with pytest.raises(StartTimeoutError):
@@ -973,13 +1107,18 @@ def test_a_protected_box_is_billable_and_protected() -> None:
 async def test_a_protected_box_reserves_its_shape_and_settles_after_the_stop(
     fake_sdk: FakeCloud, usages: list[FakeUsage]
 ) -> None:
-    """Reserve the sent shape before the create and settle after a confirmed destroy."""
+    """Reserve the sent shape before the create and settle after a confirmed destroy.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
     env = _protected(resources=ResourceRequest(cpus=4))
     await env.start()
     (box,) = fake_sdk.boxes.values()
     assert (box.params["vcpu"], box.params["memory_mb"]) == (4, 8192)
     (usage,) = usages
-    assert usage.request == {"vcpu": 4, "memory_mb": 8192, "lifetime_ms": 301_000}
+    assert usage.request == {"vcpu": 4, "memory_mb": 8192, "lifetime_ms": 302_000}
     assert usage.operation_key == "op-1"
     await env.stop()
     await env.stop()
@@ -988,7 +1127,12 @@ async def test_a_protected_box_reserves_its_shape_and_settles_after_the_stop(
 
 
 async def test_an_ignored_shape_sends_the_default_shape(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Send Mosaic's default shape so the reserved shape is the billed one."""
+    """Send Mosaic's default shape so the reserved shape is the billed one.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
     env = _protected(resources=ResourceRequest(mode=ResourceMode.IGNORE))
     await env.start()
     (box,) = fake_sdk.boxes.values()
@@ -997,7 +1141,12 @@ async def test_an_ignored_shape_sends_the_default_shape(fake_sdk: FakeCloud, usa
 
 
 async def test_a_failed_confirm_still_destroys_and_settles(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Settle the hold when the start fails after the create made a box."""
+    """Settle the hold when the start fails after the create made a box.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
 
     def factory(*args: Any, **kwargs: Any) -> FakeUsage:
         """Make a reservation whose confirm fails.
@@ -1021,8 +1170,43 @@ async def test_a_failed_confirm_still_destroys_and_settles(fake_sdk: FakeCloud, 
     assert usages[0].calls[-2:] == ["stopped", "settle"]
 
 
+async def test_an_sdk_error_in_the_confirm_is_mapped(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Raise a sandbox error, not the raw SDK error, when ``info()`` fails during the confirm.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+
+    def factory(*args: Any, **kwargs: Any) -> FakeUsage:
+        """Make a reservation whose confirm gets an SDK error.
+
+        Args:
+            *args: The reserve arguments.
+            **kwargs: The reserve keyword arguments.
+
+        Returns:
+            The reservation.
+        """
+        usage = FakeUsage(*args, **kwargs)
+        usage.confirm_error = FakeMosaicError("500", status=500)
+        return usage
+
+    env = MosaicEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=factory)
+    with pytest.raises(SandboxTransientError) as raised:
+        await env.start()
+    assert isinstance(raised.value.__cause__, FakeMosaicError)
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+
+
 async def test_a_cancelled_start_still_destroys_and_settles(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Wait for the confirm, destroy the box and settle when the start is cancelled."""
+    """Wait for the confirm, destroy the box and settle when the start is cancelled.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
 
     def factory(*args: Any, **kwargs: Any) -> FakeUsage:
         """Make a reservation whose confirm is slow.
@@ -1050,7 +1234,12 @@ async def test_a_cancelled_start_still_destroys_and_settles(fake_sdk: FakeCloud,
 
 
 async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Release the hold when Mosaic refused the create with a 4xx answer."""
+    """Release the hold when Mosaic refused the create with a 4xx answer.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
     fake_sdk.create_error = FakeMosaicError("400", status=400)
     env = _protected()
     with pytest.raises(SandboxRejectedError):
@@ -1093,8 +1282,10 @@ async def test_a_cancel_during_a_slow_create_settles_the_hold(fake_sdk: FakeClou
     assert usages[0].calls == ["dispatched", f"bind:{box.id}", "stopped", "settle"]
 
 
-async def test_a_lost_create_without_a_box_releases_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Release the hold when the box-tag list proves that the failed create made no box.
+async def test_a_lost_create_without_a_listed_box_keeps_the_hold_pending(
+    fake_sdk: FakeCloud, usages: list[FakeUsage]
+) -> None:
+    """Keep the hold pending when a lost create lists no box, because the box may appear after the list.
 
     Args:
         fake_sdk: The fake Mosaic account.
@@ -1103,11 +1294,28 @@ async def test_a_lost_create_without_a_box_releases_the_hold(fake_sdk: FakeCloud
     fake_sdk.create_error = FakeMosaicError("lost", code="transport")
     with pytest.raises(SandboxTransientError):
         await _protected().start()
+    assert usages[0].calls == ["dispatched", "pending"]
+
+
+async def test_a_rate_limited_create_without_a_listed_box_releases_the_hold(
+    fake_sdk: FakeCloud, usages: list[FakeUsage]
+) -> None:
+    """Release the hold when Mosaic refused the create with a 429 and then lists no box with the tag.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    fake_sdk.create_error = FakeRateLimitError("429", status=429)
+    with pytest.raises(SandboxTransientError):
+        await _protected().start()
     assert usages[0].calls == ["dispatched", "release:SandboxTransientError"]
 
 
-async def test_a_rate_limited_create_releases_the_hold(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Release the hold of a 429 create even when the box-tag list fails, because Mosaic made no box.
+async def test_a_rate_limited_create_with_a_failed_list_keeps_the_hold_pending(
+    fake_sdk: FakeCloud, usages: list[FakeUsage]
+) -> None:
+    """Keep the hold of a 429 create pending when the list fails, because an earlier SDK retry may have made a box.
 
     Args:
         fake_sdk: The fake Mosaic account.
@@ -1117,7 +1325,23 @@ async def test_a_rate_limited_create_releases_the_hold(fake_sdk: FakeCloud, usag
     fake_sdk.list_error = FakeMosaicError("500", status=500)
     with pytest.raises(SandboxTransientError):
         await _protected().start()
-    assert usages[0].calls == ["dispatched", "release:SandboxTransientError"]
+    assert usages[0].calls == ["dispatched", "pending"]
+
+
+async def test_a_refused_create_with_a_listed_box_settles_the_box(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Bind, destroy and settle a box that the list finds after a refused create, never release its hold.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    fake_sdk.create_error = FakeMosaicError("400", status=400)
+    fake_sdk.create_error_after_box = True
+    with pytest.raises(SandboxRejectedError):
+        await _protected().start()
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert usages[0].calls == ["dispatched", f"bind:{box.id}", "stopped", "settle"]
 
 
 async def test_a_release_without_a_start_error_uses_the_default_reason(usages: list[FakeUsage]) -> None:
@@ -1161,7 +1385,12 @@ async def test_a_failed_destroy_still_settles_the_known_box(fake_sdk: FakeCloud,
 
 
 async def test_the_box_is_destroyed_when_its_funded_lifetime_ends(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
-    """Destroy and settle the box at its funded lifetime, because Mosaic's TTL counts only idle time."""
+    """Destroy and settle the box at its funded lifetime, because Mosaic's TTL counts only idle time.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
     env = _protected(lifetime_seconds=0.05)
     await env.start()
     (box,) = fake_sdk.boxes.values()

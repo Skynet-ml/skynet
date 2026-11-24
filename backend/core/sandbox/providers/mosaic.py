@@ -25,8 +25,8 @@ process poll loop, the file calls and the lost-create cleanup come from
   an inactivity limit, not a lifetime cap, so the provider destroys the box
   itself when its funded lifetime ends. The stop settles the hold whenever
   the box id is known, also for a lost create's box found by its tag. It
-  releases the hold when Mosaic refused the create or has no box with the
-  tag, and keeps it pending only when the box is unknown.
+  releases the hold only when Mosaic refused the create and then lists no
+  box with the tag, and keeps it pending in every other case.
 - A ``sudo`` command runs as the ``root`` user.
 - Harbor's snapshot builds, volumes, secrets, SSH, pause, the ``/workspace``
   transfer staging and directory transfer are left out.
@@ -177,6 +177,25 @@ def _mapped(action: str) -> Iterator[None]:
     except _classes(MosaicError) as error:
         group = _error_group(error)
         raise group(f"Mosaic could not {action}: {type(error).__name__}.") from error
+
+
+def _refusal(error: BaseException | None) -> str | None:
+    """Name the refusal of a create, when Mosaic answered it with a refusal.
+
+    Args:
+        error: The create's SDK error, or ``None``.
+
+    Returns:
+        The sandbox error group of a 4xx answer, a refused token or a rate
+        limit, or ``None`` for any other outcome. A refusal alone does not
+        prove that no box exists; only an empty list after it does.
+    """
+    if error is None or not isinstance(error, _classes(MosaicError)):
+        return None
+    group = _error_group(error)
+    if isinstance(error, _classes(RateLimitError)) or group in (SandboxRejectedError, SandboxFatalError):
+        return group.__name__
+    return None
 
 
 async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
@@ -351,13 +370,16 @@ class MosaicEnvironment(SandboxEnvironment):
         """Build the request that the reservation prices.
 
         Returns:
-            The box shape, and its lifetime plus the stop limit, because the
-            box runs until its bounded destroy ends.
+            The box shape, and its lifetime plus two stop limits, because the
+            box runs until its destroy ends.
         """
+        # The expiry destroy waits STOP_TIMEOUT, but the SDK destroy thread
+        # retries for up to 61 s and Mosaic bills until it ends, so one stop
+        # limit is not enough margin.
         return {
             "vcpu": self._create_params["vcpu"],
             "memory_mb": self._create_params["memory_mb"],
-            "lifetime_ms": math.ceil((self.spec.lifetime_seconds + STOP_TIMEOUT) * 1000),
+            "lifetime_ms": math.ceil((self.spec.lifetime_seconds + 2 * STOP_TIMEOUT) * 1000),
         }
 
     @classmethod
@@ -490,7 +512,8 @@ class MosaicEnvironment(SandboxEnvironment):
                 # the start right after the create still sees it.
                 self._box = AsyncSandbox(sync_box)
                 if usage is not None:
-                    await self._billing(usage.confirm_created, sync_box)
+                    with _mapped("confirm the sandbox"):
+                        await self._billing(usage.confirm_created, sync_box)
                     self._expiry = asyncio.ensure_future(self._expire(funded_until))
         except TimeoutError:
             if not deadline.expired():
@@ -705,19 +728,8 @@ class MosaicEnvironment(SandboxEnvironment):
             if not done:
                 logger.warning("Mosaic did not %s in time; it goes on in the background.", action)
         elif usage is not None:
-            await self._close_usage(usage, [])
-
-    def _refused(self) -> bool:
-        """Report whether the start error proves that the create made no box.
-
-        Returns:
-            True for a 4xx answer, a refused token or a rate limit, because
-            Mosaic answers these before it makes a box.
-        """
-        error = self._start_error
-        if isinstance(error, SandboxRejectedError | SandboxFatalError):
-            return True
-        return error is not None and isinstance(error.__cause__, _classes(RateLimitError))
+            error = self._start_error
+            await self._close_usage(usage, [], type(error).__name__ if error is not None else "no_box_created")
 
     async def _close_lost_create(self, call: asyncio.Future[Any] | None, usage: Any | None) -> None:
         """Destroy the box of a lost create, then settle, release or keep its hold.
@@ -727,29 +739,39 @@ class MosaicEnvironment(SandboxEnvironment):
             usage: The usage reservation of a protected box, or ``None``.
         """
         try:
-            boxes = await self._destroy_orphan(call)
+            create_error, boxes = await self._destroy_orphan(call)
         except BaseException:
-            if usage is not None and self._refused():
-                await self._close_usage(usage, [])
-            elif usage is not None:
-                await self._close_usage(usage, None)
+            # The SDK retries a create under its idempotency key and reports
+            # only the last attempt, so no create error proves that no box
+            # exists without a list.
+            await self._close_usage(usage, None)
             raise
-        await self._close_usage(usage, [] if self._refused() else boxes)
+        refusal = _refusal(create_error)
+        if not boxes and refusal is None:
+            # A lost create may still make its box after the list: Mosaic's
+            # list shows only running, paused, archived and destroyed boxes
+            # (the ``state`` enum of GET /v1/sandboxes in
+            # https://sandbox.mosaicos.com/openapi.json, read 2026-11-24),
+            # and nothing there says a box that is still being created is listed.
+            await self._close_usage(usage, None)
+            return
+        await self._close_usage(usage, boxes, refusal or "no_box_created")
 
-    async def _close_usage(self, usage: Any | None, boxes: list[tuple[str, Any, bool]] | None) -> None:
+    async def _close_usage(
+        self, usage: Any | None, boxes: list[tuple[str, Any, bool]] | None, reason: str = "no_box_created"
+    ) -> None:
         """Settle, release or keep the hold of a protected box after its teardown.
 
         Args:
             usage: The usage reservation, or ``None`` for an unprotected box.
             boxes: The boxes of this create as ``(id, SDK box or None, destroy
                 confirmed)``; empty when no box exists, ``None`` when unknown.
+            reason: Why no box exists, for the release audit record.
         """
         if usage is None:
             return
         try:
             if boxes == []:
-                error = self._start_error
-                reason = type(error).__name__ if error is not None else "no_box_created"
                 try:
                     await asyncio.to_thread(usage.release, reason)
                 except BudgetError:
@@ -767,26 +789,30 @@ class MosaicEnvironment(SandboxEnvironment):
             logger.warning("Mosaic sandbox usage stays pending: %s", type(billing_error).__name__)
             self._settle_error = _settle_failure(billing_error)
 
-    async def _destroy_orphan(self, call: asyncio.Future[Any] | None) -> list[tuple[str, Any, bool]]:
+    async def _destroy_orphan(
+        self, call: asyncio.Future[Any] | None
+    ) -> tuple[BaseException | None, list[tuple[str, Any, bool]]]:
         """Destroy the box of a create that ended before the provider kept it.
 
         Args:
             call: The create thread future, or ``None``.
 
         Returns:
-            Every box of this create as ``(id, SDK box or None, destroy
-            confirmed)``. An empty list means Mosaic has no box with this
-            provider's box tag.
+            The create's SDK error, or ``None``, and every box of this create
+            as ``(id, SDK box or None, destroy confirmed)``. An empty list
+            means Mosaic lists no box with this provider's box tag.
 
         Raises:
             SandboxError: The list call failed; see ``_mapped``.
         """
-        sync_box = None
+        sync_box = create_error = None
         if call is not None:
-            with contextlib.suppress(Exception):
+            try:
                 sync_box = await asyncio.shield(call)
+            except Exception as error:
+                create_error = error
         if sync_box is not None:
-            return [(sync_box.id, sync_box, await self._destroy_lost(sync_box.destroy))]
+            return None, [(sync_box.id, sync_box, await self._destroy_lost(sync_box.destroy))]
         # The create failed or still runs; the server may still have made the
         # box, so look for it by its tag.
         boxes = []
@@ -795,7 +821,7 @@ class MosaicEnvironment(SandboxEnvironment):
                 boxes.append((summary.id, None, True))
             else:
                 boxes.append((summary.id, None, await self._destroy_lost(_destroy_by_id, summary.id)))
-        return boxes
+        return create_error, boxes
 
     @staticmethod
     async def _destroy_lost(destroy: Callable[..., Any], *args: Any) -> bool:

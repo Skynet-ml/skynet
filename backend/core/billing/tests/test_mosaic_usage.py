@@ -342,6 +342,30 @@ def test_a_box_with_another_shape_is_not_confirmed(database: Engine) -> None:
         USAGE.confirm(reservation, FakeHandle(vcpu=4, memory_mb=8192))
 
 
+@pytest.mark.parametrize("shape", [{"vcpu": 4, "memory_mb": 8192}, {"vcpu": 0, "memory_mb": 0}])
+def test_a_box_with_an_unconfirmed_shape_is_charged_the_whole_hold(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, shape: dict[str, int]
+) -> None:
+    """Charge the whole hold, not the measured time, when Mosaic reports another shape or the SDK default zeros.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+        shape: The shape that ``info()`` reports.
+    """
+    _clock(monkeypatch, 0.0, 60.0)
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
+    reservation.dispatched()
+    with pytest.raises(UsagePendingError):
+        USAGE.confirm(reservation, FakeHandle(**shape))
+    reservation.stopped()
+    USAGE.settle(reservation)
+    operation = _operation(runtime, reservation)
+    assert operation.state == "settled"
+    assert operation.actual_cents == operation.max_cents == Decimal(5)
+
+
 def test_release_returns_the_hold_of_a_refused_create(database: Engine) -> None:
     """Release the hold when Mosaic refused the create, so no box exists.
 
@@ -371,6 +395,7 @@ def test_release_returns_the_hold_of_a_refused_create(database: Engine) -> None:
         _page(_record(running_seconds=None)),
         _page(_record(unit_seconds=3600)),
         _page(_record(billing_snapshot={"rate": None})),
+        _page(_record(billing_snapshot={"rate": {"currency": "USD", "micros_per_unit_hour": 0}})),
         _page(_record(billing_snapshot={"rate": {"currency": "EUR", "micros_per_unit_hour": 1}})),
     ],
 )

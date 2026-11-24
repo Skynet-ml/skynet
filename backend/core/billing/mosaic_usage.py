@@ -7,8 +7,9 @@ its units, so the funded hold is a ceiling. The settle reads Mosaic's
 per-sandbox usage history. When that history is not final and complete,
 the settle charges the measured wall time from the create call to the
 confirmed destroy, which is never less than the awake time. A known box
-without a confirmed destroy is charged the whole hold, because it may still
-run. Every charge is clamped to the reserved hold.
+without a confirmed destroy, or whose shape Mosaic did not confirm, is
+charged the whole hold, because it may still run or run larger. Every charge
+is clamped to the reserved hold.
 """
 
 from __future__ import annotations
@@ -173,7 +174,7 @@ def history_usd(history: Mapping[str, Any], *, units: int) -> Decimal | None:
         if not isinstance(rate, Mapping) or rate.get("currency") != "USD":
             return None
         micros = rate.get("micros_per_unit_hour")
-        if not _positive_int(micros, 0):
+        if not _positive_int(micros, 1):
             return None
         total += unit_seconds * Decimal(micros) / _MICROS_PER_USD / _SECONDS_PER_HOUR
     return total
@@ -254,6 +255,7 @@ class MosaicUsageReservation:
             raise UsagePendingError("This sandbox was already dispatched; reconcile its exact usage.")
         self.sandbox_id: str | None = None
         self._handle: Any = None
+        self._shape_unconfirmed = False
         self._dispatched_at: float | None = None
         self._stopped_at: float | None = None
 
@@ -279,13 +281,19 @@ class MosaicUsageReservation:
         Args:
             sandbox: The SDK ``Sandbox`` that the create returned.
 
+        A failed or different answer marks the shape unconfirmed, so the
+        settle charges the whole hold. The SDK reports a missing shape as 0,
+        which never equals a funded shape.
+
         Raises:
             UsagePendingError: Mosaic reports another vCPU count or memory size.
         """
         self.bind(sandbox.id, sandbox)
+        self._shape_unconfirmed = True
         summary = sandbox.info()
         if summary.vcpu != self.request["vcpu"] or summary.memory_mb != self.request["memory_mb"]:
             raise UsagePendingError("The cloud sandbox did not confirm the admitted CPU and memory.")
+        self._shape_unconfirmed = False
 
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
         """Fund the box up to ``lifetime_ms`` before it may run that long.
@@ -373,9 +381,9 @@ class MosaicUsageReservation:
         if self.sandbox_id is None:
             raise UsagePendingError("The cloud sandbox is unknown; its usage stays pending.")
         wall_ms = self._wall_ms()
-        if wall_ms is None:
-            # No reconciler reads this box later, and it may still run, so
-            # the whole hold is the only safe charge.
+        if wall_ms is None or self._shape_unconfirmed:
+            # No reconciler reads this box later, and it may still run or run
+            # at a larger shape, so the whole hold is the only safe charge.
             return mosaic_measured_usd(self.units, self.lifetime_ms), "funded_ceiling", self.lifetime_ms
         history = None
         if self._handle is not None:
