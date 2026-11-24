@@ -25,11 +25,13 @@ from there. Changes:
   is written. Harbor's ``playwright_execute``, directory transfers,
   profiles, proxies, viewports and other browser options are left out.
 - ``stop_job_sandboxes`` finds the browsers of a job by their tags.
-- With a budget the box is protected (SKY-553). It reserves a headful 8 or
-  16 GiB browser before the create call and confirms it after. A capacity
-  answer fails the start, because the capacity wait must not hold a
-  reservation. Commands stop at the funded end. After the delete, the box
-  reads Kernel's reported uptime and settles the reservation.
+- With a budget the box is protected (SKY-553). It reserves a headful 8 GiB
+  browser before the create call and confirms it after. A capacity answer
+  fails the start, because the capacity wait must not hold a reservation.
+  Commands stop at the funded end. Kernel has no hard session lifetime, so a
+  browser that no stop deletes ends at its inactivity timeout, which the
+  reservation funds. After the delete, the box reads Kernel's reported uptime
+  and settles the reservation.
 """
 
 from __future__ import annotations
@@ -47,7 +49,9 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
+from core.billing.budgets import BudgetError
 from core.billing.kernel_usage import KernelUsageReservation
+from core.billing.runtime import UsagePendingError
 
 from ..capabilities import EnvironmentCapabilities, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
@@ -55,7 +59,6 @@ from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import SandboxSpec
 from ..telemetry import BoxTimings, current_output_sink
-from .vercel import _settle_failure
 
 try:
     from kernel import APIStatusError, APITimeoutError, AsyncKernel, NotFoundError, RateLimitError
@@ -341,8 +344,8 @@ class KernelEnvironment(SandboxEnvironment):
             "tags": {**spec.tags, BOX_TAG: self.name},
             "timeout": CREATE_TIMEOUT,
         }
-        # Kernel prices a headful browser at 8 or 16 GiB, so a protected box
-        # asks for one of those sizes explicitly.
+        # Kernel prices only the 8 GiB headful browser, so a protected box asks
+        # for its size explicitly; a larger request fails at the reservation.
         memory = _memory_request(spec.resources.memory_mb, container=self._container or self._budget is not None)
         if memory is not None:
             options["memory"] = memory
@@ -518,6 +521,7 @@ class KernelEnvironment(SandboxEnvironment):
             return
         known = None
         measured_ms = None
+        swept: tuple[list[Any], list[Any]] | None = None
         if browser is not None:
             known = browser.session_id
             try:
@@ -533,11 +537,11 @@ class KernelEnvironment(SandboxEnvironment):
             # A create that timed out can leave a browser that this
             # environment never saw.
             try:
-                await asyncio.wait_for(_delete_tagged(client, {BOX_TAG: self.name}, skip=known), STOP_TIMEOUT)
+                swept = await asyncio.wait_for(_delete_tagged(client, {BOX_TAG: self.name}, skip=known), STOP_TIMEOUT)
             except Exception as sweep_error:
                 logger.warning("Kernel browser %s sweep failed: %s", self.name, type(sweep_error).__name__)
         if self._usage is not None:
-            await self._settle(client, known, measured_ms, error)
+            await self._settle(client, known, measured_ms, error, swept)
         with contextlib.suppress(Exception):
             await client.close()
 
@@ -552,7 +556,12 @@ class KernelEnvironment(SandboxEnvironment):
         return math.ceil((self._clock.monotonic() - self._created_at) * 1000)
 
     async def _settle(
-        self, client: Any, session_id: str | None, measured_ms: int | None, error: BaseException | None
+        self,
+        client: Any,
+        session_id: str | None,
+        measured_ms: int | None,
+        error: BaseException | None,
+        swept: tuple[list[Any], list[Any]] | None,
     ) -> None:
         """Settle the reservation from Kernel's usage report, or keep it pending.
 
@@ -561,19 +570,38 @@ class KernelEnvironment(SandboxEnvironment):
             session_id: The deleted browser, or ``None`` when none is known.
             measured_ms: The measured wall time when the delete is confirmed.
             error: The start failure, or ``None``.
+            swept: The browsers that the tag sweep listed and deleted, or
+                ``None`` when no sweep finished.
         """
         usage = self._usage
         try:
-            if session_id is None:
-                await asyncio.to_thread(usage.fail, error or SandboxInfraError("The browser was never created."))
+            if session_id is None and not self._create_dispatched:
+                await asyncio.to_thread(usage.release, "The Kernel create call never went out.")
                 return
+            if session_id is None:
+                listed, deleted = swept or ([], [])
+                if swept is None or len(listed) != 1 or len(deleted) != 1:
+                    failure = error or SandboxInfraError("The browser was never created.")
+                    await asyncio.to_thread(usage.fail, failure, no_browser=swept is not None and not listed)
+                    return
+                # The create failed, but its one tagged browser exists and is
+                # now deleted, so the box bills it like a stopped browser.
+                (browser,) = deleted
+                session_id = browser.session_id
+                measured_ms = self._measured_ms()
+                try:
+                    await asyncio.to_thread(usage.confirm, browser)
+                except Exception as confirm_error:
+                    # The settle below refuses an unconfirmed browser and keeps the hold.
+                    logger.warning(
+                        "Kernel browser %s is not the funded one: %s", self.name, type(confirm_error).__name__
+                    )
             receipt = await self._usage_receipt(client, session_id) if measured_ms is not None else {}
             await asyncio.to_thread(usage.record, receipt, measured_ms=measured_ms)
             await asyncio.to_thread(usage.settle)
         except Exception as billing_error:
             logger.warning("Kernel browser %s usage stays pending: %s", self.name, type(billing_error).__name__)
-            if session_id is not None:
-                self._settle_error = _settle_failure(billing_error)
+            self._settle_error = _settle_failure(billing_error)
 
     async def _usage_receipt(self, client: Any, session_id: str) -> dict[str, Any]:
         """Read Kernel's details of the deleted browser until its usage is ready.
@@ -632,7 +660,8 @@ class KernelEnvironment(SandboxEnvironment):
             return 0
         client = cls._new_client()
         try:
-            return await _delete_tagged(client, {JOB_TAG: job_id})
+            _, deleted = await _delete_tagged(client, {JOB_TAG: job_id})
+            return len(deleted)
         finally:
             with contextlib.suppress(Exception):
                 await client.close()
@@ -888,7 +917,27 @@ class KernelEnvironment(SandboxEnvironment):
         return bytes(data).decode("utf-8")
 
 
-async def _delete_tagged(client: Any, tags: Mapping[str, str], *, skip: str | None = None) -> int:
+def _settle_failure(error: Exception) -> Exception:
+    """Return the usage error that a failed settle raises from ``stop()``.
+
+    Args:
+        error: The settle failure.
+
+    Returns:
+        A usage error unchanged. Any other failure becomes a
+        ``UsagePendingError``, because the reservation stays pending and its
+        own text can hold database details.
+    """
+    if isinstance(error, UsagePendingError | BudgetError):
+        return error
+    pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+    pending.__cause__ = error
+    return pending
+
+
+async def _delete_tagged(
+    client: Any, tags: Mapping[str, str], *, skip: str | None = None
+) -> tuple[list[Any], list[Any]]:
     """Delete every listed browser whose tags match.
 
     A failure on one browser does not stop the sweep.
@@ -899,21 +948,19 @@ async def _delete_tagged(client: Any, tags: Mapping[str, str], *, skip: str | No
         skip: A session id that is already deleted.
 
     Returns:
-        The number of browsers that Kernel deleted.
+        The listed browsers other than ``skip``, and those that Kernel deleted.
     """
     # The list pages by offset, so a delete during the listing would move
     # later browsers into pages that the listing already passed.
-    session_ids = [item.session_id async for item in client.browsers.list(tags=dict(tags))]
-    deleted = 0
-    for session_id in session_ids:
-        if session_id == skip:
-            continue
+    listed = [item async for item in client.browsers.list(tags=dict(tags)) if item.session_id != skip]
+    deleted = []
+    for item in listed:
         try:
-            await client.browsers.delete_by_id(session_id)
+            await client.browsers.delete_by_id(item.session_id)
         except Exception as error:
             if NotFoundError is not None and isinstance(error, NotFoundError):
                 continue
-            logger.warning("Kernel browser %s did not stop: %s", session_id, type(error).__name__)
+            logger.warning("Kernel browser %s did not stop: %s", item.session_id, type(error).__name__)
             continue
-        deleted += 1
-    return deleted
+        deleted.append(item)
+    return listed, deleted

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -12,7 +13,6 @@ import pytest
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
-from core.billing import kernel_usage
 from core.billing.budgets import BudgetService
 from core.billing.kernel_usage import USAGE, KernelUsageReservation, quote_kernel_browser
 from core.billing.operation_pricing import UnpricedOperationError
@@ -117,12 +117,11 @@ def test_usage_adapter_finds_kernel() -> None:
 
 
 def test_quote_covers_lifetime_idle_timeout_and_stop_margin() -> None:
-    """Fund the lifetime, one more idle timeout and the stop margin at the published GB-second rate."""
+    """Fund the lifetime, one more idle timeout and the stop margin at the published headful rate."""
     quote = quote_kernel_browser(REQUEST)
-    # (300 s + 300 s + 120 s) x 8 GiB x $0.0000166667 = $0.0960001920 = 9.6 cents.
+    # (300 s + 300 s + 120 s) x $0.0001333336/s = $0.0960001920 = 9.6 cents.
     assert quote.maximum.total == Decimal("9.60001920")
-    assert quote.price_snapshot["gb_second_usd"] == "0.0000166667"
-    assert quote_kernel_browser({**REQUEST, "memory_gib": 16}).maximum.total == 2 * quote.maximum.total
+    assert quote.price_snapshot["headful_second_usd"] == "0.0001333336"
 
 
 @pytest.mark.parametrize(
@@ -132,6 +131,7 @@ def test_quote_covers_lifetime_idle_timeout_and_stop_margin() -> None:
         {"lifetime_ms": 259_200_001},
         {"timeout_seconds": True},
         {"memory_gib": 4},
+        {"memory_gib": 16},
         {"headless": True},
         {"gpu": True},
     ],
@@ -154,20 +154,38 @@ def test_reserve_then_settle_charges_the_reported_uptime(database: Engine) -> No
     reservation.record(RECEIPT, measured_ms=90_000)
     USAGE.settle(reservation)
     assert _state(database) == "settled"
-    # 60 s x 8 GiB x $0.0000166667 = $0.0080000160.
+    # 60 s x $0.0001333336/s = $0.0080000160.
     assert _actual_cents(runtime, reservation) == Decimal("0.80000160")
     assert runtime._pinned == {}
 
 
-def test_settle_clamps_to_the_reservation(database: Engine) -> None:
-    """Never charge more than the reservation, even when the reported uptime is longer."""
+def test_settle_clamps_to_the_reservation(database: Engine, caplog: pytest.LogCaptureFixture) -> None:
+    """Never charge more than the reservation, and log a warning when the reported uptime is longer.
+
+    Args:
+        database: Engine of the funded ledger.
+        caplog: The pytest log capture fixture.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     USAGE.confirm(reservation, _browser())
     reservation.record({**RECEIPT, "usage": {"uptime_ms": 10_000_000}}, measured_ms=None)
-    reservation.settle()
+    with caplog.at_level(logging.WARNING, logger="core.billing.kernel_usage"):
+        reservation.settle()
     assert _state(database) == "settled"
     assert _actual_cents(runtime, reservation) == reservation.operation.max_cents
+    assert "clamped" in caplog.text
+
+
+def test_unconfirmed_browser_keeps_the_hold(database: Engine) -> None:
+    """Keep the hold of a browser that does not match its funded request, also with a usage report."""
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-one")
+    with pytest.raises(UsagePendingError):
+        USAGE.confirm(reservation, _browser(memory="16GiB"))
+    reservation.record(RECEIPT, measured_ms=90_000)
+    with pytest.raises(UsagePendingError, match="funded request"):
+        reservation.settle()
+    assert _state(database) == "pending"
 
 
 def test_usage_report_not_ready_falls_back_to_measured_time(database: Engine) -> None:
@@ -178,7 +196,7 @@ def test_usage_report_not_ready_falls_back_to_measured_time(database: Engine) ->
     reservation.record({**RECEIPT, "usage_status": "pending"}, measured_ms=90_000)
     reservation.settle()
     assert _state(database) == "settled"
-    # 90 s x 8 GiB x $0.0000166667 = $0.0120000240.
+    # 90 s x $0.0001333336/s = $0.0120000240.
     assert _actual_cents(runtime, reservation) == Decimal("1.20000240")
 
 
@@ -217,13 +235,54 @@ def test_confirm_refuses_a_browser_outside_the_funded_request(database: Engine, 
     assert reservation.session_id == "ses-1"
 
 
-def test_refused_create_releases_the_hold(database: Engine) -> None:
-    """Release the hold when Kernel answers the create call with a 4xx."""
+def _http_error(status: int) -> RuntimeError:
+    """Return a create failure with an HTTP status.
+
+    Args:
+        status: The status code.
+
+    Returns:
+        The error.
+    """
+    error = RuntimeError("refused")
+    error.status_code = status  # type: ignore[attr-defined]
+    return error
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422, 429])
+def test_refused_create_with_no_browser_releases_the_hold(database: Engine, status: int) -> None:
+    """Release the hold when Kernel refused the create call and the sweep found no browser.
+
+    Args:
+        database: Engine of the funded ledger.
+        status: A refusal status.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
-    error = RuntimeError("rate limited")
-    error.status_code = 429  # type: ignore[attr-defined]
-    reservation.fail(error)
+    reservation.fail(_http_error(status), no_browser=True)
+    assert _state(database) == "released"
+    assert runtime._pinned == {}
+
+
+@pytest.mark.parametrize(("status", "no_browser"), [(429, False), (408, True), (409, True), (418, True)])
+def test_uncertain_create_failure_keeps_the_hold(database: Engine, status: int, no_browser: bool) -> None:
+    """Keep the hold when the sweep did not prove no browser, or the status can follow a real create.
+
+    Args:
+        database: Engine of the funded ledger.
+        status: The create status.
+        no_browser: Whether the sweep found no browser.
+    """
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-one")
+    reservation.fail(_http_error(status), no_browser=no_browser)
+    assert _state(database) == "pending"
+
+
+def test_release_before_the_create_call_frees_the_hold(database: Engine) -> None:
+    """Release the hold when the create call never went out."""
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
+    reservation.release("cancelled before the create call")
     assert _state(database) == "released"
     assert runtime._pinned == {}
 
@@ -232,7 +291,7 @@ def test_lost_create_response_keeps_the_hold_and_refuses_a_replay(database: Engi
     """Keep the hold after a create failure with no status, and refuse a second dispatch."""
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
-    reservation.fail(TimeoutError("create response lost"))
+    reservation.fail(TimeoutError("create response lost"), no_browser=True)
     assert _state(database) == "pending"
     with pytest.raises(UsagePendingError, match="already dispatched"):
         USAGE.reserve(runtime, REQUEST, operation_key="box-one")
@@ -241,9 +300,7 @@ def test_lost_create_response_keeps_the_hold_and_refuses_a_replay(database: Engi
 def test_server_error_on_create_keeps_the_hold(database: Engine) -> None:
     """Keep the hold when a 5xx answer may still have made a browser."""
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-one")
-    error = RuntimeError("bad gateway")
-    error.status_code = 502  # type: ignore[attr-defined]
-    reservation.fail(error)
+    reservation.fail(_http_error(502), no_browser=True)
     assert _state(database) == "pending"
 
 
@@ -258,9 +315,3 @@ def test_extend_funds_the_longer_lifetime(database: Engine) -> None:
     assert reservation.quote.request_fingerprint == longer.request_fingerprint
     with pytest.raises(ValueError):
         USAGE.extend(reservation, 600_000, deadline=0.0)
-
-
-def test_rate_constant_matches_the_published_headful_price() -> None:
-    """Keep the GB-second rate equal to the published 8 GB headful price divided by 8."""
-    published_headful_usd = Decimal("0.0001333336")
-    assert published_headful_usd == kernel_usage.GB_SECOND_USD * 8

@@ -1,14 +1,15 @@
 """Reserve Kernel browser VMs and settle them from Kernel's reported uptime.
 
-Kernel bills a browser per GB-second of memory while it is active, with no
-per-browser fee and no network charge. The adapter funds a headful browser
-for its whole possible uptime and settles from the ``usage.uptime_ms`` that
+Kernel bills a headful browser at a flat rate for each second it is active,
+with no per-browser fee and no network charge. The adapter funds a headful
+8 GiB browser for its whole possible uptime and settles from the ``usage.uptime_ms`` that
 Kernel reports for the deleted session. When that report is not ready, it
 settles from the measured time between the create call and the delete.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
@@ -20,20 +21,26 @@ from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
 from .vercel_usage import vercel_charge_policy
 
-# Read on 2026-11-24. Kernel lists a headless browser (1 GB) at
-# $0.0000166667/s and a headful browser (8 GB) at $0.0001333336/s, which is
-# 8 x the same GB-second rate. A GPU browser costs more and is refused here.
+logger = logging.getLogger(__name__)
+
+# Read on 2026-11-24 from _PRICING_URL: a headful browser costs a flat
+# $0.0001333336 per second. The page gives no memory size for that rate and
+# no price for a 16 GiB headful browser, so only the 8 GiB default (the SDK's
+# ``BrowserMemoryRequest`` docs) is priced. A GPU browser costs more and is
+# refused here.
 _PRICING_URL = "https://www.kernel.sh/docs/info/pricing"
 _USAGE_URL = "https://kernel.sh/docs/api-reference/browsers/get-browser-session-details"
 _PRICE_VERSION = "kernel-public-2026-11-24"
-GB_SECOND_USD = Decimal("0.0000166667")
-# Kernel accepts only 8 or 16 GiB for a headful browser.
-HEADFUL_MEMORY_GIB = frozenset({8, 16})
+HEADFUL_SECOND_USD = Decimal("0.0001333336")
+HEADFUL_MEMORY_GIB = 8
 # Kernel's longest inactivity timeout (72 hours).
 MAX_LIFETIME_MS = 259_200_000
-# Covers the create call before the funded clock starts and the delete call
-# after the last work.
+# Covers the provider's delete call (``STOP_TIMEOUT`` in the Kernel provider)
+# and the read wait of a last command that ends at the funded end.
 STOP_MARGIN_MS = 120_000
+# Statuses on the create call that prove Kernel made no browser. A 408 or a
+# 409 can follow a create that Kernel still finishes, so they stay pending.
+_REFUSED_CREATE_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
 
 
 def _positive_int(value: Any) -> bool:
@@ -51,8 +58,9 @@ def _positive_int(value: Any) -> bool:
 def _maximum_usd(request: Mapping[str, Any]) -> Decimal:
     """Bound the uptime cost of one browser.
 
-    A worker that stops calling leaves the browser idle, and Kernel deletes
-    it after its inactivity timeout. So the browser can run for its funded
+    Kernel's create call has no hard session lifetime, only an inactivity
+    timeout. A worker that never stops the browser leaves it idle, and Kernel
+    deletes it after that timeout. So the browser can run for its funded
     lifetime, then for one more timeout, then for the stop margin.
 
     Args:
@@ -62,7 +70,19 @@ def _maximum_usd(request: Mapping[str, Any]) -> Decimal:
         The most the browser can cost in USD.
     """
     ceiling_ms = request["lifetime_ms"] + request["timeout_seconds"] * 1000 + STOP_MARGIN_MS
-    return Decimal(ceiling_ms) * request["memory_gib"] * GB_SECOND_USD / 1000
+    return _uptime_usd(ceiling_ms)
+
+
+def _uptime_usd(uptime_ms: int) -> Decimal:
+    """Price a headful browser's uptime.
+
+    Args:
+        uptime_ms: The uptime in milliseconds.
+
+    Returns:
+        The cost in USD.
+    """
+    return Decimal(uptime_ms) * HEADFUL_SECOND_USD / 1000
 
 
 def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
@@ -70,7 +90,7 @@ def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
 
     Args:
         request: ``lifetime_ms``, ``timeout_seconds`` (the inactivity
-            timeout), ``memory_gib`` (8 or 16), ``headless`` (False) and
+            timeout), ``memory_gib`` (8), ``headless`` (False) and
             ``gpu`` (False).
 
     Returns:
@@ -86,14 +106,12 @@ def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
         or lifetime_ms > MAX_LIFETIME_MS
         or not _positive_int(timeout_seconds)
         or timeout_seconds * 1000 > MAX_LIFETIME_MS
-        or request.get("memory_gib") not in HEADFUL_MEMORY_GIB
+        or request.get("memory_gib") != HEADFUL_MEMORY_GIB
         or isinstance(request.get("memory_gib"), bool)
         or request.get("headless") is not False
         or request.get("gpu") is not False
     ):
-        raise UnpricedOperationError(
-            "Protected Kernel runs need a bounded headful browser with 8 or 16 GiB and no GPU."
-        )
+        raise UnpricedOperationError("Protected Kernel runs need a bounded headful browser with 8 GiB and no GPU.")
     return operation_quote(
         request,
         _maximum_usd(request),
@@ -102,7 +120,7 @@ def quote_kernel_browser(request: Mapping[str, Any]) -> OperationQuote:
             "provider": "kernel",
             "price_version": _PRICE_VERSION,
             "source": _PRICING_URL,
-            "gb_second_usd": str(GB_SECOND_USD),
+            "headful_second_usd": str(HEADFUL_SECOND_USD),
             "stop_margin_ms": STOP_MARGIN_MS,
             "request": dict(request),
         },
@@ -199,6 +217,7 @@ class KernelUsageReservation:
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This browser was already dispatched; reconcile its exact session.")
         self.session_id: str | None = None
+        self.confirmed = False
         self.receipt: dict[str, Any] = {}
         self.measured_ms: int | None = None
 
@@ -222,6 +241,7 @@ class KernelUsageReservation:
             or timeout > self.request["timeout_seconds"]
         ):
             raise UsagePendingError("The Kernel browser did not confirm the funded memory, mode and timeout.")
+        self.confirmed = True
 
     def record(self, receipt: Mapping[str, Any], *, measured_ms: int | None) -> None:
         """Keep the evidence that the provider read after the delete.
@@ -280,28 +300,51 @@ class KernelUsageReservation:
                 evidence=evidence,
             )
 
-    def fail(self, error: BaseException) -> None:
+    def _reject(self, evidence: dict[str, Any]) -> bool:
+        """Release the hold of a browser that does not exist.
+
+        Args:
+            evidence: Why no browser exists.
+
+        Returns:
+            True when the ledger released the hold.
+        """
+        try:
+            self.runtime.service.reject(
+                self.operation.id,
+                self.runtime.username,
+                evidence_key=f"kernel-refusal:{self.operation.id}",
+                evidence={"provider": "kernel", **evidence},
+            )
+        except BudgetError:
+            return False
+        self.runtime.unpin(self.operation.id)
+        return True
+
+    def release(self, reason: str) -> None:
+        """Release the hold when the create call never went out.
+
+        Args:
+            reason: Why the create call did not go out.
+        """
+        if not self._reject({"reason": reason}):
+            self.pending()
+
+    def fail(self, error: BaseException, *, no_browser: bool) -> None:
         """Release the hold when Kernel refused the create call, otherwise keep it.
 
-        A 4xx answer proves that no browser exists. Any other failure, such
-        as a timeout or a 5xx answer, can leave a browser, so the hold stays.
+        Only a listed refusal status proves that no browser exists, and only
+        when the tag sweep also found none. A timeout, a 408, a 409 or a 5xx
+        answer can leave a browser, so the hold stays.
 
         Args:
             error: The failure of the create call.
+            no_browser: The tag sweep finished and found no browser of the box.
         """
         status = _status_code(error)
-        if self.session_id is None and status is not None and 400 <= status < 500:
-            try:
-                self.runtime.service.reject(
-                    self.operation.id,
-                    self.runtime.username,
-                    evidence_key=f"kernel-refusal:{self.operation.id}",
-                    evidence={"provider": "kernel", "status_code": status, "message": str(error)[:1000]},
-                )
-                self.runtime.unpin(self.operation.id)
-                return
-            except BudgetError:
-                pass
+        refused = self.session_id is None and no_browser and status in _REFUSED_CREATE_STATUSES
+        if refused and self._reject({"status_code": status, "message": str(error)[:1000]}):
+            return
         self.pending()
 
     def settle(self) -> None:
@@ -312,7 +355,7 @@ class KernelUsageReservation:
         goes above the reservation.
 
         Raises:
-            UsagePendingError: When the browser has no session or no usable evidence.
+            UsagePendingError: When the browser has no confirmed session or no usable evidence.
             BudgetError: When the ledger refuses the settlement.
         """
         try:
@@ -322,6 +365,8 @@ class KernelUsageReservation:
                 return
             if self.session_id is None:
                 raise UsagePendingError("Kernel browser creation has not returned an exact session identity.")
+            if not self.confirmed:
+                raise UsagePendingError("The Kernel browser does not match its funded request.")
             uptime = _uptime_ms(self.receipt, self.session_id)
             basis = "kernel-usage"
             if uptime is None:
@@ -330,8 +375,16 @@ class KernelUsageReservation:
                         "Kernel has not reported the browser's usage, and its delete is unconfirmed."
                     )
                 uptime, basis = self.measured_ms, "measured"
-            reported = Decimal(uptime) * self.request["memory_gib"] * GB_SECOND_USD / 1000
+            reported = _uptime_usd(uptime)
             maximum = _maximum_usd(self.request)
+            if reported > maximum:
+                # A longer uptime than the funded ceiling means a bound did not
+                # hold; Skynet absorbs the difference, so make it visible.
+                logger.warning(
+                    "Kernel session %s used %s ms, above its funded ceiling; the charge is clamped.",
+                    self.session_id,
+                    uptime,
+                )
             usd = min(reported, maximum)
             charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
             self.runtime.service.settle(

@@ -8,6 +8,7 @@ import contextlib
 import itertools
 import json
 import shlex
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from decimal import Decimal
 from pathlib import Path
@@ -1005,22 +1006,23 @@ async def test_real_sdk_exec_without_timeout_has_no_read_timeout(monkeypatch: py
 class FakeUsage:
     """Record the calls that a protected box makes on its usage reservation."""
 
-    def __init__(self, request: dict[str, Any], operation_key: str, settle_error: Exception | None = None) -> None:
+    def __init__(self, request: dict[str, Any], operation_key: str, billing_error: Exception | None = None) -> None:
         """Keep the funded request and start with the reserve call.
 
         Args:
             request: The usage request that the box reserved.
             operation_key: The operation key of the box.
-            settle_error: The error that ``settle`` raises, or ``None``.
+            billing_error: The error that ``settle`` and ``fail`` raise, or ``None``.
         """
         self.request = request
         self.operation_key = operation_key
-        self.settle_error = settle_error
+        self.billing_error = billing_error
         self.calls: list[str] = ["reserve"]
         self.browser: Any = None
         self.receipt: dict[str, Any] | None = None
         self.measured_ms: int | None = None
         self.error: BaseException | None = None
+        self.no_browser: bool | None = None
 
     def confirm(self, browser: Any) -> None:
         """Record the confirm call.
@@ -1049,27 +1051,47 @@ class FakeUsage:
             Exception: The scripted settle error.
         """
         self.calls.append("settle")
-        if self.settle_error is not None:
-            raise self.settle_error
+        if self.billing_error is not None:
+            raise self.billing_error
 
-    def fail(self, error: BaseException) -> None:
-        """Record the fail call.
+    def fail(self, error: BaseException, *, no_browser: bool) -> None:
+        """Record the fail call, or raise the scripted error.
 
         Args:
             error: The create failure.
+            no_browser: Whether the tag sweep found no browser.
+
+        Raises:
+            Exception: The scripted billing error.
         """
         self.calls.append("fail")
         self.error = error
+        self.no_browser = no_browser
+        if self.billing_error is not None:
+            raise self.billing_error
+
+    def release(self, reason: str) -> None:
+        """Record the release call.
+
+        Args:
+            reason: Why the create call did not go out.
+        """
+        self.calls.append("release")
 
 
 def _protected(
-    spec: SandboxSpec | None = None, *, settle_error: Exception | None = None, **options: Any
+    spec: SandboxSpec | None = None,
+    *,
+    billing_error: Exception | None = None,
+    reserve_delay: float = 0.0,
+    **options: Any,
 ) -> tuple[kernel.KernelEnvironment, list[FakeUsage]]:
     """Return a protected box and the list that collects its usage fakes.
 
     Args:
         spec: The spec, or ``None`` for a small spec with an operation key.
-        settle_error: The error that the fake settle raises.
+        billing_error: The error that the fake settle and fail raise.
+        reserve_delay: Seconds that the reserve thread blocks.
         **options: More provider options.
 
     Returns:
@@ -1089,7 +1111,8 @@ def _protected(
             The fake.
         """
         assert budget == "budget"
-        usages.append(FakeUsage(request, operation_key, settle_error))
+        time.sleep(reserve_delay)
+        usages.append(FakeUsage(request, operation_key, billing_error))
         return usages[-1]
 
     env = kernel.KernelEnvironment(
@@ -1174,6 +1197,56 @@ async def test_stop_during_a_protected_create_fails_the_reservation() -> None:
     with pytest.raises(SandboxInfraError):
         await start
     assert usages[0].calls == ["reserve", "fail"]
+    assert usages[0].no_browser is True
+
+
+async def test_cancel_during_the_reserve_releases_the_hold() -> None:
+    """Release the hold when the start is cancelled before the create call goes out."""
+    env, usages = _protected(reserve_delay=0.05)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert FakeState.create_calls == []
+    assert usages[0].calls == ["reserve", "release"]
+
+
+async def test_failed_create_with_one_swept_browser_settles_it() -> None:
+    """Bind and settle the one browser that a failed create left, at the measured time."""
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.leak_on_error = True
+    env, usages = _protected(_spec(name="leaky", operation_key="box-op"))
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.browser.session_id == FakeState.deleted[0]
+    assert usage.measured_ms is not None
+    assert FakeState.browsers == {}
+
+
+async def test_failed_create_with_two_swept_browsers_keeps_the_hold() -> None:
+    """Keep the hold when the sweep finds more than one browser, because the funded one is unknown."""
+    FakeState.new_browser({"name": "twin", "tags": {kernel.BOX_TAG: "twin"}})
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.leak_on_error = True
+    env, usages = _protected(_spec(name="twin", operation_key="box-op"))
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    assert usages[0].calls == ["reserve", "fail"]
+    assert usages[0].no_browser is False
+
+
+async def test_failed_fail_is_raised_from_stop_once() -> None:
+    """Raise a pending-usage error from the stop after a failed create whose fail call also failed."""
+    FakeState.create_errors = [_status_error(kernel.RateLimitError, 429)]
+    env, _ = _protected(billing_error=RuntimeError("database detail"))
+    with pytest.raises(kernel.RateLimitError):
+        await env.start()
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    await env.stop()
 
 
 async def test_protected_box_does_not_wait_for_capacity() -> None:
@@ -1187,6 +1260,7 @@ async def test_protected_box_does_not_wait_for_capacity() -> None:
     assert clock.sleeps == []
     assert usages[0].calls == ["reserve", "fail"]
     assert isinstance(usages[0].error, kernel.RateLimitError)
+    assert usages[0].no_browser is True
 
 
 async def test_usage_read_failure_settles_from_the_measured_time() -> None:
@@ -1218,7 +1292,7 @@ async def test_usage_read_waits_for_a_ready_report() -> None:
 
 async def test_settle_failure_is_raised_from_stop_once() -> None:
     """Raise a pending-usage error from the first stop and return quietly from the next."""
-    env, _ = _protected(settle_error=RuntimeError("database detail"))
+    env, _ = _protected(billing_error=RuntimeError("database detail"))
     await env.start()
     with pytest.raises(UsagePendingError):
         await env.stop()
@@ -1261,7 +1335,7 @@ async def test_protected_box_settles_on_a_real_ledger(tmp_path: Path, monkeypatc
     with Session(engine) as session:
         operation = session.scalar(select(ExecutionOperationModel))
         assert operation.state == "settled"
-    # 60 s x 8 GiB x $0.0000166667 = $0.0080000160.
+    # 60 s x $0.0001333336/s = $0.0080000160.
     assert service.get_operation(operation.id, "alice").actual_cents == Decimal("0.80000160")
     assert runtime._pinned == {}
     engine.dispose()
