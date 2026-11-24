@@ -183,6 +183,38 @@ def test_runtime_clock_starts_before_the_image_build(database: Engine) -> None:
     assert row.actual_units == cent_units(charge.total)
 
 
+def test_build_longer_than_the_hold_settles_at_the_funded_time_with_a_warning(
+    database: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Settle at the funded time, log a warning and flag the evidence when the build pushes past the hold.
+
+    Args:
+        database: The SQLite ledger.
+        caplog: The log capture.
+    """
+    runtime = _runtime(database)
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.building()
+    reservation.sent()
+    assert reservation._clock_at is not None
+    reservation.sent_at = reservation._clock_at + FUNDED_MS / 1000
+    reservation.confirm_created(SimpleNamespace(object_id="sb-1"))
+    reservation.stopped()
+    reservation.stopped_at = reservation.sent_at + 5
+    with caplog.at_level("WARNING", logger=modal_usage.__name__):
+        reservation.settle()
+    row = _operation(database)
+    with Session(database) as session:
+        settled = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "modal-stop:sb-1")
+        ).one()
+    assert row.state == "settled"
+    assert row.actual_units == row.max_units
+    assert settled.evidence["over_funded"] is True
+    assert settled.evidence["billed_ms"] == FUNDED_MS
+    assert "more than its funded" in caplog.text
+
+
 def test_settle_clamps_to_the_padded_lifetime(database: Engine) -> None:
     """Bill at most the timeout plus the margin, even when the measured runtime is longer."""
     long_runtime = _runtime(database)

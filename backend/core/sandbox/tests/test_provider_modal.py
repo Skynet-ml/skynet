@@ -360,7 +360,7 @@ def fake_modal(monkeypatch: pytest.MonkeyPatch) -> FakeModal:
     for name in ("App", "Image", "Secret", "Sandbox"):
         monkeypatch.setattr(modal_provider, name, getattr(sdk, name))
     monkeypatch.setattr(modal_provider, "_EXEC_TIMEOUT_ERRORS", (FakeExecTimeoutError,))
-    monkeypatch.setattr(modal_provider, "_REFUSAL_ERRORS", frozenset({FakeInvalidError}))
+    monkeypatch.setattr(modal_provider, "_REFUSAL_ERRORS", frozenset({FakeRefusalError}))
     monkeypatch.setattr(modal_provider, "modal_config", SimpleNamespace(get=lambda key: key == "sandbox_v2"))
     monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 0)
     return sdk
@@ -1205,8 +1205,12 @@ async def test_protected_box_fails_usage_when_create_fails(fake_modal: FakeModal
     assert env.usage is None
 
 
-class FakeInvalidError(Exception):
-    """Stand in for modal.exception.InvalidError."""
+class FakeRefusalError(Exception):
+    """Stand in for a refusal type, such as modal.exception.PermissionDeniedError."""
+
+
+class FakeRefusalSubclassError(FakeRefusalError):
+    """Stand in for a subclass of a refusal type, which never counts as a refusal."""
 
 
 class FakeResourceExhaustedError(Exception):
@@ -1214,7 +1218,7 @@ class FakeResourceExhaustedError(Exception):
 
 
 _CREATE_ERRORS = [
-    FakeInvalidError("bad"),
+    FakeRefusalError("bad"),
     FakeResourceExhaustedError("Insufficient capacity to create sandbox."),
     RuntimeError("client timeout"),
 ]
@@ -1223,9 +1227,9 @@ _UNREFUSED_ERRORS = _CREATE_ERRORS[1:]
 
 async def test_refused_create_releases_after_one_lookup_finds_no_box(fake_modal: FakeModal) -> None:
     """Report the box as absent when the V2 create was refused and a lookup by the box tag found no sandbox."""
-    fake_modal.create_error = FakeInvalidError("bad")
+    fake_modal.create_error = FakeRefusalError("bad")
     env, budget = _protected()
-    with pytest.raises(FakeInvalidError):
+    with pytest.raises(FakeRefusalError):
         await env.start()
     (usage,) = budget.reservations
     assert usage.calls == ["sent", "fail"]
@@ -1254,9 +1258,9 @@ async def test_unrefused_create_keeps_the_hold_after_two_empty_lookups(fake_moda
 async def test_refusal_on_the_v1_create_keeps_the_hold(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the hold pending when the V1 create raised a refusal type, because its poll runs after the box exists."""
     monkeypatch.setattr(modal_provider, "modal_config", SimpleNamespace(get=lambda key: False))
-    fake_modal.create_error = FakeInvalidError("bad")
+    fake_modal.create_error = FakeRefusalError("bad")
     env, budget = _protected()
-    with pytest.raises(FakeInvalidError):
+    with pytest.raises(FakeRefusalError):
         await env.start()
     (usage,) = budget.reservations
     assert usage.calls == ["sent", "pending", "fail"]
@@ -1304,16 +1308,37 @@ async def test_protected_box_settles_a_box_made_before_the_create_error(
     assert env.usage is None
 
 
-async def test_protected_box_keeps_the_hold_when_the_lookup_fails(fake_modal: FakeModal) -> None:
-    """Keep the hold pending when the lookup by the box tag fails, because the box may exist."""
-    fake_modal.create_error = FakeInvalidError("bad")
+@pytest.mark.parametrize(("error", "absent"), [(FakeRefusalError("bad"), True), (RuntimeError("timeout"), False)])
+async def test_failed_lookup_releases_only_a_refused_create(
+    fake_modal: FakeModal, error: Exception, absent: bool
+) -> None:
+    """Release a refused create when the lookup fails, and keep the hold of any other failed create.
+
+    Args:
+        fake_modal: The fake SDK.
+        error: The create error.
+        absent: The expected ``absent`` flag of the fail call.
+    """
+    fake_modal.create_error = error
     fake_modal.list_error = RuntimeError("list down")
     env, budget = _protected()
-    with pytest.raises(FakeInvalidError):
+    with pytest.raises(type(error)):
         await env.start()
     (usage,) = budget.reservations
     assert usage.calls == ["sent", "fail"]
+    assert usage.absent is absent
+
+
+async def test_subclass_of_a_refusal_type_keeps_the_hold(fake_modal: FakeModal) -> None:
+    """Keep the hold pending for a subclass of a refusal type, because only exact types count."""
+    fake_modal.create_error = FakeRefusalSubclassError("bad")
+    env, budget = _protected()
+    with pytest.raises(FakeRefusalSubclassError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "pending", "fail"]
     assert usage.absent is False
+    assert fake_modal.list_calls == 2
 
 
 async def test_protected_box_build_failure_is_an_unsent_create(fake_modal: FakeModal) -> None:
@@ -1485,10 +1510,25 @@ async def test_late_create_after_a_cancelled_start_settles_its_box(
     await _until(lambda: not modal_provider._LATE_TERMINATES)
 
 
+@pytest.mark.parametrize(
+    ("error", "calls", "absent"),
+    [
+        (FakeRefusalError("bad"), ["sent", "fail"], True),
+        (RuntimeError("client timeout"), ["sent", "pending", "fail"], False),
+    ],
+)
 async def test_late_create_error_after_a_cancelled_start_looks_up_the_box(
-    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch, error: Exception, calls: list[str], absent: bool
 ) -> None:
-    """Look up the box by its tag when a create fails after the cancel passed on, then fail the usage."""
+    """Look up the box by its tag when a create fails after the cancel passed on, and release only a refusal.
+
+    Args:
+        fake_modal: The fake SDK.
+        monkeypatch: Pytest fixture that shortens the cancel grace time.
+        error: The late create error.
+        calls: The expected usage calls.
+        absent: The expected ``absent`` flag of the fail call.
+    """
     monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
     fake_modal.create_gate = asyncio.Event()
     env, budget = _protected()
@@ -1498,10 +1538,10 @@ async def test_late_create_error_after_a_cancelled_start_looks_up_the_box(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 2)
     (usage,) = budget.reservations
-    fake_modal.create_error = FakeInvalidError("bad")
+    fake_modal.create_error = error
     fake_modal.create_gate.set()
-    await _until(lambda: usage.calls == ["sent", "pending", "fail"])
-    assert usage.absent is False
+    await _until(lambda: usage.calls == calls)
+    assert usage.absent is absent
     await _until(lambda: not modal_provider._LATE_TERMINATES)
 
 
@@ -1586,7 +1626,7 @@ async def test_cancel_during_the_box_lookup_still_fails_the_usage(
 ) -> None:
     """Finish the cleanup of a failed create in the background when cancels arrive during the lookup."""
     monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
-    fake_modal.create_error = FakeInvalidError("bad")
+    fake_modal.create_error = FakeRefusalError("bad")
     fake_modal.list_gate = asyncio.Event()
     env, budget = _protected()
     task = asyncio.create_task(env.start())
@@ -1596,7 +1636,7 @@ async def test_cancel_during_the_box_lookup_still_fails_the_usage(
     task.cancel()
     with pytest.raises(asyncio.CancelledError) as raised:
         await asyncio.wait_for(task, 2)
-    assert isinstance(raised.value.__cause__, FakeInvalidError)
+    assert isinstance(raised.value.__cause__, FakeRefusalError)
     (usage,) = budget.reservations
     assert usage.calls == ["sent"]
     fake_modal.list_gate.set()
@@ -1628,7 +1668,7 @@ async def test_cancel_during_the_recheck_wait_leaves_the_hold_pending(
 
 @pytest.mark.parametrize(
     ("error", "lookups", "end_state"),
-    [(FakeInvalidError("bad"), 1, "released"), (RuntimeError("client timeout"), 2, "pending")],
+    [(FakeRefusalError("bad"), 1, "released"), (RuntimeError("client timeout"), 2, "pending")],
 )
 async def test_failed_create_hold_state_in_the_real_ledger(
     fake_modal: FakeModal, tmp_path: Path, error: Exception, lookups: int, end_state: str

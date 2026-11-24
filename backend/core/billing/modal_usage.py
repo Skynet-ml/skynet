@@ -10,8 +10,10 @@ exact billed size. The runtime runs from the start of the image build to the
 confirmed terminate, which is never shorter than the time Modal bills. The
 pricing page (modal.com/pricing) and the billing guide
 (modal.com/docs/guide/billing) do not say whether an image build is billed,
-so the clock counts the build. The settled time never exceeds the funded
-lifetime, so a long build cannot push the charge past the hold.
+so the clock counts the build. The hold does not fund the build time, so
+the settled time never exceeds the funded lifetime. A box whose measured
+time is longer settles at the funded time, logs a warning and flags
+``over_funded`` in its evidence.
 
 Modal neither caps nor reports the egress of one sandbox, so no hold can
 bound it. A protected Modal box therefore has no network at all: the
@@ -24,6 +26,7 @@ refuses an extension.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Mapping
@@ -46,6 +49,8 @@ from .usage_tags import box_tag
 # The conversion is the generic sandbox charge policy; it lives in the Vercel
 # module only for history, and moving it is out of scope for SKY-546.
 from .vercel_usage import vercel_charge_policy
+
+logger = logging.getLogger(__name__)
 
 # Read from https://modal.com/pricing on 2026-11-24 ("Modal Sandbox pricing",
 # non-preemptible). These sandbox rates already include Modal's 3x
@@ -293,11 +298,11 @@ class ModalUsageReservation:
 
         No sandbox exists when the create was never sent. A create that was
         sent and failed may still have made one, so its hold is released
-        only when a lookup by the box tag proved that no sandbox exists and
-        no create ever returned a sandbox.
+        only when Modal refused the create, no lookup found a sandbox and no
+        create ever returned a sandbox.
 
         Args:
-            absent: True when a lookup by the box tag succeeded and found no sandbox.
+            absent: True when no sandbox exists: Modal refused the create, and no lookup found a sandbox.
         """
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
         if current.state in {"settled", "released"}:
@@ -309,7 +314,7 @@ class ModalUsageReservation:
                 reason = "The create call was never sent."
             else:
                 key = f"modal-absent:{self.operation.id}"
-                reason = "The create failed and a lookup by the box tag found no sandbox."
+                reason = "Modal refused the create, so no sandbox exists."
             try:
                 self.runtime.service.reject(
                     self.operation.id,
@@ -347,6 +352,14 @@ class ModalUsageReservation:
             evidence = self._evidence()
             measured = evidence["measured_ms"]
             billed_ms = self.lifetime_ms if measured is None else min(measured, self.lifetime_ms)
+            over_funded = measured is not None and measured > self.lifetime_ms
+            if over_funded:
+                logger.warning(
+                    "Modal box %s ran %d ms, more than its funded %d ms; it settles at the funded time.",
+                    self.sandbox_id or self.operation.id,
+                    measured,
+                    self.lifetime_ms,
+                )
             usd = _usd(self.quote.price_snapshot, billed_ms)
             charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
             self.runtime.service.settle(
@@ -355,7 +368,13 @@ class ModalUsageReservation:
                 evidence_key=f"modal-stop:{self.sandbox_id or self.operation.id}",
                 actual_cents=charge.total,
                 actual_wallet_cents=charge.wallet,
-                evidence={**evidence, "billed_ms": billed_ms, "source": _PRICING_URL, "provider_usd": str(usd)},
+                evidence={
+                    **evidence,
+                    "billed_ms": billed_ms,
+                    "over_funded": over_funded,
+                    "source": _PRICING_URL,
+                    "provider_usd": str(usd),
+                },
             )
             self.runtime.unpin(self.operation.id)
         except BaseException:
