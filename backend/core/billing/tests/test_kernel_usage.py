@@ -133,6 +133,7 @@ def test_quote_covers_lifetime_idle_timeout_and_stop_margin() -> None:
         {"memory_gib": 4},
         {"memory_gib": 16},
         {"memory_gib": 8.0},
+        {"memory_gib": True},
         {"headless": True},
         {"gpu": True},
     ],

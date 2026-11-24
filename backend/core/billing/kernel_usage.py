@@ -1,10 +1,13 @@
 """Reserve Kernel browser VMs and settle them from Kernel's reported uptime.
 
-Kernel bills a headful browser at a flat rate for each second it is active,
-with no per-browser fee and no network charge. The adapter funds a headful
-8 GiB browser for its whole possible uptime and settles from the
-``usage.uptime_ms`` that Kernel reports for the deleted session. When that report is not ready, it
-settles from the measured time between the create call and the delete.
+Kernel bills a headful browser at a flat rate for each second it is active.
+The pricing page lists no per-browser fee and no network fee. The adapter
+funds a headful 8 GiB browser for its whole possible uptime and settles from
+the ``usage.uptime_ms`` that Kernel reports for the deleted session. When
+that report is not ready, it settles from the measured time between the
+create call and the delete. The provider caps that measured time at the
+funded lifetime plus one inactivity timeout plus the stop margin, and the
+settle clamps every charge to the reservation.
 """
 
 from __future__ import annotations

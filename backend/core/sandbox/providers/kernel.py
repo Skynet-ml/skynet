@@ -58,7 +58,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
 from core.billing.budgets import BudgetError
-from core.billing.kernel_usage import HEADFUL_MEMORY_GIB, KernelUsageReservation
+from core.billing.kernel_usage import HEADFUL_MEMORY_GIB, STOP_MARGIN_MS, KernelUsageReservation
 from core.billing.runtime import UsagePendingError
 
 from ..capabilities import EnvironmentCapabilities, SandboxSpecError
@@ -312,13 +312,16 @@ class KernelEnvironment(SandboxEnvironment):
         Raises:
             SandboxFatalError: The SDK is not installed or the memory is too large.
             StartTimeoutError: The create did not finish in time.
-            SandboxInfraError: The box is already stopped, a ``stop()`` ended the
+            SandboxInfraError: The box is already started or stopped, a ``stop()`` ended the
                 start, or the container did not start.
         """
         if self.client_cls is None:
             raise SandboxFatalError("The kernel package is not installed: install the `kernel` extra.")
         if self._stop_task is not None:
             raise SandboxInfraError("The Kernel sandbox is stopped; it cannot start again.")
+        if self._starting is not None:
+            # A second browser would run on the first one's reservation.
+            raise SandboxInfraError("The Kernel sandbox already started; it cannot start again.")
         self._starting = asyncio.ensure_future(self._start())
         try:
             await self._starting
@@ -570,7 +573,12 @@ class KernelEnvironment(SandboxEnvironment):
             except Exception as sweep_error:
                 logger.warning("Kernel browser %s sweep failed: %s", self.name, type(sweep_error).__name__)
             else:
-                if measured_ms is None and known is not None and any(item.session_id == known for item in swept[1]):
+                # The list returns only active browsers, so a known browser
+                # that the finished sweep did not list is gone: its first
+                # delete went through, or Kernel ended it.
+                listed_ids = {item.session_id for item in swept[0]}
+                deleted_ids = {item.session_id for item in swept[1]}
+                if measured_ms is None and known is not None and (known in deleted_ids or known not in listed_ids):
                     measured_ms = self._measured_ms()
         if self._usage is not None:
             await self._settle(client, known, measured_ms, error, swept)
@@ -581,8 +589,9 @@ class KernelEnvironment(SandboxEnvironment):
         """Return the wall time from the create call until now.
 
         A protected browser's time is capped at its funded lifetime plus one
-        inactivity timeout. A delete that finds no browser means Kernel ended
-        it, at the latest at that point, so a late stop bills no extra time.
+        inactivity timeout plus the stop margin, the same bound as the
+        reservation. A delete that finds no browser means Kernel ended it by
+        then, so a late stop bills no extra time.
 
         Returns:
             The milliseconds, or ``None`` when no create call went out.
@@ -591,7 +600,7 @@ class KernelEnvironment(SandboxEnvironment):
             return None
         measured = math.ceil((self._clock.monotonic() - self._created_at) * 1000)
         if self._funded_until is not None and self._idle_timeout is not None:
-            latest = math.ceil((self._funded_until - self._created_at + self._idle_timeout) * 1000)
+            latest = math.ceil((self._funded_until - self._created_at + self._idle_timeout) * 1000) + STOP_MARGIN_MS
             measured = min(measured, latest)
         return measured
 

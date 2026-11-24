@@ -1261,8 +1261,40 @@ async def test_late_stop_of_an_ended_browser_bills_no_extra_time() -> None:
     usage = usages[0]
     assert usage.calls == ["reserve", "confirm", "record", "settle"]
     assert usage.receipt == {}
-    # 300 s funded lifetime + 300 s inactivity timeout.
-    assert usage.measured_ms == 600_000
+    # 300 s funded lifetime + 300 s inactivity timeout + 120 s stop margin.
+    assert usage.measured_ms == 720_000
+
+
+async def test_failed_delete_that_went_through_is_settled() -> None:
+    """Settle the known browser when its delete fails but the finished sweep no longer lists it."""
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    await env.start()
+    clock.now += 30
+    FakeState.browsers.clear()
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    await env.stop()
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.measured_ms == 30_000
+
+
+async def test_second_start_is_refused() -> None:
+    """Refuse a second start, so no second browser runs on the first reservation."""
+    env, usages = _protected()
+    await env.start()
+    with pytest.raises(SandboxInfraError, match="already started"):
+        await env.start()
+    assert len(FakeState.create_calls) == 1
+    assert len(usages) == 1
+    await env.stop()
+
+
+async def test_job_sweep_counts_an_already_ended_browser_as_gone() -> None:
+    """Count a job browser whose delete finds that Kernel already ended it."""
+    FakeState.new_browser({"name": "job-0", "tags": {JOB_TAG: "job-9"}})
+    FakeState.delete_errors = [_status_error(kernel.NotFoundError, 404)]
+    assert await kernel.KernelEnvironment.stop_job_sandboxes("job-9") == 1
 
 
 async def test_sweep_counts_an_already_ended_browser_as_gone() -> None:
