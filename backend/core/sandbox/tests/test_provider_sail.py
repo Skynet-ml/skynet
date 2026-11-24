@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from core.billing.budgets import BudgetConflictError
 from core.billing.runtime import UsagePendingError
 from core.billing.sail_usage import SailUsageReservation, quote_sail_sandbox
 from core.sandbox import factory
@@ -934,6 +935,47 @@ async def test_a_create_past_the_grace_is_terminated_when_it_returns(
     assert [box.terminated for box in fake_sdk.boxes] == [True]
 
 
+async def test_a_late_box_of_a_hold_is_logged_with_its_hold(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the hold key and the box id of a late box, because the pending evidence cannot name it.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+        caplog: Captures the provider log.
+    """
+    monkeypatch.setattr(sail, "CREATE_GRACE", 0.01)
+    _server_side_create(monkeypatch)
+    fake_sdk.create_delay = 0.2
+
+    def factory_(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make one fake reservation.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        return FakeUsage(request, operation_key)
+
+    env = SailEnvironment(
+        _spec(operation_key="hold-7"), budget="budget", usage_factory=factory_, timeouts=_timeouts(start=0.01)
+    )
+    with caplog.at_level(logging.WARNING, logger=sail.__name__), pytest.raises(StartTimeoutError):
+        await env.start()
+    with caplog.at_level(logging.WARNING, logger=sail.__name__):
+        await _late_tasks_done()
+    (box,) = fake_sdk.boxes
+    assert box.terminated
+    (line,) = [record.getMessage() for record in caplog.records if "late box" in record.getMessage()]
+    assert box.id in line
+    assert "hold-7" in line
+
+
 async def test_a_single_cancel_of_a_server_side_create_terminates_the_box(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1454,6 +1496,77 @@ async def test_a_box_that_did_not_terminate_is_tried_again(fake_sdk: FakeCloud) 
     assert sail._JOB_BOXES == {}
     assert made[0].names().count("pending") == 1
     assert made[0].names().count("settle") == 1
+
+
+async def test_a_later_stop_does_not_raise_an_older_failure(fake_sdk: FakeCloud) -> None:
+    """Raise nothing from a stop that settles, after a failed start whose terminate failed.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+
+    def failing(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation whose confirm fails.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        made.append(FakeUsage(request, operation_key))
+        made[-1].confirm_error = SandboxInfraError("confirm failed")
+        return made[-1]
+
+    env._usage_factory = failing
+    fake_sdk.terminate_fails.add("sb-1")
+    with pytest.raises(SandboxInfraError, match="confirm failed"):
+        await env.start()
+    assert [box.terminated for box in fake_sdk.boxes] == [False]
+    fake_sdk.terminate_fails.clear()
+    await env.stop()
+    await _spent()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].names().count("pending") == 1
+    assert made[0].names().count("settle") == 1
+
+
+async def test_a_budget_error_from_the_bind_marks_the_hold_pending_once(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the hold pending when the ledger refuses the bind of a found box.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the bind fail.
+    """
+
+    def refused_bind(self: FakeUsage, sailbox_id: str) -> None:
+        """Fail like a ledger that refuses the dispatch.
+
+        Args:
+            self: The fake reservation.
+            sailbox_id: The Sail id of the box.
+
+        Raises:
+            BudgetConflictError: Always.
+        """
+        raise BudgetConflictError("refused")
+
+    monkeypatch.setattr(FakeUsage, "bind", refused_bind)
+    fake_sdk.create_error = FakeApiError(500)
+    fake_sdk.create_makes_box = True
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError, match="create the Sailbox"):
+        await env.start()
+    with pytest.raises(BudgetConflictError):
+        await env.stop()
+    await env.stop()
+    assert made[0].names().count("pending") == 1
+    assert "settle" not in made[0].names()
 
 
 async def test_a_failed_pending_mark_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:

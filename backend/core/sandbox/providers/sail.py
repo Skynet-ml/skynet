@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import io
 import logging
 import math
@@ -180,20 +181,22 @@ async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
     return True
 
 
-def _terminate_late(create: asyncio.Future[Any]) -> None:
+def _terminate_late(create: asyncio.Future[Any], hold_key: str | None) -> None:
     """Terminate the box of a create that outlives its start, when it arrives.
 
     Args:
         create: The create task. It can still run or be done already.
+        hold_key: The operation key of the box's hold, or ``None`` for an unprotected box.
     """
     _LATE_TASKS.add(create)
-    create.add_done_callback(_on_late_create)
+    create.add_done_callback(functools.partial(_on_late_create, hold_key))
 
 
-def _on_late_create(create: asyncio.Future[Any]) -> None:
+def _on_late_create(hold_key: str | None, create: asyncio.Future[Any]) -> None:
     """Start the terminate call for the box of a late create.
 
     Args:
+        hold_key: The operation key of the box's hold, or ``None`` for an unprotected box.
         create: The finished create task.
     """
     _LATE_TASKS.discard(create)
@@ -203,7 +206,12 @@ def _on_late_create(create: asyncio.Future[Any]) -> None:
     if error is not None:
         logger.warning("A late Sailbox create failed: %s", type(error).__name__)
         return
-    terminate = asyncio.ensure_future(_bounded(create.result().terminate.aio(), "terminate a late Sailbox"))
+    sailbox = create.result()
+    if hold_key is not None:
+        # The ledger keeps the first pending evidence and refuses a change,
+        # so only this log ties the hold to the box for a reconcile.
+        logger.warning("Sail terminates the late box %s of the pending hold %s.", sailbox.sailbox_id, hold_key)
+    terminate = asyncio.ensure_future(_bounded(sailbox.terminate.aio(), "terminate a late Sailbox"))
     _LATE_TASKS.add(terminate)
     terminate.add_done_callback(_LATE_TASKS.discard)
 
@@ -366,7 +374,6 @@ class SailEnvironment(SandboxEnvironment):
         self._usage_factory = usage_factory
         self._usage: Any | None = None
         self._billing_call: asyncio.Future[Any] | None = None
-        self._box_gone = asyncio.Event()
         self._settle_error: Exception | None = None
         self._pending_marked = False
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
@@ -421,7 +428,6 @@ class SailEnvironment(SandboxEnvironment):
         # A stop before the start leaves a finished stop task; drop it so the
         # stop after this start terminates the box.
         self._stop_task = None
-        self._box_gone.clear()
         self.preflight()
         self._starting = asyncio.ensure_future(self._create())
         try:
@@ -429,15 +435,11 @@ class SailEnvironment(SandboxEnvironment):
         except BaseException as error:
             # Wait for the teardown but not through stop(): a settle failure
             # would hide the start error. It stays for a later stop() call.
-            # The error returns once the box is gone; the spend wait goes on
-            # in a background task.
+            # The spend wait goes on in a background task, so the teardown
+            # ends once the box is gone.
             if self._stop_task is None:
                 self._stop_task = asyncio.ensure_future(self._teardown())
-            gone = asyncio.ensure_future(self._box_gone.wait())
-            try:
-                await asyncio.wait({self._stop_task, gone}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                gone.cancel()
+            await asyncio.wait({self._stop_task})
             task = asyncio.current_task()
             if isinstance(error, asyncio.CancelledError) and task is not None and not task.cancelling():
                 raise SandboxInfraError("The Sail sandbox stopped during its start.") from None
@@ -570,10 +572,10 @@ class SailEnvironment(SandboxEnvironment):
         try:
             sailbox = await asyncio.wait_for(asyncio.shield(task), CREATE_GRACE)
         except asyncio.CancelledError:
-            _terminate_late(task)
+            _terminate_late(task, self.spec.operation_key if self._budget is not None else None)
             logger.warning("A second cancel came during the Sailbox create grace.")
         except TimeoutError:
-            _terminate_late(task)
+            _terminate_late(task, self.spec.operation_key if self._budget is not None else None)
             logger.warning("Sail did not return a cancelled Sailbox create within the grace.")
         except Exception as error:
             # The failure does not prove that no box exists, so the settle
@@ -755,6 +757,9 @@ class SailEnvironment(SandboxEnvironment):
 
         The start and reserve waits share ``CREATE_GRACE + STOP_TIMEOUT``.
         """
+        # A new teardown replaces the outcome of an earlier one, so a stop
+        # that settles never raises an older failure.
+        self._settle_error = None
         loop = asyncio.get_running_loop()
         waits_end = loop.time() + CREATE_GRACE + STOP_TIMEOUT
         starting = self._starting
@@ -829,10 +834,7 @@ class SailEnvironment(SandboxEnvironment):
                     boxes.discard(self)
                     if not boxes:
                         del _JOB_BOXES[job_id]
-        try:
-            await self._settle(sailbox)
-        finally:
-            self._box_gone.set()
+        await self._settle(sailbox)
 
     async def _settle(self, sailbox: Any) -> None:
         """Release, keep pending or start the settle of the reservation of a protected box.
@@ -866,7 +868,6 @@ class SailEnvironment(SandboxEnvironment):
                 self._stop_task = None
                 await self._mark_pending(usage)
                 raise UsagePendingError("The Sailbox did not terminate, so its usage stays pending.")
-            self._box_gone.set()
             # Sail shows the spend minutes after the terminate, longer than a
             # stop may take, so a task that owns the hold waits for it.
             task = asyncio.ensure_future(_settle_spend(usage))
@@ -874,16 +875,16 @@ class SailEnvironment(SandboxEnvironment):
             task.add_done_callback(_on_spend_done)
         except Exception as error:
             logger.warning("Sail sandbox %s usage stays pending: %s", self._name, type(error).__name__)
+            # Any error, a BudgetError too, can come before a pending call;
+            # record the hold as pending, best effort, so it is reconciled.
+            if not self._pending_marked:
+                try:
+                    await self._mark_pending(usage)
+                except Exception as pending_error:
+                    logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
             if isinstance(error, UsagePendingError | BudgetError):
                 self._settle_error = error
             else:
-                # A ledger or lookup error can come before any pending call;
-                # record the hold as pending, best effort, so it is reconciled.
-                if not self._pending_marked:
-                    try:
-                        await self._mark_pending(usage)
-                    except Exception as pending_error:
-                        logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
                 pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
                 pending.__cause__ = error
                 self._settle_error = pending
