@@ -298,8 +298,8 @@ class ModalUsageReservation:
 
         No sandbox exists when the create was never sent. A create that was
         sent and failed may still have made one, so its hold is released
-        only when Modal refused the create, no box was found or the lookup
-        failed, and no create ever returned a sandbox.
+        only when no create ever returned a sandbox, Modal refused the create,
+        and no box was found or the lookup failed.
 
         Args:
             absent: True when Modal refused the create, and no box was found or the lookup failed.

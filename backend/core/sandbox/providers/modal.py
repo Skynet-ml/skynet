@@ -133,8 +133,9 @@ _RECHECK_DELAY_SEC = 30.0
 # modal 1.6.3 refuses other env names (sandbox/_common.py, _SECRET_KEYNAME_REGEX).
 # The check runs here, before any hold, because the V2 create does not check
 # the keys of a Secret.from_dict and a server refusal of the sent create would
-# leave the hold pending.
-_ENV_KEY = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# leave the hold pending. It runs on every box on purpose: Modal refuses such
+# a name on any create path, so an early, clear spec error beats a late one.
+_ENV_KEY = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
 
@@ -183,7 +184,7 @@ class ModalEnvironment(SandboxEnvironment):
         if spec.resources.disk_mb is not None and spec.resources.mode is not ResourceMode.IGNORE:
             raise SandboxSpecError("The modal sandbox cannot set a disk size.")
         modal_gpu_type(spec)
-        bad_keys = sorted(key for key in (spec.env or {}) if not _ENV_KEY.match(key))
+        bad_keys = sorted(key for key in (spec.env or {}) if not _ENV_KEY.fullmatch(key))
         if bad_keys:
             raise SandboxSpecError(f"The modal sandbox refuses these env names: {', '.join(bad_keys)}.")
         self._app_name = app_name
