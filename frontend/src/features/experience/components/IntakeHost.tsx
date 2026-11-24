@@ -6,7 +6,12 @@ import { usePathname, useRouter } from "next/navigation";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { useSettingsModal, useUserPrefs } from "@/features/settings";
-import { updateModelPrivacy, updateSetupBilling, type InterviewOption } from "@/shared/lib/api";
+import {
+  getSetupBilling,
+  updateModelPrivacy,
+  updateSetupBilling,
+  type InterviewOption,
+} from "@/shared/lib/api";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
 import { isLocalMode } from "@/shared/lib/runtime-env";
@@ -272,6 +277,21 @@ function IntakeSurface() {
     writeIntakeDraft({ ...draft, stop: stop.id });
   }, [draft, stop.id]);
 
+  // The billing switch shows the stored setting until the user answers, so a
+  // rerun intake does not show wallet billing on for an account that turned it off.
+  const [storedFromWallet, setStoredFromWallet] = React.useState<boolean | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    getSetupBilling()
+      .then((result) => {
+        if (!cancelled) setStoredFromWallet(result.from_wallet);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   React.useEffect(() => {
     if (stage !== "title") return;
     if (!revealed) return;
@@ -502,7 +522,7 @@ function IntakeSurface() {
             {/* Changes only the draft: the stop still moves on when a billing choice is picked. */}
             <label className="mt-3 flex items-start gap-3 text-sm">
               <Switch
-                checked={answers.setup_from_wallet !== false}
+                checked={answers.setup_from_wallet ?? storedFromWallet ?? true}
                 onCheckedChange={(next) =>
                   setDraft((prev) => ({
                     ...prev,
