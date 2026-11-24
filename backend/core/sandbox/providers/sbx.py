@@ -30,6 +30,10 @@ policy bodies come from there. Changes:
   for its current state and ETag.
 - A command whose create answer is lost to a timeout or a cancel has no
   process name, so it cannot be killed. It ends when the sandbox does.
+- With a budget the box is protected: it reserves its whole lifetime before
+  the create call and settles after the stop at the runtime it measured
+  (``core.billing.sbx_usage``). sbx cannot extend a sandbox's timeout, so the
+  funded lifetime never grows.
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+from core.billing.sbx_usage import SbxUsageReservation
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
@@ -109,6 +115,7 @@ _LIVE: set[SbxEnvironment] = set()
 
 SBX_CAPABILITIES = EnvironmentCapabilities(
     name="sbx",
+    billable=True,
     network_modes=frozenset(NetworkMode),
     dynamic_network_policy=True,
     max_vcpus=16,
@@ -886,17 +893,33 @@ class SbxEnvironment(SandboxEnvironment):
 
     capabilities = SBX_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, timeouts: PhaseTimeouts | None = None) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        timeouts: PhaseTimeouts | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = SbxUsageReservation,
+    ) -> None:
         """Check the spec and prepare the create call.
 
         Args:
             spec: The sandbox to open.
             timeouts: The phase timeouts; ``None`` sets no start or run limit.
+            budget: The ``BudgetRuntime`` that funds the box, or ``None``.
+            usage_factory: Makes the usage reservation of a protected box.
 
         Raises:
-            SandboxSpecError: No sbx shape holds this spec.
+            SandboxSpecError: No sbx shape holds this spec, or a protected box
+                has no operation key.
         """
+        if budget is not None and spec.operation_key is None:
+            raise SandboxSpecError("A protected sbx sandbox needs an operation key.")
         super().__init__(spec)
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._orphan_found = False
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
         tag = uuid.uuid4().hex
@@ -910,6 +933,11 @@ class SbxEnvironment(SandboxEnvironment):
         # The tag makes the name unique, so a stop can find a sandbox whose
         # create answer was lost.
         self._display_name = f"{spec.name or 'skynet'}-{tag[:12]}"
+        self._usage_request = {
+            "cpus": cpus,
+            "memory_mib": memory_mib,
+            "lifetime_ms": min(lifetime, _MAX_LIFETIME_SECONDS) * 1000,
+        }
         self._create_body: dict[str, Any] = {
             "displayName": self._display_name,
             "imageRef": spec.image or DEFAULT_IMAGE,
@@ -964,7 +992,7 @@ class SbxEnvironment(SandboxEnvironment):
         self._stop_task = None
         self._management = _client(MANAGEMENT_URL, _management_token())
         _LIVE.add(self)
-        self._starting = asyncio.ensure_future(self._create())
+        self._starting = asyncio.ensure_future(self._open())
         try:
             await self._starting
         except BaseException as error:
@@ -975,6 +1003,27 @@ class SbxEnvironment(SandboxEnvironment):
             raise
         finally:
             self._starting = None
+
+    async def _open(self) -> None:
+        """Reserve the budget of a protected box, then create the sandbox."""
+        if self._budget is not None:
+            reserving = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._usage_factory, self._budget, self._usage_request, operation_key=self.spec.operation_key
+                )
+            )
+            try:
+                self._usage = await asyncio.shield(reserving)
+            except asyncio.CancelledError:
+                # The thread cannot be cancelled and may still reserve; keep
+                # its result so the teardown releases it instead of leaking it.
+                while not reserving.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(reserving)
+                if not reserving.cancelled() and reserving.exception() is None:
+                    self._usage = reserving.result()
+                raise
+        await self._create()
 
     async def _create(self) -> None:
         """Create the sandbox, wait for it, get its token and set its policy.
@@ -988,6 +1037,8 @@ class SbxEnvironment(SandboxEnvironment):
         try:
             async with asyncio.timeout(limit) as deadline:
                 self._create_dispatched = True
+                if self._usage is not None:
+                    self._usage.start_clock()
                 response = await _call(
                     client,
                     "POST",
@@ -1010,6 +1061,8 @@ class SbxEnvironment(SandboxEnvironment):
                 if not isinstance(uid, str) or not uid:
                     raise SandboxInfraError("sbx gave no sandbox uid.")
                 self._uid = uid
+                if self._usage is not None:
+                    await asyncio.to_thread(self._usage.confirm_created, uid, self._create_body)
                 while _status(sandbox) in _STARTING_STATUSES:
                     await asyncio.sleep(POLL_INTERVAL)
                     response = await _call(client, "GET", self._path, action="read the sandbox")
@@ -1281,15 +1334,48 @@ class SbxEnvironment(SandboxEnvironment):
         _LIVE.discard(self)
         if management is None:
             return
+        # How the sandbox ended decides its bill: "deleted" settles at the
+        # measured runtime, "leaked" runs to its sbx timeout and settles at the
+        # whole lifetime, "unknown" keeps the hold, "none" releases it. Each
+        # branch sets its worst case first, so a cancel mid-delete never
+        # releases the hold of a live sandbox.
+        ended = "none"
         try:
             if path is not None:
-                await _bounded(_delete(management, path, uid), "delete the sandbox")
+                ended = "leaked"
+                if await _bounded(_delete(management, path, uid), "delete the sandbox"):
+                    ended = "deleted"
             elif self._create_dispatched:
-                await _bounded(self._delete_orphan(management), "delete the lost sandbox")
+                ended = "unknown"
+                deleted = await _bounded(self._delete_orphan(management), "delete the lost sandbox")
+                if self._orphan_found:
+                    ended = "deleted" if deleted else "leaked"
         finally:
             if runtime is not None:
                 await _bounded(runtime.aclose(), "close the runtime client")
             await _bounded(management.aclose(), "close the management client")
+            usage, self._usage = self._usage, None
+            if usage is not None:
+                if ended == "deleted":
+                    usage.stop_clock()
+                await asyncio.to_thread(self._close_usage, usage, ended)
+
+    def _close_usage(self, usage: Any, ended: str) -> None:
+        """Settle, release or keep the box's hold by how the sandbox ended.
+
+        Args:
+            usage: The box's usage reservation.
+            ended: ``deleted``, ``leaked``, ``unknown`` or ``none``.
+        """
+        try:
+            if ended == "none":
+                usage.release()
+            elif ended == "unknown":
+                usage.pending()
+            else:
+                usage.settle()
+        except Exception as error:
+            logger.warning("sbx sandbox usage stays pending: %s", type(error).__name__)
 
     async def _delete_orphan(self, client: httpx.AsyncClient) -> None:
         """Delete the sandbox of a create whose outcome is unknown.
@@ -1314,6 +1400,7 @@ class SbxEnvironment(SandboxEnvironment):
         except TimeoutError:
             logger.warning("sbx found no sandbox of the lost create in %s seconds.", ORPHAN_WAIT)
             return
+        self._orphan_found = True
         uid = sandbox.get("uid")
         await _delete(
             client, _resource_path(sandbox.get("name"), "sandboxes"), uid if isinstance(uid, str) and uid else None

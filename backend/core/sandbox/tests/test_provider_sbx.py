@@ -976,3 +976,190 @@ def test_factory_registers_sbx_for_development_only(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(factory.settings, "app_environment", "production")
     with pytest.raises(factory.ProductionNotAllowedError, match="sbx"):
         factory.load_provider("sbx")
+
+
+class FakeUsage:
+    """Record the calls a protected sbx box makes on its usage reservation."""
+
+    def __init__(self, budget: object, request: dict[str, Any], *, operation_key: str) -> None:
+        """Record what the box reserved.
+
+        Args:
+            budget: The budget that funds the box.
+            request: The usage request of the box.
+            operation_key: The ledger key of the box.
+        """
+        self.budget = budget
+        self.request = request
+        self.operation_key = operation_key
+        self.calls: list[str] = []
+        RESERVED.append(self)
+
+    def start_clock(self) -> None:
+        """Record the start of the create call."""
+        self.calls.append("start")
+
+    def confirm_created(self, uid: str, body: dict[str, Any]) -> None:
+        """Record the confirmed sandbox.
+
+        Args:
+            uid: The sandbox uid.
+            body: The create body.
+        """
+        self.calls.append("confirm")
+
+    def stop_clock(self) -> None:
+        """Record the confirmed delete."""
+        self.calls.append("stop")
+
+    def settle(self) -> None:
+        """Record a settlement."""
+        self.calls.append("settle")
+
+    def release(self) -> None:
+        """Record a release."""
+        self.calls.append("release")
+
+    def pending(self) -> None:
+        """Record a hold kept pending."""
+        self.calls.append("pending")
+
+
+RESERVED: list[FakeUsage] = []
+
+
+def _protected(**spec_fields: Any) -> SbxEnvironment:
+    """Return a protected box that reserves through ``FakeUsage``.
+
+    Args:
+        **spec_fields: Spec fields to replace.
+
+    Returns:
+        The box.
+    """
+    RESERVED.clear()
+    return SbxEnvironment(
+        _spec(operation_key="box-1", **spec_fields),
+        budget=object(),
+        usage_factory=FakeUsage,
+        **({"timeouts": PhaseTimeouts(start=0.2, setup=30, run=30, score=30)} if CLOUD.create_hangs else {}),
+    )
+
+
+def test_sbx_is_billable() -> None:
+    """Let the protected runtime pass sbx a budget."""
+    assert sbx.SBX_CAPABILITIES.billable is True
+
+
+def test_protected_box_needs_an_operation_key() -> None:
+    """Refuse a budget without a ledger key for the box."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        SbxEnvironment(_spec(), budget=object())
+
+
+async def test_deleted_box_settles_at_the_measured_runtime() -> None:
+    """Reserve the funded shape before the create, then settle after the confirmed delete."""
+    env = _protected()
+    await env.start()
+    await env.stop()
+    (usage,) = RESERVED
+    assert usage.request == {"cpus": 1, "memory_mib": 2048, "lifetime_ms": 300_000}
+    assert usage.operation_key == "box-1"
+    assert usage.calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_failed_delete_settles_at_the_whole_lifetime() -> None:
+    """Settle without a stop time when sbx refuses the delete, so the whole hold is charged."""
+    env = _protected()
+    await env.start()
+    CLOUD.failures[("DELETE", "")] = (500, "internal")
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_failed_start_settles_the_sandbox_it_made() -> None:
+    """Settle a box whose start failed after sbx made the sandbox."""
+    CLOUD.final_status = "failed"
+    env = _protected()
+    with pytest.raises(SandboxError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+@pytest.mark.parametrize("status", [400, 409, 422, 429])
+async def test_refused_create_releases_the_hold(status: int) -> None:
+    """Release the hold when sbx refuses the create, as it made no sandbox."""
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (status, "someCode")
+    env = _protected()
+    with pytest.raises(SandboxError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "release"]
+
+
+async def test_lost_create_found_late_settles() -> None:
+    """Settle a box whose create answer was lost once the list shows and the delete removes it."""
+    CLOUD.create_fails = 503
+    CLOUD.list_hides = 2
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "stop", "settle"]
+
+
+async def test_lost_create_with_no_sandbox_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the hold pending when no one can say if a sandbox exists."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (503, "unavailable")
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "pending"]
+
+
+async def test_cancelled_create_settles_the_sandbox_it_made() -> None:
+    """Settle a cancelled create once the stop finds and deletes its sandbox."""
+    CLOUD.create_hangs = True
+    CLOUD.list_hides = 2
+    env = _protected()
+    task = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "stop", "settle"]
+
+
+async def test_cancel_during_the_reservation_releases_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Release a reservation that finished after a cancel, and send no create."""
+    reserving = asyncio.Event()
+    finish = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def slow_factory(budget: object, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve only after the test cancels the start.
+
+        Args:
+            budget: The budget that funds the box.
+            request: The usage request of the box.
+            operation_key: The ledger key of the box.
+
+        Returns:
+            The recorded reservation.
+        """
+        loop.call_soon_threadsafe(reserving.set)
+        asyncio.run_coroutine_threadsafe(finish.wait(), loop).result()
+        return FakeUsage(budget, request, operation_key=operation_key)
+
+    RESERVED.clear()
+    env = SbxEnvironment(_spec(operation_key="box-1"), budget=object(), usage_factory=slow_factory)
+    task = asyncio.ensure_future(env.start())
+    await reserving.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert CLOUD.calls("POST", "/v1/sandboxes") == []
+    assert RESERVED[0].calls == ["release"]
