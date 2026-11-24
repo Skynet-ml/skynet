@@ -6,8 +6,12 @@ hour or day, and every Skynet box shares one App, so it cannot attribute a
 cost to a box. A box therefore settles at its measured runtime times the
 published rates. The provider sends equal CPU and memory requests and
 limits, and Modal bills ``max(request, usage)``, so the request is the
-exact billed size. The runtime runs from the create call to the confirmed
-terminate, which is never shorter than the time Modal bills.
+exact billed size. The runtime runs from the start of the image build to the
+confirmed terminate, which is never shorter than the time Modal bills. The
+pricing page (modal.com/pricing) and the billing guide
+(modal.com/docs/guide/billing) do not say whether an image build is billed,
+so the clock counts the build. The settled time never exceeds the funded
+lifetime, so a long build cannot push the charge past the hold.
 
 Modal neither caps nor reports the egress of one sandbox, so no hold can
 bound it. A protected Modal box therefore has no network at all: the
@@ -199,6 +203,7 @@ class ModalUsageReservation:
         self.sent_at: float | None = None
         self.stopped_at: float | None = None
         self._sent_wall: float | None = None
+        self._clock_at: float | None = None
         # True once a create returned a handle, so a sandbox surely existed.
         self._returned = False
 
@@ -207,10 +212,16 @@ class ModalUsageReservation:
         """Return True once a create returned a handle, so a sandbox surely existed."""
         return self._returned
 
+    def building(self) -> None:
+        """Start the runtime clock just before the image build, which Modal may bill."""
+        self._clock_at = time.monotonic()
+
     def sent(self) -> None:
-        """Start the runtime clock just before the create call goes to Modal."""
+        """Mark the create call as sent, and start the runtime clock if no build started it."""
         self.sent_at = time.monotonic()
         self._sent_wall = time.time()
+        if self._clock_at is None:
+            self._clock_at = self.sent_at
 
     def confirm_created(self, sandbox: Any) -> None:
         """Bind the created sandbox to the operation and record its start.
@@ -255,8 +266,8 @@ class ModalUsageReservation:
             The sandbox id, the wall-clock start and the measured and funded runtimes.
         """
         measured = None
-        if self.sent_at is not None and self.stopped_at is not None:
-            measured = max(0, math.ceil((self.stopped_at - self.sent_at) * 1000))
+        if self._clock_at is not None and self.sent_at is not None and self.stopped_at is not None:
+            measured = max(0, math.ceil((self.stopped_at - self._clock_at) * 1000))
         return {
             "provider": "modal",
             "sandbox_id": self.sandbox_id,

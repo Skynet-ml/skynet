@@ -164,6 +164,25 @@ def test_reserve_then_settle_charges_the_measured_runtime(database: Engine) -> N
     assert runtime._pinned == {}
 
 
+def test_runtime_clock_starts_before_the_image_build(database: Engine) -> None:
+    """Count the image build in the settled runtime, because Modal may bill it."""
+    runtime = _runtime(database)
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.building()
+    reservation.sent()
+    assert reservation._clock_at is not None
+    reservation.sent_at = reservation._clock_at + 5
+    reservation.confirm_created(SimpleNamespace(object_id="sb-1"))
+    reservation.stopped()
+    reservation.stopped_at = reservation.sent_at + 5.2
+    reservation.settle()
+    row = _operation(database)
+    expected = 11 * (2 * Decimal("0.00003942") + 4 * Decimal("0.00000667"))
+    charge = modal_usage.vercel_charge_policy(reservation.quote.price_snapshot).convert(expected)
+    assert row.state == "settled"
+    assert row.actual_units == cent_units(charge.total)
+
+
 def test_settle_clamps_to_the_padded_lifetime(database: Engine) -> None:
     """Bill at most the timeout plus the margin, even when the measured runtime is longer."""
     long_runtime = _runtime(database)
