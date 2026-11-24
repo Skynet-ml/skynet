@@ -33,6 +33,8 @@ from .vercel_usage import vercel_charge_policy
 # Published launch rates, read on 2026-11-24 from
 # https://docs.primeintellect.ai/sandboxes/overview ("billed while running").
 # Prime says these rates hold through 2026-12-22; check them again then.
+# The page does not name a billing unit. Per-second billing from createdAt
+# is an assumption; the price snapshot records it as one.
 _PRICING_URL = "https://docs.primeintellect.ai/sandboxes/overview"
 _PRICE_VERSION = "prime-sandbox-launch-2026-11-24"
 _CPU_HOUR_USD = Decimal("0.02")
@@ -123,6 +125,7 @@ def quote_prime_sandbox(request: Mapping[str, Any]) -> OperationQuote:
             "source": _PRICING_URL,
             "rates": _rates(),
             "basis": "createdAt to terminatedAt, per second, capped at timeout_minutes",
+            "billing_unit": "second (assumed)",
             "request": dict(request),
         },
     )
@@ -402,6 +405,7 @@ class PrimeUsageReservation:
                     "source": _PRICING_URL,
                     "sandbox": dict(record),
                     "seconds": seconds,
+                    "billing_unit": "second (assumed)",
                     "provider_usd": str(usd),
                 },
             )

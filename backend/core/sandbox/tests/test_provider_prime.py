@@ -430,6 +430,7 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
     monkeypatch.setenv(prime.API_KEY_ENV, "fake-key-for-tests")
     monkeypatch.setattr(prime, "STOP_TIMEOUT", 1.0)
     monkeypatch.setattr(prime, "POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(prime, "SEARCH_AGAIN_DELAY", 0.0)
     return CLOUD
 
 
@@ -1192,6 +1193,89 @@ async def test_a_create_refused_with_402_and_no_box_releases(fake_sdk: FakeCloud
     with pytest.raises(SandboxFatalError):
         await _protected(recorder).start()
     assert recorder.made[0].calls == [("release", "SandboxFatalError")]
+
+
+def _create_then_refuse(monkeypatch: pytest.MonkeyPatch, *, ended: bool) -> list[BoxState]:
+    """Make each create build a box and then answer 402, like an SDK retry after a first try.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        ended: End the box before the answer.
+
+    Returns:
+        The boxes made, in order.
+    """
+    original = FakeClient.create
+    made: list[BoxState] = []
+
+    async def create(self: FakeClient, request: FakeCreateRequest) -> SimpleNamespace:
+        """Make the box, then refuse the create.
+
+        Args:
+            request: The create request.
+
+        Raises:
+            FakePaymentRequiredError: Always, after the box exists.
+        """
+        view = await original(self, request)
+        box = CLOUD.boxes[view.id]
+        if ended:
+            box.status = "TERMINATED"
+            box.terminated_at = _CREATED_AT + timedelta(seconds=30)
+        made.append(box)
+        raise FakePaymentRequiredError("no funds")
+
+    monkeypatch.setattr(FakeClient, "create", create)
+    return made
+
+
+async def test_a_refused_create_whose_box_already_ended_settles(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Find an ended box under the label, settle its record and never delete or release it."""
+    _create_then_refuse(monkeypatch, ended=True)
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
+    (usage,) = recorder.made
+    assert not any(call.startswith("delete:") for call in fake_sdk.calls)
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1]["terminated_at"] == (_CREATED_AT + timedelta(seconds=30)).isoformat()
+    assert usage.seconds == [None]
+
+
+async def test_a_refused_create_whose_box_is_listed_late_settles(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search again after a refused create, and delete and settle the box that the second search finds."""
+    made = _create_then_refuse(monkeypatch, ended=False)
+    original = FakeClient.list
+    hidden: dict[str, BoxState] = {}
+
+    async def late(self: FakeClient, **kwargs: Any) -> SimpleNamespace:
+        """Hide the new box from the first search only.
+
+        Args:
+            **kwargs: The list options.
+
+        Returns:
+            An object like ``SandboxListResponse``.
+        """
+        if not fake_sdk.list_calls:
+            hidden.update({box.id: fake_sdk.boxes.pop(box.id) for box in made})
+        else:
+            fake_sdk.boxes.update(hidden)
+        return await original(self, **kwargs)
+
+    monkeypatch.setattr(FakeClient, "list", late)
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
+    (usage,) = recorder.made
+    assert len(fake_sdk.list_calls) == 2
+    assert "delete:sbx-1" in fake_sdk.calls
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.seconds == [None]
 
 
 async def test_a_create_conflict_stays_pending(fake_sdk: FakeCloud) -> None:

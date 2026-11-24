@@ -95,6 +95,9 @@ BOX_TAG = "skynet_box"
 DEFAULT_IMAGE = "python:3.12.15-slim"
 STOP_TIMEOUT = 60.0
 POLL_INTERVAL = 1.0
+# Prime may list a new sandbox some time after its create; a refused create
+# is searched for again after this delay before its hold is released.
+SEARCH_AGAIN_DELAY = 10.0
 NETWORK_APPLY_TIMEOUT = 30.0
 _LIST_PAGE = 100
 _NAME_LIMIT = 100
@@ -208,27 +211,45 @@ async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
     return True
 
 
-async def _labelled(client: Any, label: str) -> AsyncIterator[Any]:
-    """Yield the active sandboxes that carry one label, page by page.
+async def _labelled(client: Any, label: str, *, ended: bool = False) -> AsyncIterator[Any]:
+    """Yield the sandboxes that carry one label, page by page.
 
     Args:
         client: The SDK client.
         label: The ``key=value`` label.
+        ended: Also yield the sandboxes that already ended.
 
     Yields:
-        Each sandbox that has the label and has not ended.
+        Each sandbox that has the label, and has not ended unless ``ended`` is set.
     """
     cursor: str | None = None
     while True:
-        page = await client.list(labels=[label], exclude_terminated=True, per_page=_LIST_PAGE, cursor=cursor)
+        page = await client.list(labels=[label], exclude_terminated=not ended, per_page=_LIST_PAGE, cursor=cursor)
         for sandbox in page.sandboxes:
             # The label filter is a server query; check it here too, so a
             # wider answer never deletes another sandbox.
-            if label in (sandbox.labels or []) and sandbox.status not in _ENDED_STATUSES:
+            if label in (sandbox.labels or []) and (ended or sandbox.status not in _ENDED_STATUSES):
                 yield sandbox
         if not page.has_next or not page.next_cursor:
             return
         cursor = page.next_cursor
+
+
+def _refused(error: BaseException | None) -> bool:
+    """Tell whether Prime refused a create with an answer that can mean no box was made.
+
+    The SDK sends the create again after a 5xx or a lost connection, so a
+    4xx answer can answer a retry whose first try made a box. Only a label
+    search can then show that no box exists. A 409 is an idempotency
+    conflict, which can mean that a box exists, so it is never a refusal.
+
+    Args:
+        error: The start failure, or ``None``.
+
+    Returns:
+        True for a 4xx refusal other than 409.
+    """
+    return isinstance(error, SandboxRejectedError | SandboxFatalError) and _status(error.__cause__) != 409
 
 
 def _record(sandbox: Any) -> dict[str, Any]:
@@ -656,12 +677,17 @@ class PrimeEnvironment(SandboxEnvironment):
             if sandbox_id is not None:
                 await self._delete(client, sandbox_id)
             elif self._create_dispatched:
-                orphan = asyncio.ensure_future(self._find_orphan(client))
-                searched = await _bounded(orphan, "find the lost sandbox")
-                sandbox_id = orphan.result() if searched else None
-                if sandbox_id is not None:
-                    # A failed delete keeps the id, so the box still settles.
-                    await self._delete(client, sandbox_id)
+                found, searched = await self._search_orphan(client)
+                if found is None and searched and _refused(error):
+                    # Release needs two empty searches, so a box that Prime
+                    # lists late still settles.
+                    await asyncio.sleep(SEARCH_AGAIN_DELAY)
+                    found, searched = await self._search_orphan(client)
+                if found is not None:
+                    sandbox_id = found.id
+                    if found.status not in _ENDED_STATUSES:
+                        # A failed delete keeps the id, so the box still settles.
+                        await self._delete(client, sandbox_id)
             await self._settle(client, sandbox_id, error, searched=searched)
         finally:
             await _bounded(client.aclose(), "close the client")
@@ -672,17 +698,18 @@ class PrimeEnvironment(SandboxEnvironment):
         """Settle, keep or release the reservation of a deleted sandbox.
 
         A create with no sandbox found is released only when it never left,
-        or when Prime refused it (4xx other than 409) and the label search
-        finished and found nothing. A 409, a 5xx answer, a create timeout or
-        a cancel during the create stays pending on purpose, also after an
-        empty search: Prime may still make the box, and only a person can
-        check that.
+        or when Prime refused it (4xx other than 409) and two label searches,
+        ended sandboxes included, finished and found nothing. A 409, a 5xx
+        answer, a create timeout or a cancel during the create stays pending
+        on purpose, also after an empty search: Prime may still make the box,
+        and only a person can check that. A found box, running or ended, is
+        always settled, never released.
 
         Args:
             client: The SDK client.
             sandbox_id: The deleted sandbox, or ``None`` when none was found.
             error: The start failure, or ``None`` for a normal stop.
-            searched: True when the label search for a lost sandbox finished.
+            searched: True when the last label search for a lost sandbox finished.
         """
         usage = self._usage
         if usage is None:
@@ -690,16 +717,7 @@ class PrimeEnvironment(SandboxEnvironment):
         record: dict[str, Any] = {}
         try:
             if sandbox_id is None:
-                # The SDK sends the create again after a 5xx or a lost
-                # connection, so a 401, 402 or 409 can answer a retry whose
-                # first try made a box. A 409 is an idempotency conflict, and
-                # the box may not be listed yet, so it never proves a refusal.
-                refused = (
-                    searched
-                    and isinstance(error, SandboxRejectedError | SandboxFatalError)
-                    and _status(error.__cause__) != 409
-                )
-                if not self._create_dispatched or refused:
+                if not self._create_dispatched or (searched and _refused(error)):
                     await asyncio.to_thread(usage.release, type(error).__name__ if error else "not created")
                 else:
                     await asyncio.to_thread(usage.pending)
@@ -780,18 +798,33 @@ class PrimeEnvironment(SandboxEnvironment):
             logger.warning("Prime did not show the sandbox end: %s", type(read_error).__name__)
         return record, full_seconds
 
-    async def _find_orphan(self, client: Any) -> str | None:
-        """Find the sandbox of a create that ended before it returned.
+    async def _search_orphan(self, client: Any) -> tuple[Any | None, bool]:
+        """Look for the sandbox of a create that ended before it returned.
+
+        The search lists ended sandboxes too: a box that already ended
+        still ran and must be settled.
 
         Args:
             client: The SDK client.
 
         Returns:
-            The id of the sandbox under this box label, or ``None`` when none was found.
+            The first sandbox under this box label, or ``None``, and True
+            when the search finished within ``STOP_TIMEOUT``.
         """
-        async for sandbox in _labelled(client, f"{BOX_TAG}={self._box_tag}"):
-            return sandbox.id
-        return None
+
+        async def first() -> Any | None:
+            """Return the first sandbox under this box label.
+
+            Returns:
+                The sandbox, or ``None`` when none was found.
+            """
+            async for sandbox in _labelled(client, f"{BOX_TAG}={self._box_tag}", ended=True):
+                return sandbox
+            return None
+
+        search = asyncio.ensure_future(first())
+        searched = await _bounded(search, "find the lost sandbox")
+        return (search.result() if searched else None), searched
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
