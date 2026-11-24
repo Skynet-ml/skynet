@@ -8,11 +8,18 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { ArrowsSplitIcon } from "@phosphor-icons/react/dist/ssr/ArrowsSplit";
+import { ChartLineUpIcon } from "@phosphor-icons/react/dist/ssr/ChartLineUp";
+import { ChatsCircleIcon } from "@phosphor-icons/react/dist/ssr/ChatsCircle";
+import { CpuIcon } from "@phosphor-icons/react/dist/ssr/Cpu";
+import { CubeIcon } from "@phosphor-icons/react/dist/ssr/Cube";
+import { GaugeIcon } from "@phosphor-icons/react/dist/ssr/Gauge";
+import { WrenchIcon } from "@phosphor-icons/react/dist/ssr/Wrench";
 import { DOCS_CHROME, DocsMarkdown, extractHeadings } from "@/features/docs";
 import { msg } from "@/shared/lib/messages";
 import { blogPostFigures, blogPostSource, type BlogFigure } from "../lib/content";
 import {
-  LEVER_NAMES,
+  LEVERS,
   POST_WORDS,
   linkCitations,
   parsePostBody,
@@ -26,6 +33,16 @@ import "./blog-figures.css";
 
 const CHROME = DOCS_CHROME.en;
 const LINK = "font-medium text-primary underline-offset-4 hover:underline";
+/** The icon of each lever, in the order of LEVERS, as in the essay. */
+const LEVER_ICONS = [
+  CpuIcon,
+  GaugeIcon,
+  ArrowsSplitIcon,
+  ChatsCircleIcon,
+  WrenchIcon,
+  CubeIcon,
+  ChartLineUpIcon,
+];
 
 /** Render Markdown with `[n]` citations linked to the source list. */
 function Prose({ source }: { source: string }) {
@@ -39,7 +56,7 @@ function CaptionText({ text }: { text: string }) {
   return text.split(/(\[\d+\])/).map((part, i) => {
     const n = part.match(/^\[(\d+)\]$/)?.[1];
     return n ? (
-      <a key={i} href={`#${referenceId(Number(n))}`} className={LINK}>
+      <a key={i} href={`#${referenceId(Number(n))}`} className="cite">
         {part}
       </a>
     ) : (
@@ -48,36 +65,72 @@ function CaptionText({ text }: { text: string }) {
   });
 }
 
-/** One live essay figure: the dark chart card, wider than the text, and its numbered caption. */
-function Figure({ block, figure }: { block: Extract<PostBlock, { kind: "figure" }>; figure?: BlogFigure }) {
+/**
+ * One live essay figure: the dark chart card, wider than the text, with its
+ * numbered caption inside the card, so the zoom view carries the caption too.
+ */
+function Figure({
+  block,
+  figure,
+}: {
+  block: Extract<PostBlock, { kind: "figure" }>;
+  figure?: BlogFigure;
+}) {
   if (!figure) return null;
+  const zoomable = figure.html.includes('class="zbtn"');
+  const label = `fh-${block.id}`;
   return (
-    <figure id={`figure-${block.number}`} className="bf not-prose my-12 scroll-mt-6">
-      {/* The HTML is the essay's own figure export, a trusted file in this repository. */}
-      <div className="card" id={`fig-${block.id}`} dangerouslySetInnerHTML={{ __html: figure.html }} />
-      <figcaption className="mx-auto mt-3.5 max-w-[36rem] text-sm leading-6 text-muted-foreground">
-        <span className="font-mono text-xs font-semibold uppercase tracking-wide text-foreground">
-          {POST_WORDS.figure} {block.number}.
-        </span>{" "}
-        <CaptionText text={block.caption} />
-      </figcaption>
+    <figure
+      id={`figure-${block.number}`}
+      className="bf not-prose my-12 scroll-mt-6"
+      aria-labelledby={figure.html.includes(`id="${label}"`) ? label : undefined}
+    >
+      <div className={zoomable ? "card zoomable" : "card"} id={`fig-${block.id}`}>
+        {/* The HTML is the essay's own figure export, a trusted file in this repository. */}
+        <div className="contents" dangerouslySetInnerHTML={{ __html: figure.html }} />
+        <figcaption>
+          <b>
+            {POST_WORDS.figure} {block.number}.
+          </b>{" "}
+          <CaptionText text={block.caption} />
+        </figcaption>
+      </div>
     </figure>
   );
 }
 
-/** A heading that names one or more of the six levers, with their numbers as badges. */
+/** A heading that names one or more of the seven levers, each with its icon and its short description. */
 function LeverHeading({ levers }: { levers: number[] }) {
   return (
-    <h3 id={`lever-${levers.join("-")}`} className="flex flex-wrap items-center gap-x-4 gap-y-2">
-      {levers.map((n) => (
-        <span key={n} className="inline-flex items-center gap-2">
-          <span className="inline-flex size-7 items-center justify-center rounded-md border border-border font-mono text-sm">
-            {n}
-          </span>
-          {LEVER_NAMES[n - 1]}
-        </span>
-      ))}
-    </h3>
+    <div className="not-prose mt-10 mb-3.5 space-y-4">
+      {levers.map((n) => {
+        const Icon = LEVER_ICONS[n - 1];
+        const lever = LEVERS[n - 1];
+        if (!Icon || !lever) return null;
+        return (
+          <div
+            key={n}
+            className="grid grid-cols-[1.625rem_minmax(0,1fr)] items-center gap-x-[11px] gap-y-1"
+          >
+            <span
+              aria-hidden="true"
+              className="inline-grid size-[1.625rem] place-items-center rounded-[7px] border border-primary/30 bg-primary/10 text-primary"
+            >
+              <Icon size={15} weight="regular" />
+            </span>
+            <h3
+              id={`lever-${n}`}
+              className="m-0 flex scroll-mt-6 items-center gap-3 font-display text-lg leading-tight font-semibold tracking-[-0.01em] text-foreground after:h-px after:flex-1 after:bg-linear-to-r after:from-border after:to-transparent"
+            >
+              {lever.name}
+            </h3>
+            <p className="col-span-full m-0 text-sm leading-[1.45] text-muted-foreground">
+              {lever.description}
+            </p>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

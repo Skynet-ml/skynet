@@ -2,7 +2,7 @@
  * Split a post's Markdown into the blocks the post page renders.
  *
  * Post-only syntax, on a line of its own:
- * - `{{figure: <id> | <caption>}}` shows public/blog/<slug>/<id>.svg with its caption.
+ * - `{{figure: <id> | <caption>}}` shows live figure <id> from content/<slug>.figures.json with its caption.
  * - `{{lever: 1}}` or `{{lever: 2, 4}}` is a heading that names the levers.
  * `## References` starts the numbered source list; a `[n]` in the text links to source n.
  *
@@ -27,14 +27,15 @@ export interface PostBody {
   afterReferences: string;
 }
 
-/** The six levers of the essay, in the order of its Figure 2. */
-export const LEVER_NAMES = [
-  "Model",
-  "Reasoning effort",
-  "Attempts and agents",
-  "Harness",
-  "Environment",
-  "Metric",
+/** The seven levers of the essay, in the order of its Figure 2. */
+export const LEVERS = [
+  { name: "Model", description: "For example, GPT-6 Astra or Claude Opus 5" },
+  { name: "Reasoning effort", description: "For example, low, high, or max" },
+  { name: "Multiple agents", description: "Running multiple tries and combining different models" },
+  { name: "Agent communication", description: "How agents coordinate and share information" },
+  { name: "Harness", description: "The tools and the context management" },
+  { name: "Environment", description: "The basic interaction the model has with the problem" },
+  { name: "Metric", description: "The methodology for scoring and measuring a result" },
 ] as const;
 
 /** Words of the post itself, so English in every UI language (not catalog text). */

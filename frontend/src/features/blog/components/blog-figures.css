@@ -1,15 +1,18 @@
 /*
  * The live blog figures: the essay's chart cards, scoped under .bf.
  *
- * The figure HTML in content/<slug>.figures.json uses these class names.
- * A card is always dark, in both app themes, like the essay it comes from.
- * Each figure is a size container, so the phone layout follows the width of
- * the figure, not of the window.
+ * The rules below the header come from the essay's own figure CSS, so the
+ * blog and the essay show the same figures. The figure HTML in
+ * content/<slug>.figures.json uses these class names. A card is always dark,
+ * in both app themes, like the essay it comes from. Each figure is a size
+ * container, so the phone layout follows the width of the figure, not of the
+ * window.
  */
 
 .bf,
 .bf-tip,
-.bf-atip {
+.bf-atip,
+.bf-zmodal {
   --bg: #1c1814;
   --base: #221d19;
   --card: #2c2621;
@@ -36,19 +39,21 @@
   margin-inline: calc((100% - var(--bf-w)) / 2);
   container-type: inline-size;
 }
+/* The zoom view: the stage holds the card that the script moves out of the post. */
+.bf.bf-zstage {
+  width: min(1140px, 100vw - 40px);
+  margin: 0;
+}
 
 .bf .card {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid rgba(72, 61, 52, 0.5);
-  border-radius: 16px;
-  background: var(--card);
   color: var(--ink);
   font-family: var(--ui);
   font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 40px -28px rgba(28, 24, 20, 0.55);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 18px 40px -28px rgba(28, 24, 20, 0.55);
   color-scheme: dark;
 }
 .bf .card *,
@@ -59,39 +64,276 @@
 .bf .card ::selection {
   background: rgba(224, 147, 90, 0.3);
 }
+.bf .card figcaption a {
+  color: var(--primary);
+  text-decoration: none;
+}
+.bf .card figcaption a:hover {
+  color: var(--primary-hover);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 
-.bf .card-body {
+.bf .card {
+  margin: 0;
+  background: var(--card);
+  border: 1px solid rgba(72, 61, 52, 0.5);
+  border-radius: 16px;
+  overflow: hidden;
   position: relative;
-  padding: 24px 28px 26px;
+  transition: border-color 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.bf .card.zoomable:not(.zoomed):hover {
+  border-color: var(--border);
+}
+.bf .card-body {
+  padding: 22px 24px;
+  position: relative;
+}
+.bf .card.zoomable .card-body {
+  cursor: zoom-in;
+}
+.bf .card.zoomed .card-body {
+  cursor: default;
+}
+.bf .zbtn {
+  position: absolute;
+  top: 20px;
+  right: 18px;
+  z-index: 4;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    transform 75ms ease-out,
+    background-color 75ms ease-out,
+    color 75ms ease-out,
+    border-color 75ms ease-out,
+    box-shadow 75ms ease-out;
+}
+.bf .card.zoomed .zbtn {
+  top: 20px;
+  right: 22px;
+}
+.bf .zbtn:hover {
+  background: #3e342c;
+  color: #fff;
+}
+.bf .zbtn:active {
+  transform: scale(0.97);
+}
+.bf .zbtn:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(224, 147, 90, 0.5);
+}
+@media (prefers-reduced-motion: reduce) {
+  .bf .zbtn {
+    transition: none;
+  }
+  .bf .zbtn:active {
+    transform: none;
+  }
+}
+.bf .zbtn .pi {
+  color: inherit;
+}
+.bf .zbtn .zi-in {
+  display: inline-flex;
+}
+.bf .zbtn .zi-out {
+  display: none;
+}
+.bf .card.zoomed .zbtn .zi-in {
+  display: none;
+}
+.bf .card.zoomed .zbtn .zi-out {
+  display: inline-flex;
+}
+.bf-zmodal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  pointer-events: none;
+  outline: none;
+  transition: opacity 0.2s ease-out;
+}
+.bf-zmodal.on {
+  opacity: 1;
+  pointer-events: auto;
+}
+.bf-zmodal.closing {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s cubic-bezier(0.4, 0, 1, 1);
+}
+.bf-zstage {
+  width: min(1140px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+  transition:
+    opacity 0.24s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.bf-zmodal.on .bf-zstage {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+.bf-zmodal.closing .bf-zstage {
+  opacity: 0;
+  transform: scale(0.98);
+  transition:
+    opacity 0.15s cubic-bezier(0.4, 0, 1, 1),
+    transform 0.15s cubic-bezier(0.4, 0, 1, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .bf-zstage,
+  .bf-zmodal.closing .bf-zstage {
+    transform: none;
+  }
+}
+.bf .card.zoomed {
+  margin: 0 !important;
+  width: 100% !important;
+  transform: none !important;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  border-color: var(--border);
+  box-shadow:
+    0 10px 28px -6px rgba(0, 0, 0, 0.6),
+    0 2px 8px -2px rgba(0, 0, 0, 0.45);
+}
+.bf .card.zoomed .card-body {
+  padding: 22px 28px;
+}
+.bf .card.zoomed .fh {
+  font-size: 1.125rem;
+}
+.bf .card.zoomed figcaption {
+  padding: 14px 28px 15px;
+  font-size: 0.9375rem;
+}
+.bf .card.zoomed .plot.wide {
+  max-width: none;
+  width: 100%;
+}
+.bf #fig-comms.zoomed .plot.wide {
+  max-width: min(980px, calc((100vh - 280px) * 1.5));
+}
+.bf #fig-venn.zoomed .plot.wide {
+  max-width: 520px;
+}
+@container (min-width: 820px) {
+  .bf #fig-venn.zoomed .vgrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+    align-items: center;
+  }
+  .bf #fig-venn.zoomed .vbars {
+    margin-top: 0;
+  }
+  .bf #fig-venn.zoomed .plot.wide {
+    max-width: none;
+  }
+}
+.bf .card.zoomed .nv-row .plot {
+  max-width: 560px;
+}
+.bf .card.zoomed .levers {
+  grid-template-columns: minmax(0, min(400px, calc((100vh - 230px) * 0.6))) minmax(0, 1fr);
+  gap: 12px 40px;
+}
+.bf #fig-arc.zoomed .ctl {
+  top: 22px;
+  left: 28px;
+}
+.bf-zmodal .card :is(.a-draw, .a-grow, .a-rise, .a-move, .a-fade, .a-pop) {
+  transition-delay: 0ms !important;
 }
 .bf .nw {
   white-space: nowrap;
 }
 .bf .fh {
-  display: flex;
+  text-wrap: balance;
   min-height: 30px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  margin: 0 0 18px;
+  margin: 0 0 16px;
   text-align: center;
-  text-wrap: balance;
   font-size: 0.9375rem;
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: -0.01em;
   color: var(--ink);
 }
-/* In the ARC-AGI-3 figure the score or cost toggle sits at the start of the title row. */
+.bf .card.zoomable .fh {
+  padding: 0 42px;
+}
 .bf #fig-arc .fh {
-  padding: 0 96px;
+  padding: 0 84px;
 }
 .bf #fig-arc .ctl {
   position: absolute;
-  top: 24px;
-  left: 28px;
+  top: 22px;
+  left: 24px;
   margin: 0;
 }
-
+@container (max-width: 604px) {
+  .bf .card.zoomable .fh,
+  .bf #fig-arc .fh {
+    padding: 0 38px;
+  }
+  .bf #fig-arc .ctl {
+    position: static;
+    justify-content: center;
+    margin-bottom: 14px;
+  }
+  .bf .zbtn,
+  .bf .card.zoomed .zbtn {
+    top: 17px;
+    right: 8px;
+  }
+  .bf .card.zoomed .card-body {
+    padding: 18px 14px;
+  }
+  .bf .card.zoomed figcaption {
+    padding: 12px 14px 14px;
+    font-size: 0.875rem;
+  }
+  .bf .card.zoomed .levers {
+    grid-template-columns: 1fr;
+  }
+}
+.bf .card figcaption {
+  padding: 12px 24px 13px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+.bf .card figcaption b {
+  display: block;
+  font-weight: 600;
+  color: var(--ink);
+}
 .bf .plot {
   display: block;
   width: 100%;
@@ -147,10 +389,13 @@
 }
 .bf .plot .row > rect {
   fill: transparent;
-  transition: fill 0.15s;
+  transition: fill 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .bf .plot .row:hover > rect {
-  fill: rgba(56, 47, 40, 0.5);
+  fill: rgba(56, 47, 40, 0.45);
+}
+.bf .plot .row.on > rect {
+  fill: rgba(224, 147, 90, 0.09);
 }
 .bf .plot .row:hover .h {
   stroke: #322b25;
@@ -158,21 +403,19 @@
 .bf .plot .row:hover text {
   fill: #fff;
 }
-
+.bf .plot .lbtn > rect {
+  fill: transparent;
+  transition: fill 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.bf .plot .lbtn:hover > rect {
+  fill: rgba(62, 52, 44, 0.7);
+}
+.bf .plot .lbtn.on > rect {
+  fill: rgba(62, 52, 44, 0.95);
+}
 .bf .pi {
   flex-shrink: 0;
   color: var(--muted);
-}
-.bf .ti {
-  display: flex;
-  justify-content: center;
-  margin-bottom: 8px;
-}
-.bf .ti .pi {
-  color: var(--ghost);
-}
-.bf .tile.primary .ti .pi {
-  color: var(--primary);
 }
 .bf .ctl {
   display: flex;
@@ -182,86 +425,82 @@
   gap: 10px 14px;
   margin-bottom: 14px;
 }
-
-/* The app's Segmented control at size "sm": equal columns on the muted track, and a pill that slides to the choice. */
+.bf .seg button .pi {
+  vertical-align: -2px;
+  margin-right: 6px;
+  color: inherit;
+}
+.bf .seg button[aria-label] .pi {
+  margin-right: 0;
+}
 .bf .seg {
-  --w: calc((100% - 4px - 2px * (var(--n) - 1)) / var(--n));
   position: relative;
   display: inline-grid;
   gap: 2px;
   padding: 2px;
-  border-radius: 8px;
+  border-radius: var(--r-lg, 8px);
   background: var(--surface-3);
+  --w: calc((100% - 4px - 2px * (var(--n) - 1)) / var(--n));
 }
 .bf .seg .pill {
   position: absolute;
   top: 2px;
   bottom: 2px;
-  left: calc(2px + var(--i) * (var(--w) + 2px));
   width: var(--w);
+  left: calc(2px + var(--i) * (var(--w) + 2px));
   border-radius: 6px;
   background: var(--primary-fill);
   pointer-events: none;
-  transition: left 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: left 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .bf .seg button {
   position: relative;
   z-index: 1;
   min-width: 0;
-  padding: 4px 12px;
-  border: 0;
-  border-radius: 6px;
-  background: none;
   font: inherit;
   font-size: 0.75rem;
   font-weight: 500;
   line-height: 1rem;
   text-align: center;
   color: rgba(243, 237, 230, 0.6);
+  background: none;
+  border: 0;
+  padding: 4px 10px;
+  border-radius: 6px;
   cursor: pointer;
   transition: color 0.2s;
 }
-.bf .seg button .pi {
-  margin-right: 6px;
-  vertical-align: -2px;
-  color: inherit;
+.bf .seg button:hover {
+  color: #fff;
 }
-.bf .seg button[aria-label] .pi {
-  margin-right: 0;
-}
-.bf .seg button:hover,
 .bf .seg button[aria-checked="true"] {
   color: #fff;
 }
-.bf :is(.seg button, .legend button, .lev li):focus-visible {
+.bf .seg button:focus-visible {
   outline: none;
-}
-.bf .seg button:focus-visible,
-.bf .legend button:focus-visible,
-.bf .lev li:focus-visible .lr {
-  box-shadow: 0 0 0 2px rgba(224, 147, 90, 0.55);
+  box-shadow: 0 0 0 2px rgba(224, 147, 90, 0.45);
 }
 @media (hover: none) and (pointer: coarse) {
   .bf .seg button {
     min-height: 44px;
   }
-  .bf .legend button {
-    min-height: 36px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bf .seg .pill {
+    transition: none;
   }
 }
-
 .bf .arcv[data-m="score"] .v-cost,
 .bf .arcv[data-m="cost"] .v-score {
   display: none;
 }
-
 .bf .legend {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 6px 18px;
-  margin-bottom: 12px;
   font-size: 0.875rem;
+  margin-bottom: 10px;
 }
 .bf .legend span {
   display: inline-flex;
@@ -270,28 +509,40 @@
 .bf .legend i {
   width: 10px;
   height: 10px;
-  margin-right: 8px;
   border-radius: 50%;
+  margin-right: 8px;
 }
 .bf .legend button {
   display: inline-flex;
   align-items: center;
-  margin: -4px 0;
-  padding: 4px 10px;
-  border: 0;
-  border-radius: 999px;
-  background: none;
   font: inherit;
   color: inherit;
+  background: none;
+  border: 0;
+  padding: 4px 10px;
+  margin: -4px 0;
+  border-radius: 999px;
   cursor: pointer;
-  transition: opacity 0.2s, background-color 0.2s;
+  transition:
+    opacity 0.15s ease-out,
+    color 0.15s ease-out,
+    background-color 0.15s ease-out,
+    transform 75ms ease-out;
 }
 .bf .legend button:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(62, 52, 44, 0.7);
+  color: var(--ink);
+}
+.bf .legend button:active {
+  transform: scale(0.97);
+}
+.bf .legend button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(224, 147, 90, 0.5);
 }
 .bf .arcv[data-h="hs"] .legend [data-h="ha"],
 .bf .arcv[data-h="ha"] .legend [data-h="hs"] {
-  opacity: 0.45;
+  opacity: 0.4;
 }
 .bf .arcv svg :is(g.ha, g.hs, .hl) {
   transition: opacity 0.25s ease-out;
@@ -301,49 +552,6 @@
 .bf .arcv[data-h] svg .hl {
   opacity: 0;
 }
-
-/* Stat tiles: the app's KPI tiles. */
-.bf .tiles {
-  display: grid;
-  gap: 12px;
-  margin-top: 18px;
-}
-.bf .c2 {
-  grid-template-columns: repeat(2, 1fr);
-}
-.bf .tile {
-  padding: 14px 14px 15px;
-  border: 1px solid rgba(72, 61, 52, 0.5);
-  border-radius: 12px;
-  background: var(--card);
-  text-align: center;
-}
-.bf .tile .v {
-  font-family: var(--mono);
-  font-size: 1.0625rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.03em;
-  line-height: 1.25;
-}
-.bf .tile .l {
-  margin-top: 6px;
-  font-size: 0.75rem;
-  line-height: 1.42;
-  color: var(--muted);
-  text-wrap: balance;
-}
-.bf .tile.primary .v {
-  color: var(--primary);
-}
-.bf .tile.delta {
-  border-color: var(--border);
-  background: rgba(56, 47, 40, 0.5);
-}
-.bf .tile.delta .v {
-  color: var(--text-2);
-}
-
 .bf .nv {
   margin-top: 6px;
 }
@@ -365,8 +573,8 @@
   color: var(--text-2);
 }
 .bf .nv-row.hi .kv {
-  font-size: 2.25rem;
   color: var(--primary);
+  font-size: 2.25rem;
 }
 .bf .nv-row.hi .kl {
   color: var(--text-2);
@@ -375,15 +583,21 @@
   background: var(--ghost);
 }
 .bf .nv-k .meter {
-  max-width: 140px;
   margin-top: 12px;
+  max-width: 140px;
+}
+@container (max-width: 564px) {
+  .bf .nv-row {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
 }
 .bf .kl {
-  margin-bottom: 8px;
   font-size: 0.6875rem;
   font-weight: 500;
   letter-spacing: 0.025em;
   color: var(--muted);
+  margin-bottom: 8px;
 }
 .bf .kv {
   font-family: var(--mono);
@@ -392,76 +606,12 @@
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }
-
-/* Badges: .chip is the app's model badge, .chip.cfg its config badge with one width, so the column reads as one scale. */
-.bf .chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border: 1px solid rgba(84, 72, 61, 0.9);
-  border-radius: 6px;
-  background: var(--border);
-  font-family: var(--ui);
-  font-size: 0.6875rem;
-  font-weight: 500;
-  line-height: 1.3;
-  white-space: nowrap;
-  color: var(--primary);
-}
-.bf .chip.cfg {
-  width: 4.25rem;
-  justify-content: center;
-  border-color: rgba(72, 61, 52, 0.6);
-  background: var(--surface-3);
-  color: var(--text-2);
-}
-.bf .num {
-  display: inline-grid;
-  min-width: 20px;
-  height: 20px;
-  margin-right: 8px;
-  place-items: center;
-  border: 1px solid rgba(84, 72, 61, 0.9);
-  border-radius: 6px;
-  background: var(--border);
-  font-family: var(--mono);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  color: var(--primary);
-}
-.bf .status {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--muted);
-}
-.bf .status i {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ghost);
-}
-.bf .st {
-  display: flex;
-  align-items: center;
-  font-size: 0.9375rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-.bf .sd {
-  margin: 4px 0 0;
-  font-size: 0.8125rem;
-  line-height: 1.5;
-  color: var(--muted);
-}
 .bf .meter {
   flex: 1;
   height: 6px;
-  overflow: hidden;
   border-radius: 999px;
   background: var(--border);
+  overflow: hidden;
 }
 .bf .meter.sm {
   height: 4px;
@@ -472,8 +622,6 @@
   border-radius: 999px;
   background: var(--primary);
 }
-
-/* The six levers: a diagram of the layers and a list that names them. A clicked row dims the other layers. */
 .bf .levers {
   display: grid;
   grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
@@ -481,30 +629,26 @@
   align-items: center;
 }
 .bf .lev {
+  list-style: none;
   margin: 0;
   padding: 0;
-  list-style: none;
 }
 .bf .lev li {
   margin: 0;
-  padding: 11px 0;
+  padding: 9px 0;
   border-top: 1px solid var(--border-subtle);
   font-size: 0.875rem;
   line-height: 1.4;
-  cursor: pointer;
-  transition: opacity 0.2s ease-out;
+  transition: opacity 0.25s ease-out;
 }
 .bf .lev li:first-child {
   border-top: 0;
 }
 .bf .lr {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
   align-items: start;
-}
-.bf .lr .num {
-  margin: 0;
 }
 .bf .lr .pi {
   margin-top: 2px;
@@ -514,24 +658,34 @@
   font-weight: 600;
   letter-spacing: -0.01em;
 }
-.bf .lr span:not(.num) {
+.bf .lr span {
   display: block;
   margin-top: 2px;
   font-size: 0.8125rem;
   line-height: 1.45;
   color: var(--muted);
 }
+.bf .lg {
+  transition: opacity 0.25s ease-out;
+}
+.bf .lev li {
+  cursor: pointer;
+  outline: none;
+}
 .bf .lev .lr {
-  margin: -6px 0;
   padding: 6px 10px;
+  margin: -6px 0;
   border-radius: 8px;
-  transition: background-color 0.2s;
+  transition: background-color 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .bf .lev li:hover .lr {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(62, 52, 44, 0.7);
 }
-.bf .lg {
-  transition: opacity 0.2s ease-out;
+.bf .lev li[aria-pressed="true"] .lr {
+  background: rgba(62, 52, 44, 0.95);
+}
+.bf .lev li:focus-visible .lr {
+  box-shadow: 0 0 0 3px rgba(224, 147, 90, 0.5);
 }
 .bf .levers[data-f] .lev li:not([aria-pressed="true"]) {
   opacity: 0.5;
@@ -541,53 +695,70 @@
 .bf .levers[data-f="3"] .lg:not(.l3),
 .bf .levers[data-f="4"] .lg:not(.l4),
 .bf .levers[data-f="5"] .lg:not(.l5),
-.bf .levers[data-f="6"] .lg:not(.l6) {
+.bf .levers[data-f="6"] .lg:not(.l6),
+.bf .levers[data-f="7"] .lg:not(.l7) {
   opacity: 0.3;
 }
-
-/* The app's table: a tinted head, 48px head cells and a row hover. */
-.bf .tbl {
-  width: 100%;
-  border-collapse: collapse;
-}
-.bf .tbl thead {
-  background: rgba(56, 47, 40, 0.4);
-}
-.bf .tbl th {
-  height: 48px;
-  padding: 0 8px;
-  border-bottom: 1px solid rgba(72, 61, 52, 0.6);
-  text-align: left;
-  white-space: nowrap;
+.bf #fig-comms .legend {
   font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--muted);
+  gap: 4px 8px;
 }
-.bf .tbl td {
-  padding: 10px 8px;
-  border-bottom: 1px solid rgba(72, 61, 52, 0.6);
-  font-family: var(--mono);
-  font-size: 0.8125rem;
-  font-variant-numeric: tabular-nums;
+.bf #fig-comms .legend button {
+  padding: 4px 7px;
+  white-space: nowrap;
 }
-.bf .tbl tbody tr {
-  transition: background-color 0.15s;
+.bf #fig-comms .legend i {
+  width: 9px;
+  height: 9px;
+  margin-right: 5px;
 }
-.bf .tbl tbody tr:hover {
-  background: rgba(56, 47, 40, 0.5);
+.bf #fig-comms .plot.wide {
+  max-width: 780px;
+  margin: 0 auto;
 }
-.bf .tbl tbody tr:last-child td {
-  border-bottom: 0;
+/* The team figure has six benchmarks side by side, so it is wider than the others on a wide screen. */
+@media (min-width: 860px) {
+  .bf:has(> #fig-comms) {
+    --bf-w: min(900px, 100vw - 48px);
+  }
 }
-.bf .sc {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.bf .fi {
+  cursor: pointer;
+  outline: none;
+  transition: opacity 0.25s ease-out;
 }
-.bf .sc span {
-  width: 3.4em;
+.bf [data-tg] {
+  transition: opacity 0.25s ease-out;
 }
-
+.bf .dim {
+  opacity: 0.18 !important;
+}
+.bf .legend button.off {
+  opacity: 0.4;
+}
+.bf .legend button.on,
+.bf .legend button[aria-pressed="true"] {
+  background: rgba(62, 52, 44, 0.95);
+  color: var(--ink);
+}
+.bf .fi:focus-visible {
+  outline: 2px solid rgba(224, 147, 90, 0.65);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bf .fi,
+  .bf [data-tg],
+  .bf .lg,
+  .bf .lev li,
+  .bf .arcv svg :is(g.ha, g.hs, .hl),
+  .bf .legend button {
+    transition-duration: 0ms !important;
+  }
+  .bf .legend button:active {
+    transform: none;
+  }
+}
 .bf #fig-venn .plot.wide {
   max-width: 440px;
   margin: 0 auto;
@@ -616,105 +787,59 @@
   font-weight: 700;
   fill: var(--text-2);
 }
-
-/* A kind of problem is a card of the app's engine picker. The selected card has the primary ring. */
-.bf .kinds {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-}
-.bf .kind {
-  overflow: hidden;
-  border: 1px solid rgba(72, 61, 52, 0.5);
-  border-radius: 12px;
-  background: rgba(34, 29, 25, 0.6);
-}
-.bf .kind.hot {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
-}
-.bf .banner {
-  display: grid;
-  height: 96px;
-  place-items: center;
-  border-bottom: 1px solid rgba(72, 61, 52, 0.5);
-  background: rgba(56, 47, 40, 0.5);
-}
-.bf .banner .plot {
-  width: 146px;
-}
-.bf .kb {
-  display: grid;
-  gap: 6px;
-  justify-items: center;
-  padding: 12px;
-  text-align: center;
-}
-.bf .kind .st {
-  font-size: 0.8125rem;
-  letter-spacing: -0.02em;
-}
-.bf .kind .sd {
-  margin: 0;
-  font-size: 0.75rem;
-  text-wrap: balance;
-}
-.bf .sprite {
-  position: absolute;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-}
-
-/* The hover card of a chart mark: the app's plain tooltip. */
 .bf-tip {
   position: fixed;
-  top: 0;
   left: 0;
-  z-index: 40;
+  top: 0;
+  z-index: 45;
+  pointer-events: none;
+  opacity: 0;
   max-width: 240px;
   padding: 6px 10px;
-  border: 1px solid var(--border);
   border-radius: 8px;
+  border: 1px solid var(--border);
   background: var(--popover);
-  box-shadow: 0 10px 28px -6px rgba(0, 0, 0, 0.6), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
-  font-family: var(--ui);
+  box-shadow:
+    0 10px 28px -6px rgba(0, 0, 0, 0.6),
+    0 2px 8px -2px rgba(0, 0, 0, 0.45);
   font-size: 0.75rem;
-  font-weight: 500;
   line-height: 1.4;
-  color: var(--ink);
-  opacity: 0;
-  pointer-events: none;
   transition: opacity 0.12s ease-out;
 }
 .bf-tip.on {
   opacity: 1;
 }
-
-/* The app's tooltip: a card above its trigger with a stroked caret, flipped below when the top has no room. */
+.bf-tip b {
+  display: block;
+  font-weight: 500;
+}
 .bf-atip {
   position: fixed;
-  top: 0;
   left: 0;
+  top: 0;
   z-index: 50;
+  pointer-events: none;
   max-width: 240px;
   padding: 6px 10px;
-  border: 1px solid var(--border);
   border-radius: 8px;
+  border: 1px solid var(--border);
   background: var(--card);
-  box-shadow: 0 10px 28px -6px rgba(0, 0, 0, 0.6), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
-  font-family: var(--ui);
+  color: var(--ink);
   font-size: 0.75rem;
   font-weight: 500;
   line-height: 1rem;
   white-space: nowrap;
-  color: var(--ink);
+  box-shadow:
+    0 10px 28px -6px rgba(0, 0, 0, 0.6),
+    0 2px 8px -2px rgba(0, 0, 0, 0.45);
+  transform-origin: var(--ox, 50%) 100%;
   opacity: 0;
   scale: 0.9;
   filter: blur(4px);
-  transform-origin: var(--ox, 50%) 100%;
-  pointer-events: none;
-  transition: opacity 0.15s ease-in, scale 0.15s ease-in, filter 0.15s ease-in;
+  transition:
+    opacity 0.15s ease-in,
+    scale 0.15s ease-in,
+    filter 0.15s ease-in;
 }
 .bf-atip.b {
   transform-origin: var(--ox, 50%) 0;
@@ -741,39 +866,47 @@
   bottom: 100%;
   transform: translateY(1px) rotate(180deg);
 }
-
-/*
- * Motion: the marks of a figure arrive one time, when the figure scrolls into
- * view. The script adds .motion to a figure that is out of view at load, and
- * .in when it scrolls in. Without the script every mark is at its final state.
- */
+@media (prefers-reduced-motion: reduce) {
+  .bf-atip {
+    scale: 1;
+    filter: none;
+  }
+}
 @media (prefers-reduced-motion: no-preference) {
   .bf.motion .a-draw {
     stroke-dasharray: 1.01 2;
-    transition: stroke-dashoffset var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+    transition: stroke-dashoffset var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms);
   }
   .bf.motion .a-grow {
     transform-box: fill-box;
     transform-origin: 0 50%;
-    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms);
   }
   .bf.motion .a-rise {
     transform-box: fill-box;
     transform-origin: 50% 100%;
-    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms);
   }
   .bf.motion .a-move {
-    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+    transition: transform var(--t, 0.7s) cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms);
   }
   .bf.motion .a-fade {
-    transition: opacity 0.3s ease-out calc(var(--d, 0ms) + 150ms);
+    transition: opacity 0.3s ease-out var(--d, 0ms);
+  }
+  .bf .arcv :is(.v-score, .v-cost) {
+    animation: vin 0.3s ease-out;
+  }
+  @keyframes vin {
+    from {
+      opacity: 0;
+    }
   }
   .bf.motion .a-pop {
     transform-box: fill-box;
     transform-origin: 50% 50%;
     transition:
-      opacity 0.25s ease-out calc(var(--d, 0ms) + 150ms),
-      transform 0.35s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--d, 0ms) + 150ms);
+      opacity 0.25s ease-out var(--d, 0ms),
+      transform 0.35s cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms);
   }
   .bf.motion .card:not(.in) .a-draw {
     stroke-dashoffset: 1.02;
@@ -794,39 +927,23 @@
     transform: scale(0.8);
   }
   .bf.motion .lev li {
-    transition: opacity 0.2s ease-out, border-color 0.3s ease-out calc(var(--d, 0ms) + 150ms);
+    transition:
+      opacity 0.25s ease-out,
+      border-color 0.3s ease-out var(--d, 0ms);
   }
   .bf.motion .card:not(.in) .lev li {
     border-top-color: transparent;
   }
-  /* A new score or cost view fades in. */
-  .bf .arcv :is(.v-score, .v-cost) {
-    animation: bf-in 0.3s ease-out;
-  }
-  @keyframes bf-in {
-    from {
-      opacity: 0;
-    }
-  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .bf .seg .pill {
-    transition: none;
-  }
-  .bf-atip {
-    scale: 1;
-    filter: none;
-  }
-  .bf.motion .card :is(.a-draw, .a-grow, .a-rise, .a-move, .a-fade, .a-pop) {
+  .bf.motion :is(.a-draw, .a-grow, .a-rise, .a-move, .a-fade, .a-pop) {
     transition: opacity 0.2s linear;
   }
   .bf.motion .card:not(.in) :is(.a-draw, .a-grow, .a-rise, .a-move, .a-fade, .a-pop) {
     opacity: 0;
   }
 }
-
-/* A narrower figure, in the text column of a tablet. */
-@container (max-width: 680px) {
+@container (max-width: 652px) {
   .bf .levers {
     grid-template-columns: 1fr;
     gap: 18px;
@@ -836,31 +953,17 @@
     margin: 0 auto;
   }
 }
-@container (max-width: 600px) {
-  .bf .nv-row {
-    grid-template-columns: 1fr;
-    gap: 12px;
+@container (max-width: 604px) {
+  .bf .card-body,
+  .bf .card figcaption {
+    padding-left: 14px;
+    padding-right: 14px;
   }
 }
-/* Phones: each wide chart has a second layout on a canvas of 300 units, so its text keeps its size. */
-@container (max-width: 560px) {
-  .bf .card {
-    border-radius: 14px;
-  }
-  .bf .card-body {
-    padding: 18px 14px 20px;
-  }
-  .bf #fig-arc .fh {
-    padding: 0;
-  }
-  .bf #fig-arc .ctl {
-    position: static;
-    justify-content: center;
-    margin-bottom: 14px;
-  }
+@container (max-width: 604px) {
   .bf .legend {
-    gap: 6px 14px;
     font-size: 0.75rem;
+    gap: 6px 14px;
   }
   .bf .legend button {
     padding: 4px 8px;
@@ -873,12 +976,11 @@
     max-width: 380px;
     margin: 0 auto;
   }
-  .bf .kinds {
-    grid-template-columns: 1fr;
-  }
 }
-@container (max-width: 340px) {
-  .bf .card-body {
-    padding-inline: 10px;
+@container (max-width: 331px) {
+  .bf .card-body,
+  .bf .card figcaption {
+    padding-left: 10px;
+    padding-right: 10px;
   }
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { LEVER_NAMES, linkCitations, parsePostBody } from "./post-body.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { LEVERS, linkCitations, parsePostBody } from "./post-body.ts";
 import { BLOG_POSTS, blogHref, findBlogPost } from "./posts.ts";
 
 const SLUG = "the-most-valuable-skill-of-this-century";
@@ -28,7 +28,13 @@ test("every post has a source, and every figure marker has its HTML", () => {
     const figures = body.blocks.filter((block) => block.kind === "figure");
     assert.ok(figures.length > 0);
     for (const figure of figures) {
-      assert.match(manifest[figure.id]?.html ?? "", /^<div class="card-body">/, figure.id);
+      const html = manifest[figure.id]?.html ?? "";
+      assert.match(html, /^<div class="card-body">/, figure.id);
+      // Images are files in public/, so the page does not carry them inline two times.
+      assert.doesNotMatch(html, /data:image\//, figure.id);
+      for (const [, src] of html.matchAll(/href="(\/[^"]+\.(?:jpg|webp|png))"/g)) {
+        assert.ok(existsSync(new URL(`../../../../public${src}`, import.meta.url)), src);
+      }
     }
   }
 });
@@ -42,7 +48,7 @@ test("the essay parses into figures, levers and numbered sources", () => {
   );
   for (const block of body.blocks) {
     if (block.kind === "lever")
-      for (const n of block.levers) assert.ok(LEVER_NAMES[n - 1], `lever ${n}`);
+      for (const n of block.levers) assert.ok(LEVERS[n - 1], `lever ${n}`);
     if (block.kind === "markdown") assert.doesNotMatch(block.text, /\{\{/);
   }
   assert.deepEqual(

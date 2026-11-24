@@ -72,6 +72,7 @@ test("the public docs, blog and llms.txt skip the login gate", () => {
     "/llms-full.txt",
     "/blog",
     "/blog/the-most-valuable-skill-of-this-century",
+    "/blog/the-most-valuable-skill-of-this-century/elon-musk.jpg",
   ]) {
     assert.ok(!matcher.test(route), route);
   }

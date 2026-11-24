@@ -1,122 +1,116 @@
-I started writing this on the day we learned that the Riemann Hypothesis, the most famous open problem in math, might have been solved with AI. Levent Alpöge, a mathematician at Anthropic, announced a proof he worked out with Claude and formalized in Lean. He set the direction himself, combining two ideas and guiding the work, though by his own account "this time Claude far outpaced me near the finish line" [1]. A day later, the Lean and Mathlib communities certified both the statement and the proof: the theorem matches Mathlib's own statement of the Riemann Hypothesis, and Lean's kernel along with several independent checkers accepted it [2].
+I started writing this the day Levent Alpöge announced a proof of the Riemann Hypothesis, worked out with Claude and formalized in Lean. He set the direction, though as he put it, "this time Claude far outpaced me near the finish line" [1]. A day later, the Lean and Mathlib communities certified both the statement and the proof [2].
 
-Seeing a proof like that come together, with a mathematician steering and Lean verifying the result, sharpened the bet I've been making and what I'm building around it.
+Watching a mathematician steer while Lean verified the result sharpened the bet I've been making and what I'm building around it.
 
 ## When will AGI arrive?
 
-Today's models still need far more data than people do to learn the same thing. Dwarkesh Patel estimates that humans are thousands to millions of times more sample efficient than current models, and notes it isn't clear we've made much progress closing that gap [3]. Even without a breakthrough there, small improvements in models, architectures, and data keep compounding. That gives us a strong chance of reaching artificial general intelligence soon, because AI will speed up the research process itself.
-
-Patel sketches a similar path. In June 2025 he argued that models still don't improve over time the way a person does, putting his 50/50 bet at 2032 for AI that learns on the job as well as a human in any white-collar role. Even in that post, though, he called misaligned superintelligence as early as 2028 a plausible outcome [4]. A year later he described how the labs plan to tackle jobs you can't train for in advance: automate AI research first, then let the automated researchers solve sample efficiency [3]. I agree with him. And he isn't the only one putting a year on it.
+Models still need far more data than people do to learn the same thing, and Dwarkesh Patel notes it isn't clear we've closed that gap [3]. Even so, steady gains in models, architectures, and data keep compounding, and AI will soon speed up AI research itself. Patel puts his 50/50 bet at 2032 for AI that learns on the job like a human [4], and describes the labs' plan to get there: automate AI research first, then let automated researchers solve sample efficiency [3]. I agree with him, and plenty of others are putting a year on it too.
 
 {{figure: timeline | Eight guesses on one line: Elon Musk [5], Dario Amodei [6], [7], Sam Altman [8], Shane Legg [9], [10], Ray Kurzweil [11], Demis Hassabis [12], [13], Dwarkesh Patel [4], and Andrej Karpathy [14].}}
 
-Whichever date turns out right, you don't have to wait for AGI to get far better results today.
+Whichever year turns out right, you don't have to wait for AGI to get far better results today.
 
-## There are six levers you can pull
+## There are seven levers you can pull
 
-A newer model is only one of six ways to push performance higher, and five other choices are already in your hands. I'll walk through all six using different benchmarks and settings to show how much each lever can move the result:
+A stronger model and higher reasoning effort are only two of the seven ways to improve a result:
 
-{{figure: levers | Every lever except the first gives you a way to improve the result without waiting for a new model.}}
+{{figure: levers | Six of the seven levers give you a way to improve the result without waiting for a new model.}}
 
-{{lever: 1}}
-
-On ARC-AGI-3, holding the harness fixed at ARC Prize's standard setup and taking each model at its best reasoning effort, scores run from 0.5% for Claude Haiku 5.5 and 30.2% for Claude Opus 5 up to 81.2% for Claude Fable 5.2, with GPT-6 Astra at 62.7% [15].
-
-{{figure: arcmodels | Different models on ARC-AGI-3 with the same standard harness, as listed on ARC Prize's leaderboard [15].}}
-
-{{lever: 2, 4}}
-
-Inside ARC-AGI-3's standard harness, a minimal interface where the model decides which notes to carry forward, turning reasoning effort from low to max lifts GPT-6 Astra from 17.5% to 62.7% [16]. Swap the harness for OpenAI's own setup, which changes context management by keeping the model's reasoning state between requests and compacting long conversations, and the exact same model at max effort jumps from 62.7% to 98.6% [16].
-
-{{figure: arc | GPT-6 Astra on ARC-AGI-3 (semi-private set), at every reasoning effort ARC Prize tested [16].}}
-
-{{lever: 3}}
-
-On Terminal-Bench 4.0, which has 66 expert-level terminal tasks across software, science, machine learning, operations, and security, the top frontier models sit close together: when Vals AI ran them in the same minimal agent and averaged three runs, Claude Fable 5.2 solved 65.15% of the tasks and GPT-6.2 Astra solved 63.13% [17].
-
-Running more attempts lifts solve rates further. On the official Terminal-Bench 4.1 leaderboard, each model ran five trials per task inside its own vendor's agent. Giving a model two attempts instead of one raises the expected share of tasks solved from 65.8% to 72.7% for Fable and from 62.1% to 66.7% for Astra [17]. Combining agents from both models pushes the total higher still. Counting a task as solved when at least three of five trials pass, Fable clears 45 of the 66 tasks and Astra clears 40. Fable gets nine that Astra misses, and Astra gets four that Fable misses, bringing the combined total to 49 [17]. Some of that split may come from the agents, since each model ran in its own vendor's setup.
-
-{{figure: venn | Terminal-Bench 4.1 tasks solved by each model, counting a task as solved when at least three of its five trials pass [17].}}
-
-How those agents communicate matters just as much as how many you run. Researchers from Google Research, Google DeepMind, and MIT tested a single agent against four multi-agent coordination structures across 260 configurations on six agentic benchmarks, holding tools, prompts, and compute steady [18]. On decomposable financial analysis (Finance-Agent), every multi-agent setup beat a single agent, with centralized coordination lifting scores by up to 80.8%. On sequential planning (PlanCraft), every multi-agent setup hurt performance, dropping scores by 39% to 70% because coordination overhead broke up step-by-step reasoning [18]. How agents communicate also controlled how errors spread: independent agents amplified mistakes 17.2x, while centralized coordination kept that down to 4.4x [18].
-
-{{figure: comms | Relative score change of multi-agent setups against a single agent across four of those benchmarks, plus error amplification by coordination style [18].}}
+Everyone knows the first two help. Below are the other five, and how far each one can move a result.
 
 {{lever: 5}}
 
-OSWorld tests AI agents on 369 real computer tasks across web and desktop apps, varying how the model sees and acts on the desktop [19]. Giving the exact same model a different interface to that desktop more than doubled its success rate. With raw screenshots alone, GPT-4V solved 5.26% of the tasks; adding the accessibility tree lifted it to 12.17% [19]. GPT-4o climbed from 5.03% on screenshots to 11.36% with the accessibility tree, and Claude 3 Opus went from 2.42% to 6.72% with Set-of-Mark overlays [19]. Which interface works best depends on the model too: Set-of-Mark lifted Claude 3 Opus to its top score, yet dropped GPT-4o to 4.59% [19].
+On ARC-AGI-3, GPT-6 Astra ran in a minimal standard harness and in OpenAI's own harness, which keeps reasoning state across requests and compacts long conversations. Same model, same reasoning effort, completely different outcome [15].
 
-{{figure: env | Three models on OSWorld's 369 desktop tasks, moving from raw screenshots to each model's best structured interface [19].}}
+{{figure: arc | GPT-6 Astra on ARC-AGI-3 (semi-private set), comparing the standard harness with OpenAI's harness across every reasoning effort ARC Prize tested [15].}}
+
+{{lever: 3}}
+
+On Terminal-Bench 4.1 (66 expert terminal tasks), running a second try already lifts both Claude Fable 5.2 and GPT-6.2 Astra. Combining agents from both models pushes the total higher still, because each model solves tasks the other misses [16].
+
+{{figure: venn | Terminal-Bench 4.1 tasks solved by each model, counting a task as solved when at least three of its five trials pass [16].}}
+
+{{lever: 4}}
+
+Google Research, Google DeepMind, and MIT compared a single agent against four team setups across six benchmarks with the same tools and budget: independent (no talk), centralized (a manager splits work and checks answers), decentralized (peers talk directly), and hybrid (manager plus peer talk) [17].
+
+The right setup depended on the job. Teams crushed a single agent on parallelizable work like financial research, but hurt performance on step-by-step planning where extra back-and-forth got in the way. Unchecked independent agents also amplified errors 17.2x, versus 4.4x with a manager [17].
+
+{{figure: comms | Mean benchmark score of a single agent versus all four team setups across all six benchmarks [17].}}
 
 {{lever: 6}}
 
-Extra attempts and agents only pay off if the system can score and verify which attempt worked. A study by researchers at Stanford, Oxford, and Google DeepMind shows how sharp that divide is [20]. On SWE-bench Lite, where unit tests automatically verify each proposed fix, drawing 250 samples from DeepSeek-Coder-V2-Instruct lifted its solve rate from 15.9% on one try to 56%, beating the single-attempt frontier record of 43% at the time [20]. On MATH, where no automatic test confirms an answer, the picture splits wide open. Scaling Llama-3-8B-Instruct from 100 to 10,000 samples raised the share of problems with at least one right answer in the pool from 82.9% to 98.44%, yet majority voting and reward models barely budged, rising at best from 40.50% to 41.41% [20].
+Researchers from UC Berkeley, the University of Chicago, and Bespoke Labs built EnvOpt to optimize the workspace itself without touching the model or harness. It turns messy emails, files, and apps into clean text, action cheatsheets, and searchable indexes [18].
 
-{{figure: metric | Repeated sampling with and without an automatic verifier: SWE-bench Lite with unit tests, and MATH with an oracle verifier against majority voting or reward models [20].}}
+On AutomationBench (200 workplace tasks), EnvOpt built one improved workspace using Claude Haiku 4.5, then dropped four other models straight into that exact same workspace unchanged. Every model scored higher, and EnvOpt even added gains on top of an already-optimized harness [18].
+
+{{figure: env | AutomationBench pass rates before and after EnvOpt reorganized the workspace for Claude Haiku 4.5, with four other models reusing that same workspace unchanged [18].}}
+
+{{lever: 7}}
+
+Extra tries only scale when a metric can tell which attempt worked [19]. Researchers at Stanford, Oxford, and Google DeepMind showed the gap clearly: with unit tests on SWE-bench Lite, more samples kept lifting the score; without an automatic verifier on MATH, voting and reward models stalled even as right answers piled up in the pool [19].
+
+{{figure: metric | Repeated sampling with and without an automatic verifier: SWE-bench Lite with unit tests, and MATH with an oracle verifier against majority voting or reward models [19].}}
 
 ## A benchmark score measures the harness too
 
-Results like these make benchmarks close to useless as a measure of the model alone. They still tell you something about what a model can do in a domain, and ARC Prize keeps a standard harness so you can compare models from different providers apples to apples [16]. Still, when the same model can score 62.7% or 98.6% depending on what you wrap around it [16], which number tells you what the model can do?
+When the same model scores 62.7% or 98.6% depending on what wraps around it [15], a benchmark score no longer measures the model alone. After GPT-6.2 Astra became the first model to hit 100% on ARC-AGI-3 in a custom harness, ARC Prize president Greg Kamradt concluded that static task completion is no longer enough to measure frontier models [20].
 
-Greg Kamradt, the president of ARC Prize, goes even further. After GPT-6.2 Astra became the first model to hit 100% on ARC-AGI-3 in ARC Prize's verified results on November 17, 2026, he concluded that static task completion is no longer an adequate way to measure frontier models [21].
+Sometimes all a harness adds is a small nudge. Nvidia researchers took Claude Opus 5 from 30% to 100% on ARC-AGI-3's public set with a supervisor agent that steers the main agent away from dead ends [21]. The right nudge can unlock a hard coding task, or maybe even a proof like the Riemann Hypothesis, though we still don't know how much Alpöge guided Claude [1].
 
-Astra's 100% came from a harness built for the model [21]. In August, TechCrunch reported that Nvidia researchers pushed Claude Opus 5 from 30% to 100% on the benchmark's public set with a custom harness [22]. Sometimes all a harness adds is a small nudge. Nvidia's setup uses a supervisor agent that steers the main agent away from dead ends and paths it already tried [22]. The right nudge can turn a stuck attempt into a solved coding problem, or perhaps into something like a proof of the Riemann Hypothesis, though we still don't know how much guidance Alpöge gave Claude along the way [1]. What remains open is how many nudges a model still needs before it can handle problems like these on its own.
-
-{{figure: nvidia | Claude Opus 5 on ARC-AGI-3's public set without and with Nvidia's harness, where a supervisor agent nudges the main agent away from dead ends and repeat paths [22].}}
+{{figure: nvidia | Claude Opus 5 on ARC-AGI-3's public set without and with Nvidia's harness, where a supervisor agent nudges the main agent away from dead ends and repeat paths [21].}}
 
 ## Problems come in three kinds
 
-1. Problems AI solves in one shot, with no special changes to the environment.
-2. Problems that need a bespoke solution before AI can solve them. Here the harness makes a huge difference, as the ARC-AGI-3 results with and without a custom setup show [16], [22].
-3. Problems AI can't solve no matter how you tweak the harness or environment. Those hit a real ceiling in the model itself, and only more training can raise it.
+1. Problems AI solves in one shot, with no special setup.
+2. Problems that need a bespoke setup before AI can solve them, like the ARC-AGI-3 harnesses above [15], [21].
+3. Problems AI can't solve yet, where only more training can raise the ceiling.
 
-AI already handles the first kind, and only the labs training the models can work on the third. The second kind is the big, immediate opportunity for everyone else.
+AI already handles the first kind, and only the labs can work on the third. The middle bucket is the big opportunity for everyone else.
 
-{{figure: problems | The three kinds of problems. Adjusting the levers around the model pays off in the middle group.}}
-
-## As intelligence gets cheaper, the opportunity keeps growing
-
-Those three buckets do not stand still. Epoch AI's data show how fast intelligence is getting cheaper: since 2023, the cost of a fixed level of AI performance has fallen about 47% per quarter, or 13x per year [23]. In one example, Epoch estimates that OpenAI's o3 cost about $0.30 per question in January 2025 to score 75% on GPQA Diamond. Just under 18 months later, GPT-5.6 Luna hit the same score for about $0.0004 per question, a drop Epoch puts at 725-fold [23].
-
-That decline does slow as a given level of performance ages. Averaged across Epoch's five main benchmarks, prices fall fastest when a capability is new, at 66% per quarter, then slow to 32% per quarter two years later, a pattern visible in three of the five benchmarks. Epoch notes a few caveats: benchmark scores aren't the same as useful work, the data span only about three years, and the numbers shouldn't be read as exact [23]. Even at the slower rate, though, a fixed level of performance gets far cheaper every year.
-
-{{figure: price | How many times cheaper each technology became per year, on a log scale. The AI bar is the cost of a fixed level of performance on five benchmarks since 2023. The four comparisons and their periods are Epoch's [23].}}
-
-As models improve and intelligence gets cheaper, both the first and second kinds of problems grow. Tasks that need a bespoke harness today become routine one-shot work tomorrow, expanding the first group. At the same time, harder problems that sit out of reach in the third group, either beyond current models or too expensive to explore across hundreds of attempts, open up once stronger models and cheap inference make search practical. Even as easier tasks graduate out of the middle group, a larger wave of harder problems moves in from above, so the opportunity there keeps growing.
+That bucket keeps growing. As models improve and inference gets cheaper, easier tasks move into one-shot work while a larger wave of previously unsolvable problems opens up from above.
 
 {{figure: shift | As models improve and intelligence gets cheaper, one-shot problems grow and previously unsolvable problems move into the bespoke-solution bucket, keeping the middle opportunity large.}}
 
+## Intelligence is getting cheaper fast
+
+Epoch AI finds that since 2023, the cost of a fixed level of AI performance has fallen about 13x per year (47% per quarter) [22]. Reaching 75% on GPQA Diamond cost roughly $0.30 per question with o3 in January 2025, and about $0.0004 with GPT-5.6 Luna 18 months later, a 725-fold drop [22]. Even as the decline slows on older capabilities, cheap intelligence pulls more hard problems into reach every year.
+
+{{figure: price | How many times cheaper each technology became per year, on a log scale. The AI bar is the cost of a fixed level of performance on five benchmarks since 2023. The four comparisons and their periods are Epoch's [22].}}
+
 ## My bet is on first-principles thinking
 
-Humans have always worked inside real constraints: limited time, limited money, limited anything else you can name. Those constraints haven't disappeared, but AI loosens them, and that shift is only speeding up. When intelligence gets cheap, the bottleneck shifts from doing the work to deciding what the work should be: what do we want, and how do we measure it?
+Humans have always worked inside tight constraints: limited time, limited money, limited intelligence. When intelligence gets cheap, the bottleneck shifts from doing the work to deciding what we want and how to measure it.
 
-Behind most tasks sits a higher-level goal: make more money, run faster, be more accurate. Goals like these have no finish line, because you can always push the result further. Put five people on a problem at a company, and what goes into it is their combined intelligence along with their time and resources. Intelligence is a basic resource right next to time and money, which is why AI changes so much once it can handle a task as well as people do: it makes that resource cheap. Put the intelligence of 100 or 1,000 people on a problem, and you would approach it in a completely different way. When old constraints loosen like that, copying how things used to be done wastes the new capacity; you have to reason up from the underlying goal. That is why I'm betting on first-principles thinking as the most needed skill of this century, and why you need a clear metric to guide it.
+Most real goals have no finish line: make more money, run faster, be more accurate. Put five people on a problem and you are working with five minds. Put the intelligence of 100 or 1,000 people on it and you would approach it completely differently. Copying old habits wastes that capacity; you have to reason up from the goal with a clear metric. That is why I'm betting on first-principles thinking as the most valuable skill of this century.
 
 ## Agent swarms wrestle with the environment
 
-Once you have a metric, you can launch swarms of agents in parallel inside a harness built for diversity, so they explore different solutions. That appeals to me because it's how good solutions come about in the real world: we wrestle with the environment. It's the scientific method. You form a hypothesis, run experiments, revise your assumptions, and so on and so forth.
-
-Agent swarms do the same thing at scale. Like the harness, the number of agents is a lever you can pull without a new model: the more agents you run, the more ground you cover and the more results come back, even if no single agent gets smarter. Covering more ground also gives you intelligence in the military sense of the word: more data. Data, and the connections between data points, are how we build an understanding of the world we're working in.
+With a clear metric, you can launch swarms of agents in parallel inside a diverse harness to test different ideas. It is the scientific method at scale: form a hypothesis, run experiments, revise, repeat. Running more agents covers more ground and brings back more data, even without a smarter model.
 
 {{figure: loop | The loop I expect: one goal with a metric, many different attempts in parallel, every attempt measured, and the insights fed back into the next round.}}
 
-In the end, almost everything there is to learn traces back to the laws of the universe. Those laws are fixed, and you discover how they play out by running experiments against your problem. Building a bespoke setup to explore it is what pays off. For the same reason, making models smarter matters less than making them better at orchestration: exploring the space until they either solve the problem or bring back useful insights.
+Most real problems trace back to fixed rules you discover by running experiments against the world. Making models smarter matters less than orchestrating them to explore until they solve the problem or bring back useful insights.
 
-I picture a world where we rebuild things from first principles. A lot of software, and plenty outside it, was built under constraints I don't think apply anymore, so rewriting with agent swarms will probably become much more common. Doing that well takes two things: measuring and verifying a goal, and iterating continuously toward a better solution. The only hard limits are the laws of physics; as Elon Musk likes to say, everything else is a recommendation [24].
+Agent Plasticity, a benchmark from UC Berkeley, Meta Superintelligence Labs, Princeton, and the University of Washington, tests this exact loop on Dwarkesh Patel's question [4]: can frozen models learn on the job? Each round starts fresh, carrying forward only notes, code, tools, and strategies from earlier rounds, then scores the agent on unseen games [23]. Experience alone drove huge gains without changing model weights, yet raw strength and learning efficiency came apart: some models stalled, and the best learner gained over five times more points per dollar than the top final scorer [23].
+
+{{figure: plasticity | Agent Plasticity results with frozen model weights [23]. Left: held-out unseen game scores before and after learning from experience (Hard Chess averages checkpoints 16 to 20; Go and Hex show checkpoint 20). Right: score points gained per $1,000 of learning cost across Chess, Go, and Hex combined.}}
+
+A lot of software was built under old constraints that no longer hold, so rebuilding from first principles with agent swarms will become common. The only hard limits are the laws of physics; as Elon Musk says, everything else is a recommendation [24].
 
 ## Real problems are black-box optimization
 
-When you train a neural network, you get gradients that tell you which way to nudge every weight. Most real problems give you nothing like that. You can't take a derivative through a production codebase, a trading system, a compiler, or a business workflow. All you can do is try a candidate solution inside the environment, measure its score, and learn from what came back.
+Neural-network training gives you gradients that show which way to nudge every weight. Real problems don't. You can't take a derivative through a codebase, a trading system, or a business workflow; you can only try a solution, measure its score, and learn from what comes back.
 
-In optimization, that is a black box: you control the inputs and observe the score, without an equation connecting the two. Running an agent swarm against a metric is black-box optimization with agents doing the search: reading error logs, inspecting what failed, forming new hypotheses, rewriting code, and pulling the six levers to push the score higher until the budget runs out.
+That is black-box optimization. An agent swarm running against a metric does that search directly: reading errors, rewriting code, and pulling the seven levers until the budget runs out.
 
 ## I'm building Skynet to run that loop
 
-You bring the goal and a budget. Skynet aims to deliver black-box optimization across any part of the six levers: the model, reasoning effort, attempts and agents, the harness, the environment, and the metric. It works from first principles toward a verifiable solution in that expanding middle category of problems, where the setup around the model decides the outcome, as the jump from 62.7% to 98.6% on ARC-AGI-3 shows [16].
+You bring a goal and a budget. Skynet runs black-box optimization across the seven levers, working from first principles toward a verifiable solution in that growing middle bucket where the setup decides the outcome [15].
 
-We're designing Skynet as a model-agnostic, vendor-agnostic tool that runs locally or on the web, because the best model changes every few months and no single provider has the best harness for every job. Our plan is to stay close to the research, track the optimization algorithms out there, and make them available to anyone who wants to use them. You can find Skynet at [skynetml.com](https://skynetml.com).
+Skynet is model-agnostic and vendor-agnostic, running locally or on the web, because the best model changes every few months and no single provider owns the best harness for every job. We track the latest optimization research and put it in your hands at [skynetml.com](https://skynetml.com).
 
-{{figure: skynet | Skynet at a glance. You bring the goal and a budget, Skynet orchestrates the six levers from Figure 2, and the loop works toward a solution you can verify.}}
+{{figure: skynet | Skynet at a glance. You bring the goal and a budget, Skynet orchestrates the seven levers from Figure 2, and the loop works toward a solution you can verify.}}
 
 ## References
 
@@ -168,17 +162,7 @@ We're designing Skynet as a model-agnostic, vendor-agnostic tool that runs local
 14. D. Patel, "Andrej Karpathy — AGI is still a decade away," *Dwarkesh Podcast*, Oct. 17, 2025. [Online]. Available: <https://www.dwarkesh.com/p/andrej-karpathy>
     - A decade: how far away AGI feels to Andrej Karpathy, who calls this the decade of agents
     - About 2035: a decade from October 17, 2025, the year the figure uses
-15. ARC Prize, "ARC-AGI-3 leaderboard," *ARC Prize*, updated Nov. 19, 2026. Accessed: Nov. 22, 2026. [Online]. Available: <https://arcprize.org/leaderboard>
-    - Standard harness, semi-private set, each model at its best reasoning effort
-    - 81.2%: Claude Fable 5.2 (xhigh)
-    - 70.3%: GPT-6.2 Astra (max)
-    - 65.1%: Gemini 4 Carbon (low)
-    - 62.7%: GPT-6 Astra (max)
-    - 30.2%: Claude Opus 5 (high)
-    - 24.3%: Claude Sonnet 5.5 (xhigh)
-    - 1.8%: Grok 4.7 (xhigh)
-    - 0.5%: Claude Haiku 5.5 (max)
-16. G. Kamradt, "OpenAI's GPT-6 Astra on ARC-AGI-3," *ARC Prize*, Sept. 3, 2026. [Online]. Available: <https://arcprize.org/blog/astra>
+15. G. Kamradt, "OpenAI's GPT-6 Astra on ARC-AGI-3," *ARC Prize*, Sept. 3, 2026. [Online]. Available: <https://arcprize.org/blog/astra>
     - 62.7%: standard harness, max effort
     - 98.6%: OpenAI harness, max effort
     - 99.9%: OpenAI harness, high effort, the best run
@@ -188,36 +172,39 @@ We're designing Skynet as a model-agnostic, vendor-agnostic tool that runs local
     - 100%: of the environments can be solved by humans
     - About 3.66x faster: OpenAI harness against standard, on the 167 game and reasoning-effort pairs that both harnesses solved, across the public and semi-private sets
     - 49% fewer: total tokens, in that same comparison
-17. Vals AI, "Terminal-Bench 4.0," *Vals AI Benchmarks*, and Terminal-Bench, "Terminal-Bench 4.1 leaderboard," *tbench.ai*, 2026. Accessed: Nov. 22, 2026. [Online]. Available: <https://www.vals.ai/benchmarks/terminal-bench-4> and <https://www.tbench.ai/leaderboard/terminal-bench/4.1>
-    - Terminal-Bench 4.0 (Vals AI): 66 expert-level terminal tasks, same minimal agent, averaged over three runs: Claude Fable 5.2 65.15%, GPT-6.2 Astra 63.13%
-    - Terminal-Bench 4.1 (official leaderboard): five trials per task in each vendor's agent; with two attempts, expected share solved rises from 65.8% to 72.7% for Fable and from 62.1% to 66.7% for Astra
+16. Terminal-Bench, "Terminal-Bench 4.1 leaderboard," *tbench.ai*, 2026. Accessed: Nov. 22, 2026. [Online]. Available: <https://www.tbench.ai/leaderboard/terminal-bench/4.1>
+    - 66 expert-level terminal tasks, five trials per task in each provider's harness; with two attempts, expected share solved rises from 65.8% to 72.7% for Claude Fable 5.2 and from 62.1% to 66.7% for GPT-6.2 Astra
     - Task overlap (at least three of five trials passing): 45 of 66 solved by Fable, 40 by Astra; 9 by Fable alone, 4 by Astra alone, 36 by both, 49 together
-18. Y. Kim et al., "Towards a Science of Scaling Agent Systems," *arXiv:2512.08296*, Dec. 9, 2025, rev. Apr. 8, 2026. [Online]. Available: <https://arxiv.org/abs/2512.08296>
+17. Y. Kim et al., "Towards a Science of Scaling Agent Systems," *arXiv:2512.08296*, Dec. 9, 2025, rev. Apr. 8, 2026. [Online]. Available: <https://arxiv.org/abs/2512.08296>
     - 260 configurations: five architectures (single agent, independent, centralized, decentralized, hybrid) across six benchmarks and three model families, with tools, prompts, and compute standardized
-    - +57% to +80.8%: multi-agent gains over a single agent on decomposable financial reasoning (Finance-Agent)
-    - -39.1% to -70.0%: multi-agent drops on sequential planning (PlanCraft), with -39.1% for hybrid, -50.3% for centralized, and -70.0% for independent
-    - -11% to +6% on WorkBench; -15% to -2% on SWE-bench Verified
+    - Finance-Agent: Independent +57%, Centralized +80.8%, Decentralized +74.5%, Hybrid +73.1%
+    - BrowseComp-Plus: Independent -35%, Centralized +0.2%, Decentralized +9.2%, Hybrid +6%
+    - WorkBench: Independent -11%, Centralized -1.2%, Decentralized +5.6%, Hybrid -1.2%
+    - SWE-bench Verified: Independent -14.9%, Centralized -3.1%, Decentralized -5.4%, Hybrid -2.1%
+    - Terminal-Bench: Independent +1.7%, Centralized -19.2%, Decentralized -6%, Hybrid -15%
+    - PlanCraft: Independent -70.0%, Centralized -50.3%, Decentralized -41.5%, Hybrid -39.1%
     - Error amplification: 17.2x with independent agents versus 4.4x with centralized coordination
-19. T. Xie et al., "OSWorld: Benchmarking Multimodal Agents for Open-Ended Tasks in Real Computer Environments," *NeurIPS*, 2024. [Online]. Available: <https://arxiv.org/abs/2404.07972>
-    - 369 real computer tasks across web and desktop applications, with execution-based evaluation scripts (human performance: 72.36%)
-    - GPT-4V: 5.26% with screenshots only, 11.77% with Set-of-Mark, 12.17% with screenshots and accessibility tree
-    - GPT-4o: 5.03% with screenshots only, 4.59% with Set-of-Mark, 11.21% with screenshots and accessibility tree, 11.36% with accessibility tree only
-    - Claude 3 Opus: 2.42% with screenshots only, 4.41% with screenshots and accessibility tree, 6.72% with Set-of-Mark
-20. B. Brown et al., "Large Language Monkeys: Scaling Inference Compute with Repeated Sampling," *arXiv:2407.21787*, July 31, 2024, rev. Dec. 30, 2024. [Online]. Available: <https://arxiv.org/abs/2407.21787>
+18. M. Li, H. Mao, Q. Mang, H. Li, J. E. Gonzalez, and A. Dimakis, "EnvOpt: Automated Optimization for Agent Environments," *arXiv:2611.07372*, Nov. 5, 2026. [Online]. Available: <https://arxiv.org/abs/2611.07372>
+    - Stationary environment optimization: automatically reorganizing a shared workspace (plain-text exports, endpoint cheatsheets, file indexes, SQLite catalogs) without changing the model or harness
+    - Five benchmarks (workspace, data engineering, and software engineering tasks): 48% average cost reduction for target agents on unseen test sets with equal or higher pass rates
+    - AutomationBench (200 test tasks, Table 1): Claude Haiku 4.5 (target) rises from 2.33% to 16.67% pass rate while cost drops 72.73% ($42.36 to $11.55)
+    - Transferred unchanged to four other models on AutomationBench: Claude Haiku 5.5 rises from 20.7% to 32.8% (-68.74% cost, $4.83 to $1.51); GPT-5.6 Luna rises from 19.17% to 24.67% (-88.63% cost, $17.42 to $1.98); Claude Opus 4.8 rises from 28.50% to 33.33% (-77.41% cost, $358.13 to $80.90); Claude Opus 5 rises from 33.83% to 35.17% (-68.13% cost, $236.18 to $75.26)
+    - Stacked on top of Meta-Harness for Haiku 4.5 (Table 4): pass rate rises from 7.00% to 18.17% (+11.17 percentage points) while cost drops a further 83.4% ($75.33 to $12.47)
+19. B. Brown et al., "Large Language Monkeys: Scaling Inference Compute with Repeated Sampling," *arXiv:2407.21787*, July 31, 2024, rev. Dec. 30, 2024. [Online]. Available: <https://arxiv.org/abs/2407.21787>
     - SWE-bench Lite (unit tests verify each patch): DeepSeek-Coder-V2-Instruct rises from 15.9% at 1 sample to 56% at 250 samples, beating the 43% single-sample state of the art
     - MATH (Llama-3-8B-Instruct, 100 to 10,000 samples): coverage with a perfect verifier rises from 82.9% to 98.44%
     - Without an automatic verifier on MATH: across majority voting and reward models, the largest gain is only from 40.50% to 41.41% over the same 100 to 10,000 sample range
-21. G. Kamradt, "This is the first 100% we've seen on v3," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/GregKamradt/status/2122759751159447888>. Quoted post: ARC Prize, "GPT-6.2 Astra from OpenAI on ARC-AGI (Verified)," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/arcprize/status/2122751233442156678>
+20. G. Kamradt, "This is the first 100% we've seen on v3," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/GregKamradt/status/2122759751159447888>. Quoted post: ARC Prize, "GPT-6.2 Astra from OpenAI on ARC-AGI (Verified)," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/arcprize/status/2122751233442156678>
     - 100%: GPT-6.2 Astra on ARC-AGI-3 with the OpenAI harness, about $4,100, the first 100% score ARC Prize reports on the benchmark
     - 70.3%: the same model in the standard harness, about $24,200
     - Not adequate anymore: static task completion as a measure of frontier models, in his view
-22. J. Bort, "Nvidia just showed that the harness, not the AI model, is now the real hero," *TechCrunch*, Aug. 21, 2026. [Online]. Available: <https://techcrunch.com/2026/08/21/nvidia-just-showed-that-the-harness-not-the-ai-model-is-now-the-real-hero>
+21. J. Bort, "Nvidia just showed that the harness, not the AI model, is now the real hero," *TechCrunch*, Aug. 21, 2026. [Online]. Available: <https://techcrunch.com/2026/08/21/nvidia-just-showed-that-the-harness-not-the-ai-model-is-now-the-real-hero>
     - 30% to 100%: Claude Opus 5 on ARC-AGI-3's public set (25 environments), with Nvidia's custom harness
     - AVO: Agentic Variation Operators, the name of the harness
     - Supervisor agent: nudges the main agent away from dead ends and from paths it already tried
     - Under 10%: OpenAI's models on ARC-AGI-3, about tripled after two changes to harness settings
     - 2x the cost: what the wrong harness can mean for the same model, in the words of Databricks' CEO
-23. L. Emberson and D. Roodman, "The plunging price of thought," *Epoch AI*, Sept. 22, 2026. [Online]. Available: <https://epoch.ai/publications/the-plunging-price-of-thought>
+22. L. Emberson and D. Roodman, "The plunging price of thought," *Epoch AI*, Sept. 22, 2026. [Online]. Available: <https://epoch.ai/publications/the-plunging-price-of-thought>
     - 47% per quarter: the fall in the cost of a fixed level of AI performance since 2023, on five benchmarks
     - 13x per year: the same rate, per year
     - About $0.30 to about $0.0004 per question: Epoch's estimate for 75% (adjusted for guessing) on GPQA Diamond, from o3 (January 2025) to GPT-5.6 Luna just under 18 months later. Epoch calls it a 725-fold drop
@@ -225,6 +212,10 @@ We're designing Skynet as a model-agnostic, vendor-agnostic tool that runs local
     - 32% per quarter: the fall two years later, on the same average; three of the five benchmarks show the slowdown
     - Average price decline per year of older technologies: DNA sequencing 1.84x (2001 to 2025), compute 1.51x (1940 to 2001), lithium-ion batteries 1.16x (1991 to 2024), US residential electricity 1.05x (1892 to 1973)
     - Caution: a benchmark score is not the same as useful work, the data cover about three years, and Epoch says the figures should not be read as exact
+23. H. Singh et al., "Agent Plasticity: Measuring Self-Improvement Through Experience," *arXiv:2610.08902*, Oct. 6, 2026. [Online]. Available: <https://arxiv.org/abs/2610.08902>. Summary thread: H. Singh, *X*, Nov. 2026. [Online]. Available: <https://x.com/harman26singh/status/2124911857064640826>
+    - Frozen-weight self-improvement: each round starts fresh and inherits notes, code, tools, and strategies written after earlier rounds, scored on unseen Chess, Go, Hex, and NetHack games
+    - Held-out unseen game gains: Claude Fable 5 rises from 20% to 80% on 5x5 Go (checkpoints 0 to 20) and 37.5% to 73.3% on Hard Chess (checkpoint 0 to checkpoints 16 to 20 average); Claude Opus 5 rises from 25.0% to 66.4% on Hard Chess; GPT-5.6 Sol rises from 40% to 77.5% on 6x6 Hex (checkpoints 0 to 20); Claude Opus 5.5 triples its NetHack mean score from about 2,000 to 6,000 (checkpoints 0 to 2 vs. 36 to 40)
+    - Agent plasticity (score points gained per $1,000 of learning cost across Chess, Go, and Hex): GPT-5.6 Sol 298, Claude Opus 5 233, Claude Fable 5 57 (highest final score), Claude Opus 4.8 14, GPT-5.6 Luna 0 (no reliable gain)
 24. W. Isaacson, *Elon Musk*. New York, NY, USA: Simon & Schuster, 2023, ch. 46, "Fremont Factory Hell."
     - The algorithm: Musk's rules for questioning requirements, which the book sets out in this chapter
     - The corollary: only the laws of physics are real rules, and every other requirement is a recommendation
