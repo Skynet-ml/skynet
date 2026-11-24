@@ -640,7 +640,10 @@ class KernelEnvironment(SandboxEnvironment):
             return None
         measured = math.ceil((self._clock.monotonic() - self._created_at) * 1000)
         if self._funded_until is not None and self._idle_timeout is not None:
-            latest = math.ceil((self._funded_until - self._created_at + self._idle_timeout) * 1000) + STOP_MARGIN_MS
+            # The quote's own integer lifetime, because float clock subtraction
+            # can put the cap one millisecond above the reservation.
+            lifetime_ms = math.ceil(self.spec.lifetime_seconds * 1000)
+            latest = lifetime_ms + self._idle_timeout * 1000 + STOP_MARGIN_MS
             measured = min(measured, latest)
         return measured
 
@@ -707,20 +710,23 @@ class KernelEnvironment(SandboxEnvironment):
             every read failed. The settle checks whether the usage is final.
         """
         receipt: dict[str, Any] = {}
-        waited = 0.0
+        # One deadline for reads and polls, so hung reads cannot stretch a stop.
+        deadline = self._clock.monotonic() + USAGE_WAIT
         while True:
             try:
                 await self._pace_read()
+                left = max(deadline - self._clock.monotonic(), 0.0)
                 details = await asyncio.wait_for(
-                    client.browsers.retrieve(session_id, include_deleted=True), STOP_TIMEOUT
+                    client.browsers.retrieve(session_id, include_deleted=True), min(STOP_TIMEOUT, left)
                 )
                 receipt = details.to_dict(mode="json")
             except Exception as read_error:
                 logger.warning("Kernel browser %s usage read failed: %s", self.name, type(read_error).__name__)
-            if receipt.get("usage_status") == "ready" or waited >= USAGE_WAIT:
+            # Stop when no read could start after the next poll, so no read
+            # gets a zero timeout.
+            if receipt.get("usage_status") == "ready" or deadline - self._clock.monotonic() <= USAGE_POLL:
                 return receipt
             await self._clock.sleep(USAGE_POLL)
-            waited += USAGE_POLL
 
     def _funded_seconds(self) -> float | None:
         """Return the funded time that a protected box has left.

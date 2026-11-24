@@ -32,7 +32,11 @@ RECEIPT = {
 
 @pytest.fixture(autouse=True)
 def _at_cost_markup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the usage markup to 1.0 so these tests check settlement arithmetic, not pricing policy."""
+    """Pin the usage markup to 1.0 so these tests check settlement arithmetic, not pricing policy.
+
+    Args:
+        monkeypatch: Replaces the markup setting.
+    """
     monkeypatch.setattr(settings, "usage_markup", 1.0)
 
 
@@ -149,7 +153,11 @@ def test_quote_refuses_an_unbounded_or_unpriced_browser(change: dict[str, Any]) 
 
 
 def test_reserve_then_settle_charges_the_reported_uptime(database: Engine) -> None:
-    """Settle a deleted browser at Kernel's reported uptime and release the pin."""
+    """Settle a deleted browser at Kernel's reported uptime and release the pin.
+
+    Args:
+        database: The ledger database.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     USAGE.confirm(reservation, _browser())
@@ -180,7 +188,11 @@ def test_settle_clamps_to_the_reservation(database: Engine, caplog: pytest.LogCa
 
 
 def test_unconfirmed_browser_keeps_the_hold(database: Engine) -> None:
-    """Keep the hold of a browser that does not match its funded request, also with a usage report."""
+    """Keep the hold of a browser that does not match its funded request, also with a usage report.
+
+    Args:
+        database: The ledger database.
+    """
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-one")
     with pytest.raises(UsagePendingError):
         USAGE.confirm(reservation, _browser(memory="16GiB"))
@@ -191,7 +203,11 @@ def test_unconfirmed_browser_keeps_the_hold(database: Engine) -> None:
 
 
 def test_usage_report_not_ready_falls_back_to_measured_time(database: Engine) -> None:
-    """Settle from the measured wall time when Kernel's report is still pending."""
+    """Settle from the measured wall time when Kernel's report is still pending.
+
+    Args:
+        database: The ledger database.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     USAGE.confirm(reservation, _browser())
@@ -203,7 +219,11 @@ def test_usage_report_not_ready_falls_back_to_measured_time(database: Engine) ->
 
 
 def test_no_usage_report_and_no_confirmed_delete_keeps_the_hold(database: Engine) -> None:
-    """Keep the hold pending when the read failed and the delete is not confirmed."""
+    """Keep the hold pending when the read failed and the delete is not confirmed.
+
+    Args:
+        database: The ledger database.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     USAGE.confirm(reservation, _browser())
@@ -214,7 +234,11 @@ def test_no_usage_report_and_no_confirmed_delete_keeps_the_hold(database: Engine
 
 
 def test_a_report_for_another_session_is_not_used(database: Engine) -> None:
-    """Ignore a report that names another session and use the measured time."""
+    """Ignore a report that names another session and use the measured time.
+
+    Args:
+        database: The ledger database.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     USAGE.confirm(reservation, _browser())
@@ -281,7 +305,11 @@ def test_uncertain_create_failure_keeps_the_hold(database: Engine, status: int, 
 
 
 def test_release_before_the_create_call_frees_the_hold(database: Engine) -> None:
-    """Release the hold when the create call never went out."""
+    """Release the hold when the create call never went out.
+
+    Args:
+        database: The ledger database.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     reservation.release("cancelled before the create call")
@@ -290,7 +318,11 @@ def test_release_before_the_create_call_frees_the_hold(database: Engine) -> None
 
 
 def test_lost_create_response_keeps_the_hold_and_refuses_a_replay(database: Engine) -> None:
-    """Keep the hold after a create failure with no status, and refuse a second dispatch."""
+    """Keep the hold after a create failure with no status, and refuse a second dispatch.
+
+    Args:
+        database: The ledger database.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     reservation.fail(TimeoutError("create response lost"), no_browser=True)
@@ -341,7 +373,11 @@ def test_ledger_error_on_reject_marks_the_hold_pending(database: Engine, monkeyp
 
 
 def test_extend_funds_the_longer_lifetime(database: Engine) -> None:
-    """Grow the coverage to the quote of the longer lifetime."""
+    """Grow the coverage to the quote of the longer lifetime.
+
+    Args:
+        database: The ledger database.
+    """
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
     USAGE.confirm(reservation, _browser())

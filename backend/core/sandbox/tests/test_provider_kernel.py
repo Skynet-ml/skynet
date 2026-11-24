@@ -1307,6 +1307,19 @@ async def test_stale_list_after_a_failed_delete_keeps_the_hold() -> None:
     assert usages[0].calls == ["reserve", "confirm", "pending"]
 
 
+async def test_not_found_retrieve_after_a_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold when a stale list leaves out the browser and its retrieve raises NotFound."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.list_hidden = True
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.retrieve_errors = [_status_error(kernel.NotFoundError, 404)]
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
 async def test_second_failed_delete_keeps_the_hold() -> None:
     """Keep the hold and raise from stop when the first delete and the sweep delete both fail."""
     env, usages = _protected(clock=FakeClock())
@@ -1340,6 +1353,18 @@ async def test_failed_create_browser_gets_the_measured_time_cap() -> None:
     clock.now += 10_000
     # 300 s funded lifetime + 300 s inactivity timeout + 120 s stop margin.
     assert env._measured_ms() == 720_000
+
+
+async def test_measured_time_cap_ignores_float_clock_error() -> None:
+    """Cap a late stop at the integer reservation bound when the clock base is not a whole number."""
+    clock = FakeClock()
+    # At this base, funded end minus create time is 300.0000000000009 s.
+    clock.now = 8184.81
+    env, usages = _protected(clock=clock)
+    async with env:
+        clock.now += 10_000
+    # 300 s funded lifetime + 300 s inactivity timeout + 120 s stop margin.
+    assert usages[0].measured_ms == 720_000
 
 
 async def test_second_start_is_refused() -> None:
@@ -1423,7 +1448,40 @@ async def test_usage_read_failure_settles_from_the_measured_time() -> None:
     assert usage.calls == ["reserve", "confirm", "record", "settle"]
     assert usage.receipt == {}
     assert usage.measured_ms == 42_000
-    assert len(FakeState.retrieves) == int(kernel.USAGE_WAIT / kernel.USAGE_POLL) + 1
+    assert len(FakeState.retrieves) == int(kernel.USAGE_WAIT / kernel.USAGE_POLL)
+
+
+async def test_slow_usage_reads_stop_at_the_usage_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End the usage reads at one overall deadline when each read hangs for a long time.
+
+    Args:
+        monkeypatch: Replaces the browser read with a slow one.
+    """
+    clock = FakeClock()
+    reads: list[str] = []
+
+    async def slow_retrieve(self: FakeBrowsers, session_id: str, *, include_deleted: bool) -> FakeDetails:
+        """Use up fake time and then time out, as a hung read does.
+
+        Args:
+            self: The fake browsers resource.
+            session_id: The browser id.
+            include_deleted: Must be True to read a deleted browser.
+
+        Raises:
+            TimeoutError: Always, after the slow read.
+        """
+        reads.append(session_id)
+        clock.now += 20
+        raise TimeoutError
+
+    monkeypatch.setattr(FakeBrowsers, "retrieve", slow_retrieve)
+    env, usages = _protected(clock=clock)
+    async with env:
+        start = clock.now
+    assert len(reads) == 2
+    assert clock.now - start <= kernel.USAGE_WAIT + 20
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
 
 
 async def test_usage_read_waits_for_a_ready_report() -> None:
