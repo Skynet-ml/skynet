@@ -173,7 +173,13 @@ def test_a_matching_devbox_is_confirmed(database: Engine) -> None:
 
 @pytest.mark.parametrize(
     "launch",
-    [{"custom_cpu_cores": 4}, {"custom_gb_memory": 8}, {"keep_alive_time_seconds": 7200}, {"custom_cpu_cores": None}],
+    [
+        {"custom_cpu_cores": 4},
+        {"custom_gb_memory": 8},
+        {"keep_alive_time_seconds": 7200},
+        {"custom_cpu_cores": None},
+        {"custom_gb_memory": None},
+    ],
 )
 def test_a_devbox_of_another_size_is_not_confirmed(database: Engine, launch: dict[str, Any]) -> None:
     """Bind the devbox but refuse a size or keep-alive that differs from the funded one.
@@ -187,6 +193,64 @@ def test_a_devbox_of_another_size_is_not_confirmed(database: Engine, launch: dic
     with pytest.raises(UsagePendingError):
         USAGE.confirm(reservation, _view(**launch))
     assert reservation.devbox_id == "dbx-1"
+
+
+def test_a_view_without_a_keep_alive_is_confirmed_at_the_funded_one(database: Engine) -> None:
+    """Confirm a devbox whose view leaves out the optional keep-alive, and assume the funded one."""
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, CREATE, operation_key="box-one")
+    USAGE.confirm(reservation, _view(keep_alive_time_seconds=None))
+    assert reservation.actual_sizes == {"vcpus": 2, "memory_gb": 4, "disk_gb": 16, "keep_alive_seconds": 3600}
+
+
+def test_a_failed_bind_keeps_the_known_size(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record the devbox size before the bind, so a failed bind still settles at that size.
+
+    Args:
+        database: The funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, CREATE, operation_key="box-one")
+
+    def refuse(*args: Any) -> None:
+        """Fail the dispatch record.
+
+        Args:
+            *args: The mark_dispatched arguments.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(runtime.service, "mark_dispatched", refuse)
+    with pytest.raises(RuntimeError):
+        USAGE.confirm(reservation, _view(custom_cpu_cores=4))
+    assert reservation.devbox_id is None
+    assert reservation.actual_sizes is not None
+    assert reservation.actual_sizes["vcpus"] == 4
+
+
+def test_a_larger_orphan_devbox_without_a_report_settles_at_its_size(database: Engine) -> None:
+    """Price measured time of a larger devbox that the tag search found at its size, clamped to the hold."""
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, CREATE, operation_key="box-one")
+    reservation.record_sizes(_view(custom_cpu_cores=4).launch_parameters)
+    reservation.bind("dbx-1")
+    reservation.record_stop(600_000)
+    reservation.record_usage({**REPORT, "status": "running", "end_time_ms": None})
+    reservation.settle()
+    operation = runtime.service.get_operation(reservation.operation.id, "alice")
+    larger = 4 * Decimal("0.108") + 4 * Decimal("0.0252") + 16 * Decimal("0.00034236")
+    assert operation.actual_cents == 600 * larger / 3600 * 100
+    huge = USAGE.reserve(runtime, CREATE, operation_key="box-two")
+    huge.record_sizes(_view(custom_cpu_cores=16, custom_gb_memory=64, custom_disk_size=64).launch_parameters)
+    huge.bind("dbx-2")
+    huge.record_stop(3_600_000)
+    huge.settle()
+    clamped = runtime.service.get_operation(huge.operation.id, "alice")
+    assert clamped.actual_cents == clamped.max_cents
 
 
 def test_a_larger_devbox_settles_measured_time_at_its_size(database: Engine) -> None:

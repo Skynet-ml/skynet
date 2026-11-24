@@ -77,7 +77,7 @@ def _size(request: Mapping[str, Any]) -> tuple[int, int, int]:
     if (
         vcpus not in {1, *range(2, 17, 2)}
         or not 2 * vcpus <= memory <= min(64, 8 * vcpus)
-        or (memory != 1 and memory % 2)
+        or memory % 2
         or not 2 <= disk <= 64
         or disk % 2
     ):
@@ -99,16 +99,18 @@ def _hourly_usd(vcpus: int, memory_gb: int, disk_gb: int) -> Decimal:
     return vcpus * _CPU_HOUR_USD + memory_gb * _MEMORY_GB_HOUR_USD + disk_gb * _DISK_GB_HOUR_USD
 
 
-def _launch_sizes(launch: Any) -> dict[str, int] | None:
+def _launch_sizes(launch: Any, funded_keep_alive_seconds: int) -> dict[str, int] | None:
     """Read the size and keep-alive that Runloop gave a devbox.
 
     Args:
         launch: The ``launch_parameters`` of the SDK ``DevboxView``, or a
             mapping of its fields.
+        funded_keep_alive_seconds: The keep-alive to assume when the view
+            leaves it out.
 
     Returns:
         The vCPUs, memory GiB, disk GiB and keep-alive seconds, or ``None``
-        when a field is missing or not a whole number.
+        when a size is missing or a field is not a whole number.
     """
     names = ("custom_cpu_cores", "custom_gb_memory", "custom_disk_size", "keep_alive_time_seconds")
     if isinstance(launch, Mapping):
@@ -118,6 +120,10 @@ def _launch_sizes(launch: Any) -> dict[str, int] | None:
     if values[2] is None:
         # Runloop gives a custom size with no disk its default disk.
         values[2] = DEFAULT_DISK_GB
+    if values[3] is None:
+        # The SDK marks the keep-alive optional. The provider always sends
+        # the funded one, and the settle clamp bounds the charge anyway.
+        values[3] = funded_keep_alive_seconds
     if any(
         isinstance(value, bool) or not isinstance(value, int | float) or value < 0 or not float(value).is_integer()
         for value in values
@@ -312,16 +318,30 @@ class RunloopUsageReservation:
             UsagePendingError: When the size or the keep-alive differs from
                 the funded one, or cannot be read.
         """
+        # Keep the size first, so a failed bind still settles at it.
+        sizes = self.record_sizes(launch)
         self.bind(devbox_id)
-        sizes = _launch_sizes(launch)
         if sizes is None:
             raise UsagePendingError("Runloop did not report the size of the admitted devbox.")
-        self.actual_sizes = sizes
         funded = (self.vcpus, self.memory_gb, self.disk_gb)
         if (sizes["vcpus"], sizes["memory_gb"], sizes["disk_gb"]) != funded or (
             sizes["keep_alive_seconds"] * 1000 > self.lifetime_ms
         ):
             raise UsagePendingError("Runloop did not confirm the admitted size and keep-alive of the devbox.")
+
+    def record_sizes(self, launch: Any) -> dict[str, int] | None:
+        """Keep the size that Runloop gave the devbox, when it can be read.
+
+        Args:
+            launch: The ``launch_parameters`` of the devbox.
+
+        Returns:
+            The recorded sizes, or ``None`` when they cannot be read.
+        """
+        sizes = _launch_sizes(launch, math.ceil(self.lifetime_ms / 1000))
+        if sizes is not None:
+            self.actual_sizes = sizes
+        return sizes
 
     def record_usage(self, usage: Any) -> None:
         """Keep Runloop's usage report of the stopped devbox.

@@ -359,7 +359,12 @@ class FakeSDK:
         """
         CLOUD.list_limits.append(limit)
         for box in list(CLOUD.boxes.values()):
-            yield SimpleNamespace(id=box.id, metadata=box.metadata, status=box.status)
+            yield SimpleNamespace(
+                id=box.id,
+                metadata=box.metadata,
+                status=box.status,
+                launch_parameters=SimpleNamespace(**box.launch),
+            )
         if CLOUD.list_hangs:
             await asyncio.Event().wait()
 
@@ -1050,6 +1055,15 @@ class FakeReservation:
         self.bind(devbox_id)
         self.launch = launch
 
+    def record_sizes(self, launch: Any) -> None:
+        """Record the launch parameters of a devbox that the tag search found.
+
+        Args:
+            launch: The launch parameters.
+        """
+        self.events.append("sizes")
+        self.launch = launch
+
     def record_stop(self, measured_ms: int) -> None:
         """Record the measured time.
 
@@ -1303,7 +1317,7 @@ async def test_a_cancelled_start_settles_the_orphan_devbox(fake_sdk: FakeCloud) 
     (box,) = fake_sdk.boxes.values()
     (reservation,) = FakeReservation.made
     assert box.status == "shutdown"
-    assert reservation.events == [f"bind:{box.id}", "stop", "usage", "settle"]
+    assert reservation.events == ["sizes", f"bind:{box.id}", "stop", "usage", "settle"]
 
 
 async def test_a_cancel_during_a_slow_reserve_releases_the_hold(fake_sdk: FakeCloud) -> None:
@@ -1411,6 +1425,22 @@ async def test_a_larger_devbox_is_stopped_and_settled(fake_sdk: FakeCloud) -> No
     (reservation,) = FakeReservation.made
     assert box.status == "shutdown"
     assert reservation.events == [f"bind:{box.id}", "stop", "usage", "settle"]
+
+
+async def test_a_larger_orphan_devbox_passes_its_size_to_the_settle(fake_sdk: FakeCloud) -> None:
+    """Keep the size of the devbox that the tag search finds, and record it before the settle."""
+    fake_sdk.create_hangs = True
+    fake_sdk.size_override = {"custom_cpu_cores": 4}
+    env = _protected()
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (box,) = fake_sdk.boxes.values()
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["sizes", f"bind:{box.id}", "stop", "usage", "settle"]
+    assert reservation.launch.custom_cpu_cores == 4
 
 
 async def test_an_unsized_protected_devbox_is_not_started(fake_sdk: FakeCloud) -> None:

@@ -374,6 +374,7 @@ class RunloopEnvironment(SandboxEnvironment):
         self._create_refused: SandboxError | None = None
         self._settle_error: Exception | None = None
         self._orphan_id: str | None = None
+        self._orphan_launch: Any = None
 
     @classmethod
     def preflight(cls) -> None:
@@ -797,6 +798,9 @@ class RunloopEnvironment(SandboxEnvironment):
                     # search did not find, so the hold waits for reconciliation.
                     await asyncio.to_thread(usage.pending)
                 return
+            if self._orphan_launch is not None:
+                # A lost create never returned the view; the tag search did.
+                usage.record_sizes(self._orphan_launch)
             if usage.devbox_id is None:
                 await asyncio.to_thread(usage.bind, box_id)
             if stopped_at is not None and self._create_sent_at is not None:
@@ -824,6 +828,7 @@ class RunloopEnvironment(SandboxEnvironment):
         async for box in client.api.devboxes.list(limit=_LIST_LIMIT):
             if (box.metadata or {}).get(BOX_TAG) == self._box_tag:
                 self._orphan_id = box.id
+                self._orphan_launch = getattr(box, "launch_parameters", None)
                 if box.status not in _ENDED_STATUSES:
                     await client.api.devboxes.shutdown(box.id)
                 return
