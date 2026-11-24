@@ -93,6 +93,10 @@ logger = logging.getLogger(__name__)
 API_KEY_ENV = "PRIME_API_KEY"
 BOX_TAG = "skynet_box"
 DEFAULT_IMAGE = "python:3.12.15-slim"
+# prime-sandboxes 0.5.8 CreateSandboxRequest has disk_size_gb=None, and its
+# validate_restore_source validator sets 5.0 GB for an image create. The create
+# sends this size, so the quote prices the same disk that Prime gives.
+DEFAULT_DISK_GB = 5.0
 STOP_TIMEOUT = 60.0
 POLL_INTERVAL = 1.0
 # Prime may list a new sandbox some time after its create; a refused create
@@ -302,6 +306,7 @@ def _create_fields(spec: SandboxSpec, box_tag: str) -> dict[str, Any]:
             fields["memory_gb"] = request.memory_mb / 1024
         if request.disk_mb is not None:
             fields["disk_size_gb"] = request.disk_mb / 1024
+    fields.setdefault("disk_size_gb", DEFAULT_DISK_GB)
     return fields
 
 
@@ -349,6 +354,8 @@ class PrimeEnvironment(SandboxEnvironment):
         self._starting: asyncio.Future[None] | None = None
         self._create_dispatched = False
         self._create_sent_at: float | None = None
+        self._create_error: BaseException | None = None
+        self._deleted_at: float | None = None
         self._started = False
         self._stop_task: asyncio.Future[None] | None = None
 
@@ -414,6 +421,22 @@ class PrimeEnvironment(SandboxEnvironment):
             self._starting = None
 
     async def _create(self) -> None:
+        """Create the sandbox, and keep any create error for the teardown.
+
+        Raises:
+            SandboxSpecError: The SDK rejected the create request fields.
+            StartTimeoutError: The sandbox did not run within the start timeout.
+            UsagePendingError: Prime created a sandbox larger than funded.
+        """
+        try:
+            await self._create_box()
+        except BaseException as error:
+            # Kept here, not in start(): a stop that runs before start() sees
+            # the error must still know that Prime refused the create.
+            self._create_error = error
+            raise
+
+    async def _create_box(self) -> None:
         """Reserve the budget, create the sandbox, keep its id and wait until it runs.
 
         Raises:
@@ -678,6 +701,8 @@ class PrimeEnvironment(SandboxEnvironment):
         self._client = self._sandbox_id = None
         if client is None:
             return
+        if error is None:
+            error = self._create_error
         try:
             searched = False
             if sandbox_id is not None:
@@ -746,7 +771,8 @@ class PrimeEnvironment(SandboxEnvironment):
         """Delete the sandbox, and try again after a failure until ``STOP_TIMEOUT``.
 
         A 4xx answer ends the tries: the box is gone, or Prime will not
-        delete it now. Prime still ends the box at its timeout.
+        delete it now. Prime still ends the box at its timeout. A delete
+        that Prime accepts keeps the local time of its answer.
 
         Args:
             client: The SDK client.
@@ -758,6 +784,7 @@ class PrimeEnvironment(SandboxEnvironment):
                     try:
                         with _mapped("delete the sandbox"):
                             await client.delete(sandbox_id)
+                        self._deleted_at = time.monotonic()
                         return
                     except (SandboxRejectedError, SandboxFatalError):
                         raise
@@ -779,8 +806,10 @@ class PrimeEnvironment(SandboxEnvironment):
             The last record read, and the seconds to charge when the record
             cannot give them. That is ``None`` when Prime showed the end time.
             It is the local time since the create was sent when Prime no
-            longer knows the box (HTTP 404). Otherwise it is the whole funded
-            lifetime: the box exists, and Prime ends it at its timeout.
+            longer knows the box (HTTP 404). When Prime accepted the delete,
+            it is the local time from the create sent to the delete answer.
+            Otherwise it is the whole funded lifetime: the box exists, and
+            Prime ends it at its timeout.
         """
         record: dict[str, Any] = {}
         try:
@@ -802,6 +831,9 @@ class PrimeEnvironment(SandboxEnvironment):
                     await asyncio.sleep(POLL_INTERVAL)
         except Exception as read_error:
             logger.warning("Prime did not show the sandbox end: %s", type(read_error).__name__)
+        if self._deleted_at is not None and self._create_sent_at is not None:
+            # The accepted delete ended the box, so it ran no longer than this.
+            return record, math.ceil(self._deleted_at - self._create_sent_at)
         return record, full_seconds
 
     async def _search_orphan(self, client: Any) -> tuple[Any | None, bool]:

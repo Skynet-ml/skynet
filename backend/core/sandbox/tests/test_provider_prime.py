@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from core.billing.prime_usage import quote_prime_sandbox
 from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
@@ -70,8 +71,8 @@ class FakeUploadTimeoutError(RuntimeError):
     """Stand in for ``UploadTimeoutError``."""
 
 
-# The SDK model defaults; its validator sets a 5 GB disk when an image is given.
-_SDK_DEFAULTS = {"cpu_cores": 1.0, "memory_gb": 1.0, "disk_size_gb": 5.0, "timeout_minutes": 60, "gpu_count": 0}
+# The SDK model field defaults, before its validator runs: the fake runs no validator.
+_SDK_DEFAULTS = {"cpu_cores": 1.0, "memory_gb": 1.0, "disk_size_gb": None, "timeout_minutes": 60, "gpu_count": 0}
 _CREATED_AT = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
 _FAKE_ENDED = frozenset({"ERROR", "TERMINATED", "TIMEOUT"})
 
@@ -596,14 +597,17 @@ def test_create_fields_defaults() -> None:
     assert fields["timeout_minutes"] == 1
     assert "secrets" not in fields
     assert "memory_gb" not in fields
-    assert "disk_size_gb" not in fields
+    assert fields["disk_size_gb"] == prime.DEFAULT_DISK_GB == 5.0
     assert len(_fields(_spec(name="x" * 300))["name"]) == prime._NAME_LIMIT
 
 
-def test_ignore_mode_sends_no_size() -> None:
-    """Send no size when the spec ignores resources."""
-    fields = _fields(_spec(resources=ResourceRequest(cpus=64, memory_mb=1024, mode=ResourceMode.IGNORE)))
-    assert not {"cpu_cores", "memory_gb", "disk_size_gb"} & fields.keys()
+def test_ignore_mode_sends_only_the_default_disk() -> None:
+    """Send no CPU or memory size when the spec ignores resources, and the SDK's default disk."""
+    fields = _fields(
+        _spec(resources=ResourceRequest(cpus=64, memory_mb=1024, disk_mb=99_999, mode=ResourceMode.IGNORE))
+    )
+    assert not {"cpu_cores", "memory_gb"} & fields.keys()
+    assert fields["disk_size_gb"] == prime.DEFAULT_DISK_GB
 
 
 def test_create_fields_map_the_network_mode() -> None:
@@ -1040,7 +1044,7 @@ async def test_a_protected_sandbox_reserves_before_the_create_and_settles_after_
     (usage,) = recorder.made
     assert "create" not in usage.created_before
     assert usage.operation_key == "op-1"
-    assert usage.request == {**_SDK_DEFAULTS, "cpu_cores": 1.0, "timeout_minutes": 5}
+    assert usage.request == {**_SDK_DEFAULTS, "cpu_cores": 1.0, "disk_size_gb": 5.0, "timeout_minutes": 5}
     assert [name for name, _ in usage.calls] == ["confirm", "settle"]
     record = usage.calls[1][1]
     assert record["id"] == "sbx-1"
@@ -1102,8 +1106,58 @@ async def test_a_failed_settle_is_raised_once_by_stop(fake_sdk: FakeCloud) -> No
     assert [name for name, _ in recorder.made[0].calls] == ["confirm", "settle", "pending"]
 
 
-async def test_a_sandbox_with_no_end_time_settles_at_its_whole_lifetime(fake_sdk: FakeCloud) -> None:
-    """Stop waiting after the stop timeout and settle the whole funded timeout, since Prime ends the box then."""
+@pytest.mark.parametrize(
+    "resources",
+    [ResourceRequest(cpus=1), ResourceRequest(cpus=4, memory_mb=8192, mode=ResourceMode.IGNORE)],
+    ids=["no-disk", "ignore"],
+)
+async def test_a_protected_sandbox_with_no_disk_size_sends_and_quotes_the_default_disk(
+    fake_sdk: FakeCloud, resources: ResourceRequest
+) -> None:
+    """Send the SDK's default disk in the create, and price that same disk in the quote.
+
+    Args:
+        resources: A request with no disk size, or one that ignores sizes.
+    """
+    recorder = UsageRecorder()
+    env = PrimeEnvironment(_spec(operation_key="op-1", resources=resources), budget=object(), usage_factory=recorder)
+    async with env:
+        pass
+    (usage,) = recorder.made
+    assert usage.request["disk_size_gb"] == prime.DEFAULT_DISK_GB
+    assert fake_sdk.boxes["sbx-1"].request["disk_size_gb"] == prime.DEFAULT_DISK_GB
+    assert quote_prime_sandbox(usage.request).maximum.total > 0
+
+
+async def test_a_stop_after_a_refused_create_but_before_start_handles_it_releases(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release the hold when a stop runs between a 4xx refusal and the start's own teardown."""
+    recorder = UsageRecorder()
+    env = _protected(recorder)
+    stops: list[asyncio.Future[None]] = []
+
+    async def refuse(self: FakeClient, request: FakeCreateRequest) -> SimpleNamespace:
+        """Start a stop, then refuse the create, so the stop's teardown starts before start() sees the error.
+
+        Args:
+            request: The create request.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 422.
+        """
+        stops.append(asyncio.ensure_future(env.stop()))
+        raise FakeAPIError("HTTP 422: bad field")
+
+    monkeypatch.setattr(FakeClient, "create", refuse)
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    await stops[0]
+    assert recorder.made[0].calls == [("release", "SandboxRejectedError")]
+
+
+async def test_a_sandbox_with_no_end_time_settles_until_the_delete_answer(fake_sdk: FakeCloud) -> None:
+    """Charge the local time from the create to the accepted delete when Prime shows no end time."""
     fake_sdk.run_seconds = None
     recorder = UsageRecorder()
     async with _protected(recorder):
@@ -1111,8 +1165,60 @@ async def test_a_sandbox_with_no_end_time_settles_at_its_whole_lifetime(fake_sdk
     (usage,) = recorder.made
     assert [name for name, _ in usage.calls] == ["confirm", "settle"]
     assert usage.calls[-1][1]["terminated_at"] is None
-    assert usage.seconds == [5 * 60]
+    (seconds,) = usage.seconds
+    assert 0 <= seconds <= 5
     assert fake_sdk.calls.count("get:sbx-1") > 1
+
+
+async def test_a_sandbox_whose_reads_fail_settles_until_the_delete_answer(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Charge the local time to the accepted delete, not the whole lifetime, when every read gets a 5xx."""
+
+    async def unavailable(self: FakeClient, sandbox_id: str) -> SimpleNamespace:
+        """Fail the read with a 5xx answer.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 503.
+        """
+        raise FakeAPIError("HTTP 503: unavailable")
+
+    monkeypatch.setattr(FakeClient, "get", unavailable)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    (seconds,) = usage.seconds
+    assert 0 <= seconds <= 5
+
+
+async def test_a_sandbox_with_no_end_and_no_delete_settles_at_its_whole_lifetime(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settle the whole funded timeout when no delete succeeded and Prime shows no end, since Prime ends the box then."""
+
+    async def unavailable(self: FakeClient, sandbox_id: str) -> None:
+        """Fail the delete with a 5xx answer.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 503.
+        """
+        raise FakeAPIError("HTTP 503: unavailable")
+
+    monkeypatch.setattr(FakeClient, "delete", unavailable)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.seconds == [5 * 60]
 
 
 async def test_a_failed_delete_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
