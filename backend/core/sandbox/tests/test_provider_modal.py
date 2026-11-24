@@ -1059,6 +1059,10 @@ class FakeUsage:
         self.calls.append("sent")
         self.sent_at = 1.0
 
+    def pending(self) -> None:
+        """Record that the hold stays pending."""
+        self.calls.append("pending")
+
     def confirm_created(self, sandbox: Any) -> None:
         """Record the created sandbox.
 
@@ -1188,7 +1192,7 @@ async def test_protected_box_fails_usage_when_create_fails(fake_modal: FakeModal
     env, budget = _protected()
     with pytest.raises(RuntimeError, match="quota"):
         await env.start()
-    assert budget.reservations[0].calls == ["sent", "fail"]
+    assert budget.reservations[0].calls == ["sent", "pending", "fail"]
     assert budget.reservations[0].absent is True
     assert env.usage is None
 
@@ -1223,7 +1227,7 @@ async def test_protected_box_releases_only_after_two_lookups_find_no_box(
     with pytest.raises(type(error)):
         await env.start()
     (usage,) = budget.reservations
-    assert usage.calls == ["sent", "fail"]
+    assert usage.calls == ["sent", "pending", "fail"]
     assert usage.absent is True
     assert fake_modal.list_calls == 2
 
@@ -1332,7 +1336,7 @@ async def test_protected_box_settles_when_confirm_fails(fake_modal: FakeModal) -
     with pytest.raises(RuntimeError, match="no id"):
         await env.start()
     assert _box(fake_modal).terminated
-    assert budget.reservations[0].calls == ["sent", "stopped", "settle", "fail"]
+    assert budget.reservations[0].calls == ["sent", "stopped", "settle", "pending", "fail"]
 
 
 async def _until(predicate: Callable[[], bool]) -> None:
@@ -1441,7 +1445,7 @@ async def test_late_create_error_after_a_cancelled_start_looks_up_the_box(
     (usage,) = budget.reservations
     fake_modal.create_error = FakeInvalidError("bad")
     fake_modal.create_gate.set()
-    await _until(lambda: usage.calls == ["sent", "fail"])
+    await _until(lambda: usage.calls == ["sent", "pending", "fail"])
     assert usage.absent is True
     await _until(lambda: not modal_provider._LATE_TERMINATES)
 
@@ -1502,7 +1506,7 @@ async def test_box_that_appears_after_a_create_error_is_settled(fake_modal: Fake
     (usage,) = budget.reservations
     assert fake_modal.list_calls == 2
     assert _box(fake_modal).terminated
-    assert usage.calls == ["sent", "confirm", "stopped", "settle"]
+    assert usage.calls == ["sent", "pending", "confirm", "stopped", "settle"]
 
 
 async def test_failed_create_does_not_wait_for_the_second_lookup(
@@ -1516,8 +1520,8 @@ async def test_failed_create_does_not_wait_for_the_second_lookup(
     with pytest.raises(FakeInvalidError):
         await asyncio.wait_for(env.start(), 0.4)
     (usage,) = budget.reservations
-    assert usage.calls == ["sent"]
-    await _until(lambda: usage.calls == ["sent", "fail"])
+    assert usage.calls == ["sent", "pending"]
+    await _until(lambda: usage.calls == ["sent", "pending", "fail"])
     assert fake_modal.list_calls == 2
     await _until(lambda: not modal_provider._LATE_TERMINATES)
 
@@ -1541,6 +1545,69 @@ async def test_cancel_during_the_box_lookup_still_fails_the_usage(
     (usage,) = budget.reservations
     assert usage.calls == ["sent"]
     fake_modal.list_gate.set()
-    await _until(lambda: usage.calls == ["sent", "fail"])
+    await _until(lambda: usage.calls == ["sent", "pending", "fail"])
     assert usage.absent is True
     await _until(lambda: not modal_provider._LATE_TERMINATES)
+
+
+async def test_cancel_during_the_recheck_wait_leaves_the_hold_pending(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leave the hold pending, never dispatched or released, when the background cleanup is cancelled in its wait."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 60)
+    fake_modal.create_error = FakeInvalidError("bad")
+    env, budget = _protected()
+    with pytest.raises(FakeInvalidError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "pending"]
+    (cleanup,) = modal_provider._LATE_TERMINATES
+    cleanup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+    assert usage.calls == ["sent", "pending"]
+    assert fake_modal.list_calls == 1
+
+
+async def test_pending_hold_after_the_first_lookup_is_released_in_the_real_ledger(
+    fake_modal: FakeModal, tmp_path: Path
+) -> None:
+    """Move the real hold from pending to released when both lookups find no box.
+
+    Args:
+        fake_modal: The fake SDK.
+        tmp_path: Per-test directory for the SQLite ledger.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'modal.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    runtime = BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    states: list[str] = []
+
+    def record_state() -> None:
+        """Record the ledger state that the first lookup left, when the second lookup runs."""
+        if fake_modal.list_calls == 2:
+            with Session(engine) as session:
+                states.append(session.scalars(select(ExecutionOperationModel)).one().state)
+
+    fake_modal.list_hook = record_state
+    fake_modal.create_error = FakeInvalidError("bad")
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
+    env = ModalEnvironment(spec, budget=runtime, usage_factory=ModalUsageReservation)
+    try:
+        with pytest.raises(FakeInvalidError):
+            await env.start()
+        with Session(engine) as session:
+            row = session.scalars(select(ExecutionOperationModel)).one()
+        assert states == ["pending"]
+        assert row.state == "released"
+        assert runtime._pinned == {}
+    finally:
+        engine.dispose()

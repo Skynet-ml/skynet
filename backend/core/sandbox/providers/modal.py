@@ -44,10 +44,7 @@ except ImportError:
     Secret = None
 
 try:
-    from modal.exception import (
-        ExecTimeoutError,
-        SandboxFilesystemNotFoundError,
-    )
+    from modal.exception import ExecTimeoutError, SandboxFilesystemNotFoundError
 except ImportError:
     ExecTimeoutError = None
     SandboxFilesystemNotFoundError = None
@@ -753,8 +750,10 @@ async def _fail_usage(usage: Any | None, app_name: str | None = None) -> None:
     A sent create may still have made a sandbox. A lookup by the box tag
     then decides: a found box is terminated and settled; a failed lookup
     keeps the hold pending. An empty lookup is repeated once after
-    ``_RECHECK_DELAY_SEC``, because the box may still appear. The hold is
-    released only when both lookups found no box.
+    ``_RECHECK_DELAY_SEC``, because the box may still appear. The hold
+    goes to pending before that wait, so a cancel or a dead worker during
+    the wait leaves it pending, not dispatched. The hold is released only
+    when both lookups found no box.
 
     Args:
         usage: The usage reservation, or ``None``.
@@ -766,6 +765,10 @@ async def _fail_usage(usage: Any | None, app_name: str | None = None) -> None:
     if app_name is not None and usage.sent_at is not None and usage.sandbox_id is None:
         found = await _find_boxes(usage, app_name)
         if found == []:
+            try:
+                await asyncio.to_thread(usage.pending)
+            except Exception:
+                logger.exception("Could not mark a modal usage hold pending before the second lookup.")
             await asyncio.sleep(_RECHECK_DELAY_SEC)
             found = await _find_boxes(usage, app_name)
         if found:
