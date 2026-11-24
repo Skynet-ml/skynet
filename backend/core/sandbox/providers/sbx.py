@@ -29,6 +29,8 @@ policy bodies come from there. Changes:
 - As in Harbor, the delete flow checks a not-found answer against the
   sandbox list, and a 409 or 412 delete answer reads the sandbox once more
   for its current state and ETag.
+- A stop can wait up to ``STOP_TIMEOUT`` plus ``DELETE_WAIT`` (about 300 s)
+  for a slow delete before the clients close.
 - A command whose create answer is lost to a timeout or a cancel has no
   process name, so it cannot be killed. It ends when the sandbox does.
 - With a budget the box is protected: it reserves its whole lifetime before
@@ -1495,7 +1497,11 @@ class SbxEnvironment(SandboxEnvironment):
             raise SandboxInfraError(f"sbx could not read a file: {type(error).__name__}.") from None
 
     async def stop(self) -> None:
-        """Delete the sandbox once and close the clients. Safe to call again."""
+        """Delete the sandbox once and close the clients. Safe to call again.
+
+        A stop can wait up to ``STOP_TIMEOUT`` plus ``DELETE_WAIT`` (about 300 s)
+        for a slow delete before the clients close.
+        """
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._teardown())
         await asyncio.shield(self._stop_task)

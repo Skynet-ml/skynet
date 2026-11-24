@@ -1467,8 +1467,9 @@ async def test_failed_reads_during_a_slow_delete_settle_at_the_measured_runtime(
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
 
 
-async def test_not_found_delete_of_a_listed_box_is_sent_at_most_twice() -> None:
+async def test_not_found_delete_of_a_listed_box_is_sent_at_most_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     """Send the DELETE once more after a notFound 404, not on every poll, and settle the whole lifetime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
     env = _protected()
     await env.start()
     CLOUD.failures[("DELETE", "")] = (404, "notFound")
