@@ -249,11 +249,11 @@ class DaytonaEnvironment(SandboxEnvironment):
                 self._budget,
                 self._usage_request(ttl_minutes),
                 operation_key=self.spec.operation_key,
-                box_label=dict(self._box_label),
             )
         )
         try:
             self._usage = await asyncio.shield(reserving)
+            self._usage.box_label = dict(self._box_label)
         except asyncio.CancelledError:
             # The thread cannot be cancelled and may still reserve; keep its
             # result so stop() releases it instead of leaking it.
@@ -262,6 +262,7 @@ class DaytonaEnvironment(SandboxEnvironment):
                     await asyncio.wait({reserving})
             if not reserving.cancelled() and reserving.exception() is None:
                 self._usage = reserving.result()
+                self._usage.box_label = dict(self._box_label)
             raise
 
     def _usage_request(self, ttl_minutes: int) -> dict[str, Any]:

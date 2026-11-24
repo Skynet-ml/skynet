@@ -234,7 +234,6 @@ class DaytonaUsageReservation:
         *,
         operation_key: str,
         reserved: OperationSnapshot | None = None,
-        box_label: Mapping[str, str] | None = None,
     ) -> None:
         """Reserve and claim one box before the create call.
 
@@ -243,8 +242,6 @@ class DaytonaUsageReservation:
             request: Final create parameters that :func:`quote_daytona_sandbox` prices.
             operation_key: Stable logical identity of the box.
             reserved: A pool lease slice already reserved for this box.
-            box_label: The label that only this box carries, so a reconciler
-                can find a box whose id never came back.
 
         Raises:
             BudgetConflictError: When the lease slice was reserved for a different request.
@@ -253,8 +250,10 @@ class DaytonaUsageReservation:
         """
         self.runtime = runtime
         self.request = dict(request)
-        # Kept out of the request, so equal boxes keep one fingerprint.
-        self.box_label = dict(box_label or {})
+        # The provider sets the label that only this box carries, so a
+        # reconciler can find a box whose id never came back. It stays out of
+        # the request, so equal boxes keep one fingerprint.
+        self.box_label: dict[str, str] = {}
         self.quote = quote_daytona_sandbox(request)
         self.box = box_tag(operation_key)
         if reserved is None:

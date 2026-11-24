@@ -840,17 +840,16 @@ _PROTECTED = SandboxSpec(lifetime_seconds=125, operation_key="op-1")
 class FakeUsage:
     """Record the reservation calls that a protected box makes."""
 
-    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str, box_label: dict[str, str]) -> None:
-        """Record the reserve call.
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+        """Record the reserve call, with the pool lease's factory signature.
 
         Args:
             budget: The budget runtime.
             request: The priced create parameters.
             operation_key: The box's operation key.
-            box_label: The label that only the box carries.
         """
         self.calls: list[Any] = [("reserve", budget, request, operation_key)]
-        self.box_label = box_label
+        self.box_label: dict[str, str] = {}
         self.settle_error: Exception | None = None
         FakeUsage.made.append(self)
 
