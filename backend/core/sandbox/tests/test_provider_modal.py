@@ -29,6 +29,7 @@ from core.sandbox import (
 from core.sandbox.capabilities import VERCEL_CAPABILITIES, EnvironmentCapabilities, validate_spec
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.factory import ProductionNotAllowedError
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import modal as modal_provider
 from core.sandbox.providers.ec2 import EC2_CAPABILITIES
 from core.sandbox.providers.modal import ModalEnvironment, egress_kwargs, resource_kwargs
@@ -92,6 +93,7 @@ class FakeSandbox:
             kwargs: The create keyword arguments.
         """
         self.sdk = sdk
+        self.object_id = f"sb-{len(sdk.boxes) + 1}"
         self.args = args
         self.kwargs = kwargs
         self.tags: dict[str, str] = dict(kwargs.get("tags") or {})
@@ -969,12 +971,188 @@ def test_factory_refuses_the_modal_provider_in_production(monkeypatch: pytest.Mo
 
 
 def test_capabilities_allow_every_network_mode_and_gpus() -> None:
-    """Report dynamic egress for all modes, GPUs, and no billing or protection."""
+    """Report dynamic egress for all modes, GPUs, billing, and no protection."""
     caps = ModalEnvironment.capabilities
     assert caps.name == "modal"
     assert caps.dynamic_network_policy
     assert caps.gpus
     assert caps.gpu_types
-    assert not caps.billable
+    assert caps.billable
     assert not caps.protected
     assert len(caps.network_modes) == 3
+
+
+class FakeUsage:
+    """Record the calls a protected box makes on its usage reservation."""
+
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+        """Record the reservation.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's logical identity.
+        """
+        self.budget = budget
+        self.request = request
+        self.operation_key = operation_key
+        self.calls: list[str] = []
+        self.confirmed: Any = None
+        budget.reservations.append(self)
+
+    def sent(self) -> None:
+        """Record that the create was sent."""
+        self.calls.append("sent")
+
+    def opened_network(self) -> None:
+        """Record that egress opened."""
+        self.calls.append("network")
+
+    def confirm_created(self, sandbox: Any) -> None:
+        """Record the created sandbox.
+
+        Args:
+            sandbox: The fake sandbox.
+        """
+        self.calls.append("confirm")
+        self.confirmed = sandbox
+
+    def stopped(self) -> None:
+        """Record a confirmed terminate."""
+        self.calls.append("stopped")
+
+    def settle(self) -> None:
+        """Record the settle."""
+        self.calls.append("settle")
+
+    def fail(self) -> None:
+        """Record a failure with no sandbox."""
+        self.calls.append("fail")
+
+
+def _protected(spec: SandboxSpec | None = None) -> tuple[ModalEnvironment, SimpleNamespace]:
+    """Build a protected box with a fake budget and a fake usage factory.
+
+    Args:
+        spec: The spec, or a default spec with an operation key.
+
+    Returns:
+        The box and the fake budget whose ``reservations`` collects each reservation.
+    """
+    budget = SimpleNamespace(reservations=[])
+    spec = spec or SandboxSpec(
+        lifetime_seconds=60, operation_key="op-1", network_disabled=True, resources=ResourceRequest(cpus=2)
+    )
+    return ModalEnvironment(spec, budget=budget, usage_factory=FakeUsage), budget
+
+
+def test_protected_box_needs_an_operation_key() -> None:
+    """Refuse a protected box with no operation key."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        ModalEnvironment(_SPEC, budget=SimpleNamespace(), usage_factory=FakeUsage)
+
+
+def test_protected_box_refuses_a_gpu() -> None:
+    """Refuse a protected GPU box, because no sandbox GPU rate is published."""
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", resources=ResourceRequest(gpu=1))
+    with pytest.raises(SandboxSpecError, match="GPU"):
+        ModalEnvironment(spec, budget=SimpleNamespace(), usage_factory=FakeUsage)
+
+
+async def test_protected_box_reserves_before_create_and_settles_after_stop(fake_modal: FakeModal) -> None:
+    """Reserve the lifetime, pin the billed size, confirm the sandbox, then settle after the terminate."""
+    env, budget = _protected()
+    await env.start()
+    (usage,) = budget.reservations
+    assert usage.operation_key == "op-1"
+    assert usage.request == {
+        "image": modal_provider.DEFAULT_IMAGE,
+        "lifetime_ms": 60_000,
+        "cpu_cores": 2,
+        "memory_mib": 4096,
+        "gpu": False,
+        "network_bytes_cap": modal_provider.SANDBOX_NETWORK_BYTES_CAP,
+    }
+    box = _box(fake_modal)
+    assert box.kwargs["cpu"] == (2, 2)
+    assert box.kwargs["memory"] == (4096, 4096)
+    assert usage.confirmed is box
+    assert usage.calls == ["sent", "confirm"]
+    await env.stop()
+    assert box.terminated
+    assert usage.calls == ["sent", "confirm", "stopped", "settle"]
+
+
+async def test_protected_box_marks_network_use_when_egress_opens(fake_modal: FakeModal) -> None:
+    """Mark egress use when a running box opens its network policy."""
+    env, budget = _protected()
+    await env.start()
+    await env.set_network_policy(NetworkPolicy(allowed_hosts=("pypi.org",)))
+    assert budget.reservations[0].calls == ["sent", "confirm", "network"]
+    await env.stop()
+
+
+async def test_protected_box_fails_usage_when_create_fails(fake_modal: FakeModal) -> None:
+    """Hand a failed create to the reservation, which keeps or releases the hold."""
+    fake_modal.create_error = RuntimeError("quota")
+    env, budget = _protected()
+    with pytest.raises(RuntimeError, match="quota"):
+        await env.start()
+    assert budget.reservations[0].calls == ["sent", "fail"]
+    assert env.usage is None
+
+
+async def test_protected_box_settles_when_terminate_fails(fake_modal: FakeModal) -> None:
+    """Settle at the funded lifetime when Modal does not confirm the terminate."""
+    env, budget = _protected()
+    await env.start()
+    _box(fake_modal).fail_terminate = True
+    with pytest.raises(RuntimeError, match="terminate"):
+        await env.stop()
+    assert budget.reservations[0].calls == ["sent", "confirm", "settle"]
+
+
+async def test_protected_box_settles_when_start_is_cancelled(fake_modal: FakeModal) -> None:
+    """Terminate and settle the sandbox that a cancelled start created."""
+    fake_modal.create_gate = asyncio.Event()
+    env, budget = _protected()
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    fake_modal.create_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _box(fake_modal).terminated
+    assert budget.reservations[0].calls == ["sent", "confirm", "stopped", "settle"]
+
+
+class RefusingUsage(FakeUsage):
+    """Refuse every created sandbox, like a create that returns no sandbox id."""
+
+    def confirm_created(self, sandbox: Any) -> None:
+        """Refuse the sandbox.
+
+        Args:
+            sandbox: The fake sandbox.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("no id")
+
+
+async def test_protected_box_settles_when_confirm_fails(fake_modal: FakeModal) -> None:
+    """Terminate and settle a sandbox whose confirm fails, then pass the error on."""
+    budget = SimpleNamespace(reservations=[])
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
+    env = ModalEnvironment(spec, budget=budget, usage_factory=RefusingUsage)
+    with pytest.raises(RuntimeError, match="no id"):
+        await env.start()
+    assert _box(fake_modal).terminated
+    assert budget.reservations[0].calls == ["sent", "stopped", "settle", "fail"]
+
+
+def test_modal_has_a_usage_adapter() -> None:
+    """Find the Modal usage adapter, which hosted Skynet needs before it offers Modal."""
+    assert usage_adapter("modal") is not None
