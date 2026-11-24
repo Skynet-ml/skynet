@@ -33,8 +33,9 @@ import { StepCard } from "./blackbox/shared";
 
 /**
  * The one budget surface of both wizards: a spending limit that covers the
- * optimization. Setup checks bill the account balance, not the limit
- * (SKY-925), so the ledger shows the run's own spend and holds. A run has no
+ * optimization. By default setup checks bill the account balance, not the
+ * limit (SKY-925); an account that turns off wallet setup billing counts them
+ * in the limit. The ledger shows the spend the limit counts. A run has no
  * upfront cost estimate; it spends up to the limit and stops at the budget
  * with its best version. The card names the least the limit can be (what the
  * run's boxes hold before the first model call, plus spare for its first
@@ -61,7 +62,9 @@ const BUDGET_STEP_CENTS = 100;
  * the card shows the default, which bills the balance.
  */
 export function limitExplainerKey(setupFromWallet: boolean | null): MessageKey {
-  return setupFromWallet === false ? "submit.budget.explainer.setup_in_limit" : "submit.budget.explainer";
+  return setupFromWallet === false
+    ? "submit.budget.explainer.setup_in_limit"
+    : "submit.budget.explainer";
 }
 
 /** Why Continue holds while the spending limit sits under what the run needs to start. */
@@ -83,9 +86,10 @@ const ISOLATE_START = "⁦";
 const ISOLATE_END = "⁩";
 
 /**
- * The run's own spend and holds, as the server counts them for
- * ``available_cents``: setup checks bill the balance, not the limit (SKY-925),
- * and before the budget is attached to a run every hold is a setup check's.
+ * The spend and holds the limit counts, as the server reports them for
+ * ``available_cents``: ``run_spent_cents`` includes setup only for a
+ * ``setup_in_total`` budget (SKY-925), and before the budget is attached to a
+ * run every hold is a setup check's.
  */
 export function runLedger(budget: ExecutionBudget): { spent: string; reserved: string } {
   return { spent: budget.run_spent_cents, reserved: budget.job_id ? budget.reserved_cents : "0" };
