@@ -6,9 +6,12 @@ the command call, the file calls and the network policy flow come from
 
 - The provider implements the async ``SandboxEnvironment`` contract. The
   factory refuses it in production (``production_allowed=False``).
-- The provider adds no retry of its own (SKY-406 D3, D10). The
-  prime-sandboxes SDK keeps internal retries that it does not let a caller
-  turn off. An SDK error maps to one sandbox error group.
+- The provider adds no retry of its own (SKY-406 D3, D10), with two
+  exceptions in the teardown: it sends the delete again after a failure,
+  and it reads the deleted sandbox again until Prime shows its end, both
+  within ``STOP_TIMEOUT``. The prime-sandboxes SDK keeps internal retries
+  that it does not let a caller turn off. An SDK error maps to one sandbox
+  error group.
 - The start and run phase timeouts bound the create and each command. The
   SDK command timeout is set to the run limit, so Prime also ends a command
   that runs past it.
@@ -653,9 +656,12 @@ class PrimeEnvironment(SandboxEnvironment):
             if sandbox_id is not None:
                 await self._delete(client, sandbox_id)
             elif self._create_dispatched:
-                orphan = asyncio.ensure_future(self._delete_orphan(client))
-                searched = await _bounded(orphan, "delete the lost sandbox")
+                orphan = asyncio.ensure_future(self._find_orphan(client))
+                searched = await _bounded(orphan, "find the lost sandbox")
                 sandbox_id = orphan.result() if searched else None
+                if sandbox_id is not None:
+                    # A failed delete keeps the id, so the box still settles.
+                    await self._delete(client, sandbox_id)
             await self._settle(client, sandbox_id, error, searched=searched)
         finally:
             await _bounded(client.aclose(), "close the client")
@@ -666,11 +672,11 @@ class PrimeEnvironment(SandboxEnvironment):
         """Settle, keep or release the reservation of a deleted sandbox.
 
         A create with no sandbox found is released only when it never left,
-        when Prime refused it with a 401 or 402 (no box is made then, even if
-        the label search failed), or when Prime rejected it and the search
-        found nothing. A 5xx answer, a create timeout or a cancel during the
-        create stays pending on purpose, also after an empty search: Prime
-        may still make the box, and only a person can check that.
+        or when Prime refused it (4xx other than 409) and the label search
+        finished and found nothing. A 409, a 5xx answer, a create timeout or
+        a cancel during the create stays pending on purpose, also after an
+        empty search: Prime may still make the box, and only a person can
+        check that.
 
         Args:
             client: The SDK client.
@@ -684,7 +690,15 @@ class PrimeEnvironment(SandboxEnvironment):
         record: dict[str, Any] = {}
         try:
             if sandbox_id is None:
-                refused = isinstance(error, SandboxFatalError) or (searched and isinstance(error, SandboxRejectedError))
+                # The SDK sends the create again after a 5xx or a lost
+                # connection, so a 401, 402 or 409 can answer a retry whose
+                # first try made a box. A 409 is an idempotency conflict, and
+                # the box may not be listed yet, so it never proves a refusal.
+                refused = (
+                    searched
+                    and isinstance(error, SandboxRejectedError | SandboxFatalError)
+                    and _status(error.__cause__) != 409
+                )
                 if not self._create_dispatched or refused:
                     await asyncio.to_thread(usage.release, type(error).__name__ if error else "not created")
                 else:
@@ -730,7 +744,7 @@ class PrimeEnvironment(SandboxEnvironment):
             logger.warning("Prime could not delete the sandbox: %s", type(error).__name__)
 
     async def _final_record(self, client: Any, sandbox_id: str, full_seconds: int) -> tuple[dict[str, Any], int | None]:
-        """Read the sandbox until Prime shows its end time.
+        """Read the sandbox until Prime shows its end time and an ended status.
 
         Args:
             client: The SDK client.
@@ -759,24 +773,23 @@ class PrimeEnvironment(SandboxEnvironment):
                         return record, math.ceil(time.monotonic() - self._create_sent_at)
                     except SandboxTransientError as read_error:
                         logger.warning("Prime could not read the sandbox, trying again: %s", type(read_error).__name__)
-                    if record.get("terminated_at") is not None:
+                    if record.get("terminated_at") is not None and record.get("status") in _ENDED_STATUSES:
                         return record, None
                     await asyncio.sleep(POLL_INTERVAL)
         except Exception as read_error:
             logger.warning("Prime did not show the sandbox end: %s", type(read_error).__name__)
         return record, full_seconds
 
-    async def _delete_orphan(self, client: Any) -> str | None:
-        """Delete the sandbox of a create that ended before it returned.
+    async def _find_orphan(self, client: Any) -> str | None:
+        """Find the sandbox of a create that ended before it returned.
 
         Args:
             client: The SDK client.
 
         Returns:
-            The id of the deleted sandbox, or ``None`` when none was found.
+            The id of the sandbox under this box label, or ``None`` when none was found.
         """
         async for sandbox in _labelled(client, f"{BOX_TAG}={self._box_tag}"):
-            await client.delete(sandbox.id)
             return sandbox.id
         return None
 

@@ -1168,10 +1168,10 @@ async def test_a_sandbox_that_prime_no_longer_knows_settles_on_local_time(
 
 
 @pytest.mark.parametrize("error", [FakeUnauthorizedError("no key"), FakePaymentRequiredError("no funds")])
-async def test_a_create_refused_with_401_or_402_releases_even_when_the_search_fails(
+async def test_a_create_refused_with_401_or_402_stays_pending_when_the_search_fails(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
-    """Release the hold of a create that Prime refused with 401 or 402, though the label search timed out.
+    """Keep the hold when the label search timed out: an SDK retry can get 401 or 402 after a first try made a box.
 
     Args:
         error: The SDK refusal.
@@ -1182,4 +1182,86 @@ async def test_a_create_refused_with_401_or_402_releases_even_when_the_search_fa
     recorder = UsageRecorder()
     with pytest.raises(SandboxFatalError):
         await _protected(recorder).start()
+    assert recorder.made[0].calls == [("pending", None)]
+
+
+async def test_a_create_refused_with_402_and_no_box_releases(fake_sdk: FakeCloud) -> None:
+    """Release the hold when Prime refused the create with 402 and the label search found nothing."""
+    fake_sdk.create_error = FakePaymentRequiredError("no funds")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
     assert recorder.made[0].calls == [("release", "SandboxFatalError")]
+
+
+async def test_a_create_conflict_stays_pending(fake_sdk: FakeCloud) -> None:
+    """Keep the hold after a 409, since a retried create may have made a box that Prime does not list yet."""
+    fake_sdk.create_error = FakeAPIError("HTTP 409: conflict")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxRejectedError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("pending", None)]
+
+
+async def test_a_lost_sandbox_whose_delete_fails_still_settles(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the id of a found lost sandbox after a failed delete, and settle its whole funded timeout."""
+
+    async def failing(self: FakeClient, sandbox_id: str) -> None:
+        """Fail every delete.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with a 5xx answer.
+        """
+        CLOUD.calls.append(f"delete:{sandbox_id}")
+        raise FakeAPIError("HTTP 503: unavailable")
+
+    monkeypatch.setattr(prime, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(FakeClient, "delete", failing)
+    fake_sdk.create_hangs = True
+    recorder = UsageRecorder()
+    start = asyncio.ensure_future(_protected(recorder).start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (usage,) = recorder.made
+    assert fake_sdk.calls.count("delete:sbx-1") > 1
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.sandbox_id == "sbx-1"
+    assert usage.seconds == [5 * 60]
+
+
+async def test_the_read_waits_for_an_ended_status(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read again while Prime shows an end time but not yet an ended status."""
+    original = FakeClient.get
+    reads = 0
+
+    async def ending(self: FakeClient, sandbox_id: str) -> SimpleNamespace:
+        """Show an end time with a status that has not ended on the first read.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Returns:
+            An object like ``Sandbox``.
+        """
+        nonlocal reads
+        reads += 1
+        view = await original(self, sandbox_id)
+        if reads == 1:
+            view.status = "STOPPING"
+        return view
+
+    monkeypatch.setattr(FakeClient, "get", ending)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert reads == 2
+    assert usage.calls[-1][1]["status"] == "TERMINATED"
+    assert usage.seconds == [None]
