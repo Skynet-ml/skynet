@@ -1341,6 +1341,61 @@ async def test_box_deleting_from_another_delete_settles_at_the_measured_runtime(
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
 
 
+async def test_slow_delete_by_another_caller_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait past STOP_TIMEOUT for a box that another delete removes, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    box.status = "deleting"
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.3
+    await env.stop()
+    assert CLOUD.calls("DELETE", "") == []
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_accepted_delete_with_a_late_running_read_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep polling when sbx shows the box as running after a 202 DELETE, then settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    # Two reads: the old code ended the delete on the first one and the
+    # follow-up wait on the second.
+    running_reads = [2]
+
+    async def lagging_status(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and show the box as running for two reads after the DELETE.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        response = await _handle(request)
+        if request.method == "DELETE":
+            for box in CLOUD.boxes.values():
+                box.status = "running"
+        elif request.method == "GET" and CLOUD.calls("DELETE", "") and running_reads[0] > 0:
+            running_reads[0] -= 1
+            if running_reads[0] == 0:
+                for box in CLOUD.boxes.values():
+                    box.status = "deleting"
+        return response
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(lagging_status))
+    env = _protected()
+    await env.start()
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
 async def test_delete_sets_no_sent_flag_for_a_box_another_delete_removes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Leave ``sent`` clear, and mark the delete on its way, for a box that is already deleting."""
     monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
@@ -1369,7 +1424,7 @@ async def test_failed_start_settles_the_sandbox_it_made() -> None:
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
 
 
-@pytest.mark.parametrize("status", [400, 402, 405, 409, 413, 415, 422, 429])
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 405, 409, 413, 415, 422, 429])
 async def test_refused_create_releases_the_hold(status: int) -> None:
     """Release the hold when sbx refuses the create, as it made no sandbox."""
     CLOUD.failures[("POST", "/v1/sandboxes")] = (status, "someCode")

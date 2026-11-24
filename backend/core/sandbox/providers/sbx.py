@@ -16,8 +16,8 @@ policy bodies come from there. Changes:
   cancel, a timeout, a transport error, a 5xx or an invalid 2xx answer),
   polls the sandbox list by the unique display name for up to
   ``ORPHAN_WAIT`` seconds and deletes the sandbox it finds. Only the listed
-  pre-action refusals and a failed connect are definite, so a stop after one
-  looks for nothing. A sandbox that shows in the list only after
+  pre-action refusals, a failed connect and no free pooled connection are
+  definite, so a stop after one looks for nothing. A sandbox that shows in the list only after
   ``ORPHAN_WAIT`` leaks until its sbx lifetime ends.
 - A lifetime above the sbx limit of 12 hours is capped, with a warning.
 - The spec sizes map to the first sbx shape that is large enough. The sbx
@@ -591,12 +591,14 @@ class _DeleteState:
     """What a stop knows about its delete of one sandbox.
 
     ``sent`` is true while a DELETE is in flight or after sbx accepted it; an
-    answer that is not 2xx clears it. ``on_its_way`` is true after sbx
-    accepted a DELETE or showed the sandbox as deleting. Only then does a
-    missing sandbox count as gone; before, a miss can be list lag.
+    answer that is not 2xx clears it. ``accepted`` is true after sbx answered
+    a DELETE with 2xx. ``on_its_way`` is true after sbx accepted a DELETE or
+    showed the sandbox as deleting. Only then does a missing sandbox count as
+    gone; before, a miss can be list lag.
     """
 
     sent: bool = False
+    accepted: bool = False
     on_its_way: bool = False
 
 
@@ -628,12 +630,12 @@ async def _delete(
             delete ends early knows whether sbx may be deleting the sandbox.
 
     Raises:
-        SandboxInfraError: The sandbox has no ETag, stopped deleting, or never
-            showed in ``ORPHAN_WAIT`` seconds.
+        SandboxInfraError: The sandbox has no ETag, or never showed in
+            ``ORPHAN_WAIT`` seconds.
         SandboxError: A request failed; see ``_call``.
     """
     state = state if state is not None else _DeleteState()
-    deleting = refreshed = False
+    refreshed = False
     missing_since: float | None = None
     while True:
         sandbox = await _read(client, path, uid)
@@ -648,9 +650,9 @@ async def _delete(
         status = _status(sandbox)
         if status == "deleting":
             state.on_its_way = True
-        else:
-            if deleting:
-                raise SandboxInfraError(f"The sbx sandbox stopped deleting: {status}.")
+        elif not state.accepted:
+            # After a 2xx DELETE, sbx can still show the old status for a
+            # while, so the loop only polls until the sandbox goes.
             etag = _core(sandbox).get("etag")
             if not isinstance(etag, str) or not etag:
                 raise SandboxInfraError("sbx gave no ETag for the sandbox delete.")
@@ -683,7 +685,7 @@ async def _delete(
                     refreshed = True
                     continue
             else:
-                state.on_its_way = deleting = True
+                state.accepted = state.on_its_way = True
         await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -698,8 +700,9 @@ async def _wait_gone(client: httpx.AsyncClient, path: str, uid: str | None, stat
 
     Returns:
         True when the sandbox is gone after sbx accepted the DELETE or showed
-        it as deleting. False when it is not deleting, stays missing for
-        ``ORPHAN_WAIT`` with no such proof, a read fails or the wait ends.
+        it as deleting. False when it is not deleting and sbx accepted no
+        DELETE, stays missing for ``ORPHAN_WAIT`` with no such proof, a read
+        fails or the wait ends.
     """
     missing_since: float | None = None
     try:
@@ -714,7 +717,7 @@ async def _wait_gone(client: httpx.AsyncClient, path: str, uid: str | None, stat
                         return False
                 elif _status(sandbox) == "deleting":
                     state.on_its_way = True
-                else:
+                elif not state.accepted:
                     return False
                 await asyncio.sleep(POLL_INTERVAL)
     except Exception as error:
@@ -1199,8 +1202,9 @@ class SbxEnvironment(SandboxEnvironment):
                     )
                 except SandboxTransientError as error:
                     # A failed connect, or no free pooled connection, proves
-                    # the create never reached sbx, so the stop releases the hold. ``_call`` hides the httpx
-                    # error as the cause but keeps it as the context.
+                    # the create never reached sbx, so the stop releases the
+                    # hold. ``_call`` hides the httpx error as the cause but
+                    # keeps it as the context.
                     if isinstance(error.__context__, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
                         self._create_dispatched = False
                     raise
@@ -1506,7 +1510,7 @@ class SbxEnvironment(SandboxEnvironment):
             if path is not None:
                 ended = "leaked"
                 if await _bounded(_delete(management, path, uid, state), "delete the sandbox") or (
-                    state.sent and await _wait_gone(management, path, uid, state)
+                    (state.sent or state.on_its_way) and await _wait_gone(management, path, uid, state)
                 ):
                     ended = "deleted"
                     self._stop_usage_clock()
@@ -1516,7 +1520,9 @@ class SbxEnvironment(SandboxEnvironment):
                 if self._orphan_found:
                     ended = "leaked"
                     if deleted or (
-                        state.sent and self._orphan is not None and await _wait_gone(management, *self._orphan, state)
+                        (state.sent or state.on_its_way)
+                        and self._orphan is not None
+                        and await _wait_gone(management, *self._orphan, state)
                     ):
                         ended = "deleted"
                         self._stop_usage_clock()
