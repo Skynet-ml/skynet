@@ -753,3 +753,6 @@ def test_a_refused_create_releases_the_hold(database: Engine) -> None:
     reservation.release(refused=True)
     assert _state(database) == "released"
     assert reservation.runtime._pinned == {}
+    with Session(database) as session:
+        evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence
+    assert evidence["sailbox_name"] == "skynet-box-1"

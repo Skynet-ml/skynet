@@ -113,8 +113,10 @@ _REFUSED_CREATE_STATUSES = frozenset({400, 401, 402, 403, 404, 413, 422})
 _REFUSED_CREATE_ERRORS = frozenset(
     {"InvalidArgumentError", "PermissionDeniedError", "NotFoundError", "ImageBuildError"}
 )
-# The SDK 0.17.2 statuses (``SailboxStatus``) of a box that no longer runs.
-_GONE_STATUSES = frozenset({"failed", "terminated"})
+# The SDK 0.17.2 status (``SailboxStatus``) of a box that can no longer
+# spend. "failed" is left out: a failed box may still hold billable state
+# disk until Sail deletes it.
+_GONE_STATUSES = frozenset({"terminated"})
 # Strong references to the creates that outlive their start, and to the
 # terminate calls of their late boxes, so the event loop does not drop them.
 _LATE_TASKS: set[asyncio.Future[Any]] = set()
@@ -732,10 +734,13 @@ class SailEnvironment(SandboxEnvironment):
                 await asyncio.wait({starting}, timeout=waits_end - loop.time())
             except BaseException:
                 # A cancel of the teardown here must still release a hold
-                # that the reserve thread returns later.
+                # that the reserve thread returns now or later.
                 billing, self._billing_call = self._billing_call, None
-                if billing is not None and not billing.done():
+                if billing is not None and self._usage is None:
                     _release_late(billing)
+                # Nothing is terminated or settled yet, so a later stop() can
+                # run a fresh teardown instead of the cancelled one.
+                self._stop_task = None
                 raise
         billing, self._billing_call = self._billing_call, None
         if billing is not None:
@@ -748,6 +753,9 @@ class SailEnvironment(SandboxEnvironment):
                 # still needs a release, and a finished call is fine here.
                 if self._usage is None:
                     _release_late(billing)
+                # Nothing is terminated or settled yet, so a later stop() can
+                # run a fresh teardown instead of the cancelled one.
+                self._stop_task = None
                 raise
             if not billing.done():
                 _release_late(billing)
@@ -860,8 +868,8 @@ class SailEnvironment(SandboxEnvironment):
             return None
         # Together, so several boxes still take one STOP_TIMEOUT.
         results = await asyncio.gather(*(_bounded(box.terminate.aio(), "terminate the Sailbox") for box in found))
-        # A box that Sail lists as failed or terminated no longer runs, so it
-        # cannot spend even when this terminate call fails.
+        # A box that Sail lists as terminated cannot spend, even when this
+        # terminate call fails.
         self._terminated = all(ended or box.status in _GONE_STATUSES for box, ended in zip(found, results, strict=True))
         if len(found) > 1:
             await self._mark_pending(usage)

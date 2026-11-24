@@ -1946,22 +1946,119 @@ async def test_a_reserve_that_ends_with_the_cancel_still_releases_its_hold(fake_
     assert fake_sdk.create_calls == 0
 
 
-async def test_a_failed_box_that_will_not_terminate_still_settles(fake_sdk: FakeCloud) -> None:
-    """Settle the box of a failed create when Sail lists it as failed and its terminate fails.
+@pytest.mark.parametrize(("status", "settles"), [("terminated", True), ("failed", False)])
+async def test_only_a_terminated_box_settles_when_its_terminate_fails(
+    fake_sdk: FakeCloud, status: str, settles: bool
+) -> None:
+    """Settle a lost box that Sail lists as terminated, and keep a failed one pending.
+
+    A failed box may still hold billable state disk, so its terminate must succeed.
 
     Args:
         fake_sdk: The fake Sail cloud.
+        status: The status that Sail lists for the lost box.
+        settles: True when the usage settles.
     """
     fake_sdk.create_error = FakeApiError(500)
     fake_sdk.create_makes_box = True
-    fake_sdk.lost_box_status = "failed"
+    fake_sdk.lost_box_status = status
     fake_sdk.terminate_fails.add("sb-1")
     env, made = _protected()
     with pytest.raises(SandboxInfraError, match="create the Sailbox"):
         await env.start()
+    if settles:
+        await env.stop()
+        assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [False])]
+    else:
+        with pytest.raises(UsagePendingError, match="did not terminate"):
+            await env.stop()
+        assert made[0].calls[-1] == ("pending", None)
+        assert "settle" not in made[0].names()
+
+
+async def test_a_reserve_that_ends_with_the_cancel_of_the_start_wait_releases_its_hold(
+    fake_sdk: FakeCloud,
+) -> None:
+    """Release the hold when the teardown is cancelled in its start wait as the reserve returns.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def slow(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Block until the test opens the gate.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            A fake reservation that the test does not use.
+        """
+        entered.set()
+        gate.wait(5)
+        return FakeUsage(request, operation_key)
+
+    env = SailEnvironment(_spec(operation_key="box-1"), budget="budget", usage_factory=slow)
+    starting = asyncio.ensure_future(env.start())
+    usage = FakeUsage({}, "box-1")
+    try:
+        await asyncio.to_thread(entered.wait, 5)
+        # A future that the test ends, so the reserve returns in the same
+        # loop turn as the cancel of the teardown.
+        billing: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        env._billing_call = billing
+        stopping = asyncio.ensure_future(env.stop())
+        # The first loop turn runs stop(), which makes the teardown task; the
+        # second lets the teardown reach its wait for the start.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert env._stop_task is not None
+        billing.set_result(usage)
+        env._stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        with contextlib.suppress(BaseException):
+            await starting
+    finally:
+        gate.set()
+    for _ in range(100):
+        if usage.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert usage.calls == [("release", False)]
+    assert fake_sdk.create_calls == 0
+
+
+async def test_a_stop_after_a_cancelled_teardown_terminates_and_settles_once(fake_sdk: FakeCloud) -> None:
+    """Run a fresh teardown in a later stop when the first one was cancelled in its start wait.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    fake_sdk.create_delay = 0.2
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    await fake_sdk.create_started.wait()
+    stopping = asyncio.ensure_future(env.stop())
+    await asyncio.sleep(0.05)
+    # The create is in its grace, so the teardown waits for the start.
+    assert not stopping.done()
+    assert env._stop_task is not None
+    env._stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    with contextlib.suppress(BaseException):
+        await starting
+    # The start's own cleanup may run the fresh teardown first; the later
+    # stops must then only wait for it, never settle again.
     await env.stop()
-    assert [box.terminated for box in fake_sdk.boxes] == [False]
-    assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [False])]
+    await env.stop()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].names().count("settle") == 1
 
 
 async def test_a_lookup_that_finds_two_boxes_keeps_the_hold(fake_sdk: FakeCloud) -> None:
