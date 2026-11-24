@@ -908,29 +908,35 @@ def _check(harness: _Harness, payload: dict[str, Any], budget_id: str, revision:
     )
 
 
+@pytest.mark.parametrize("local_mode", [False, True], ids=["hosted", "local"])
 @pytest.mark.parametrize(
     ("limit", "status"),
     [(budgets.CHUNK_CENTS + 1, None), (budgets.CHUNK_CENTS + 2, 201)],
     ids=["hold-into-the-lease", "hold-beside-the-lease"],
 )
 def test_the_setup_check_keeps_one_lease_so_submit_accepts_a_limit_it_passes(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int, status: int | None
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int, status: int | None, local_mode: bool
 ) -> None:
     """Refuse a setup charge that would spend into the run's first lease, so a passed check never leaves a refused run.
 
     Before, the check spent into the lease and submit then refused the run after the user paid for setup (SKY-923).
+    Local mode has no balance gate, but submit still needs the limit's lease, so its check keeps it too.
     The fixture's setup check holds 2 cents and settles 1 cent.
 
     Args:
         harness: Real submission routes and spending authority.
-        monkeypatch: Restores the real lease size.
+        monkeypatch: Restores the real lease size and sets local mode.
         limit: The budget's limit.
         status: The expected submit status, or ``None`` when the setup check must refuse.
+        local_mode: Whether the server runs in local mode.
     """
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(submissions.settings, "local_mode", local_mode)
     _set_balance(harness, 1_000)
     budget = harness.budgets.create(harness.username, limit, idempotency_key="setup-spends-room")
     payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
+    if local_mode:
+        payload["reflection_model_config"] = _SUBSCRIPTION
     checked = _check(harness, payload, budget.id, budget.revision).json()
     if status is None:
         assert checked["status"] == "failed", checked

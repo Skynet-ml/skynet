@@ -336,6 +336,29 @@ def test_unconfirmed_release_keeps_partial_usage_billed_and_frees_the_rest(engin
     assert (again.state, again.budget.billed_cents) == ("released", 3)
 
 
+def test_replayed_dispatch_and_pending_keep_the_return_window(engine: Engine) -> None:
+    """Keep a replay that changes nothing from restarting the 404 release window (SKY-923)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="draft")
+    operation = _reserve(service, budget.id)
+    service.mark_dispatched(operation.id, "alice", "provider-1")
+    service.mark_pending(operation.id, "alice")
+    time.sleep(0.01)
+    returned = datetime.now(UTC)
+    time.sleep(0.01)
+    assert not service.mark_dispatched(operation.id, "alice").dispatch_claimed
+    service.mark_dispatched(operation.id, "alice", "provider-1")
+    service.mark_pending(operation.id, "alice")
+    released = service.release_unconfirmed(
+        operation.id,
+        "alice",
+        dispatched_before=datetime.now(UTC) + timedelta(seconds=1),
+        returned_before=returned,
+        reason="no bill",
+    )
+    assert released.state == "released"
+
+
 def test_unconfirmed_release_keeps_live_and_quarantined_work_covered(engine: Engine) -> None:
     """Never release a call that may still run, or a known bill held for a bound problem (SKY-784)."""
     service = BudgetService(engine=engine)

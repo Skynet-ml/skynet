@@ -241,6 +241,7 @@ def _admit(
     scope: int,
     charge: int,
     keep_units: int = 0,
+    keep_funds: bool = True,
 ) -> None:
     """Check that new coverage fits the budget's limit and the account's funds.
 
@@ -253,6 +254,7 @@ def _admit(
         charge: Wallet units the new coverage adds.
         keep_units: Units of a capped limit, and of the account's funds for any budget, that the coverage must leave
             unused.
+        keep_funds: Whether ``keep_units`` also applies to the account's funds.
 
     Raises:
         BudgetInsufficientError: When the coverage cannot fit without a budget or funding change.
@@ -280,7 +282,7 @@ def _admit(
     )
     # Submit also needs one lease of the balance, also for an uncapped run, so the check keeps that room of the
     # funds (SKY-923).
-    keep = ceil_cents(keep_units)
+    keep = ceil_cents(keep_units) if keep_funds else 0
     if hold_delta + keep > wallet_balance - held:
         after_release = ceil_cents(budget.wallet_settled_units + charge) - budget.billed_cents
         if after_release + keep <= wallet_balance:
@@ -853,6 +855,7 @@ class BudgetService:
         role: str | None = None,
         session: Session | None = None,
         keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Admit one physical attempt under its verified scope and wallet bounds.
 
@@ -872,6 +875,7 @@ class BudgetService:
             session: Optional caller transaction for atomic lifecycle publication.
             keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
                 this attempt must leave unused.
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The reserved operation or its existing identical attempt.
@@ -925,7 +929,7 @@ class BudgetService:
             )
             if unresolved is not None:
                 raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
-            _admit(session, wallet, budget, username, scope, charge, keep_cents * CENT_SCALE)
+            _admit(session, wallet, budget, username, scope, charge, keep_cents * CENT_SCALE, keep_funds)
             now = datetime.now(UTC)
             operation = ExecutionOperationModel(
                 id=str(uuid4()),
@@ -1108,7 +1112,10 @@ class BudgetService:
                 _identifier(provider_request_id, maximum=255)
                 if operation.provider_request_id not in {None, provider_request_id}:
                     raise BudgetConflictError("The operation already has a different provider request identity.")
+                identified = operation.provider_request_id is None
                 operation.provider_request_id = provider_request_id
+            else:
+                identified = False
             if operation.state == "reserved":
                 if budget.state == "blocked":
                     raise BudgetConflictError("This budget is quarantined pending usage reconciliation.")
@@ -1121,7 +1128,10 @@ class BudgetService:
                 claimed = True
             else:
                 claimed = False
-            operation.updated_at = datetime.now(UTC)
+            # A replay that changes nothing must not move the last change: the
+            # 404 release counts its window from the return (SKY-923).
+            if claimed or identified:
+                operation.updated_at = datetime.now(UTC)
             return replace(self._operation_snapshot(session, operation, budget, wallet), dispatch_claimed=claimed)
 
     def mark_pending(
@@ -1177,8 +1187,11 @@ class BudgetService:
                             created_at=datetime.now(UTC),
                         )
                     )
-            operation.state = "pending"
-            operation.updated_at = datetime.now(UTC)
+            # Only the return moves the last change; a repeated call keeps the
+            # 404 release window that counts from it (SKY-923).
+            if operation.state != "pending":
+                operation.state = "pending"
+                operation.updated_at = datetime.now(UTC)
             return self._operation_snapshot(session, operation, budget, wallet)
 
     def release(self, operation_id: str, username: str) -> OperationSnapshot:
@@ -1404,6 +1417,7 @@ class BudgetService:
         max_wallet_cents: Decimal | str | int | float,
         evidence: Mapping[str, Any],
         keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Grow a running sandbox's coverage before the provider is asked to keep it alive longer.
 
@@ -1421,6 +1435,7 @@ class BudgetService:
             evidence: The extended request bound, recorded for audit.
             keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
                 the extension must leave unused.
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The operation with its grown coverage and the budget totals.
@@ -1466,6 +1481,7 @@ class BudgetService:
                 scope - operation.max_units,
                 charge - operation.max_wallet_units,
                 keep_cents * CENT_SCALE,
+                keep_funds,
             )
             now = datetime.now(UTC)
             session.add(
