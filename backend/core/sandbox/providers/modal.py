@@ -27,7 +27,6 @@ from typing import Any, ClassVar
 
 from core.billing.modal_usage import ModalUsageReservation, quote_modal_sandbox
 from core.billing.operation_pricing import UnpricedOperationError
-from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP
 
 from ..capabilities import MODAL_GPU_TYPES, EnvironmentCapabilities, NetworkMode, SandboxSpecError, modal_gpu_name
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
@@ -45,9 +44,22 @@ except ImportError:
     Secret = None
 
 try:
-    from modal.exception import ExecTimeoutError, SandboxFilesystemNotFoundError
+    from modal.exception import (
+        AuthError,
+        ConflictError,
+        ExecTimeoutError,
+        InvalidError,
+        PermissionDeniedError,
+        ResourceExhaustedError,
+        SandboxFilesystemNotFoundError,
+    )
 except ImportError:
+    AuthError = None
+    ConflictError = None
     ExecTimeoutError = None
+    InvalidError = None
+    PermissionDeniedError = None
+    ResourceExhaustedError = None
     SandboxFilesystemNotFoundError = None
 
 logger = logging.getLogger(__name__)
@@ -70,6 +82,9 @@ DEFAULT_APP_NAME = "skynet-sandbox"
 _MAX_LIFETIME_SEC = 24 * 60 * 60
 _DEFAULT_CPU_REQUEST_CORES = 0.125
 _DEFAULT_MEMORY_REQUEST_MB = 128
+_PROTECTED_EGRESS_REFUSAL = (
+    "A protected Modal sandbox cannot open egress: Modal neither caps nor reports the egress of one sandbox."
+)
 # A protected box must name its memory so its bill has a ceiling; with no
 # memory in the spec it gets 2 GiB for each core.
 _PROTECTED_MEMORY_MB_PER_CORE = 2048
@@ -89,6 +104,19 @@ _NOT_FOUND_ERRORS: tuple[type[BaseException], ...] = tuple(
 )
 _EXEC_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = tuple(
     error for error in (ExecTimeoutError,) if error is not None
+)
+
+# Errors from Sandbox.create that prove no sandbox exists (read in the pinned
+# modal 1.6.3 source). The default V2 create checks its arguments on the client
+# (InvalidError) and then makes one SandboxCreateV2 call, so a refusal of that
+# call (bad argument, auth, permission or quota) leaves no sandbox. The V1
+# create re-raises a ConflictError, an InvalidError subclass, after the
+# sandbox was made and without a terminate, so a conflict keeps the hold.
+_REFUSED_CREATE_ERRORS: tuple[type[BaseException], ...] = tuple(
+    error for error in (InvalidError, AuthError, PermissionDeniedError, ResourceExhaustedError) if error is not None
+)
+_UNPROVEN_REFUSAL_ERRORS: tuple[type[BaseException], ...] = tuple(
+    error for error in (ConflictError,) if error is not None
 )
 
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
@@ -130,7 +158,7 @@ class ModalEnvironment(SandboxEnvironment):
             SandboxSpecError: The spec asks for a lifetime, a disk size or a
                 GPU type that Modal cannot apply, or for another unsupported
                 feature. A protected box also needs an operation key and a
-                priced size, and cannot use a GPU.
+                priced size, and cannot use a GPU or any egress.
         """
         super().__init__(spec)
         if spec.lifetime_seconds > _MAX_LIFETIME_SEC:
@@ -148,9 +176,12 @@ class ModalEnvironment(SandboxEnvironment):
         self._budget = budget
         self._usage_factory = usage_factory
         self._usage: Any | None = None
+        self._stopped = False
         if budget is not None:
             if spec.operation_key is None:
                 raise SandboxSpecError("A protected Modal sandbox needs an operation key.")
+            if not spec.network_disabled or spec.allowed_hosts:
+                raise SandboxSpecError(_PROTECTED_EGRESS_REFUSAL)
             try:
                 quote_modal_sandbox(self._usage_request())
             except UnpricedOperationError as error:
@@ -189,13 +220,17 @@ class ModalEnvironment(SandboxEnvironment):
 
         A protected box reserves its budget before the create. A create
         that fails or is cancelled with no sandbox releases or keeps the hold;
-        a sandbox that a cancel terminates settles its usage.
+        a sandbox that a cancel terminates settles its usage. A protected box
+        cannot start again after it stopped, because its hold is settled.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the create.
+            SandboxInfraError: The protected box already stopped.
         """
         if self._sandbox is not None:
             return
+        if self._stopped and self._budget is not None:
+            raise SandboxInfraError("The protected Modal sandbox is stopped; it cannot start again.")
         _require_sdk()
         usage = await self._reserve()
         create = asyncio.ensure_future(self._create(usage))
@@ -208,7 +243,7 @@ class ModalEnvironment(SandboxEnvironment):
                 create.add_done_callback(functools.partial(_terminate_late_sandbox, usage=usage))
                 raise
             if create.cancelled() or create.exception() is not None:
-                await _fail_usage(usage)
+                await _fail_usage(usage, None if create.cancelled() else create.exception())
                 raise
             terminate = asyncio.ensure_future(_terminate_and_settle(create.result(), usage))
             await _wait_through_cancels(terminate, _CANCEL_GRACE_SEC)
@@ -221,9 +256,9 @@ class ModalEnvironment(SandboxEnvironment):
                     "Could not stop a modal sandbox after a cancelled start.", exc_info=terminate.exception()
                 )
             raise
-        except Exception:
+        except Exception as error:
             self._usage = None
-            await _fail_usage(usage)
+            await _fail_usage(usage, error)
             raise
         self._sandbox = sandbox
         self._termination_requested = False
@@ -249,6 +284,7 @@ class ModalEnvironment(SandboxEnvironment):
             return
         usage, self._usage = self._usage, None
         self._sandbox = None
+        self._stopped = True
         self._termination_requested = True
         terminate = asyncio.ensure_future(_terminate_and_settle(sandbox, usage))
         try:
@@ -380,10 +416,11 @@ class ModalEnvironment(SandboxEnvironment):
 
         Raises:
             RuntimeError: The sandbox is not running.
+            SandboxSpecError: The box is protected and the policy opens egress.
         """
+        if self._budget is not None and not policy.disabled:
+            raise SandboxSpecError(_PROTECTED_EGRESS_REFUSAL)
         sandbox = self._require_running()
-        if self._usage is not None and not policy.disabled:
-            self._usage.opened_network()
         await sandbox._experimental_set_outbound_network_policy.aio(**egress_kwargs(policy))
 
     async def _reserve(self) -> Any | None:
@@ -408,7 +445,7 @@ class ModalEnvironment(SandboxEnvironment):
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.shield(reserving)
             if not reserving.cancelled() and reserving.exception() is None:
-                await _fail_usage(reserving.result())
+                await _fail_usage(reserving.result(), None)
             raise
         return self._usage
 
@@ -416,7 +453,7 @@ class ModalEnvironment(SandboxEnvironment):
         """Build the usage request that the reservation prices.
 
         Returns:
-            The lifetime, size and egress cap of the box.
+            The lifetime and size of the box.
         """
         spec = self.spec
         request = spec.resources
@@ -427,8 +464,6 @@ class ModalEnvironment(SandboxEnvironment):
             "cpu_cores": request.cpus,
             "memory_mib": memory,
             "gpu": bool(request.gpu or spec.gpu_type),
-            # The policy can open egress on a running box, so every box funds the cap.
-            "network_bytes_cap": SANDBOX_NETWORK_BYTES_CAP,
         }
 
     async def _create(self, usage: Any | None = None) -> Any:
@@ -460,8 +495,6 @@ class ModalEnvironment(SandboxEnvironment):
             kwargs["idle_timeout"] = self._idle_timeout_sec
         image = Image.from_registry(spec.image or DEFAULT_IMAGE)
         if usage is not None:
-            if not policy.disabled:
-                usage.opened_network()
             usage.sent()
         sandbox = await Sandbox.create.aio(
             "sleep",
@@ -475,8 +508,11 @@ class ModalEnvironment(SandboxEnvironment):
             try:
                 await asyncio.to_thread(usage.confirm_created, sandbox)
             except BaseException:
-                with contextlib.suppress(Exception):
+                try:
                     await _terminate_and_settle(sandbox, usage)
+                except Exception:
+                    # The confirm error goes on; the sweep can stop a leaked box.
+                    logger.exception("Could not stop a modal sandbox whose usage was not confirmed.")
                 raise
         return sandbox
 
@@ -685,24 +721,40 @@ async def _terminate_and_settle(sandbox: Any, usage: Any | None) -> None:
         await _terminate(sandbox)
     except BaseException:
         if usage is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await asyncio.to_thread(usage.settle)
+            except Exception:
+                # The terminate error goes on; the settle error keeps the hold pending.
+                logger.exception("Could not settle the usage of a modal sandbox whose terminate failed.")
         raise
     if usage is not None:
         usage.stopped()
         await asyncio.to_thread(usage.settle)
 
 
-async def _fail_usage(usage: Any | None) -> None:
+def _refused_create(error: BaseException | None) -> bool:
+    """Tell if Modal refused the create, so no sandbox exists.
+
+    Args:
+        error: The error of the create, or ``None`` for a cancel.
+
+    Returns:
+        True for a refusal that proves no sandbox exists.
+    """
+    return isinstance(error, _REFUSED_CREATE_ERRORS) and not isinstance(error, _UNPROVEN_REFUSAL_ERRORS)
+
+
+async def _fail_usage(usage: Any | None, error: BaseException | None) -> None:
     """Release or keep the hold of a protected box whose create returned no sandbox.
 
     Args:
         usage: The usage reservation, or ``None``.
+        error: The error of the create, or ``None`` for a cancel.
     """
     if usage is None:
         return
     try:
-        await asyncio.to_thread(usage.fail)
+        await asyncio.to_thread(usage.fail, error if _refused_create(error) else None)
     except Exception:
         logger.exception("Could not release the usage hold of a modal sandbox that was never created.")
 
@@ -742,7 +794,8 @@ def _terminate_late_sandbox(create: asyncio.Future[Any], *, usage: Any | None = 
     try:
         if create.cancelled() or create.exception() is not None:
             if usage is not None:
-                _keep_late_terminate(asyncio.ensure_future(_fail_usage(usage)))
+                error = None if create.cancelled() else create.exception()
+                _keep_late_terminate(asyncio.ensure_future(_fail_usage(usage, error)))
             return
         terminate = asyncio.ensure_future(_terminate_and_settle(create.result(), usage))
     except Exception:

@@ -18,10 +18,9 @@ from core.billing.budgets import BudgetService
 from core.billing.modal_usage import ModalUsageReservation, quote_modal_sandbox
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
-from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP
 from core.config import settings
 from core.sandbox.metering import usage_adapter
-from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 CREATE = {
     "image": "python:3.11-slim",
@@ -29,8 +28,9 @@ CREATE = {
     "cpu_cores": 2,
     "memory_mib": 4096,
     "gpu": False,
-    "network_bytes_cap": SANDBOX_NETWORK_BYTES_CAP,
 }
+# The funded lifetime: the 60 s timeout plus the 60 s boot and terminate margin.
+FUNDED_MS = 120_000
 
 
 @pytest.fixture(autouse=True)
@@ -104,22 +104,23 @@ def _run(reservation: ModalUsageReservation, *, measured_sec: float | None) -> N
     reservation.settle()
 
 
-def test_quote_covers_the_lifetime_at_the_published_rates_and_the_egress_cap() -> None:
-    """Price the whole lifetime at the published CPU and memory rates, plus the whole egress cap."""
+def test_quote_covers_the_padded_lifetime_at_the_published_rates_with_no_egress() -> None:
+    """Price the timeout plus the boot and terminate margin at the CPU and memory rates, with no egress."""
     quote = quote_modal_sandbox(CREATE)
-    compute = 60 * (2 * Decimal("0.00003942") + 4 * Decimal("0.00000667"))
-    egress = Decimal(SANDBOX_NETWORK_BYTES_CAP) / Decimal(1024**3) * Decimal("0.04")
-    assert modal_usage._usd(quote.price_snapshot, 60_000, network=True) == compute + egress
+    per_second = 2 * Decimal("0.00003942") + 4 * Decimal("0.00000667")
+    assert modal_usage._usd(quote.price_snapshot, FUNDED_MS) == 120 * per_second
+    charge = modal_usage.vercel_charge_policy(quote.price_snapshot).convert(120 * per_second)
+    assert quote.maximum.total == charge.total
     assert quote.price_snapshot["provider"] == "modal"
     assert quote.price_snapshot["source"] == "https://modal.com/pricing"
-    assert quote.maximum.total > 0
+    assert not any("egress" in key or "network" in key for key in quote.price_snapshot)
 
 
 def test_quote_applies_the_modal_minimum_size() -> None:
     """Bill a tiny box at Modal's 0.125-core and 128 MiB minimums."""
     snapshot = quote_modal_sandbox({**CREATE, "cpu_cores": 0.05, "memory_mib": 64}).price_snapshot
     expected = 10 * (Decimal("0.125") * Decimal("0.00003942") + Decimal("0.125") * Decimal("0.00000667"))
-    assert modal_usage._usd(snapshot, 10_000, network=False) == expected
+    assert modal_usage._usd(snapshot, 10_000) == expected
 
 
 @pytest.mark.parametrize(
@@ -131,12 +132,11 @@ def test_quote_applies_the_modal_minimum_size() -> None:
         {"cpu_cores": 0},
         {"cpu_cores": None},
         {"memory_mib": None},
-        {"network_bytes_cap": SANDBOX_NETWORK_BYTES_CAP + 1},
         {"gpu": True},
     ],
 )
 def test_unbounded_or_gpu_box_is_not_quoted(change: dict[str, Any]) -> None:
-    """Refuse a box whose lifetime, size or egress has no ceiling, or that asks for a GPU.
+    """Refuse a box whose lifetime or size has no ceiling, or that asks for a GPU.
 
     Args:
         change: The field that breaks the quote.
@@ -146,7 +146,7 @@ def test_unbounded_or_gpu_box_is_not_quoted(change: dict[str, Any]) -> None:
 
 
 def test_reserve_then_settle_charges_the_measured_runtime(database: Engine) -> None:
-    """Settle a stopped box at its measured seconds, with no egress when the network never opened."""
+    """Settle a stopped box at its measured seconds, with no egress charge."""
     runtime = _runtime(database)
     reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
     _run(reservation, measured_sec=10.2)
@@ -160,15 +160,14 @@ def test_reserve_then_settle_charges_the_measured_runtime(database: Engine) -> N
     assert runtime._pinned == {}
 
 
-def test_settle_clamps_to_the_funded_lifetime(database: Engine) -> None:
-    """Bill at most the funded lifetime, even when the measured runtime is longer."""
+def test_settle_clamps_to_the_padded_lifetime(database: Engine) -> None:
+    """Bill at most the timeout plus the margin, even when the measured runtime is longer."""
     long_runtime = _runtime(database)
     long_box = ModalUsageReservation(long_runtime, CREATE, operation_key="long")
-    long_box.opened_network()
+    assert long_box.lifetime_ms == FUNDED_MS
     _run(long_box, measured_sec=10_000)
     unknown_runtime = _runtime(database)
     unknown_box = ModalUsageReservation(unknown_runtime, CREATE, operation_key="unknown")
-    unknown_box.opened_network()
     _run(unknown_box, measured_sec=None)
     with Session(database) as session:
         rows = {row.operation_key: row for row in session.scalars(select(ExecutionOperationModel))}
@@ -202,6 +201,41 @@ def test_failure_before_the_create_releases_the_hold(database: Engine) -> None:
     assert runtime._pinned == {}
 
 
+def test_confirm_records_the_start_time_for_reconciliation(database: Engine) -> None:
+    """Write the wall-clock start into the pending evidence once the sandbox is confirmed."""
+    runtime = _runtime(database)
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent()
+    reservation.confirm_created(SimpleNamespace(object_id="sb-1"))
+    with Session(database) as session:
+        (evidence,) = session.scalars(select(ExecutionUsageEvidenceModel))
+    assert _operation(database).state == "pending"
+    assert evidence.evidence["sandbox_id"] == "sb-1"
+    assert evidence.evidence["sent_at"] == reservation._sent_wall
+    assert isinstance(evidence.evidence["sent_at"], float)
+    assert evidence.evidence["funded_ms"] == FUNDED_MS
+
+
+def test_refused_create_releases_the_hold(database: Engine) -> None:
+    """Release the hold when Modal refused the create, because no sandbox exists."""
+    runtime = _runtime(database)
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent()
+    reservation.fail(PermissionError("quota"))
+    assert _operation(database).state == "released"
+    assert runtime._pinned == {}
+
+
+def test_refusal_after_a_confirmed_sandbox_keeps_the_hold(database: Engine) -> None:
+    """Keep the hold when a sandbox id exists, even if the error looks like a refusal."""
+    runtime = _runtime(database)
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent()
+    reservation.confirm_created(SimpleNamespace(object_id="sb-1"))
+    reservation.fail(PermissionError("quota"))
+    assert _operation(database).state == "pending"
+
+
 def test_failure_after_the_create_keeps_the_hold_and_refuses_a_replay(database: Engine) -> None:
     """Keep the hold pending when a sent create returned no sandbox, and refuse a second dispatch."""
     runtime = _runtime(database)
@@ -213,16 +247,15 @@ def test_failure_after_the_create_keeps_the_hold_and_refuses_a_replay(database: 
         ModalUsageReservation(runtime, CREATE, operation_key="box-one")
 
 
-def test_extend_funds_a_longer_lifetime(database: Engine) -> None:
-    """Grow the hold to the quote for the longer lifetime."""
+def test_extend_is_refused(database: Engine) -> None:
+    """Refuse an extension, because Modal cannot lengthen a running sandbox's timeout."""
     runtime = _runtime(database)
     reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
     before = _operation(database).max_units
-    reservation.extend(120_000, deadline=0)
-    assert _operation(database).max_units > before
-    assert reservation.lifetime_ms == 120_000
-    with pytest.raises(ValueError, match="lengthen"):
-        reservation.extend(120_000, deadline=0)
+    with pytest.raises(UnpricedOperationError, match="cannot lengthen"):
+        modal_usage.USAGE.extend(reservation, 240_000, deadline=0)
+    assert _operation(database).max_units == before
+    assert reservation.lifetime_ms == FUNDED_MS
 
 
 def test_modal_usage_adapter_is_found() -> None:

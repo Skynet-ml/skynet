@@ -998,15 +998,12 @@ class FakeUsage:
         self.operation_key = operation_key
         self.calls: list[str] = []
         self.confirmed: Any = None
+        self.refusal: BaseException | None = None
         budget.reservations.append(self)
 
     def sent(self) -> None:
         """Record that the create was sent."""
         self.calls.append("sent")
-
-    def opened_network(self) -> None:
-        """Record that egress opened."""
-        self.calls.append("network")
 
     def confirm_created(self, sandbox: Any) -> None:
         """Record the created sandbox.
@@ -1025,9 +1022,14 @@ class FakeUsage:
         """Record the settle."""
         self.calls.append("settle")
 
-    def fail(self) -> None:
-        """Record a failure with no sandbox."""
+    def fail(self, refusal: BaseException | None = None) -> None:
+        """Record a failure with no sandbox.
+
+        Args:
+            refusal: The create error that proves no sandbox exists, or ``None``.
+        """
         self.calls.append("fail")
+        self.refusal = refusal
 
 
 def _protected(spec: SandboxSpec | None = None) -> tuple[ModalEnvironment, SimpleNamespace]:
@@ -1054,7 +1056,9 @@ def test_protected_box_needs_an_operation_key() -> None:
 
 def test_protected_box_refuses_a_gpu() -> None:
     """Refuse a protected GPU box, because no sandbox GPU rate is published."""
-    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", resources=ResourceRequest(gpu=1))
+    spec = SandboxSpec(
+        lifetime_seconds=60, operation_key="op-1", network_disabled=True, resources=ResourceRequest(gpu=1)
+    )
     with pytest.raises(SandboxSpecError, match="GPU"):
         ModalEnvironment(spec, budget=SimpleNamespace(), usage_factory=FakeUsage)
 
@@ -1071,9 +1075,11 @@ async def test_protected_box_reserves_before_create_and_settles_after_stop(fake_
         "cpu_cores": 2,
         "memory_mib": 4096,
         "gpu": False,
-        "network_bytes_cap": modal_provider.SANDBOX_NETWORK_BYTES_CAP,
     }
     box = _box(fake_modal)
+    assert box.kwargs["timeout"] == 60
+    assert box.kwargs["outbound_domain_allowlist"] == []
+    assert box.kwargs["outbound_cidr_allowlist"] == []
     assert box.kwargs["cpu"] == (2, 2)
     assert box.kwargs["memory"] == (4096, 4096)
     assert usage.confirmed is box
@@ -1083,12 +1089,39 @@ async def test_protected_box_reserves_before_create_and_settles_after_stop(fake_
     assert usage.calls == ["sent", "confirm", "stopped", "settle"]
 
 
-async def test_protected_box_marks_network_use_when_egress_opens(fake_modal: FakeModal) -> None:
-    """Mark egress use when a running box opens its network policy."""
+@pytest.mark.parametrize(
+    "spec",
+    [
+        SandboxSpec(lifetime_seconds=60, operation_key="op-1"),
+        SandboxSpec(lifetime_seconds=60, operation_key="op-1", allowed_hosts=("pypi.org",)),
+    ],
+)
+def test_protected_box_refuses_egress_at_construction(spec: SandboxSpec) -> None:
+    """Refuse open or allowlisted egress, because Modal neither caps nor reports it.
+
+    Args:
+        spec: A protected spec whose network is not disabled.
+    """
+    with pytest.raises(SandboxSpecError, match="egress"):
+        ModalEnvironment(spec, budget=SimpleNamespace(), usage_factory=FakeUsage)
+
+
+@pytest.mark.parametrize("policy", [NetworkPolicy(), NetworkPolicy(allowed_hosts=("pypi.org",))])
+async def test_protected_box_refuses_to_open_egress(fake_modal: FakeModal, policy: NetworkPolicy) -> None:
+    """Refuse a policy that opens egress on a running protected box, and keep it closed.
+
+    Args:
+        fake_modal: The fake SDK.
+        policy: A policy that opens egress.
+    """
     env, budget = _protected()
     await env.start()
-    await env.set_network_policy(NetworkPolicy(allowed_hosts=("pypi.org",)))
-    assert budget.reservations[0].calls == ["sent", "confirm", "network"]
+    with pytest.raises(SandboxSpecError, match="egress"):
+        await env.set_network_policy(policy)
+    assert _box(fake_modal).policies == []
+    await env.disable_network()
+    assert _box(fake_modal).policies == [{"outbound_domain_allowlist": [], "outbound_cidr_allowlist": []}]
+    assert budget.reservations[0].calls == ["sent", "confirm"]
     await env.stop()
 
 
@@ -1099,7 +1132,71 @@ async def test_protected_box_fails_usage_when_create_fails(fake_modal: FakeModal
     with pytest.raises(RuntimeError, match="quota"):
         await env.start()
     assert budget.reservations[0].calls == ["sent", "fail"]
+    assert budget.reservations[0].refusal is None
     assert env.usage is None
+
+
+class FakeInvalidError(Exception):
+    """Stand in for modal.exception.InvalidError."""
+
+
+class FakeConflictError(FakeInvalidError):
+    """Stand in for modal.exception.ConflictError, an InvalidError subclass."""
+
+
+class FakeAuthError(Exception):
+    """Stand in for modal.exception.AuthError."""
+
+
+class FakeResourceExhaustedError(Exception):
+    """Stand in for modal.exception.ResourceExhaustedError."""
+
+
+@pytest.mark.parametrize(
+    ("error", "refused"),
+    [
+        (FakeInvalidError("bad"), True),
+        (FakeAuthError("token"), True),
+        (FakeResourceExhaustedError("quota"), True),
+        (FakeConflictError("conflict"), False),
+        (RuntimeError("lost"), False),
+    ],
+)
+async def test_protected_box_passes_only_proven_refusals(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch, error: Exception, refused: bool
+) -> None:
+    """Pass a create error to the reservation as a refusal only when it proves no sandbox exists.
+
+    Args:
+        fake_modal: The fake SDK.
+        monkeypatch: Replaces the Modal error classes.
+        error: The create error.
+        refused: True when the error proves no sandbox exists.
+    """
+    monkeypatch.setattr(
+        modal_provider,
+        "_REFUSED_CREATE_ERRORS",
+        (FakeInvalidError, FakeAuthError, FakeResourceExhaustedError),
+    )
+    monkeypatch.setattr(modal_provider, "_UNPROVEN_REFUSAL_ERRORS", (FakeConflictError,))
+    fake_modal.create_error = error
+    env, budget = _protected()
+    with pytest.raises(type(error)):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "fail"]
+    assert (usage.refusal is error) is refused
+
+
+async def test_protected_box_cannot_start_again_after_stop(fake_modal: FakeModal) -> None:
+    """Refuse a restart of a stopped protected box before any reservation."""
+    env, budget = _protected()
+    await env.start()
+    await env.stop()
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    assert len(budget.reservations) == 1
+    assert len(fake_modal.boxes) == 1
 
 
 async def test_protected_box_settles_when_terminate_fails(fake_modal: FakeModal) -> None:

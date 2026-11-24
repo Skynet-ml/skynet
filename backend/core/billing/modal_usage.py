@@ -8,6 +8,14 @@ published rates. The provider sends equal CPU and memory requests and
 limits, and Modal bills ``max(request, usage)``, so the request is the
 exact billed size. The runtime runs from the create call to the confirmed
 terminate, which is never shorter than the time Modal bills.
+
+Modal neither caps nor reports the egress of one sandbox, so no hold can
+bound it. A protected Modal box therefore has no network at all: the
+provider refuses every policy that opens egress, and the quote and the
+settlement carry no egress charge.
+
+Modal cannot make the timeout of a running sandbox longer, so a reservation
+refuses an extension.
 """
 
 from __future__ import annotations
@@ -30,7 +38,10 @@ from .operation_pricing import (
 )
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
-from .vercel_usage import SANDBOX_NETWORK_BYTES_CAP, vercel_charge_policy
+
+# The conversion is the generic sandbox charge policy; it lives in the Vercel
+# module only for history, and moving it is out of scope for SKY-546.
+from .vercel_usage import vercel_charge_policy
 
 # Read from https://modal.com/pricing on 2026-11-24 ("Modal Sandbox pricing",
 # non-preemptible). These sandbox rates already include Modal's 3x
@@ -41,13 +52,14 @@ _PRICING_URL = "https://modal.com/pricing"
 _PRICE_VERSION = "modal-sandbox-public-2026-11-24"
 _CPU_CORE_SECOND_USD = Decimal("0.00003942")
 _MEMORY_GIB_SECOND_USD = Decimal("0.00000667")
-_NETWORK_EGRESS_GIB_USD = Decimal("0.04")
 _MIN_CPU_CORES = Decimal("0.125")
 _MIN_MEMORY_MIB = 128
 _MIB_PER_GIB = Decimal(1024)
-_BYTES_PER_GIB = Decimal(1024**3)
 # Modal ends every sandbox after 24 hours.
 _LIFETIME_CEILING_MS = 24 * 60 * 60 * 1000
+# Modal can bill the boot before the timeout starts and the terminate after
+# it ends, so the hold funds this much more than the timeout that Modal gets.
+_LIFETIME_MARGIN_MS = 60_000
 
 
 def _seconds(duration_ms: int) -> int:
@@ -62,16 +74,15 @@ def _seconds(duration_ms: int) -> int:
     return max(1, math.ceil(duration_ms / 1000))
 
 
-def _usd(snapshot: Mapping[str, Any], duration_ms: int, *, network: bool) -> Decimal:
+def _usd(snapshot: Mapping[str, Any], duration_ms: int) -> Decimal:
     """Price one box of the admitted shape for a duration.
 
     Args:
         snapshot: The admitted price snapshot with its rates and request.
         duration_ms: The billed duration.
-        network: True when the box ever had open egress.
 
     Returns:
-        Compute for the duration, plus the whole egress cap when ``network`` is True.
+        The compute cost for the duration.
 
     Raises:
         UsagePendingError: When the snapshot has no usable rates.
@@ -81,25 +92,22 @@ def _usd(snapshot: Mapping[str, Any], duration_ms: int, *, network: bool) -> Dec
             raise ValueError("Not a Modal price snapshot")
         cpu_rate = exact_nonnegative(snapshot["cpu_core_second_usd"])
         memory_rate = exact_nonnegative(snapshot["memory_gib_second_usd"])
-        egress_rate = exact_nonnegative(snapshot["network_egress_gib_usd"])
         cores = max(exact_nonnegative(snapshot["request"]["cpu_cores"]), _MIN_CPU_CORES)
         memory_gib = Decimal(max(snapshot["request"]["memory_mib"], _MIN_MEMORY_MIB)) / _MIB_PER_GIB
-        cap = snapshot["request"]["network_bytes_cap"]
     except (KeyError, TypeError, ValueError) as error:
         raise UsagePendingError("The Modal sandbox admission has no usable price snapshot.") from error
-    compute = Decimal(_seconds(duration_ms)) * (cores * cpu_rate + memory_gib * memory_rate)
-    return compute + (Decimal(cap) / _BYTES_PER_GIB * egress_rate if network else Decimal(0))
+    return Decimal(_seconds(duration_ms)) * (cores * cpu_rate + memory_gib * memory_rate)
 
 
 def quote_modal_sandbox(request: Mapping[str, Any]) -> OperationQuote:
     """Price a Modal sandbox for its whole lifetime before it exists.
 
     Args:
-        request: Final create parameters with ``lifetime_ms``, ``cpu_cores``,
-            ``memory_mib``, ``gpu`` and ``network_bytes_cap``.
+        request: Final create parameters with ``lifetime_ms`` (the timeout
+            that Modal gets), ``cpu_cores``, ``memory_mib`` and ``gpu``.
 
     Returns:
-        Coverage for the lifetime at the requested size plus the egress cap.
+        Coverage for the lifetime plus the boot and terminate margin, at the requested size.
 
     Raises:
         UnpricedOperationError: When the lifetime or size is unbounded, or the box asks for a GPU.
@@ -107,7 +115,6 @@ def quote_modal_sandbox(request: Mapping[str, Any]) -> OperationQuote:
     lifetime_ms = request.get("lifetime_ms")
     cores = request.get("cpu_cores")
     memory_mib = request.get("memory_mib")
-    cap = request.get("network_bytes_cap")
     if (
         isinstance(lifetime_ms, bool)
         or not isinstance(lifetime_ms, int)
@@ -118,11 +125,8 @@ def quote_modal_sandbox(request: Mapping[str, Any]) -> OperationQuote:
         or isinstance(memory_mib, bool)
         or not isinstance(memory_mib, int)
         or memory_mib <= 0
-        or isinstance(cap, bool)
-        or not isinstance(cap, int)
-        or not 0 <= cap <= SANDBOX_NETWORK_BYTES_CAP
     ):
-        raise UnpricedOperationError("Modal requires a bounded lifetime, CPU, memory and egress cap.")
+        raise UnpricedOperationError("Modal requires a bounded lifetime, CPU and memory.")
     # The sandbox page names no sandbox GPU rate, so a protected box takes no GPU.
     if request.get("gpu"):
         raise UnpricedOperationError("Protected Modal sandboxes cannot use a GPU.")
@@ -132,10 +136,11 @@ def quote_modal_sandbox(request: Mapping[str, Any]) -> OperationQuote:
         "source": _PRICING_URL,
         "cpu_core_second_usd": str(_CPU_CORE_SECOND_USD),
         "memory_gib_second_usd": str(_MEMORY_GIB_SECOND_USD),
-        "network_egress_gib_usd": str(_NETWORK_EGRESS_GIB_USD),
         "request": dict(request),
     }
-    return operation_quote(request, _usd(evidence, lifetime_ms, network=True), ChargePolicy("sandbox"), evidence)
+    return operation_quote(
+        request, _usd(evidence, lifetime_ms + _LIFETIME_MARGIN_MS), ChargePolicy("sandbox"), evidence
+    )
 
 
 class ModalUsageReservation:
@@ -189,10 +194,9 @@ class ModalUsageReservation:
             raise
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This sandbox was already dispatched; reconcile it by hand.")
-        self.lifetime_ms: int = self.request["lifetime_ms"]
+        # The funded lifetime: the Modal timeout plus the boot and terminate margin.
+        self.lifetime_ms: int = self.request["lifetime_ms"] + _LIFETIME_MARGIN_MS
         self.sandbox_id: str | None = None
-        # The quote funds the egress cap, but a box that never opened egress pays none.
-        self.network_used = False
         self.sent_at: float | None = None
         self.stopped_at: float | None = None
         self._sent_wall: float | None = None
@@ -203,7 +207,10 @@ class ModalUsageReservation:
         self._sent_wall = time.time()
 
     def confirm_created(self, sandbox: Any) -> None:
-        """Bind the created sandbox to the operation.
+        """Bind the created sandbox to the operation and record its start.
+
+        The start time goes into the pending evidence at once, so a worker
+        that dies before the settle leaves enough to reconcile the hold.
 
         Args:
             sandbox: The Modal sandbox handle.
@@ -216,45 +223,29 @@ class ModalUsageReservation:
             raise UsagePendingError("The Modal sandbox returned no sandbox id.")
         self.sandbox_id = sandbox_id
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, sandbox_id)
-
-    def opened_network(self) -> None:
-        """Record that the box has open egress, so it pays its egress cap."""
-        self.network_used = True
+        self.pending()
 
     def stopped(self) -> None:
         """Stop the runtime clock once Modal confirmed the sandbox ended."""
         self.stopped_at = time.monotonic()
 
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
-        """Fund a longer lifetime before Modal is asked for it.
+        """Refuse an extension, because Modal cannot lengthen a running sandbox's timeout.
 
         Args:
             lifetime_ms: Total lifetime after the extension.
             deadline: ``time.monotonic()`` instant after which waiting stops.
 
         Raises:
-            ValueError: When the lifetime does not grow.
+            UnpricedOperationError: Always.
         """
-        if lifetime_ms <= self.lifetime_ms:
-            raise ValueError("An extension must lengthen the funded lifetime.")
-        quote = quote_modal_sandbox({**self.request, "lifetime_ms": lifetime_ms})
-        extended = self.runtime.extend(
-            self.operation.id,
-            quote,
-            evidence_key=f"modal-extend:{lifetime_ms}",
-            evidence={"provider": "modal", "lifetime_ms": lifetime_ms, "request": quote.request_fingerprint},
-            deadline=deadline,
-        )
-        self.runtime.pin(self.operation.id, cent_units(extended.max_cents), box=self.box)
-        self.request["lifetime_ms"] = lifetime_ms
-        self.lifetime_ms = lifetime_ms
-        self.quote = quote
+        raise UnpricedOperationError("Modal cannot lengthen the timeout of a running sandbox.")
 
     def _evidence(self) -> dict[str, Any]:
         """Return the provider evidence of this box.
 
         Returns:
-            The sandbox id, the measured runtime and the egress state.
+            The sandbox id, the wall-clock start and the measured and funded runtimes.
         """
         measured = None
         if self.sent_at is not None and self.stopped_at is not None:
@@ -265,7 +256,6 @@ class ModalUsageReservation:
             "sent_at": self._sent_wall,
             "measured_ms": measured,
             "funded_ms": self.lifetime_ms,
-            "network_used": self.network_used,
         }
 
     def pending(self) -> None:
@@ -280,19 +270,31 @@ class ModalUsageReservation:
                 evidence=evidence,
             )
 
-    def fail(self) -> None:
-        """Release the hold when no create reached Modal, otherwise retain it.
+    def fail(self, refusal: BaseException | None = None) -> None:
+        """Release the hold when no sandbox can exist, otherwise retain it.
 
-        A create that was sent but returned no sandbox may still have made
-        one, so its hold stays pending for reconciliation.
+        No sandbox exists when the create was never sent, or when Modal
+        refused the create itself. A create that was sent and failed in any
+        other way may still have made one, so its hold stays pending.
+
+        Args:
+            refusal: The create error that proves no sandbox exists, or ``None``.
         """
-        if self.sent_at is None:
+        if self.sent_at is None or (refusal is not None and self.sandbox_id is None):
+            if self.sent_at is None:
+                key = f"modal-unsent:{self.operation.id}"
+                evidence = {"provider": "modal", "reason": "The create call was never sent."}
+            else:
+                key = f"modal-refusal:{self.operation.id}"
+                evidence = {
+                    "provider": "modal",
+                    "error": type(refusal).__name__,
+                    "message": str(refusal)[:1000],
+                    "sent_at": self._sent_wall,
+                }
             try:
                 self.runtime.service.reject(
-                    self.operation.id,
-                    self.runtime.username,
-                    evidence_key=f"modal-unsent:{self.operation.id}",
-                    evidence={"provider": "modal", "reason": "The create call was never sent."},
+                    self.operation.id, self.runtime.username, evidence_key=key, evidence=evidence
                 )
                 self.runtime.unpin(self.operation.id)
                 return
@@ -303,8 +305,9 @@ class ModalUsageReservation:
     def settle(self) -> None:
         """Settle the box at its measured runtime, or at its whole lifetime when its end is unknown.
 
-        Modal ends a sandbox at its timeout, so the funded lifetime bounds
-        the bill of a box whose terminate was not confirmed. The billed time
+        Modal ends a sandbox at its timeout, so the funded lifetime (the
+        timeout plus the boot and terminate margin) bounds the bill of a box
+        whose terminate was not confirmed. The billed time
         never exceeds the funded lifetime, so the charge stays inside the hold.
 
         Raises:
@@ -321,7 +324,7 @@ class ModalUsageReservation:
             evidence = self._evidence()
             measured = evidence["measured_ms"]
             billed_ms = self.lifetime_ms if measured is None else min(measured, self.lifetime_ms)
-            usd = _usd(self.quote.price_snapshot, billed_ms, network=self.network_used)
+            usd = _usd(self.quote.price_snapshot, billed_ms)
             charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
             self.runtime.service.settle(
                 self.operation.id,
@@ -384,12 +387,15 @@ class ModalUsage:
         reservation.confirm_created(session)
 
     def extend(self, reservation: ModalUsageReservation, lifetime_ms: int, *, deadline: float) -> None:
-        """Fund a longer lifetime before the provider grants it.
+        """Refuse an extension, because Modal cannot lengthen a running sandbox's timeout.
 
         Args:
             reservation: The box's claimed reservation.
             lifetime_ms: Total lifetime after the extension.
             deadline: ``time.monotonic()`` instant after which waiting stops.
+
+        Raises:
+            UnpricedOperationError: Always.
         """
         reservation.extend(lifetime_ms, deadline=deadline)
 
