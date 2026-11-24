@@ -50,6 +50,7 @@ from core.billing.runtime import UsagePendingError
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -104,8 +105,11 @@ _UNBOUNDED_POLLS = 10**9
 _MAX_KEEP_ALIVE_SECONDS = 172_800
 _MAX_MEMORY_GB = 64
 _ENDED_STATUSES = frozenset({"failure", "shutdown"})
+# Answers that refuse a request before Runloop acts on it. Other 4xx codes,
+# 5xx answers and transport errors leave the outcome unknown.
+_REFUSED_STATUSES = frozenset({400, 401, 403, 404, 409, 422, 429})
 # The SDK's devbox.create POSTs here, then polls wait_for_status while the box
-# boots. Only a 4xx from this POST proves that no devbox exists.
+# boots. Only a refusal status from this POST shows that no devbox was made.
 _CREATE_PATH = "/v1/devboxes/create_and_await_running"
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
 _TIMEOUT_EXIT_CODE = 124
@@ -261,16 +265,18 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
     )
 
 
-def _refused_create(error: SandboxRejectedError) -> bool:
+def _refused_create(error: SandboxError) -> bool:
     """Tell whether Runloop refused the create POST itself.
 
     Args:
-        error: The mapped 4xx error of ``client.devbox.create``.
+        error: The mapped error of ``client.devbox.create``.
 
     Returns:
-        True when the SDK error came from the create POST, not from the
-        status poll that follows it once the devbox exists.
+        True when the SDK error is a refusal status from the create POST,
+        not from the status poll that follows it once the devbox exists.
     """
+    if getattr(error.__cause__, "status_code", None) not in _REFUSED_STATUSES:
+        return False
     request = getattr(error.__cause__, "request", None)
     path = getattr(getattr(request, "url", None), "path", None)
     return isinstance(path, str) and path.endswith(_CREATE_PATH)
@@ -335,11 +341,14 @@ class RunloopEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxSpecError: Runloop cannot open this spec, or a protected
-                spec has no operation key.
+                spec has no operation key or no explicit size.
         """
         if budget is not None:
             if spec.operation_key is None:
                 raise SandboxSpecError("A protected Runloop sandbox needs an operation key.")
+            if spec.resources.mode is ResourceMode.IGNORE:
+                # Runloop picks the size in this mode, so no price bounds the box.
+                raise SandboxSpecError("A protected Runloop sandbox needs an explicit size.")
             self.capabilities = dataclasses.replace(RUNLOOP_CAPABILITIES, protected=True)
         super().__init__(spec)
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
@@ -362,7 +371,7 @@ class RunloopEnvironment(SandboxEnvironment):
         self._usage: Any | None = None
         self._binding: asyncio.Future[Any] | None = None
         self._create_sent_at: float | None = None
-        self._create_refused: SandboxRejectedError | None = None
+        self._create_refused: SandboxError | None = None
         self._settle_error: Exception | None = None
         self._orphan_id: str | None = None
 
@@ -486,7 +495,7 @@ class RunloopEnvironment(SandboxEnvironment):
                         self._devbox = await client.devbox.create(
                             **params, polling_config=_polling(), idempotency_key=self._box_tag
                         )
-                except SandboxRejectedError as error:
+                except SandboxError as error:
                     if _refused_create(error):
                         self._create_refused = error
                     raise

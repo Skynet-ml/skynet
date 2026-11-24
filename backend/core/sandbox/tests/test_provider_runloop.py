@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 
-from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
@@ -51,33 +50,49 @@ class FakeAPIStatusError(FakeRunloopError):
 class FakeNotFoundError(FakeAPIStatusError):
     """Stand in for ``NotFoundError``."""
 
+    status_code = 404
+
 
 class FakeConflictError(FakeAPIStatusError):
     """Stand in for ``ConflictError``."""
+
+    status_code = 409
 
 
 class FakeBadRequestError(FakeAPIStatusError):
     """Stand in for ``BadRequestError``."""
 
+    status_code = 400
+
 
 class FakeUnprocessableEntityError(FakeAPIStatusError):
     """Stand in for ``UnprocessableEntityError``."""
+
+    status_code = 422
 
 
 class FakeAuthenticationError(FakeAPIStatusError):
     """Stand in for ``AuthenticationError``."""
 
+    status_code = 401
+
 
 class FakePermissionDeniedError(FakeAPIStatusError):
     """Stand in for ``PermissionDeniedError``."""
+
+    status_code = 403
 
 
 class FakeRateLimitError(FakeAPIStatusError):
     """Stand in for ``RateLimitError``."""
 
+    status_code = 429
+
 
 class FakeInternalServerError(FakeAPIStatusError):
     """Stand in for ``InternalServerError``."""
+
+    status_code = 500
 
 
 class FakeAPIConnectionError(FakeRunloopError):
@@ -1164,16 +1179,17 @@ async def test_a_billing_error_from_settle_is_raised_unchanged(fake_sdk: FakeClo
     assert raised.value is error
 
 
-def _refusal(path: str) -> FakeBadRequestError:
-    """Return a 400 error whose request went to this API path.
+def _refusal(path: str, kind: type[FakeAPIStatusError] = FakeBadRequestError) -> FakeAPIStatusError:
+    """Return an SDK status error whose request went to this API path.
 
     Args:
         path: The API path of the failed request.
+        kind: The fake SDK error class.
 
     Returns:
         The error.
     """
-    error = FakeBadRequestError("bad size")
+    error = kind("refused")
     error.request = SimpleNamespace(url=SimpleNamespace(path=path))
     return error
 
@@ -1217,9 +1233,19 @@ async def test_a_refused_create_with_a_failed_tag_search_keeps_the_hold_pending(
     assert reservation.events == ["pending"]
 
 
+async def test_a_rate_limited_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold when Runloop answers the create POST with a 429 and no box carries the tag."""
+    fake_sdk.create_error = _refusal("/v1/devboxes/create_and_await_running", FakeRateLimitError)
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["release"]
+
+
 async def test_a_lost_create_keeps_the_hold_pending(fake_sdk: FakeCloud) -> None:
-    """Keep the hold pending when the create failed and no devbox carries the tag."""
-    fake_sdk.create_error = FakeRateLimitError("slow down")
+    """Keep the hold pending when the create got a 5xx, even though no devbox carries the tag."""
+    fake_sdk.create_error = _refusal("/v1/devboxes/create_and_await_running", FakeInternalServerError)
     env = _protected()
     with pytest.raises(SandboxTransientError):
         await env.start()
@@ -1328,7 +1354,6 @@ async def test_a_failed_bind_still_shuts_down_and_settles(fake_sdk: FakeCloud) -
 async def test_an_unsized_protected_devbox_is_not_started(fake_sdk: FakeCloud) -> None:
     """Refuse a protected devbox whose size Runloop picks, because it has no price."""
     spec = _spec(operation_key="op-1", resources=ResourceRequest(cpus=1, mode=ResourceMode.IGNORE))
-    env = RunloopEnvironment(spec, budget="budget")
-    with pytest.raises(UnpricedOperationError):
-        await env.start()
-    assert "create" not in fake_sdk.calls
+    with pytest.raises(SandboxSpecError, match="explicit size"):
+        RunloopEnvironment(spec, budget="budget")
+    assert fake_sdk.calls == []

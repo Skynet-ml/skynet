@@ -11,6 +11,7 @@ charging the whole keep-alive. Every settlement stays inside the reservation.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping
 from decimal import Decimal
@@ -22,6 +23,8 @@ from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationEr
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
 from .vercel_usage import vercel_charge_policy
+
+logger = logging.getLogger(__name__)
 
 # Published usage rates, read on 2026-11-24 from https://www.runloop.ai/pricing.
 # The page bills usage per second with no minimum, and its one usage table
@@ -178,8 +181,10 @@ def _rates(price_snapshot: Mapping[str, Any]) -> tuple[Decimal, Decimal, Decimal
     try:
         if price_snapshot.get("provider") != "runloop":
             raise ValueError("Unsupported billing policy")
-        return tuple(
-            Decimal(str(price_snapshot[name])) for name in ("cpu_hour_usd", "memory_gb_hour_usd", "disk_gb_hour_usd")
+        return (
+            Decimal(str(price_snapshot["cpu_hour_usd"])),
+            Decimal(str(price_snapshot["memory_gb_hour_usd"])),
+            Decimal(str(price_snapshot["disk_gb_hour_usd"])),
         )
     except (KeyError, TypeError, ValueError, ArithmeticError) as error:
         raise UsagePendingError("The Runloop admission has no usable price snapshot.") from error
@@ -315,7 +320,7 @@ class RunloopUsageReservation:
                 evidence={"provider": "runloop", "reason": reason[:1000]},
             )
         except BaseException:
-            self.pending()
+            self._keep_pending()
             raise
         self.runtime.unpin(self.operation.id)
 
@@ -345,6 +350,15 @@ class RunloopUsageReservation:
         # Charging the whole keep-alive here would bill a box that ran for a
         # minute as if it ran for days, so the hold waits for reconciliation.
         raise UsagePendingError("Runloop reported no final usage and the shutdown is not confirmed.")
+
+    def _keep_pending(self) -> None:
+        """Mark the hold pending after a failure, without hiding that failure."""
+        try:
+            self.pending()
+        except Exception as error:
+            # The caller re-raises the first failure; a ledger error here
+            # would replace it with a less useful one.
+            logger.warning("Runloop hold %s could not be marked pending: %s", self.operation.id, type(error).__name__)
 
     def pending(self) -> None:
         """Keep the hold for manual reconciliation when settlement fails."""
@@ -395,7 +409,7 @@ class RunloopUsageReservation:
             )
             self.runtime.unpin(self.operation.id)
         except BaseException:
-            self.pending()
+            self._keep_pending()
             raise
 
 

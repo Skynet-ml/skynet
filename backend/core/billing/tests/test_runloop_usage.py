@@ -279,6 +279,30 @@ def test_a_failed_settle_keeps_the_hold_pending(database: Engine) -> None:
     assert _state(database) == "pending"
 
 
+def test_a_failed_pending_mark_keeps_the_settle_error(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise the settle failure, not the ledger error of the pending mark after it.
+
+    Args:
+        database: The funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    runtime = _runtime(database)
+    reservation = RunloopUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.bind("dbx-1")
+
+    def refuse() -> None:
+        """Fail the pending mark.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(reservation, "pending", refuse)
+    with pytest.raises(UsagePendingError, match="not confirmed"):
+        reservation.settle()
+
+
 def test_a_devbox_that_was_never_created_releases_its_hold(database: Engine) -> None:
     """Return the whole hold when the create call was never sent or Runloop refused it."""
     runtime = _runtime(database)
