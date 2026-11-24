@@ -432,6 +432,11 @@ class KernelEnvironment(SandboxEnvironment):
         """
         self._create_dispatched = True
         self._created_at = self._clock.monotonic()
+        if usage is not None:
+            # Set before the create, so a browser that a failed create leaves
+            # also gets the measured-time cap.
+            self._funded_until = self._created_at + self.spec.lifetime_seconds
+            self._idle_timeout = options["timeout_seconds"]
         try:
             async with asyncio.timeout(CREATE_TIMEOUT) as deadline:
                 self._browser = await self._client.browsers.create(**options)
@@ -446,8 +451,6 @@ class KernelEnvironment(SandboxEnvironment):
                 raise ProviderAtCapacityError(f"Kernel has no capacity: {type(error).__name__}") from error
             raise
         if usage is not None:
-            self._funded_until = self._created_at + self.spec.lifetime_seconds
-            self._idle_timeout = options["timeout_seconds"]
             self._billing_call = asyncio.ensure_future(asyncio.to_thread(usage.confirm, self._browser))
             # The teardown awaits the same call, so a settle never races it.
             await asyncio.shield(self._billing_call)
@@ -573,17 +576,54 @@ class KernelEnvironment(SandboxEnvironment):
             except Exception as sweep_error:
                 logger.warning("Kernel browser %s sweep failed: %s", self.name, type(sweep_error).__name__)
             else:
-                # The list returns only active browsers, so a known browser
-                # that the finished sweep did not list is gone: its first
-                # delete went through, or Kernel ended it.
-                listed_ids = {item.session_id for item in swept[0]}
-                deleted_ids = {item.session_id for item in swept[1]}
-                if measured_ms is None and known is not None and (known in deleted_ids or known not in listed_ids):
+                if measured_ms is None and known is not None and await self._sweep_confirms(client, known, swept):
                     measured_ms = self._measured_ms()
         if self._usage is not None:
             await self._settle(client, known, measured_ms, error, swept)
         with contextlib.suppress(Exception):
             await client.close()
+
+    async def _sweep_confirms(self, client: Any, session_id: str, swept: tuple[list[Any], list[Any]]) -> bool:
+        """Tell whether a finished sweep proves that a known browser is gone.
+
+        Args:
+            client: The SDK client.
+            session_id: The known browser whose first delete failed.
+            swept: The browsers that the sweep listed and deleted.
+
+        Returns:
+            True when the sweep deleted it, or did not list it and Kernel
+            reports it as deleted.
+        """
+        listed, deleted = swept
+        if any(item.session_id == session_id for item in deleted):
+            return True
+        if any(item.session_id == session_id for item in listed):
+            return False
+        return await self._confirmed_deleted(client, session_id)
+
+    async def _confirmed_deleted(self, client: Any, session_id: str) -> bool:
+        """Tell whether Kernel reports a browser as deleted.
+
+        The list can be stale right after a failed delete, so a browser that
+        it leaves out counts as gone only with this proof.
+
+        Args:
+            client: The SDK client.
+            session_id: The browser whose delete failed.
+
+        Returns:
+            True when Kernel's details carry ``deleted_at``.
+        """
+        try:
+            await self._pace_read()
+            details = await asyncio.wait_for(client.browsers.retrieve(session_id, include_deleted=True), STOP_TIMEOUT)
+        except Exception as read_error:
+            # With ``include_deleted`` Kernel returns a soft-deleted session
+            # with ``deleted_at``, so a NotFound here does not prove a delete.
+            logger.warning("Kernel browser %s delete check failed: %s", self.name, type(read_error).__name__)
+            return False
+        return getattr(details, "deleted_at", None) is not None
 
     def _measured_ms(self) -> int | None:
         """Return the wall time from the create call until now.
@@ -645,7 +685,10 @@ class KernelEnvironment(SandboxEnvironment):
                     logger.warning(
                         "Kernel browser %s is not the funded one: %s", self.name, type(confirm_error).__name__
                     )
-            receipt = await self._usage_receipt(client, session_id) if measured_ms is not None else {}
+            if measured_ms is None:
+                await asyncio.to_thread(usage.pending)
+                raise UsagePendingError("The Kernel browser delete is not confirmed; the reservation remains active.")
+            receipt = await self._usage_receipt(client, session_id)
             await asyncio.to_thread(usage.record, receipt, measured_ms=measured_ms)
             await asyncio.to_thread(usage.settle)
         except Exception as billing_error:

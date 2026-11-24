@@ -270,6 +270,10 @@ class KernelUsageReservation:
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
         """Fund a longer lifetime before the browser gets it.
 
+        The Kernel provider never calls this. It keeps the funded end that it
+        set at the create call, so commands and the measured-time cap keep
+        the first lifetime. A caller that extends must also move that end.
+
         Args:
             lifetime_ms: The total lifetime after the extension.
             deadline: ``time.monotonic()`` instant after which waiting stops.
@@ -484,6 +488,9 @@ class KernelUsage:
 
     def extend(self, reservation: KernelUsageReservation, lifetime_ms: int, *, deadline: float) -> None:
         """Fund a longer lifetime before the browser gets it.
+
+        The Kernel provider never calls this; see
+        :meth:`KernelUsageReservation.extend`.
 
         Args:
             reservation: The browser's reservation.

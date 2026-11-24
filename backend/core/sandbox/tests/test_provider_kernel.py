@@ -111,6 +111,7 @@ class FakeDetails:
             data: The JSON form of the details.
         """
         self.data = data
+        self.deleted_at = data.get("deleted_at")
 
     def to_dict(self, *, mode: str) -> dict[str, Any]:
         """Return the details as JSON data.
@@ -182,6 +183,9 @@ class FakeState:
     retrieves: ClassVar[list[str]] = []
     retrieve_errors: ClassVar[list[BaseException]] = []
     delete_errors: ClassVar[list[BaseException]] = []
+    list_error: ClassVar[BaseException | None] = None
+    # Act as a stale list that does not show the live browsers yet.
+    list_hidden: ClassVar[bool] = False
     usage_statuses: ClassVar[list[str]] = []
     uptime_ms: ClassVar[int] = 60_000
     closed: ClassVar[int] = 0
@@ -206,6 +210,8 @@ class FakeState:
         cls.retrieves = []
         cls.retrieve_errors = []
         cls.delete_errors = []
+        cls.list_error = None
+        cls.list_hidden = False
         cls.usage_statuses = []
         cls.uptime_ms = 60_000
         cls.closed = 0
@@ -387,7 +393,14 @@ class FakeBrowsers:
 
         Yields:
             Each match.
+
+        Raises:
+            BaseException: The scripted list error.
         """
+        if FakeState.list_error is not None:
+            raise FakeState.list_error
+        if FakeState.list_hidden:
+            return
         offset = 0
         while True:
             matches = [
@@ -439,7 +452,7 @@ class FakeBrowsers:
         return FakeDetails(
             {
                 "session_id": session_id,
-                "deleted_at": "2026-11-24T00:05:00Z",
+                "deleted_at": None if session_id in FakeState.browsers else "2026-11-24T00:05:00Z",
                 "usage_status": status,
                 "usage": {"uptime_ms": FakeState.uptime_ms},
             }
@@ -1075,6 +1088,10 @@ class FakeUsage:
         if self.billing_error is not None:
             raise self.billing_error
 
+    def pending(self) -> None:
+        """Record the pending call."""
+        self.calls.append("pending")
+
     def release(self, reason: str) -> None:
         """Record the release call.
 
@@ -1277,6 +1294,52 @@ async def test_failed_delete_that_went_through_is_settled() -> None:
     usage = usages[0]
     assert usage.calls == ["reserve", "confirm", "record", "settle"]
     assert usage.measured_ms == 30_000
+
+
+async def test_stale_list_after_a_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold when the list leaves out a browser that Kernel does not report as deleted."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.list_hidden = True
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+
+
+async def test_second_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold and raise from stop when the first delete and the sweep delete both fail."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500) for _ in range(2)]
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
+async def test_failed_list_after_a_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold with no measured time when the sweep list fails after the delete failed."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.list_error = _status_error(kernel.APIStatusError, 500)
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
+async def test_failed_create_browser_gets_the_measured_time_cap() -> None:
+    """Cap the measured time of a browser that a failed create left, as for a created one."""
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    clock = FakeClock()
+    env, _ = _protected(clock=clock)
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    clock.now += 10_000
+    # 300 s funded lifetime + 300 s inactivity timeout + 120 s stop margin.
+    assert env._measured_ms() == 720_000
 
 
 async def test_second_start_is_refused() -> None:
