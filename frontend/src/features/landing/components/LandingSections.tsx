@@ -9,16 +9,14 @@ import * as React from "react";
 import Link from "next/link";
 import { Play } from "@/shared/ui/icons";
 import { cn } from "@/shared/lib/utils";
+import { Button } from "@/shared/ui/primitives/button";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import {
   clamp,
   DISPLAY,
-  Dot,
   HOW_A_RUN_WORKS,
   INK_BG,
   Marks,
-  PILL,
-  PILL_SOFT,
   Ribbon,
   RollText,
   useReducedMotion,
@@ -54,9 +52,9 @@ export function BigStatement() {
       <div className="mt-[90px] grid grid-cols-2 gap-12 max-[860px]:mt-14 max-[860px]:grid-cols-1">
         <div className="col-start-2 max-w-[46ch] max-[860px]:col-start-1">
           <p className="mb-[22px] text-[17px] leading-[1.55]">{msg("landing.big_body")}</p>
-          <Link href={HOW_A_RUN_WORKS} className={cn(PILL, PILL_SOFT)}>
-            <Dot className="text-primary" /> {msg("landing.how_run_works")}
-          </Link>
+          <Button asChild variant="outline">
+            <Link href={HOW_A_RUN_WORKS}>{msg("landing.how_run_works")}</Link>
+          </Button>
         </div>
       </div>
     </section>
@@ -121,7 +119,7 @@ export function Reel() {
             href={HOW_A_RUN_WORKS}
             aria-label={msg("landing.reel_play")}
             className={cn(
-              "grid h-[clamp(52px,5.4vw,76px)] w-[clamp(84px,9vw,128px)] flex-none place-items-center rounded-full bg-[#f3ede6] text-[#1c1612] transition-[transform,background-color] duration-[400ms] hover:scale-[1.06] hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+              "grid h-[clamp(52px,5.4vw,76px)] w-[clamp(84px,9vw,128px)] flex-none place-items-center rounded-xl bg-[#f3ede6] text-[#1c1612] transition-[transform,background-color] duration-[400ms] hover:scale-[1.06] hover:bg-white active:scale-[0.97] focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
               EASE,
             )}
           >
@@ -246,9 +244,9 @@ export function WorkCards({ onPickGoal }: { onPickGoal: (goal: string) => void }
           d="M300 30 C 520 -10, 700 30, 820 70 S 1150 110, 1440 90"
           className="-start-[var(--pad)] top-[50px] z-0 h-[120px] w-[calc(100%+var(--pad)*2)] max-[860px]:hidden"
         />
-        <Link href="/blog" className={cn(PILL, PILL_SOFT, "relative z-[3]")}>
-          <Dot className="text-primary" /> {msg("landing.read_blog")}
-        </Link>
+        <Button asChild variant="outline" className="relative z-[3]">
+          <Link href="/blog">{msg("landing.read_blog")}</Link>
+        </Button>
       </div>
     </section>
   );

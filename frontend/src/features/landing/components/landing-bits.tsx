@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Small pieces that several landing sections share: the pill link, the scroll
+ * Small pieces that several landing sections share: the dot, the scroll
  * hooks, the drawn ribbon, the letter roll and the row of cross marks.
  */
 
@@ -19,11 +19,6 @@ export const DISPLAY = "[font-family:var(--font-display)] [font-optical-sizing:a
 
 /** The always-dark ink color under the hero, reel and finale. */
 export const INK_BG = "bg-[#1c1612] [.dark_&]:bg-[#161210]";
-
-export const PILL =
-  "inline-flex h-9 cursor-pointer items-center gap-2.5 whitespace-nowrap rounded-full px-4 text-xs font-semibold uppercase tracking-[.06em] transition-[background-color,color,transform] duration-300 ease-[cubic-bezier(.16,1,.3,1)] active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary max-[860px]:h-8 max-[860px]:px-3.5";
-export const PILL_GO = "bg-primary-fill text-white hover:bg-primary-hover";
-export const PILL_SOFT = "border border-border bg-card hover:bg-secondary";
 
 /** A 5px dot in the current text color. */
 export function Dot({ className }: { className?: string }) {

@@ -44,7 +44,7 @@ export function LandingPage() {
             <h1
               id={TITLE_ID}
               className={cn(
-                "mb-3.5 ms-1 text-[clamp(26px,3vw,40px)] font-semibold leading-[1.05] tracking-[-.02em] text-[#f3ede6] [text-shadow:0_2px_18px_rgba(0,0,0,.45)] bg-none! [-webkit-text-fill-color:currentColor]!",
+                "mb-3.5 text-center text-[clamp(26px,3vw,40px)] font-semibold leading-[1.05] tracking-[-.02em] text-[#f3ede6] [text-shadow:0_2px_18px_rgba(0,0,0,.45)] bg-none! [-webkit-text-fill-color:currentColor]!",
                 DISPLAY,
               )}
             >

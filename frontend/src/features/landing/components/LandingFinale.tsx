@@ -9,8 +9,9 @@ import * as React from "react";
 import Link from "next/link";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
 import { cn } from "@/shared/lib/utils";
+import { Button } from "@/shared/ui/primitives/button";
 import { msg } from "@/shared/lib/messages";
-import { clamp, DISPLAY, Dot, HOW_A_RUN_WORKS, INK_BG, PILL, PILL_GO, RUN_TARGET, useReducedMotion, useScrollFrame } from "./landing-bits";
+import { clamp, DISPLAY, HOW_A_RUN_WORKS, INK_BG, RUN_TARGET, useReducedMotion, useScrollFrame } from "./landing-bits";
 import { SceneCanvas } from "./SceneCanvas";
 
 const FOOTER_HEAD = "mb-3 text-[11px] font-semibold uppercase tracking-[.1em] text-muted-foreground";
@@ -98,9 +99,9 @@ export function LandingFinale() {
           </h3>
           <div>
             <p className="mb-[22px] max-w-[40ch] text-[17px] text-muted-foreground">{msg("landing.cta_body")}</p>
-            <Link href={RUN_TARGET} className={cn(PILL, PILL_GO, "h-12 px-6 text-[13px] max-[860px]:h-12 max-[860px]:px-6")}>
-              {msg("landing.start_run")} <Dot />
-            </Link>
+            <Button asChild size="lg">
+              <Link href={RUN_TARGET}>{msg("landing.start_run")}</Link>
+            </Button>
           </div>
         </div>
         <footer className="mt-[140px] grid grid-cols-[2fr_1fr_1fr_1fr] gap-6 border-t border-border pt-7 text-sm max-[860px]:mt-[90px] max-[860px]:grid-cols-2">
@@ -137,7 +138,6 @@ export function LandingFinale() {
             </Link>
           </div>
         </footer>
-        <p className="mt-[60px] text-[13px] text-muted-foreground">{msg("landing.legal_line")}</p>
       </div>
     </section>
   );

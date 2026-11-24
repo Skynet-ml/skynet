@@ -7,12 +7,13 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Moon, Sun } from "@/shared/ui/icons";
+import { List, Moon, Sun, X } from "@/shared/ui/icons";
+import { Button } from "@/shared/ui/primitives/button";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
 import { useColorTheme } from "@/shared/providers/theme-provider";
 import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
-import { DISPLAY, Dot, PILL, PILL_GO, RollText, RUN_TARGET, useScrollFrame } from "./landing-bits";
+import { DISPLAY, Dot, RollText, RUN_TARGET, useScrollFrame } from "./landing-bits";
 
 const EASE = "ease-[cubic-bezier(.16,1,.3,1)]";
 const GLASS = "bg-background/85 backdrop-blur-[14px]";
@@ -79,34 +80,25 @@ export function LandingHeader() {
       <header
         ref={headerRef}
         data-scrolled="false"
-        className="group/hdr pointer-events-none fixed inset-x-0 top-0 z-30 grid grid-cols-[auto_1fr_auto] items-start gap-10 px-[var(--pad)] py-[18px] text-foreground max-[860px]:grid-cols-[1fr_auto] max-[860px]:gap-3 max-[860px]:p-3 [&>*]:pointer-events-auto"
+        className="group/hdr pointer-events-none fixed inset-x-0 top-0 z-30 grid grid-cols-[1fr_auto] items-start gap-10 px-[var(--pad)] py-[18px] text-foreground max-[860px]:gap-3 max-[860px]:p-3 [&>*]:pointer-events-auto"
       >
         <Link
           href="/"
           aria-label={msg("legal.chrome.home_aria")}
           className={cn(
-            "-ms-2.5 inline-flex h-11 w-fit items-center rounded-full border border-transparent pe-3.5 ps-2.5 transition-[background-color,border-color] duration-[400ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary max-[860px]:ms-0 max-[860px]:h-10 max-[860px]:px-2.5",
+            "-ms-2.5 inline-flex h-11 w-fit items-center rounded-lg border border-transparent pe-3.5 ps-2.5 transition-[background-color,border-color] duration-[400ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary max-[860px]:ms-0 max-[860px]:h-10 max-[860px]:px-2.5",
             EASE,
             "group-data-[scrolled=true]/hdr:border-border group-data-[scrolled=true]/hdr:bg-background/85 group-data-[scrolled=true]/hdr:backdrop-blur-[14px]",
           )}
         >
           <AnimatedWordmark size={22} withMark className="max-[860px]:[&_svg]:h-[22px] max-[860px]:[&_svg]:w-auto" />
         </Link>
-        <p
-          className={cn(
-            "max-w-[24ch] pt-2.5 text-base leading-[1.3] transition-[opacity,transform,filter] duration-500 max-[860px]:hidden",
-            EASE,
-            "group-data-[scrolled=true]/hdr:pointer-events-none group-data-[scrolled=true]/hdr:-translate-y-2.5 group-data-[scrolled=true]/hdr:opacity-0 group-data-[scrolled=true]/hdr:blur-[6px]",
-          )}
-        >
-          {msg("landing.statement")}
-        </p>
-        <div className={cn("flex h-11 items-center gap-1 rounded-full border border-border p-[3px] max-[860px]:h-10", GLASS)}>
-          <div role="radiogroup" aria-label={msg("landing.theme_label")} className="relative flex rounded-full">
+        <div className={cn("flex h-11 items-center gap-1 rounded-lg border border-border p-1 max-[860px]:h-10", GLASS)}>
+          <div role="radiogroup" aria-label={msg("landing.theme_label")} className="relative flex">
             <span
               aria-hidden="true"
               className={cn(
-                "absolute start-0 top-0 size-9 rounded-full bg-secondary transition-transform duration-[450ms] max-[860px]:size-8",
+                "absolute start-0 top-0 size-8 rounded-md bg-muted transition-transform duration-[450ms] max-[860px]:size-7",
                 EASE,
                 dark && "translate-x-full rtl:-translate-x-full",
               )}
@@ -119,30 +111,27 @@ export function LandingHeader() {
                 aria-checked={resolved === mode}
                 aria-label={msg(mode === "light" ? "landing.theme_light" : "landing.theme_dark")}
                 onClick={() => setTheme(mode)}
-                className="relative grid size-9 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors hover:text-foreground aria-checked:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary max-[860px]:size-8"
+                className="relative grid size-8 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors duration-200 hover:text-foreground aria-checked:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 max-[860px]:size-7"
               >
                 {mode === "light" ? <Sun className="size-4" /> : <Moon className="size-4" />}
               </button>
             ))}
           </div>
           <span aria-hidden="true" className="mx-0.5 h-4 w-px bg-border max-[860px]:hidden" />
-          <Link href={RUN_TARGET} className={cn(PILL, PILL_GO, "max-[860px]:hidden")}>
-            {msg("landing.start_run")} <Dot />
-          </Link>
-          <button
+          <Button asChild size="sm" className="max-[860px]:hidden">
+            <Link href={RUN_TARGET}>{msg("landing.start_run")}</Link>
+          </Button>
+          <Button
             ref={buttonRef}
-            type="button"
+            variant="ghost"
+            size="sm"
             aria-expanded={open}
             aria-controls="landing-menu"
             onClick={() => setOpen((v) => !v)}
-            className={cn(PILL, "text-foreground hover:bg-secondary")}
           >
+            {open ? <X aria-hidden="true" /> : <List aria-hidden="true" />}
             {msg(open ? "landing.menu_close" : "landing.menu")}
-            <span aria-hidden="true" className={cn("inline-flex gap-[3px] transition-transform duration-[450ms]", EASE, open && "rotate-90")}>
-              <Dot />
-              <Dot />
-            </span>
-          </button>
+          </Button>
         </div>
       </header>
 
