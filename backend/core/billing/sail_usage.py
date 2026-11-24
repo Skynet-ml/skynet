@@ -19,7 +19,7 @@ import email.utils
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, Decimal, localcontext
 from typing import Any
 
 import httpx
@@ -308,13 +308,43 @@ def _creation_usd(spend: Mapping[str, Any], fee: Any) -> Decimal:
     return exact_nonnegative(spend["creation_count"]) * exact_nonnegative(fee)
 
 
+def _billed_minutes(spend: Mapping[str, Any], measured: dict[str, Decimal]) -> dict[str, Decimal]:
+    """Scale the measured counters up to whole running minutes.
+
+    Sail adds usage to the bill "in one-minute increments" (_PRICING_URL).
+    Without account prices no Sail cost is the floor, so this code rounds
+    the running time up to whole minutes and scales each counter by the
+    same factor. A box with 2 vCPU for 61 s then prices as 2 vCPU for 120 s.
+
+    Args:
+        spend: The box's spend line.
+        measured: The measured resource-second counters.
+
+    Returns:
+        The counters at whole running minutes.
+    """
+    running = spend.get("running_seconds")
+    running = exact_nonnegative(running) if running is not None else Decimal(0)
+    if running == 0:
+        # With no running time there is no factor; rounding each counter up
+        # alone never charges less than its own measured seconds.
+        return {
+            counter: (value / 60).to_integral_value(rounding=ROUND_CEILING) * 60 for counter, value in measured.items()
+        }
+    billed = (running / 60).to_integral_value(rounding=ROUND_CEILING) * 60
+    # Round up, so an inexact quotient never charges less than Sail bills.
+    with localcontext() as context:
+        context.rounding = ROUND_CEILING
+        return {counter: value * billed / running for counter, value in measured.items()}
+
+
 def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any]) -> Decimal:
     """Price one box from its spend line.
 
     The measured usage is priced per second, plus the creation charge
     unless Sail waives it. With account prices, Sail's reported rates are
     used and the result is never below Sail's own cost. Otherwise the
-    admitted rates are used, on counters rounded up to whole minutes.
+    admitted rates are used, on usage rounded up to whole running minutes.
 
     Args:
         spend: The box's spend line with the report's pricing flags.
@@ -346,13 +376,7 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
                 fee = exact_nonnegative(rate) / _NANOS_PER_USD
         measured = {counter: exact_nonnegative(spend[counter]) for counter in per_second}
         if not configured:
-            # Sail adds usage to the bill "in one-minute increments"
-            # (_PRICING_URL). Without account prices no Sail cost is the
-            # floor, so each counter rounds up to whole minutes here.
-            measured = {
-                counter: (value / 60).to_integral_value(rounding=ROUND_CEILING) * 60
-                for counter, value in measured.items()
-            }
+            measured = _billed_minutes(spend, measured)
         cost = sum((measured[counter] * price for counter, price in per_second.items()), Decimal(0)) + _creation_usd(
             spend, fee
         )

@@ -425,17 +425,53 @@ def test_settle_rounds_usage_up_to_whole_minutes_when_sail_has_no_prices() -> No
     snapshot = quote_sail_sandbox(CREATE).price_snapshot
     line = {
         **SPEND,
+        "running_seconds": 61,
         "vcpu_seconds": 61,
         "memory_gib_seconds": 61,
         "state_disk_gib_seconds": 61,
         "pricing_configured": False,
         "creation_fees_waived": True,
     }
-    two_minutes = {**line, "vcpu_seconds": 120, "memory_gib_seconds": 120, "state_disk_gib_seconds": 120}
+    two_minutes = {
+        **line,
+        "running_seconds": 120,
+        "vcpu_seconds": 120,
+        "memory_gib_seconds": 120,
+        "state_disk_gib_seconds": 120,
+    }
     assert sail_actual_usd(line, snapshot) == sail_actual_usd(two_minutes, snapshot)
     expected = 120 * (Decimal("0.015") + Decimal("0.008") + Decimal("0.0007")) / 3600
     assert abs(sail_actual_usd(line, snapshot) - expected) < Decimal("1e-20")
     assert sail_actual_usd({**line, "vcpu_seconds": 60}, snapshot) < sail_actual_usd(line, snapshot)
+
+
+def test_settle_bills_whole_running_minutes_of_a_two_vcpu_box() -> None:
+    """Price 2 vCPU for 61 s the same as 2 vCPU for 120 s, because Sail bills whole running minutes."""
+    snapshot = quote_sail_sandbox(CREATE).price_snapshot
+    line = {
+        **SPEND,
+        "running_seconds": 61,
+        "vcpu_seconds": 122,
+        "memory_gib_seconds": 244,
+        "state_disk_gib_seconds": 61,
+        "pricing_configured": False,
+        "creation_fees_waived": True,
+    }
+    two_minutes = {
+        **line,
+        "running_seconds": 120,
+        "vcpu_seconds": 240,
+        "memory_gib_seconds": 480,
+        "state_disk_gib_seconds": 120,
+    }
+    assert sail_actual_usd(line, snapshot) == sail_actual_usd(two_minutes, snapshot)
+    # With no running time, each counter still rounds up alone.
+    idle = {**line, "running_seconds": 0}
+    assert sail_actual_usd(idle, snapshot) == sail_actual_usd(
+        {**idle, "vcpu_seconds": 180, "memory_gib_seconds": 300, "state_disk_gib_seconds": 120}, snapshot
+    )
+    del idle["running_seconds"]
+    assert sail_actual_usd(idle, snapshot) == sail_actual_usd({**line, "running_seconds": 0}, snapshot)
 
 
 def test_settle_recomputes_sails_cost_with_one_creation_charge() -> None:
