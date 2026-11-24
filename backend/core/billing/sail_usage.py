@@ -322,20 +322,28 @@ def _billed_minutes(spend: Mapping[str, Any], measured: dict[str, Decimal]) -> d
 
     Returns:
         The counters at whole running minutes.
+
+    Raises:
+        UsagePendingError: A counter has usage but the line has no running time.
     """
     running = spend.get("running_seconds")
     running = exact_nonnegative(running) if running is not None else Decimal(0)
     if running == 0:
-        # With no running time there is no factor; rounding each counter up
-        # alone never charges less than its own measured seconds.
-        return {
-            counter: (value / 60).to_integral_value(rounding=ROUND_CEILING) * 60 for counter, value in measured.items()
-        }
+        # The API marks running_seconds as required, so usage without it is
+        # a broken line; the hold stays pending instead of a guessed price.
+        if any(value > 0 for value in measured.values()):
+            raise UsagePendingError("The Sail spend report has usage but no running time for the box.")
+        return measured
     billed = (running / 60).to_integral_value(rounding=ROUND_CEILING) * 60
-    # Round up, so an inexact quotient never charges less than Sail bills.
+    # Sail can count disk-seconds outside the running time and round them by
+    # itself, so the charge is never below either rule. Round up, so an
+    # inexact quotient never charges less than Sail bills.
     with localcontext() as context:
         context.rounding = ROUND_CEILING
-        return {counter: value * billed / running for counter, value in measured.items()}
+        return {
+            counter: max(value * billed / running, (value / 60).to_integral_value(rounding=ROUND_CEILING) * 60)
+            for counter, value in measured.items()
+        }
 
 
 def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any]) -> Decimal:

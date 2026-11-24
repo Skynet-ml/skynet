@@ -465,13 +465,33 @@ def test_settle_bills_whole_running_minutes_of_a_two_vcpu_box() -> None:
         "state_disk_gib_seconds": 120,
     }
     assert sail_actual_usd(line, snapshot) == sail_actual_usd(two_minutes, snapshot)
-    # With no running time, each counter still rounds up alone.
+    # Usage with no running time is a broken line, so the hold stays pending.
     idle = {**line, "running_seconds": 0}
-    assert sail_actual_usd(idle, snapshot) == sail_actual_usd(
-        {**idle, "vcpu_seconds": 180, "memory_gib_seconds": 300, "state_disk_gib_seconds": 120}, snapshot
-    )
+    with pytest.raises(UsagePendingError, match="no running time"):
+        sail_actual_usd(idle, snapshot)
     del idle["running_seconds"]
-    assert sail_actual_usd(idle, snapshot) == sail_actual_usd({**line, "running_seconds": 0}, snapshot)
+    with pytest.raises(UsagePendingError, match="no running time"):
+        sail_actual_usd(idle, snapshot)
+    empty = {**idle, "vcpu_seconds": 0, "memory_gib_seconds": 0, "state_disk_gib_seconds": 0}
+    assert sail_actual_usd(empty, snapshot) == 0
+
+
+def test_settle_never_bills_disk_below_its_own_whole_minutes() -> None:
+    """Round disk-seconds up alone when they pass the scaled running time."""
+    snapshot = quote_sail_sandbox(CREATE).price_snapshot
+    # 1 GiB of disk for 119 s of running time, but Sail counts 121
+    # disk-seconds. Scaled to 120 s they are about 122, and alone they round to 180.
+    line = {
+        **SPEND,
+        "running_seconds": 119,
+        "vcpu_seconds": 0,
+        "memory_gib_seconds": 0,
+        "state_disk_gib_seconds": 121,
+        "pricing_configured": False,
+        "creation_fees_waived": True,
+    }
+    rounded = {**line, "running_seconds": 120, "state_disk_gib_seconds": 180}
+    assert sail_actual_usd(line, snapshot) == sail_actual_usd(rounded, snapshot)
 
 
 def test_settle_recomputes_sails_cost_with_one_creation_charge() -> None:

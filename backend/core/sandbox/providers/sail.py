@@ -859,7 +859,10 @@ class SailEnvironment(SandboxEnvironment):
             if sailbox is None:
                 await asyncio.to_thread(usage.release, refused=self._create_failed and self._create_refused)
                 return None
-            if not self._terminated:
+            # A concurrent stop() can terminate the box during the bind below,
+            # so this teardown acts only on the outcome it saw itself.
+            terminated = self._terminated
+            if not terminated:
                 # The box can still run. Keep its handle, its job entry and its
                 # usage before any ledger call can fail, so a later stop() or
                 # the job sweep terminates and settles it; a found box of a
@@ -870,7 +873,11 @@ class SailEnvironment(SandboxEnvironment):
             if usage.sailbox_id is None:
                 # A create in its grace returns the handle without a confirm.
                 await asyncio.to_thread(usage.bind, sailbox.sailbox_id)
-            if not self._terminated:
+            if not terminated:
+                if self._usage is not usage:
+                    # A later teardown took the usage during the bind, so that
+                    # teardown settles the hold, with one spend task.
+                    return None
                 await self._mark_pending(usage)
                 raise UsagePendingError("The Sailbox did not terminate, so its usage stays pending.")
             # Sail shows the spend minutes after the terminate, longer than a
@@ -895,6 +902,9 @@ class SailEnvironment(SandboxEnvironment):
             return pending
         except BaseException:
             # A cancel during a ledger call must not leave the hold reserved.
+            # stop() shields the teardown, so only an event-loop shutdown
+            # cancels here; a terminated box then keeps a pending hold with no
+            # spend task, and reconciliation settles it.
             await self._pend_after_cancel(usage)
             raise
 

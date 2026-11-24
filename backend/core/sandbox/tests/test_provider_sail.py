@@ -1684,6 +1684,62 @@ async def test_each_stop_sees_the_failure_of_the_teardown_it_awaited(fake_sdk: F
     assert made[0].names().count("settle") == 1
 
 
+async def test_a_stop_during_a_bind_starts_one_spend_task(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start one spend task when a concurrent stop terminates the box during the bind of an earlier teardown.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Blocks the first bind and counts the spend tasks.
+    """
+    bind = FakeUsage.bind
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_bind(self: FakeUsage, sailbox_id: str) -> None:
+        """Block the first bind until the test releases it.
+
+        Args:
+            self: The fake reservation.
+            sailbox_id: The Sail id of the box.
+        """
+        if not entered.is_set():
+            entered.set()
+            release.wait(5)
+        bind(self, sailbox_id)
+
+    spends: list[Any] = []
+    settle_spend = sail._settle_spend
+
+    async def counted(usage: Any) -> None:
+        """Count one spend task, then run it.
+
+        Args:
+            usage: The usage reservation of the box.
+        """
+        spends.append(usage)
+        await settle_spend(usage)
+
+    monkeypatch.setattr(FakeUsage, "bind", blocking_bind)
+    monkeypatch.setattr(sail, "_settle_spend", counted)
+    fake_sdk.create_error = FakeApiError(500)
+    fake_sdk.create_makes_box = True
+    fake_sdk.terminate_fails.add("sb-1")
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    assert await asyncio.to_thread(entered.wait, 5)
+    fake_sdk.terminate_fails.clear()
+    await env.stop()
+    release.set()
+    with pytest.raises(SandboxInfraError, match="create the Sailbox"):
+        await starting
+    await _spent()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert len(spends) == 1
+    assert made[0].names().count("settle") == 1
+    # The first teardown leaves the hold to the stop that settles it.
+    assert "pending" not in made[0].names()
+
+
 async def test_a_failed_pending_mark_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
     """Try the pending mark again after it fails, and stop once it works.
 
