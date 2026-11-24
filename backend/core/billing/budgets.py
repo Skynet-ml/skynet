@@ -96,7 +96,7 @@ class BudgetTotalConflictError(BudgetConflictError):
         Args:
             message: Internal diagnostic for logs and focused tests.
             current_total_cents: Last total accepted by the ledger.
-            minimum_total_cents: Lowest total that covers settled and reserved work.
+            minimum_total_cents: Lowest total that covers the run's settled and reserved work.
         """
         super().__init__(message)
         self.current_total_cents = current_total_cents
