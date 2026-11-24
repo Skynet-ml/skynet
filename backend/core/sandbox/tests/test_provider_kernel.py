@@ -1243,6 +1243,40 @@ async def test_failed_create_with_two_swept_browsers_keeps_the_hold() -> None:
     assert usages[0].no_browser is False
 
 
+def test_protected_box_refuses_more_than_the_priced_memory() -> None:
+    """Refuse a protected spec above 8 GiB, because Kernel publishes no price for a larger browser."""
+    with pytest.raises(SandboxSpecError, match="8 GiB"):
+        _protected(_spec(operation_key="box-op", resources=ResourceRequest(cpus=1, memory_mb=8 * 1024 + 1)))
+
+
+async def test_late_stop_of_an_ended_browser_bills_no_extra_time() -> None:
+    """Cap the measured time at the funded lifetime plus one inactivity timeout when Kernel already ended the browser."""
+    FakeState.retrieve_errors = [_status_error(kernel.APIStatusError, 500) for _ in range(40)]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    await env.start()
+    FakeState.browsers.clear()
+    clock.now += 10_000
+    await env.stop()
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.receipt == {}
+    # 300 s funded lifetime + 300 s inactivity timeout.
+    assert usage.measured_ms == 600_000
+
+
+async def test_sweep_counts_an_already_ended_browser_as_gone() -> None:
+    """Settle the one swept browser when its delete finds that Kernel already ended it."""
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.leak_on_error = True
+    env, usages = _protected()
+    FakeState.delete_errors = [_status_error(kernel.NotFoundError, 404)]
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+    assert usages[0].measured_ms is not None
+
+
 async def test_boxes_with_one_name_do_not_sweep_each_other() -> None:
     """Keep and leave unbilled the browser of another box that shares ``spec.name``."""
     other, _ = _protected(_spec(name="same", operation_key="box-a"))

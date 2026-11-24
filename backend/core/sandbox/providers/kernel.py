@@ -25,9 +25,10 @@ from there. Changes:
   is written. Harbor's ``playwright_execute``, directory transfers,
   profiles, proxies, viewports and other browser options are left out.
 - ``stop_job_sandboxes`` finds the browsers of a job by their tags.
-- With a budget the box is protected (SKY-553). It reserves a headful 8 or
-  16 GiB browser before the create call and confirms it after. A capacity
-  answer fails the start, because the capacity wait must not hold a
+- With a budget the box is protected (SKY-553). It reserves a headful 8 GiB
+  browser before the create call and confirms it after; a spec that needs
+  more memory is refused, because Kernel publishes no price for it. A
+  capacity answer fails the start, because the capacity wait must not hold a
   reservation. Commands stop at the funded end. Kernel has no hard session
   lifetime, so a browser that no stop deletes ends at its inactivity timeout,
   which the reservation funds. After the delete, the box reads Kernel's
@@ -57,7 +58,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
 from core.billing.budgets import BudgetError
-from core.billing.kernel_usage import KernelUsageReservation
+from core.billing.kernel_usage import HEADFUL_MEMORY_GIB, KernelUsageReservation
 from core.billing.runtime import UsagePendingError
 
 from ..capabilities import EnvironmentCapabilities, SandboxSpecError
@@ -241,11 +242,17 @@ class KernelEnvironment(SandboxEnvironment):
             clock: The clock for waits and timings.
 
         Raises:
-            SandboxSpecError: A protected box has no operation key.
+            SandboxSpecError: A protected box has no operation key, or needs
+                more memory than the priced 8 GiB browser.
         """
         if budget is not None:
             if spec.operation_key is None:
                 raise SandboxSpecError("A protected Kernel sandbox needs an operation key.")
+            memory_mb = spec.resources.memory_mb
+            if memory_mb is not None and memory_mb > HEADFUL_MEMORY_GIB * 1024:
+                raise SandboxSpecError(
+                    f"A protected Kernel sandbox has at most {HEADFUL_MEMORY_GIB} GiB, the only priced size."
+                )
             self.capabilities = dataclasses.replace(KERNEL_CAPABILITIES, protected=True)
         super().__init__(spec)
         self._budget = budget
@@ -255,6 +262,7 @@ class KernelEnvironment(SandboxEnvironment):
         self._settle_error: Exception | None = None
         self._created_at: float | None = None
         self._funded_until: float | None = None
+        self._idle_timeout: int | None = None
         self._pacing = pacing
         self._at_capacity = at_capacity
         self._clock = clock or SYSTEM_CLOCK
@@ -358,8 +366,8 @@ class KernelEnvironment(SandboxEnvironment):
             "tags": {**spec.tags, BOX_TAG: self._box_tag},
             "timeout": CREATE_TIMEOUT,
         }
-        # Kernel prices the 8 and 16 GiB headful browsers, so a protected box
-        # asks for its size explicitly; any other size fails at the reservation.
+        # Only the 8 GiB headful browser is priced, so a protected box asks
+        # for its size explicitly; the constructor refuses a larger spec.
         memory = _memory_request(spec.resources.memory_mb, container=self._container or self._budget is not None)
         if memory is not None:
             options["memory"] = memory
@@ -436,6 +444,7 @@ class KernelEnvironment(SandboxEnvironment):
             raise
         if usage is not None:
             self._funded_until = self._created_at + self.spec.lifetime_seconds
+            self._idle_timeout = options["timeout_seconds"]
             self._billing_call = asyncio.ensure_future(asyncio.to_thread(usage.confirm, self._browser))
             # The teardown awaits the same call, so a settle never races it.
             await asyncio.shield(self._billing_call)
@@ -571,12 +580,20 @@ class KernelEnvironment(SandboxEnvironment):
     def _measured_ms(self) -> int | None:
         """Return the wall time from the create call until now.
 
+        A protected browser's time is capped at its funded lifetime plus one
+        inactivity timeout. A delete that finds no browser means Kernel ended
+        it, at the latest at that point, so a late stop bills no extra time.
+
         Returns:
             The milliseconds, or ``None`` when no create call went out.
         """
         if self._created_at is None:
             return None
-        return math.ceil((self._clock.monotonic() - self._created_at) * 1000)
+        measured = math.ceil((self._clock.monotonic() - self._created_at) * 1000)
+        if self._funded_until is not None and self._idle_timeout is not None:
+            latest = math.ceil((self._funded_until - self._created_at + self._idle_timeout) * 1000)
+            measured = min(measured, latest)
+        return measured
 
     async def _settle(
         self,
@@ -677,7 +694,7 @@ class KernelEnvironment(SandboxEnvironment):
             job_id: The value of the ``JOB_TAG`` tag.
 
         Returns:
-            The number of browsers that the sweep deleted.
+            The number of browsers that the sweep found gone.
         """
         if cls.client_cls is None:
             return 0
@@ -972,7 +989,8 @@ async def _delete_tagged(
         skip: A session id that is already deleted.
 
     Returns:
-        The listed browsers other than ``skip``, and those that Kernel deleted.
+        The listed browsers other than ``skip``, and those that are gone:
+        deleted now, or already ended by Kernel.
     """
     # The list pages by offset, so a delete during the listing would move
     # later browsers into pages that the listing already passed.
@@ -982,9 +1000,9 @@ async def _delete_tagged(
         try:
             await client.browsers.delete_by_id(item.session_id)
         except Exception as error:
-            if NotFoundError is not None and isinstance(error, NotFoundError):
+            # A browser that Kernel already ended counts as gone.
+            if NotFoundError is None or not isinstance(error, NotFoundError):
+                logger.warning("Kernel browser %s did not stop: %s", item.session_id, type(error).__name__)
                 continue
-            logger.warning("Kernel browser %s did not stop: %s", item.session_id, type(error).__name__)
-            continue
         deleted.append(item)
     return listed, deleted

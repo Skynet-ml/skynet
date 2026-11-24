@@ -131,6 +131,8 @@ def test_quote_covers_lifetime_idle_timeout_and_stop_margin() -> None:
         {"lifetime_ms": 259_200_001},
         {"timeout_seconds": True},
         {"memory_gib": 4},
+        {"memory_gib": 16},
+        {"memory_gib": 8.0},
         {"headless": True},
         {"gpu": True},
     ],
@@ -143,13 +145,6 @@ def test_quote_refuses_an_unbounded_or_unpriced_browser(change: dict[str, Any]) 
     """
     with pytest.raises(UnpricedOperationError):
         quote_kernel_browser({**REQUEST, **change})
-
-
-def test_sixteen_gib_browser_costs_twice_the_eight_gib_rate() -> None:
-    """Price a 16 GiB headful browser per GiB-second, so it costs twice the 8 GiB browser."""
-    quote = quote_kernel_browser({**REQUEST, "memory_gib": 16})
-    assert quote.maximum.total == 2 * quote_kernel_browser(REQUEST).maximum.total
-    assert quote.price_snapshot["headful_second_usd"] == "0.0002666672"
 
 
 def test_reserve_then_settle_charges_the_reported_uptime(database: Engine) -> None:
