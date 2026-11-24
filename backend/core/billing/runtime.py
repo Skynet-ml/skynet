@@ -115,8 +115,9 @@ class BudgetRuntime:
             stop: Optional shared stop latch for all concurrent optimizer lanes.
             wait_timeout: Maximum wait for covered work before reporting uncertainty.
             keep_cents: Cents of a capped limit, and of the account's funds,
-                that the coverage must leave free. Only a continuous-plan
-                check keeps them, for the run's first lease (SKY-923).
+                that the coverage must leave free. Only the check of a ``setup_in_total`` budget
+                (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps them,
+                for the run's first lease (SKY-923).
             keep_funds: Whether ``keep_cents`` also applies to the account's funds.
         """
         self.service = service
@@ -253,8 +254,9 @@ class BudgetRuntime:
         """Refuse an operation that only this runtime's own blocked sandboxes keep out.
 
         Setup work is bounded by the account's funds alone (SKY-925), except
-        for a continuous-plan budget, whose limit also bounds setup. A setup
-        check runs its samples one at a time inside boxes it opened itself, so
+        for a ``setup_in_total`` budget (continuous-plan cycles, or accounts
+        that turn off wallet setup billing), whose limit also bounds setup. A
+        setup check runs its samples one at a time inside boxes it opened itself, so
         its pinned coverage never frees funds or limit while it waits. A run's lanes share
         this runtime, and a box frees its coverage when its work ends. A
         snapshot hold stays for the whole run. A run therefore refuses early
@@ -272,7 +274,7 @@ class BudgetRuntime:
         Returns:
             The refusal to raise instead of waiting, or None when waiting may help.
             In the setup phase it is an ``AccountFundsError`` for the funds, or
-            a ``BudgetInsufficientError`` for a continuous-plan limit. In the run phase
+            a ``BudgetInsufficientError`` for a ``setup_in_total`` limit. In the run phase
             it is the stop latch's ``BudgetReached``, after the budget stopped
             admitting work, like any other run refusal.
         """
@@ -289,7 +291,7 @@ class BudgetRuntime:
             )
         if self.phase != "setup" and not every_box_waits:
             return None
-        # Only a continuous-plan budget's limit refuses setup work (SKY-925).
+        # Only the limit of a setup_in_total budget refuses setup work (SKY-925).
         owner = "check's" if self.phase == "setup" else "run's"
         message = (
             f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this {owner} "

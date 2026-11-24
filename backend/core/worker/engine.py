@@ -23,7 +23,6 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1677,7 +1676,7 @@ class BackgroundWorker:
         """
         snapshot: dict[str, Any] | None = None
         try:
-            raw = asdict(gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username))
+            raw = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username).limit_view()
             raw.pop("username", None)
             raw.pop("account_available_cents", None)
             snapshot = json.loads(json.dumps(raw, default=str))

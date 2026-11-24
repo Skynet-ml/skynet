@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from sqlalchemy import Engine, create_engine, func, select
 from sqlalchemy.orm import Session
 
 from core.api.routers import execution_budgets
+from core.api.routers.optimizations._local import execution_budget_view
 from core.billing.budget_amounts import cent_units
 from core.billing.budgets import (
     AccountFundsError,
@@ -553,6 +555,35 @@ def test_a_continuous_plan_budget_counts_setup_against_its_limit(engine: Engine)
     assert lowered.value.minimum_total_cents == 60
     with pytest.raises(BudgetInsufficientError):
         _reserve(service, budget.id, "run-lease", phase="run", max_cents=41)
+
+
+def test_the_job_view_counts_setup_spend_of_a_setup_in_total_budget(engine: Engine) -> None:
+    """Report setup in a ``setup_in_total`` job's run spend, so the run notice suggests a limit update_total accepts."""
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 100, idempotency_key="job-view", setup_in_total=True)
+    setup = _reserve(service, budget.id, "setup-check", max_cents=60)
+    service.mark_dispatched(setup.id, "alice")
+    service.settle(setup.id, "alice", evidence_key="setup-usage", actual_cents=60, evidence={"usage": "setup"})
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    _reserve(service, budget.id, "run-lease", phase="run", max_cents=10)
+
+    view = execution_budget_view(
+        SimpleNamespace(engine=engine), {"execution_budget_id": budget.id, "username": "alice"}
+    )
+
+    assert view is not None
+    assert view["run_spent_cents"] == 60
+    assert "username" not in view
+    assert "account_available_cents" not in view
+    # RunLifecycleNotice.tsx suggests run spend plus reservations plus one cent.
+    suggested = int(view["run_spent_cents"] + view["reserved_cents"]) + 1
+    current = service.get(budget.id, "alice")
+    assert (
+        service.update_total(budget.id, "alice", suggested, expected_revision=current.revision).total_cents == suggested
+    )
 
 
 def test_a_wizard_budget_leaves_setup_out_of_its_limit(engine: Engine) -> None:

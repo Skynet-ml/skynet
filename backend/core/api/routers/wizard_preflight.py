@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from ...billing import StripeBillingService
+from ...billing.budget_amounts import CENT_SCALE
 from ...billing.budgets import BudgetError, BudgetService
 from ...billing.byok_bridge import _model_config_dicts
 from ...billing.byok_vault import safe_connection_params
@@ -193,7 +194,9 @@ def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUs
         None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
     )
     if not budget.uncapped:
-        require_funded_lease(budget.total_cents, spendable)
+        # Count the spend against the limit as submit does, so that a
+        # setup_in_total budget gets the same answer here and at submit.
+        require_funded_lease(budget.total_cents, spendable, spent_units=int(budget.limit_spent_cents * CENT_SCALE))
     elif spendable is not None:
         require_one_lease(spendable, from_balance=True)
 

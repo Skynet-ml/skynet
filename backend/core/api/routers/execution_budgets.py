@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -71,9 +70,7 @@ def budget_response(snapshot: BudgetSnapshot) -> ExecutionBudgetResponse:
     Returns:
         Response whose fractional amounts are decimal strings in JSON.
     """
-    # The budget card reads run_spent_cents as the spend against the limit, so a
-    # continuous-plan budget, whose limit also counts setup, reports both (SKY-925).
-    return ExecutionBudgetResponse.model_validate({**asdict(snapshot), "run_spent_cents": snapshot.limit_spent_cents})
+    return ExecutionBudgetResponse.model_validate(snapshot.limit_view())
 
 
 def budget_http_error(error: BudgetError) -> HTTPException:
@@ -110,9 +107,10 @@ def require_one_lease(total_cents: int, *, from_balance: bool = False, spent_uni
 
     A run takes its budget in leases of :data:`CHUNK_CENTS`, so a smaller
     limit ends the run before its first paid step (SKY-914). Setup checks
-    bill only the wallet, so they leave the whole limit to the run (SKY-925).
-    A continuous-plan check still spends from the limit, so its lease counts
-    only the room the check left (SKY-923).
+    bill only the wallet, so they leave the whole limit to the run (SKY-925). The check of a
+    ``setup_in_total`` budget (continuous-plan cycles, or accounts that turn off wallet setup
+    billing) still spends from the limit, so its lease counts only the room the check left
+    (SKY-923).
 
     Args:
         total_cents: The run's approved spending limit.

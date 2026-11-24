@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import asdict
 from typing import Any
 
 from ....billing.budgets import BudgetService
@@ -106,8 +105,10 @@ def execution_budget_view(job_store: Any, job_data: dict[str, Any]) -> dict[str,
     """
     execution_budget = (job_data.get("terminal_evidence") or {}).get("execution_budget")
     if job_data.get("execution_budget_id") is not None and getattr(job_store, "engine", None) is not None:
-        execution_budget = asdict(
-            BudgetService(engine=job_store.engine).get(job_data["execution_budget_id"], job_data["username"])
+        execution_budget = (
+            BudgetService(engine=job_store.engine)
+            .get(job_data["execution_budget_id"], job_data["username"])
+            .limit_view()
         )
         execution_budget.pop("username", None)
         execution_budget.pop("account_available_cents", None)

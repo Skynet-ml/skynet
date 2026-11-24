@@ -218,8 +218,8 @@ def test_data_tool_says_the_candidate_gets_only_input(harness: Any) -> None:
     assert "The candidate gets only input" in json.dumps(schema)
 
 
-def test_limit_argument_says_the_setup_check_bills_the_balance(harness: Any) -> None:
-    """Tell the agent that the setup check bills the balance and the limit needs one lease (SKY-925).
+def test_limit_argument_says_the_setting_decides_what_the_setup_check_bills(harness: Any) -> None:
+    """Tell the agent that the setup billing setting decides what setup bills, and the limit needs one lease (SKY-925).
 
     Args:
         harness: MCP client, database engine and recorded calls.
@@ -230,7 +230,7 @@ def test_limit_argument_says_the_setup_check_bills_the_balance(harness: Any) -> 
     tools = {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
     for name in ("repo_draft_preflight", "repo_draft_submit"):
         description = tools[name]["inputSchema"]["properties"]["max_cost_cents"]["description"]
-        assert "The setup check bills the balance, not this limit" in description
+        assert "setup billing setting decides whether the setup check bills the balance or this limit" in description
         assert f"the limit must be at least {CHUNK_CENTS} cents" in description
 
 
@@ -625,6 +625,34 @@ def test_review_and_submit_raise_a_small_floor_to_one_lease(harness: Any, monkey
 
     assert review["min_max_cost_cents"] == CHUNK_CENTS
     assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS
+    assert calls["submits"] == []
+
+
+def test_review_and_submit_keep_one_lease_after_setup_when_setup_counts_in_the_limit(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add one lease to the floor when the account counts setup against the limit (SKY-925).
+
+    The setup check then spends up to the floor from the limit, and submit needs
+    one lease of the room left, so a lower minimum would pass review and fail at submit.
+
+    Args:
+        harness: MCP client, database engine and recorded calls.
+        monkeypatch: Sets a floor, turns local mode off and turns off wallet setup billing.
+    """
+    client, _engine, calls = harness
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(remote_mcp_repo, "repo_floor_cents", lambda spec, http_client: (30, []))
+    monkeypatch.setattr(remote_mcp_repo, "bills_setup_from_wallet", lambda engine, username: False)
+    draft_id = _complete_draft(client)
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    text = _error_text(
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": CHUNK_CENTS + 29, "confirm": True})
+    )
+
+    assert review["min_max_cost_cents"] == CHUNK_CENTS + 30
+    assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS + 30
     assert calls["submits"] == []
 
 

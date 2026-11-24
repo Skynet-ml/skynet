@@ -4,6 +4,7 @@ import { test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { msg } from "@/shared/lib/messages";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { setClientLocale } from "@/shared/lib/runtime-locale";
 import { setServerMessages } from "@/shared/lib/runtime-messages";
@@ -17,7 +18,7 @@ registerHooks({
   },
 });
 const { ExecutionBudgetProvider } = await import("../hooks/use-execution-budget");
-const { TotalBudgetCard, runLedger } = await import("./TotalBudgetCard");
+const { TotalBudgetCard, limitExplainerKey, runLedger } = await import("./TotalBudgetCard");
 
 setServerMessages(buildActiveCatalog("en"), "en");
 setClientLocale("en");
@@ -72,4 +73,12 @@ void test("the budget ledger counts the run's own spend and holds, not the setup
     spent: "40.25",
     reserved: "12.5",
   });
+});
+
+void test("the limit tooltip says setup counts in the limit only when the account turned off wallet setup billing", () => {
+  assert.equal(limitExplainerKey(true), "submit.budget.explainer");
+  assert.equal(limitExplainerKey(null), "submit.budget.explainer");
+  assert.equal(limitExplainerKey(false), "submit.budget.explainer.setup_in_limit");
+  assert.match(msg(limitExplainerKey(true)), /paid from your balance/);
+  assert.match(msg(limitExplainerKey(false)), /count against this limit/);
 });

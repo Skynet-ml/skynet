@@ -3548,6 +3548,7 @@ export type MessageKey =
   | "submit.budget.error.fraction"
   | "submit.budget.error.invalid"
   | "submit.budget.explainer"
+  | "submit.budget.explainer.setup_in_limit"
   | "submit.budget.external_endpoint_fees"
   | "submit.budget.label"
   | "submit.budget.limit_too_low"
@@ -7441,9 +7442,9 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "settings.security.totp_dialog.verify": "אימות והפעלה",
   "settings.security.totp_disabled_toast": "האימות הדו-שלבי כבוי",
   "settings.security.totp_enabled_toast": "האימות הדו-שלבי פועל",
-  "settings.setup_billing.description": "בדיקות ההגדרה של ריצות חדשות מחויבות מהיתרה שלך, מחוץ למגבלת ההוצאה של הריצה. תוכניות רציפות תמיד סופרות את ההגדרה בתקציב המחזור.",
-  "settings.setup_billing.label": "לחייב את ההגדרה מהארנק שלי",
-  "settings.setup_billing.save_error": "לא ניתן לשמור את הגדרת החיוב של ההגדרה",
+  "settings.setup_billing.description": "בדיקות ההגדרה של ריצות חדשות מחויבות מהיתרה שלך, מחוץ למגבלת ההוצאה של הריצה. תוכניות רציפות תמיד סופרות את בדיקות ההגדרה בתקציב המחזור.",
+  "settings.setup_billing.label": "לחייב את בדיקות ההגדרה מהארנק שלי",
+  "settings.setup_billing.save_error": "לא ניתן לשמור את העדפת החיוב של בדיקות ההגדרה",
   "settings.tab.about": "אודות",
   "settings.tab.account": "חשבון",
   "settings.tab.admin": "ניהול",
@@ -8143,6 +8144,7 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.budget.error.fraction": "הסכומים הם עד רמת הסנט — השתמשו בשתי ספרות עשרוניות לכל היותר.",
   "submit.budget.error.invalid": "הזינו סכום בדולרים, לדוגמה {suggested}.",
   "submit.budget.explainer": "מכסה את האופטימיזציה. בדיקות ההגדרה מחויבות מהיתרה שלכם.",
+  "submit.budget.explainer.setup_in_limit": "מכסה את האופטימיזציה ואת בדיקות ההגדרה שלה. בדיקות ההגדרה נספרות במגבלה הזו.",
   "submit.budget.external_endpoint_fees": "עמלות שגובה ספק הניקוד החיצוני או ספק ה-MCP שלכם משולמות ישירות לספק, מחוץ לתקציב הכולל הזה.",
   "submit.budget.label": "תקרת הוצאה",
   "submit.budget.limit_too_low": "התקציב נמוך מדי. תקרת ההוצאה צריכה להיות לפחות {amount}.",
@@ -22019,6 +22021,7 @@ const ui_en: Partial<Record<MessageKey, string>> = {
   "submit.budget.error.fraction": "Amounts go down to the cent — use at most two decimals.",
   "submit.budget.error.invalid": "Enter a dollar amount, for example {suggested}.",
   "submit.budget.explainer": "Covers the optimization. Setup checks are paid from your balance.",
+  "submit.budget.explainer.setup_in_limit": "Covers the optimization and its setup checks. Setup checks count against this limit.",
   "submit.budget.external_endpoint_fees": "Any fees charged by your external scorer or MCP provider are paid directly to that provider, outside this total.",
   "submit.budget.label": "Spending limit",
   "submit.budget.limit_too_low": "Budget too low. The spending limit needs at least {amount}.",

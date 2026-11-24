@@ -567,10 +567,12 @@ def _perform_preflight(
                 generation=snapshot.generation,
                 phase="setup",
                 wait_timeout=SETUP_WAIT_SECONDS,
-                # A continuous-plan limit bounds setup, and submit needs one lease of that limit and of
-                # the balance left after the check, so the check must not spend into it. Local mode
-                # checks no balance at submit. The lease is read through the router module, which
-                # submit reads too, so a test that patches it changes both rules (SKY-923, SKY-925).
+                # The limit of a setup_in_total budget (continuous-plan cycles, or accounts that
+                # turn off wallet setup billing) bounds setup, and submit needs one lease of that
+                # limit and of the balance left after the check, so the check must not spend into
+                # it. Local mode checks no balance at submit. The lease is read through the router
+                # module, which submit reads too, so a test that patches it changes both rules
+                # (SKY-923, SKY-925).
                 keep_cents=execution_budgets.CHUNK_CENTS if snapshot.setup_in_total else 0,
                 keep_funds=not settings.local_mode,
             )
@@ -652,9 +654,10 @@ def _perform_preflight(
             ),
         )
     except BudgetInsufficientError as error:
-        # Setup bills the balance only (SKY-925), so a guest that relays a plain
-        # budget stop still ran out of balance, never out of limit. A
-        # continuous-plan limit still bounds setup, so its plain stop names the limit.
+        # Setup bills the balance only (SKY-925), so a guest that relays a plain budget stop still
+        # ran out of balance, never out of limit. A setup_in_total limit (continuous-plan cycles, or
+        # accounts that turn off wallet setup billing) still bounds setup, so its plain stop names
+        # the limit.
         on_balance = isinstance(error, AccountFundsError) or not snapshot.setup_in_total
         field = BALANCE_FIELD if on_balance else None
         result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), field)]}

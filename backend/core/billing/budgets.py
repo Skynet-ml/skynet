@@ -13,7 +13,7 @@ import json
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -180,10 +180,21 @@ class BudgetSnapshot:
         """Return the settled spend that counts against the limit.
 
         Returns:
-            Run spend, plus setup spend for a continuous-plan budget, which
-            keeps the policy from before SKY-925.
+            Run spend, plus setup spend for a ``setup_in_total`` budget
+            (continuous-plan cycles, or accounts that turn off wallet setup
+            billing).
         """
         return self.run_spent_cents + self.setup_spent_cents if self.setup_in_total else self.run_spent_cents
+
+    def limit_view(self) -> dict[str, Any]:
+        """Return the fields with ``run_spent_cents`` as the spend against the limit.
+
+        Returns:
+            Every field, where ``run_spent_cents`` is ``limit_spent_cents``.
+            The budget card, the job status and the run notice read it as the
+            spend against the limit (SKY-925).
+        """
+        return {**asdict(self), "run_spent_cents": self.limit_spent_cents}
 
 
 @dataclass(frozen=True)
@@ -253,11 +264,10 @@ def usd_text(cents: int) -> str:
 def _setup_units(session: Session, budget: ExecutionBudgetModel) -> int:
     """Sum the settled setup scope units that the budget's limit leaves out.
 
-    Setup is billed to the wallet only and never counts against the run's
-    limit (SKY-925), so readers of the limit subtract this from the budget's
-    settled units. A continuous-plan budget (``setup_in_total``) keeps the
-    older policy, so its limit leaves out nothing. Call it while the budget
-    lock is held.
+    Setup is billed to the wallet only and never counts against the run's limit (SKY-925), so
+    readers of the limit subtract this from the budget's settled units. A ``setup_in_total`` budget
+    (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps the older policy,
+    so its limit leaves out nothing. Call it while the budget lock is held.
 
     Args:
         session: Transaction holding the budget lock.
@@ -284,10 +294,10 @@ def _run_reserved_units(budget: ExecutionBudgetModel) -> int:
     Reserve takes setup work only before attach and run work only after it,
     and attach refuses while setup work is active. So before attach every
     reservation is setup work, and after it every reservation is run work.
-    A budget detached from a deleted job (``close_for_deleted_jobs``) keeps
-    its dispatched run holds, but it is closed, so they no longer count
-    against a limit. A continuous-plan budget (``setup_in_total``) counts
-    its setup holds against the limit too.
+    A budget detached from a deleted job (``close_for_deleted_jobs``) keeps its dispatched run
+    holds, but it is closed, so they no longer count against a limit. A ``setup_in_total`` budget
+    (continuous-plan cycles, or accounts that turn off wallet setup billing) counts its setup holds
+    against the limit too.
 
     Args:
         budget: Locked budget.
@@ -312,9 +322,9 @@ def _admit(
     """Check that new coverage fits the budget's limit and the account's funds.
 
     Setup coverage is bounded only by the account's funds; the limit is the
-    run's own, and setup spend does not count against it (SKY-925). A
-    continuous-plan budget (``setup_in_total``) keeps the older policy: its
-    limit also bounds setup.
+    run's own, and setup spend does not count against it (SKY-925). A ``setup_in_total`` budget
+    (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps the older policy:
+    its limit also bounds setup.
 
     Args:
         session: Transaction holding the account and budget locks.
@@ -686,7 +696,8 @@ class BudgetService:
             idempotency_key: Stable creation identity across browser retries.
             uncapped: Let the run draw on the account instead of stopping at the total.
             setup_in_total: Count setup spend against the total and let the
-                total cap setup, as before SKY-925 (continuous-plan checks).
+                total cap setup, as before SKY-925 (continuous-plan cycles, or accounts that turn
+                off wallet setup billing).
 
         Returns:
             Current authoritative budget; paid work still requires a reservation.
@@ -957,8 +968,9 @@ class BudgetService:
             role: Optional task, judge, proposer or runtime attribution.
             session: Optional caller transaction for atomic lifecycle publication.
             keep_cents: Cents of a capped limit, and of the account's funds,
-                that the coverage must leave free. Only a continuous-plan
-                check keeps them, for the run's first lease (SKY-923).
+                that the coverage must leave free. Only the check of a ``setup_in_total`` budget
+                (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps them,
+                for the run's first lease (SKY-923).
             keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
@@ -1518,8 +1530,9 @@ class BudgetService:
             max_wallet_cents: Wallet coverage the operation holds after the extension.
             evidence: The extended request bound, recorded for audit.
             keep_cents: Cents of a capped limit, and of the account's funds,
-                that the coverage must leave free. Only a continuous-plan
-                check keeps them, for the run's first lease (SKY-923).
+                that the coverage must leave free. Only the check of a ``setup_in_total`` budget
+                (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps them,
+                for the run's first lease (SKY-923).
             keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:

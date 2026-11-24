@@ -16,7 +16,8 @@ import {
   WarningCircle,
 } from "@/shared/ui/icons";
 import { formatBudgetUsd, formatCentsUsd, type TokenSourceMode } from "@/features/billing";
-import { formatMsg, msg } from "@/shared/lib/messages";
+import { getSetupBilling } from "@/shared/lib/api";
+import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
@@ -53,6 +54,15 @@ type BudgetContext = Pick<
 };
 
 const BUDGET_STEP_CENTS = 100;
+
+/**
+ * The tooltip of the limit option. An account that turns off wallet setup
+ * billing counts setup checks in the limit (SKY-925). Until the setting loads,
+ * the card shows the default, which bills the balance.
+ */
+export function limitExplainerKey(setupFromWallet: boolean | null): MessageKey {
+  return setupFromWallet === false ? "submit.budget.explainer.setup_in_limit" : "submit.budget.explainer";
+}
 
 /** Why Continue holds while the spending limit sits under what the run needs to start. */
 export function belowFloorMessage(neededCents: number): string {
@@ -94,6 +104,19 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
   useEffect(() => {
     if (localMode && !budgetUncapped) setBudgetUncapped(true);
   }, [localMode, budgetUncapped, setBudgetUncapped]);
+  const [setupFromWallet, setSetupFromWallet] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (localMode) return;
+    let cancelled = false;
+    getSetupBilling()
+      .then((result) => {
+        if (!cancelled) setSetupFromWallet(result.from_wallet);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [localMode]);
 
   // The field is typed in dollars; the wizard state stays in cents. The field
   // owns its text so the user can clear it or leave a typo visible with its
@@ -191,7 +214,7 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
               {
                 value: "limit",
                 label: msg("submit.budget.mode.limit"),
-                tip: msg("submit.budget.explainer"),
+                tip: msg(limitExplainerKey(setupFromWallet)),
               },
               {
                 value: "uncapped",

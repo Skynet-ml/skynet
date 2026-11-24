@@ -144,7 +144,7 @@ def _ensure_api_budget(
         from_balance: Whether the account balance, not the user's own limit,
             set the request's limit.
         setup_in_total: Whether a new budget counts setup against its limit,
-            as a continuous-plan check does (SKY-925). When False, the
+            as a continuous-plan cycle needs (SKY-925). When False, the
             owner's setup billing setting decides.
     """
     if payload.execution_budget_id is not None:
@@ -203,11 +203,11 @@ def _ensure_api_budget(
         raise SubmissionInProgressError()
     budget_stops = [check for check in checked.checks if check.key == BUDGET_CHECK_KEY and check.status == "failed"]
     if checked.status == "failed" and budget_stops:
-        # Setup bills the account balance only (SKY-925), so a budget stop in
-        # setup names the balance rather than the optimizer, the columns or a
-        # limit that a higher value could not fix. A continuous-plan limit
-        # still bounds setup, so its stop names the limit, unless the balance
-        # set that limit (SKY-923).
+        # Setup bills the account balance only (SKY-925), so a budget stop in setup names the
+        # balance rather than the optimizer, the columns or a limit that a higher value could not
+        # fix. The limit of a setup_in_total budget (continuous-plan cycles, or accounts that turn
+        # off wallet setup billing) still bounds setup, so its stop names the limit, unless the
+        # balance set that limit (SKY-923).
         if budget.setup_in_total and not from_balance and any(check.field != BALANCE_FIELD for check in budget_stops):
             raise DomainError("budget.below_minimum", status=409)
         raise DomainError("budget.insufficient", status=402)
@@ -251,9 +251,10 @@ def _protected_submission(payload, job_store, workflow: str, *, from_balance: bo
         budget = BudgetService(engine=job_store.engine).get(payload.execution_budget_id, payload.username)
         if budget.revision != payload.execution_budget_revision:
             raise DomainError("budget.conflict", status=409)
-        # The same gate as the wizard check: the first lease draws on a balance that can fall after the
-        # check, and the setup check billed that balance (SKY-923, SKY-925). A continuous-plan check also
-        # spent from the limit, so its lease needs the room the check left.
+        # The same gate as the wizard check: the first lease draws on a balance that can fall after
+        # the check, and the setup check billed that balance (SKY-923, SKY-925). The check of a
+        # setup_in_total budget (continuous-plan cycles, or accounts that turn off wallet setup
+        # billing) also spent from the limit, so its lease needs the room the check left.
         spendable = (
             None
             if settings.local_mode
@@ -826,7 +827,8 @@ def submit_repo_payload(
         current_user: Owner of the new run.
         idempotency_key: Dedup key; a repeat returns the original.
         setup_in_total: Whether a new budget counts setup spend against its
-            limit, as before SKY-925. Continuous-plan checks set it.
+            limit, as before SKY-925. Continuous-plan cycles set it; when
+            False, the owner's setup billing setting decides.
 
     Returns:
         An ``OptimizationSubmissionResponse`` for the new or replayed run.
