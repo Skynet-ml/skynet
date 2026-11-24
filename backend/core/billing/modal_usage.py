@@ -202,6 +202,11 @@ class ModalUsageReservation:
         # True once a create returned a handle, so a sandbox surely existed.
         self._returned = False
 
+    @property
+    def returned(self) -> bool:
+        """Return True once a create returned a handle, so a sandbox surely existed."""
+        return self._returned
+
     def sent(self) -> None:
         """Start the runtime clock just before the create call goes to Modal."""
         self.sent_at = time.monotonic()

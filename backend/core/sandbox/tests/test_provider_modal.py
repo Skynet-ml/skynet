@@ -1052,6 +1052,7 @@ class FakeUsage:
         self.sent_at: float | None = None
         self.sandbox_id: str | None = None
         self.absent: bool | None = None
+        self.returned = False
         budget.reservations.append(self)
 
     def sent(self) -> None:
@@ -1069,6 +1070,7 @@ class FakeUsage:
         Args:
             sandbox: The fake sandbox.
         """
+        self.returned = True
         self.calls.append("confirm")
         self.confirmed = sandbox
         self.sandbox_id = sandbox.object_id
@@ -1325,18 +1327,22 @@ class RefusingUsage(FakeUsage):
         Raises:
             RuntimeError: Always.
         """
+        self.returned = True
         raise RuntimeError("no id")
 
 
-async def test_protected_box_settles_when_confirm_fails(fake_modal: FakeModal) -> None:
-    """Terminate and settle a sandbox whose confirm fails, then pass the error on."""
+async def test_protected_box_settles_when_confirm_fails(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Terminate and settle a sandbox whose confirm fails, then pass the error on with no box lookup or wait."""
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 60)
     budget = SimpleNamespace(reservations=[])
     spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
     env = ModalEnvironment(spec, budget=budget, usage_factory=RefusingUsage)
     with pytest.raises(RuntimeError, match="no id"):
         await env.start()
     assert _box(fake_modal).terminated
-    assert budget.reservations[0].calls == ["sent", "stopped", "settle", "pending", "fail"]
+    assert budget.reservations[0].calls == ["sent", "stopped", "settle", "fail"]
+    assert fake_modal.list_calls == 0
+    assert not modal_provider._LATE_TERMINATES
 
 
 async def _until(predicate: Callable[[], bool]) -> None:

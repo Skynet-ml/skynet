@@ -762,7 +762,9 @@ async def _fail_usage(usage: Any | None, app_name: str | None = None) -> None:
     if usage is None:
         return
     absent = False
-    if app_name is not None and usage.sent_at is not None and usage.sandbox_id is None:
+    # A create that returned a handle sends its box to the terminate and
+    # settle path, and fail() never releases its hold, so a lookup adds nothing.
+    if app_name is not None and usage.sent_at is not None and usage.sandbox_id is None and not usage.returned:
         found = await _find_boxes(usage, app_name)
         if found == []:
             try:

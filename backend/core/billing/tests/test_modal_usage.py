@@ -247,6 +247,7 @@ def test_absent_after_a_returned_handle_keeps_the_hold(database: Engine) -> None
     reservation.sent()
     with pytest.raises(UsagePendingError):
         reservation.confirm_created(SimpleNamespace(object_id=None))
+    assert reservation.returned is True
     reservation.fail(absent=True)
     assert _operation(database).state == "pending"
 
