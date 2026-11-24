@@ -467,10 +467,10 @@ class SailEnvironment(SandboxEnvironment):
         """
         if self._budget is None or self._usage is not None:
             return
+        with _mapped("prepare the Sailbox"):
+            request = self._usage_request()
         reserving = asyncio.ensure_future(
-            asyncio.to_thread(
-                self._usage_factory, self._budget, self._usage_request(), operation_key=self.spec.operation_key
-            )
+            asyncio.to_thread(self._usage_factory, self._budget, request, operation_key=self.spec.operation_key)
         )
         # The thread cannot be cancelled and may still reserve after a stop,
         # so the teardown waits for this call and settles what it returns.
@@ -761,6 +761,7 @@ class SailEnvironment(SandboxEnvironment):
         usage, self._usage = self._usage, None
         if usage is None:
             return
+        marked_pending = False
         try:
             if sailbox is None and self._create_failed:
                 sailbox = await self._find_failed_create(usage)
@@ -777,6 +778,7 @@ class SailEnvironment(SandboxEnvironment):
             try:
                 spend = await usage.final_spend(budget=end - asyncio.get_running_loop().time())
             except BaseException:
+                marked_pending = True
                 await asyncio.to_thread(usage.pending)
                 raise
             await asyncio.to_thread(usage.settle_spend, spend)
@@ -785,6 +787,13 @@ class SailEnvironment(SandboxEnvironment):
             if isinstance(error, UsagePendingError | BudgetError):
                 self._settle_error = error
             else:
+                # A ledger or lookup error can come before any pending call;
+                # record the hold as pending, best effort, so it is reconciled.
+                if not marked_pending:
+                    try:
+                        await asyncio.to_thread(usage.pending)
+                    except Exception as pending_error:
+                        logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
                 pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
                 pending.__cause__ = error
                 self._settle_error = pending

@@ -83,9 +83,10 @@ _LIFETIME_CEILING_MS = 24 * 3_600_000
 # Sail reports usage in batches of about one minute and shows spend "within
 # a few minutes", so the settle waits before the first read and gives up
 # after the deadline, which keeps the hold pending with the last line read.
-# The deadline counts from the first wait. With the terminate (60 s), it must
-# stay well under the 240 s that a session close gives one stop
-# (``_ASYNC_CLOSE_BUDGET_SECONDS`` in the blackbox sandbox runtime).
+# The deadline counts from the first wait. The real bound is the provider's
+# ``TEARDOWN_SECONDS`` (``core/sandbox/providers/sail.py``): the teardown
+# passes the time it has left as the ``final_spend`` budget, so the spend
+# wait ends inside the 240 s that a session close gives one stop.
 SPEND_DELAY_SECONDS = 60.0
 SPEND_POLL_SECONDS = 15.0
 SPEND_DEADLINE_SECONDS = 150.0
@@ -259,17 +260,19 @@ def fetch_sail_spend(sailbox_id: str, since: dt.datetime) -> Mapping[str, Any]:
     return response.json()
 
 
-def _box_spend(report: Mapping[str, Any], sailbox_id: str) -> dict[str, Any] | None:
+def _box_spend(report: Any, sailbox_id: str) -> dict[str, Any] | None:
     """Pick the line of one box from a spend report.
 
     Args:
-        report: The JSON spend report.
+        report: The decoded JSON spend report.
         sailbox_id: The box to find.
 
     Returns:
         The box's spend fields with the report's pricing flags, or ``None``
-        when the report does not list the box yet.
+        when the report is not an object or does not list the box yet.
     """
+    if not isinstance(report, Mapping):
+        return None
     boxes = report.get("sailboxes")
     if not isinstance(boxes, list):
         return None
@@ -293,6 +296,10 @@ def _creation_usd(spend: Mapping[str, Any], fee: Any) -> Decimal:
     Returns:
         The creation charges in USD, or zero when Sail waives them.
     """
+    # creation_fees_waived shows the current plan, not the plan at the
+    # create. A box made on Free just before a change to Pro can miss its
+    # fee, at most $0.01; the cost_usd_nanos floor covers it when Sail's
+    # cost holds the fee.
     if spend.get("creation_fees_waived") is True:
         return Decimal(0)
     return exact_nonnegative(spend["creation_count"]) * exact_nonnegative(fee)
@@ -331,7 +338,8 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
                     per_second[counter] = exact_nonnegative(rates[name]) / _NANOS_PER_USD
             size = (price_snapshot.get("request") or {}).get("size") or _DEFAULT_SIZE
             rate = rates.get(f"{size}_creation_usd_nanos")
-            if rate is not None and exact_nonnegative(rate) > 0:
+            # With account prices, a zero rate is the account's real price.
+            if rate is not None:
                 fee = exact_nonnegative(rate) / _NANOS_PER_USD
         cost = sum(
             (exact_nonnegative(spend[counter]) * price for counter, price in per_second.items()), Decimal(0)
@@ -565,9 +573,11 @@ class SailUsageReservation:
                     raise
                 retry_after = _retry_after(error.response)
                 if retry_after is not None:
-                    wait = retry_after
+                    # A zero or past Retry-After must not make reads back to back.
+                    wait = max(retry_after, SPEND_POLL_SECONDS)
                 continue
-            except (httpx.TransportError, TimeoutError):
+            except (httpx.TransportError, TimeoutError, ValueError):
+                # ValueError: the body is not JSON, which a proxy error page can cause.
                 continue
             line = _box_spend(report, sailbox_id)
             if line is None:

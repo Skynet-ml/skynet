@@ -1630,6 +1630,74 @@ async def test_a_create_that_fails_in_its_grace_is_looked_up(fake_sdk: FakeCloud
     assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
 
 
+async def test_a_failed_bind_of_a_late_box_keeps_the_hold_pending(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Record the hold as pending when the ledger write of a late box's identity fails.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the bind write fail.
+    """
+
+    def failing_bind(self: FakeUsage, sailbox_id: str) -> None:
+        """Fail like a ledger that cannot write.
+
+        Args:
+            self: The fake reservation.
+            sailbox_id: The Sail id of the box.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(FakeUsage, "bind", failing_bind)
+    fake_sdk.create_delay = 0.05
+    fake_sdk.create_error = FakeApiError(403)
+    fake_sdk.create_makes_box = True
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    await fake_sdk.create_started.wait()
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    with pytest.raises(UsagePendingError, match="not yet settled"):
+        await env.stop()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].calls[-1] == ("pending", None)
+
+
+async def test_a_size_error_before_the_reserve_leaves_no_hold(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Map an SDK size error to a sandbox error before any hold or create.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the size lookup fail.
+    """
+
+    def bad_size(**limits: Any) -> SimpleNamespace:
+        """Fail like the SDK's argument check.
+
+        Args:
+            **limits: The size limits.
+
+        Raises:
+            FakeApiError: Always.
+        """
+        raise FakeApiError(400)
+
+    monkeypatch.setattr(FakeSailbox, "size_for", staticmethod(bad_size))
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError, match="prepare the Sailbox"):
+        await env.start()
+    await env.stop()
+    assert made == []
+    assert fake_sdk.create_calls == 0
+
+
 async def test_a_lookup_that_finds_two_boxes_keeps_the_hold(fake_sdk: FakeCloud) -> None:
     """Terminate every box with the name, and keep the hold when there is more than one.
 

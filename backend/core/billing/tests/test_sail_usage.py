@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import threading
@@ -324,6 +325,9 @@ def test_settle_recomputes_sails_cost_with_one_creation_charge() -> None:
     # A rate that this code does not know shows only in Sail's own cost.
     assert sail_actual_usd({**line, "cost_usd_nanos": 50_000_000}, snapshot) == Decimal("0.05")
     assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == usage
+    # With account prices, a zero creation rate is the account's price.
+    free = {**line, "rates": {**RATES, "s_creation_usd_nanos": 0}}
+    assert sail_actual_usd(free, snapshot) == max(usage, Decimal("0.012"))
     published = (600 * Decimal("0.015") + 1200 * Decimal("0.008") + 2400 * Decimal("0.0007")) / 3600
     assert sail_actual_usd({**line, "rates": None}, snapshot) == published + Decimal("0.01")
 
@@ -383,7 +387,7 @@ def test_a_spend_api_failure_keeps_polling_until_the_deadline(database: Engine) 
 
 @pytest.mark.parametrize("status", [500, 502, 503, 504])
 def test_a_rate_limited_or_unavailable_read_is_tried_again(database: Engine, status: int) -> None:
-    """Honor Retry-After on a 429, poll again after a 5xx answer, then settle.
+    """Wait at least one poll after a short Retry-After, poll again after a 5xx answer, then settle.
 
     Args:
         database: Engine of the funded ledger.
@@ -395,7 +399,74 @@ def test_a_rate_limited_or_unavailable_read_is_tried_again(database: Engine, sta
     reservation.settle()
     assert _state(database) == "settled"
     poll = sail_usage.SPEND_POLL_SECONDS
-    assert spend.waits[:3] == [sail_usage.SPEND_DELAY_SECONDS, 5.0, poll]
+    assert spend.waits[:3] == [sail_usage.SPEND_DELAY_SECONDS, poll, poll]
+
+
+@pytest.mark.parametrize(
+    ("header", "wait"),
+    [
+        ("0", sail_usage.SPEND_POLL_SECONDS),
+        ("Wed, 21 Oct 2015 07:28:00 GMT", sail_usage.SPEND_POLL_SECONDS),
+        ("40", 40.0),
+    ],
+)
+def test_retry_after_never_waits_less_than_one_poll(database: Engine, header: str, wait: float) -> None:
+    """Honor a long Retry-After, but never read again sooner than one poll.
+
+    Args:
+        database: Engine of the funded ledger.
+        header: The Retry-After value of the 429 answer.
+        wait: The wait expected before the next read.
+    """
+    spend = FakeSpend(_status_error(429, header), SPEND)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    with contextlib.suppress(UsagePendingError):
+        reservation.settle()
+    assert spend.waits[1] == wait
+
+
+def test_a_body_that_is_not_json_is_read_again(database: Engine) -> None:
+    """Read again when the spend body is not JSON, then settle.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    spend = FakeSpend(ValueError("not JSON"), SPEND)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    reservation.settle()
+    assert _state(database) == "settled"
+    assert len(spend.reads) > 1
+
+
+def test_a_report_that_is_not_an_object_is_read_again(database: Engine) -> None:
+    """Read again when the spend JSON is not an object, then settle.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    spend = FakeSpend(SPEND)
+    answers: list[Any] = [["not", "an", "object"]]
+
+    def fetch(sailbox_id: str, since: dt.datetime) -> Any:
+        """Answer a JSON list once, then the scripted report.
+
+        Args:
+            sailbox_id: The box to report.
+            since: The start of the report window.
+
+        Returns:
+            The decoded JSON body.
+        """
+        return answers.pop() if answers else spend.fetch(sailbox_id, since)
+
+    reservation = _reservation(database, spend)
+    reservation._fetch = fetch
+    _created(reservation)
+    reservation.settle()
+    assert _state(database) == "settled"
+    assert answers == []
 
 
 def test_a_refused_spend_read_keeps_the_hold_pending(database: Engine) -> None:
