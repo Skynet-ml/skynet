@@ -5,15 +5,20 @@ from __future__ import annotations
 import asyncio
 import itertools
 import shlex
+import threading
 from collections.abc import Callable, Mapping
 from typing import Any, ClassVar
 
 import pytest
 
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
 from core.sandbox import factory
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
-from core.sandbox.pacing import ProviderAtCapacityError
+from core.sandbox.metering import usage_adapter
+from core.sandbox.pacing import ProviderAtCapacityError, ProviderPacing
 from core.sandbox.providers import e2b
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
@@ -262,6 +267,7 @@ class FakeBox:
     create_delay: ClassVar[float] = 0.0
     kill_errors: ClassVar[dict[str, BaseException]] = {}
     leak_on_error: ClassVar[bool] = False
+    size: ClassVar[tuple[int, int]] = (1, 1024)
     _ids: ClassVar[itertools.count] = itertools.count(1)
 
     def __init__(self, metadata: Mapping[str, str], envs: Mapping[str, str]) -> None:
@@ -279,6 +285,7 @@ class FakeBox:
         self.commands = FakeCommands(self)
         self.timeouts: list[int] = []
         self.timeout_errors: list[BaseException] = []
+        self.request_timeouts: list[float | None] = []
         self.network_updates: list[dict[str, Any]] = []
 
     @classmethod
@@ -290,6 +297,7 @@ class FakeBox:
         cls.create_delay = 0.0
         cls.kill_errors = {}
         cls.leak_on_error = False
+        cls.size = (1, 1024)
 
     @classmethod
     async def create(cls, **options: Any) -> FakeBox:
@@ -379,11 +387,12 @@ class FakeBox:
         """
         return await cls._kill_id(sandbox_id)
 
-    async def set_timeout(self, timeout: int) -> None:  # noqa: ASYNC109 - the SDK method has this name
+    async def set_timeout(self, timeout: int, *, request_timeout: float | None = None) -> None:  # noqa: ASYNC109 - the SDK method has this name
         """Record a timeout extension, or raise the next scripted error.
 
         Args:
             timeout: The new timeout in seconds.
+            request_timeout: The SDK request time limit.
 
         Raises:
             BaseException: The next scripted error.
@@ -391,6 +400,16 @@ class FakeBox:
         if self.timeout_errors:
             raise self.timeout_errors.pop(0)
         self.timeouts.append(timeout)
+        self.request_timeouts.append(request_timeout)
+
+    async def get_info(self) -> Any:
+        """Return the id and the template size of the box, as ``SandboxInfo``.
+
+        Returns:
+            An object with ``sandbox_id``, ``cpu_count`` and ``memory_mb``.
+        """
+        cpu_count, memory_mb = self.size
+        return type("Info", (), {"sandbox_id": self.sandbox_id, "cpu_count": cpu_count, "memory_mb": memory_mb})()
 
     async def update_network(self, update: dict[str, Any]) -> None:
         """Record a network update.
@@ -843,11 +862,11 @@ def test_preflight_reports_a_missing_sdk(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_capabilities_allow_every_network_mode() -> None:
-    """Declare every network mode and dynamic policy, with no billing."""
+    """Declare every network mode and dynamic policy, billed against the run budget."""
     caps = e2b.E2BEnvironment.capabilities
     assert caps.name == "e2b"
     assert caps.dynamic_network_policy
-    assert not caps.billable
+    assert caps.billable
     assert not caps.protected
 
 
@@ -858,3 +877,694 @@ def test_factory_entry_is_not_allowed_in_production() -> None:
     assert entry.cls == "E2BEnvironment"
     assert entry.extra == "e2b"
     assert entry.production_allowed is False
+
+
+class FakeUsage:
+    """Record the calls a protected box makes to its usage reservation."""
+
+    def __init__(self, request: Mapping[str, Any], *, operation_key: str) -> None:
+        """Keep the funded request.
+
+        Args:
+            request: The request that the reservation prices.
+            operation_key: The box's logical identity.
+        """
+        self.request = dict(request)
+        self.operation_key = operation_key
+        self.lifetime_ms = request["lifetime_ms"]
+        self.started_at: float | None = None
+        self.events: list[Any] = []
+        self.extend_error: BaseException | None = None
+        self.settle_error: Exception | None = None
+        self.confirm_error: Exception | None = None
+
+    def start(self, at: float) -> None:
+        """Record the create call.
+
+        Args:
+            at: Monotonic time of the create call.
+        """
+        self.started_at = at
+        self.events.append(("start", len(FakeBox.create_calls)))
+
+    def confirm(self, info: Any) -> None:
+        """Record the confirm, or raise the scripted error.
+
+        Args:
+            info: The box info.
+
+        Raises:
+            Exception: The scripted confirm error.
+        """
+        self.events.append(("confirm", info.sandbox_id))
+        if self.confirm_error is not None:
+            raise self.confirm_error
+
+    def extend(self, lifetime_ms: int, *, deadline: float) -> None:
+        """Record the extension, or raise the scripted error.
+
+        Args:
+            lifetime_ms: The new total lifetime.
+            deadline: The wait deadline.
+
+        Raises:
+            BaseException: The scripted extension error.
+        """
+        if self.extend_error is not None:
+            raise self.extend_error
+        self.events.append(("extend", lifetime_ms))
+        self.lifetime_ms = lifetime_ms
+
+    def stopped(self, at: float, *, confirmed: bool) -> None:
+        """Record the stop.
+
+        Args:
+            at: Monotonic time of the stop.
+            confirmed: Whether every kill answered.
+        """
+        self.events.append(("stopped", confirmed, len(FakeBox.boxes)))
+
+    def settle(self) -> None:
+        """Record the settle, or raise the scripted error.
+
+        Raises:
+            Exception: The scripted settle error.
+        """
+        self.events.append(("settle",))
+        if self.settle_error is not None:
+            raise self.settle_error
+
+
+class UsageFactory:
+    """Make one ``FakeUsage`` per reservation and keep them."""
+
+    def __init__(self) -> None:
+        """Start with no reservations."""
+        self.made: list[FakeUsage] = []
+        self.budgets: list[Any] = []
+
+    def __call__(self, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve one box.
+
+        Args:
+            budget: The budget runtime.
+            request: The funded request.
+            operation_key: The box's logical identity.
+
+        Returns:
+            The new fake reservation.
+        """
+        self.budgets.append(budget)
+        usage = FakeUsage(request, operation_key=operation_key)
+        usage.events.append(("reserve", len(FakeBox.create_calls)))
+        self.made.append(usage)
+        return usage
+
+
+def _protected(factory_: UsageFactory, **spec: Any) -> e2b.E2BEnvironment:
+    """Return a protected environment with a fake budget and usage factory.
+
+    Args:
+        factory_: The usage factory.
+        **spec: Spec fields to replace.
+
+    Returns:
+        The environment.
+    """
+    return e2b.E2BEnvironment(
+        _spec(operation_key="op-1", **spec), budget=object(), usage_factory=factory_, clock=FakeClock()
+    )
+
+
+def test_e2b_has_a_usage_adapter() -> None:
+    """Find the E2B usage adapter by its billing module name."""
+    adapter = usage_adapter("e2b")
+    assert adapter is not None
+    assert adapter.name == "e2b"
+
+
+def test_protected_box_needs_an_operation_key() -> None:
+    """Refuse a protected box with no stable operation identity."""
+    with pytest.raises(SandboxSpecError):
+        e2b.E2BEnvironment(_spec(), budget=object())
+
+
+async def test_protected_box_reserves_before_create_and_settles_after_kill() -> None:
+    """Reserve before the create, confirm after it, settle after the kill."""
+    made = UsageFactory()
+    async with _protected(made, resources=ResourceRequest(cpus=2, memory_mb=2048)) as env:
+        assert (await env.exec("true")).ok
+        sandbox_id = _the_box().sandbox_id
+    (usage,) = made.made
+    assert usage.request == {"lifetime_ms": 420_000, "vcpus": 2, "memory_mb": 2048, "template": None}
+    assert usage.operation_key == "op-1"
+    assert usage.events == [("reserve", 0), ("start", 0), ("confirm", sandbox_id), ("stopped", True, 0), ("settle",)]
+    assert FakeBox.boxes == {}
+
+
+async def test_spec_without_memory_funds_the_largest_e2b_memory() -> None:
+    """Fund E2B's largest memory when the spec leaves memory to the template."""
+    made = UsageFactory()
+    async with _protected(made):
+        pass
+    assert made.made[0].request["memory_mb"] == 8 * 1024
+
+
+async def test_capacity_retries_reuse_one_reservation() -> None:
+    """Keep one reservation across rate-limit waits and count from the last create."""
+    FakeBox.create_errors = [_status_error(429), e2b.RateLimitException("429")]
+    made = UsageFactory()
+    async with _protected(made):
+        pass
+    (usage,) = made.made
+    assert [event for event in usage.events if event[0] in {"reserve", "start"}] == [
+        ("reserve", 0),
+        ("start", 0),
+        ("start", 1),
+        ("start", 2),
+    ]
+
+
+@pytest.mark.parametrize("status", [502, 503])
+async def test_protected_box_fails_the_start_on_a_gateway_error(status: int) -> None:
+    """Fail the start on a 502 or 503, so the teardown sweeps a box E2B opened and settles.
+
+    Args:
+        status: The gateway status that E2B answers.
+    """
+    FakeBox.leak_on_error = True
+    FakeBox.create_errors = [_status_error(status)]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(e2b.SandboxException):
+        await env.start()
+    assert len(FakeBox.create_calls) == 1
+    assert FakeBox.boxes == {}
+    assert made.made[0].events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_gateway_error_with_an_empty_sweep_is_not_confirmed() -> None:
+    """Charge the funded lifetime when a 503 sweep finds no box: the E2B list can lag."""
+    FakeBox.create_errors = [_status_error(503)]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(e2b.SandboxException):
+        await env.start()
+    assert made.made[0].events[-2:] == [("stopped", False, 0), ("settle",)]
+
+
+async def test_rate_limit_does_not_count_as_runtime() -> None:
+    """Clear the start time after a 429, which opens no box."""
+    FakeBox.create_errors = [_status_error(429) for _ in range(e2b.PROTECTED_RATE_LIMIT_ATTEMPTS)]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    (usage,) = made.made
+    assert len(FakeBox.create_calls) == e2b.PROTECTED_RATE_LIMIT_ATTEMPTS
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_failed_create_still_settles() -> None:
+    """Settle the reservation when the create fails outright."""
+    FakeBox.create_errors = [e2b.SandboxException("bad template", status_code=400)]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(e2b.SandboxException):
+        await env.start()
+    assert made.made[0].events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_oversized_template_stops_the_box_and_settles() -> None:
+    """Stop a box that is larger than its funding, then settle it."""
+    made = UsageFactory()
+    FakeBox.size = (4, 4096)
+    env = _protected(made, resources=ResourceRequest(cpus=2, memory_mb=2048))
+
+    original = UsageFactory.__call__
+
+    def oversized(self: UsageFactory, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve a box whose confirm refuses the template size.
+
+        Args:
+            self: The factory.
+            budget: The budget runtime.
+            request: The funded request.
+            operation_key: The box's logical identity.
+
+        Returns:
+            The fake reservation.
+        """
+        usage = original(self, budget, request, operation_key=operation_key)
+        usage.confirm_error = SandboxSpecError("too large")
+        return usage
+
+    env._usage_factory = oversized.__get__(made)
+    with pytest.raises(SandboxSpecError):
+        await env.start()
+    assert FakeBox.boxes == {}
+    assert made.made[0].events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_cancel_during_start_settles_the_reservation() -> None:
+    """Settle the reservation when a stop cancels the start mid-create."""
+    FakeBox.create_delay = 0.05
+    made = UsageFactory()
+    env = e2b.E2BEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=made)
+    starting = asyncio.create_task(env.start())
+    await asyncio.sleep(0.01)
+    await env.stop()
+    with pytest.raises(SandboxInfraError):
+        await starting
+    assert FakeBox.boxes == {}
+    assert made.made[0].events[-1] == ("settle",)
+
+
+async def test_unconfirmed_kill_is_reported_to_the_settle() -> None:
+    """Tell the reservation the kill failed, so it charges the funded lifetime."""
+    made = UsageFactory()
+    env = _protected(made)
+    await env.start()
+    FakeBox.kill_errors = {_the_box().sandbox_id: e2b.SandboxException("down")}
+    await env.stop()
+    stopped = next(event for event in made.made[0].events if event[0] == "stopped")
+    assert stopped[1] is False
+
+
+async def test_settle_failure_is_raised_by_stop_once() -> None:
+    """Raise a failed settle from the first stop only."""
+    made = UsageFactory()
+    env = _protected(made)
+    await env.start()
+    made.made[0].settle_error = RuntimeError("database down")
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    await env.stop()
+
+
+async def test_renew_loop_funds_each_extension_before_it_asks_e2b() -> None:
+    """Fund the longer lifetime first, then extend the E2B timeout."""
+    made = UsageFactory()
+    env = _protected(made, lifetime_seconds=2 * 3600)
+    await env.start()
+    try:
+        box = _the_box()
+        await asyncio.wait_for(env._renewer, 1)
+        (usage,) = made.made
+        extends = [event[1] for event in usage.events if event[0] == "extend"]
+        # The first slice also funds the create time limit.
+        assert usage.request["lifetime_ms"] == (e2b.LIFETIME_SLICE + e2b.CREATE_TIMEOUT) * 1000
+        # Each renewal funds the time already used, the new timeout and the call time limit.
+        assert box.timeouts == [e2b.LIFETIME_SLICE, 600]
+        assert box.request_timeouts == [e2b.RENEW_CALL_TIMEOUT, e2b.RENEW_CALL_TIMEOUT]
+        assert extends == [6_931_000, 7_231_000]
+    finally:
+        await env.stop()
+
+
+async def test_budget_refusal_stops_the_renew_loop() -> None:
+    """Leave the box on its funded timeout when the budget refuses more."""
+    made = UsageFactory()
+    env = _protected(made, lifetime_seconds=2 * 3600)
+    original = UsageFactory.__call__
+
+    def refusing(self: UsageFactory, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve a box whose extensions the budget refuses.
+
+        Args:
+            self: The factory.
+            budget: The budget runtime.
+            request: The funded request.
+            operation_key: The box's logical identity.
+
+        Returns:
+            The fake reservation.
+        """
+        usage = original(self, budget, request, operation_key=operation_key)
+        usage.extend_error = BudgetReached("no funds")
+        return usage
+
+    env._usage_factory = refusing.__get__(made)
+    await env.start()
+    try:
+        box = _the_box()
+        await asyncio.wait_for(env._renewer, 1)
+        assert box.timeouts == []
+    finally:
+        await env.stop()
+    assert made.made[0].events[-1] == ("settle",)
+
+
+async def _refused_box(made: UsageFactory) -> e2b.E2BEnvironment:
+    """Start a two-hour protected box whose first extension the budget refuses.
+
+    Args:
+        made: The usage factory.
+
+    Returns:
+        The started environment, with its renew loop ended.
+    """
+    env = _protected(made, lifetime_seconds=2 * 3600)
+    original = UsageFactory.__call__
+
+    def refusing(self: UsageFactory, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve a box whose extensions the budget refuses.
+
+        Args:
+            self: The factory.
+            budget: The budget runtime.
+            request: The funded request.
+            operation_key: The box's logical identity.
+
+        Returns:
+            The fake reservation.
+        """
+        usage = original(self, budget, request, operation_key=operation_key)
+        usage.extend_error = BudgetReached("no funds")
+        return usage
+
+    env._usage_factory = refusing.__get__(made)
+    await env.start()
+    await asyncio.wait_for(env._renewer, 1)
+    return env
+
+
+async def test_budget_refusal_raises_budget_reached_after_the_funded_timeout() -> None:
+    """Raise BudgetReached, not an infra error, once the last funded timeout is over."""
+    made = UsageFactory()
+    env = await _refused_box(made)
+    try:
+        assert (await env.exec("true")).ok
+        env._clock.now = e2b.LIFETIME_SLICE
+        with pytest.raises(BudgetReached):
+            await env.exec("true")
+        with pytest.raises(BudgetReached):
+            await env.download_file("/tmp/x")
+    finally:
+        await env.stop()
+
+
+async def test_box_error_after_the_funded_timeout_raises_budget_reached() -> None:
+    """Turn a box call error into BudgetReached when the box ended on a budget stop."""
+    made = UsageFactory()
+    env = await _refused_box(made)
+    clock = env._clock
+
+    async def expired(*args: Any, **kwargs: Any) -> Any:
+        """Fail as a box that E2B ended at its timeout, after the funded time.
+
+        Args:
+            *args: The dispatch arguments.
+            **kwargs: The dispatch keywords.
+
+        Raises:
+            SandboxInfraError: Always.
+        """
+        clock.now = e2b.LIFETIME_SLICE
+        raise SandboxInfraError("sandbox not found")
+
+    env._dispatch = expired
+    try:
+        with pytest.raises(BudgetReached):
+            await env.exec("true")
+    finally:
+        await env.stop()
+
+
+async def test_cancel_while_the_reservation_thread_runs_settles_it() -> None:
+    """Keep and settle a reservation that a stop interrupts while its thread runs."""
+    entered = threading.Event()
+    release = threading.Event()
+    made = UsageFactory()
+
+    def slow(budget: Any, request: Mapping[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve only after the test releases the thread.
+
+        Args:
+            budget: The budget runtime.
+            request: The funded request.
+            operation_key: The box's logical identity.
+
+        Returns:
+            The fake reservation.
+        """
+        entered.set()
+        release.wait(5)
+        return made(budget, request, operation_key=operation_key)
+
+    env = e2b.E2BEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=slow, clock=FakeClock())
+    starting = asyncio.create_task(env.start())
+    await asyncio.to_thread(entered.wait, 5)
+    stopping = asyncio.create_task(env.stop())
+    await asyncio.sleep(0.01)
+    release.set()
+    await stopping
+    with pytest.raises(SandboxInfraError):
+        await starting
+    assert FakeBox.create_calls == []
+    assert made.made[0].events == [("reserve", 0), ("stopped", True, 0), ("settle",)]
+
+
+async def test_failed_tagged_kill_is_not_confirmed() -> None:
+    """Charge the funded lifetime when the sweep cannot kill one tagged box."""
+    made = UsageFactory()
+    env = _protected(made)
+    await env.start()
+    stray = FakeBox(_the_box().metadata, {})
+    FakeBox.boxes[stray.sandbox_id] = stray
+    FakeBox.kill_errors = {stray.sandbox_id: e2b.SandboxException("down")}
+    await env.stop()
+    stopped = next(event for event in made.made[0].events if event[0] == "stopped")
+    assert stopped[1] is False
+
+
+async def test_cancel_during_the_rate_limit_wait_settles_with_no_runtime() -> None:
+    """Settle a reservation at zero runtime when a stop ends the wait after a 429."""
+    FakeBox.create_errors = [_status_error(429)]
+    blocked = asyncio.Event()
+    checks = 0
+
+    async def at_capacity() -> bool:
+        """Report capacity once, then hold the start in the capacity wait.
+
+        Returns:
+            False on the first check.
+        """
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            blocked.set()
+            await asyncio.Event().wait()
+        return False
+
+    made = UsageFactory()
+    env = e2b.E2BEnvironment(
+        _spec(operation_key="op-1"), budget=object(), usage_factory=made, clock=FakeClock(), at_capacity=at_capacity
+    )
+    starting = asyncio.create_task(env.start())
+    await asyncio.wait_for(blocked.wait(), 1)
+    await env.stop()
+    with pytest.raises(SandboxInfraError):
+        await starting
+    (usage,) = made.made
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+def test_protected_lifetime_must_fit_the_extension_ceiling() -> None:
+    """Refuse a protected spec whose last extension would pass the 24-hour quote."""
+    with pytest.raises(SandboxSpecError):
+        _protected(UsageFactory(), lifetime_seconds=e2b.MAX_PROTECTED_LIFETIME + 1)
+    e2b.E2BEnvironment(_spec(lifetime_seconds=e2b.E2B_MAX_LIFETIME))
+
+
+async def test_longest_protected_box_stays_inside_the_quote_ceiling() -> None:
+    """Fund every extension of the longest protected box within 24 hours."""
+    made = UsageFactory()
+    env = _protected(made, lifetime_seconds=e2b.MAX_PROTECTED_LIFETIME)
+    await env.start()
+    try:
+        await asyncio.wait_for(env._renewer, 5)
+        (usage,) = made.made
+        extends = [event[1] for event in usage.events if event[0] == "extend"]
+        assert extends
+        assert max(extends) <= e2b.E2B_MAX_LIFETIME * 1000
+    finally:
+        await env.stop()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(lambda: e2b.SandboxException("bad template", status_code=400), id="400"),
+        pytest.param(lambda: e2b.SandboxException("no template", status_code=404), id="404"),
+        pytest.param(lambda: e2b.AuthenticationException("bad key"), id="401"),
+    ],
+)
+async def test_refused_create_bills_no_runtime(error: Callable[[], BaseException]) -> None:
+    """Clear the start time and confirm the stop when E2B refuses the create.
+
+    Args:
+        error: Makes the refusal that E2B answers.
+    """
+    FakeBox.create_errors = [error()]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(Exception):  # noqa: B017 - each refusal has its own SDK type
+        await env.start()
+    (usage,) = made.made
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_gateway_timeout_answer_keeps_the_outcome_unknown() -> None:
+    """Treat a 408 as unknown: a gateway can answer it after E2B opened the box."""
+    FakeBox.create_errors = [_status_error(408)]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(e2b.SandboxException):
+        await env.start()
+    (usage,) = made.made
+    assert usage.started_at is not None
+    assert usage.events[-2:] == [("stopped", False, 0), ("settle",)]
+
+
+async def test_capacity_wait_ends_when_the_hold_is_too_old() -> None:
+    """End a protected capacity wait that holds the funds past the time limit."""
+    FakeBox.create_errors = [_status_error(429)]
+    checks = 0
+
+    async def at_capacity() -> bool:
+        """Report capacity on the first check, then no capacity forever.
+
+        Returns:
+            False on the first check, then True.
+        """
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    made = UsageFactory()
+    clock = FakeClock()
+    env = e2b.E2BEnvironment(
+        _spec(operation_key="op-1"), budget=object(), usage_factory=made, clock=clock, at_capacity=at_capacity
+    )
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert clock.now >= e2b.PROTECTED_HOLD_WAIT
+    assert len(FakeBox.create_calls) == 1
+    (usage,) = made.made
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+def test_protected_memory_must_fit_e2b() -> None:
+    """Refuse a protected spec with more memory than E2B allows, before any reservation."""
+    with pytest.raises(SandboxSpecError):
+        _protected(UsageFactory(), resources=ResourceRequest(cpus=1, memory_mb=e2b.MAX_MEMORY_MB + 1))
+
+
+class SlowCreateBucket:
+    """Act as a create bucket whose second wait moves the clock past the hold limit."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        """Keep the clock.
+
+        Args:
+            clock: The fake clock of the environment.
+        """
+        self.clock = clock
+        self.calls = 0
+
+    async def acquire(self) -> None:
+        """Wait for a create token; the second wait takes the whole hold limit."""
+        self.calls += 1
+        if self.calls > 1:
+            self.clock.now += e2b.PROTECTED_HOLD_WAIT
+
+
+class FreeBucket:
+    """Act as a read bucket that never waits."""
+
+    async def acquire(self) -> None:
+        """Return at once."""
+
+
+async def test_create_bucket_wait_counts_against_the_hold_limit() -> None:
+    """Fail before a resent create when the create-bucket wait used up the hold limit."""
+    FakeBox.create_errors = [_status_error(429)]
+    made = UsageFactory()
+    clock = FakeClock()
+    pacing = ProviderPacing(reads=FreeBucket(), creates=SlowCreateBucket(clock))
+    env = e2b.E2BEnvironment(
+        _spec(operation_key="op-1"), budget=object(), usage_factory=made, clock=clock, pacing=pacing
+    )
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert len(FakeBox.create_calls) == 1
+    (usage,) = made.made
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_slow_confirm_does_not_push_the_last_extension_past_the_quote() -> None:
+    """Count the renew deadline from the create call, so a slow confirm cannot pass 24 hours."""
+    made = UsageFactory()
+    env = _protected(made, lifetime_seconds=e2b.MAX_PROTECTED_LIFETIME)
+    clock = env._clock
+    slow = True
+
+    async def pace_read() -> None:
+        """Make the first read wait, which runs before the size check, take 1000 seconds."""
+        nonlocal slow
+        if slow:
+            slow = False
+            clock.now += 1000
+
+    env._pace_read = pace_read
+    await env.start()
+    try:
+        await asyncio.wait_for(env._renewer, 5)
+        (usage,) = made.made
+        extends = [event[1] for event in usage.events if event[0] == "extend"]
+        assert extends
+        assert max(extends) <= e2b.E2B_MAX_LIFETIME * 1000
+    finally:
+        await env.stop()
+
+
+async def test_slow_extend_and_read_fund_one_extension_per_slice() -> None:
+    """Fund each slice once when the extend and the read pacing take a little time."""
+    made = UsageFactory()
+    env = _protected(made, lifetime_seconds=2 * 3600)
+    clock = env._clock
+
+    async def pace_read() -> None:
+        """Take a small step of fake time, as a read-bucket wait."""
+        clock.now += 0.05
+
+    env._pace_read = pace_read
+    await env.start()
+    (usage,) = made.made
+    extend = usage.extend
+
+    def slow_extend(lifetime_ms: int, *, deadline: float) -> None:
+        """Take a small step of fake time, as a ledger call.
+
+        Args:
+            lifetime_ms: The new total lifetime.
+            deadline: The wait deadline.
+        """
+        clock.now += 0.05
+        extend(lifetime_ms, deadline=deadline)
+
+    usage.extend = slow_extend
+    try:
+        box = _the_box()
+        await asyncio.wait_for(env._renewer, 1)
+        extends = [event[1] for event in usage.events if event[0] == "extend"]
+        assert box.timeouts == [e2b.LIFETIME_SLICE, 600]
+        assert len(extends) == 2
+    finally:
+        await env.stop()
