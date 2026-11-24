@@ -312,6 +312,8 @@ class FakeServer:
         self.found_at: list[float] = []
         self.missing_at: list[float] = []
         self.missing = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_gate: asyncio.Event | None = None
 
 
 class FakeClient:
@@ -373,7 +375,10 @@ class FakeClient:
         return self.server.boxes[name]
 
     async def aclose(self) -> None:
-        """Record the close."""
+        """Record the close, after the gate opens when the test set one."""
+        self.server.close_started.set()
+        if self.server.close_gate is not None:
+            await self.server.close_gate.wait()
         self.server.closed += 1
 
 
@@ -1701,6 +1706,24 @@ async def test_cancel_during_the_background_settle_logs_its_outcome_and_closes(
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
     assert server.closed == 1
     assert logged in caplog.text
+
+
+async def test_cancel_during_the_background_close_lets_the_close_finish(
+    server: FakeServer, usage: type[FakeUsage], clock: FakeClock
+) -> None:
+    """Finish the client close after a settle, then re-raise a cancel that came during the close."""
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    task = await _handed_off(server, env)
+    server.close_gate = asyncio.Event()
+    clock.offset = _PAST_THE_WINDOW
+    await asyncio.wait_for(server.close_started.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    server.close_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert server.closed == 1
 
 
 async def test_settle_error_after_a_hand_off_is_only_logged(

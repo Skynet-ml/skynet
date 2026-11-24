@@ -875,10 +875,12 @@ async def _settle_late(
         answered: True when the server answered the create.
 
     Raises:
-        asyncio.CancelledError: The event loop cancelled the wait; the hold
-            is marked pending first, except a cancel before the task starts,
-            which leaves the hold dispatched and the client open, and is
-            only logged.
+        asyncio.CancelledError: The event loop cancelled the task. A cancel
+            before the settle marks the hold pending. A cancel during the
+            settle waits for it, and the settle decides. A cancel during the
+            client close waits for the close and does not change the hold.
+            A cancel before the task starts leaves the hold dispatched and
+            the client open, and is only logged.
         UsagePendingError: No delete proof came, so the hold stays pending.
         BudgetError: The ledger refused the settlement.
     """
@@ -910,7 +912,8 @@ async def _settle_late(
             logger.info("LangSmith sandbox %s usage settled before the cancel.", name)
         raise
     finally:
-        await _close(client)
+        # A cut-short close would leak the client and end a settled task as cancelled.
+        await _wait_through_cancels(asyncio.ensure_future(_close(client)))
 
 
 def _on_settle_done(name: str, task: asyncio.Future[None]) -> None:
