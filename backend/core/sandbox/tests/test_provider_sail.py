@@ -20,9 +20,12 @@ from typing import Any
 
 import pytest
 
+from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import sail
 from core.sandbox.providers.sail import SailEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -78,6 +81,7 @@ class FakeCloud:
     read_error: type[BaseException] = FileNotFoundError
     terminate_fails: set[str] = field(default_factory=set)
     no_auth: bool = False
+    limits: tuple[int, int, int] = (8, 64 * 1024, 256)
     ids: Any = field(default_factory=lambda: itertools.count(1))
 
     def run(self, box: BoxState, argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
@@ -383,7 +387,21 @@ class FakeSailbox:
         self._box.egress = policy
 
 
+async def _get(sailbox_id: str) -> SimpleNamespace:
+    """Read the full fake box, with the limits that the fake cloud sets.
+
+    Args:
+        sailbox_id: The box id.
+
+    Returns:
+        The box id and its vCPU, memory and disk limits.
+    """
+    vcpus, memory_mib, disk_gib = CLOUD.limits
+    return SimpleNamespace(sailbox_id=sailbox_id, vcpu_count=vcpus, memory_mib=memory_mib, state_disk_size_gib=disk_gib)
+
+
 FakeSailbox.create = _aio(FakeSailbox._create)
+FakeSailbox.get = _aio(_get)
 
 
 @pytest.fixture(autouse=True)
@@ -840,3 +858,219 @@ async def test_stop_job_sandboxes_goes_on_after_a_failure(fake_sdk: FakeCloud) -
     assert [box.terminated for box in fake_sdk.boxes] == [False, True]
     assert sail._JOB_BOXES == {}
     assert await SailEnvironment.stop_job_sandboxes("job-1") == 0
+
+
+class FakeUsage:
+    """Record the reservation calls of a protected box."""
+
+    def __init__(self, request: dict[str, Any], operation_key: str) -> None:
+        """Keep the priced request and the operation key.
+
+        Args:
+            request: The request that the provider priced.
+            operation_key: The box's operation key.
+        """
+        self.request = request
+        self.operation_key = operation_key
+        self.calls: list[tuple[str, Any]] = []
+        self.sailbox_id: str | None = None
+        self.confirm_error: BaseException | None = None
+        self.settle_error: BaseException | None = None
+
+    def begin_create(self) -> None:
+        """Record the create call, with the boxes that existed before it."""
+        self.calls.append(("begin_create", CLOUD.create_calls))
+
+    def bind(self, sailbox_id: str) -> None:
+        """Record the box identity.
+
+        Args:
+            sailbox_id: The Sail id of the box.
+        """
+        self.sailbox_id = sailbox_id
+        self.calls.append(("bind", sailbox_id))
+
+    def confirm_created(self, sailbox: Any) -> None:
+        """Record the checked box, or fail as the test sets.
+
+        Args:
+            sailbox: The full fake box.
+
+        Raises:
+            BaseException: The error that the test sets.
+        """
+        self.calls.append(("confirm", sailbox.memory_mib))
+        if self.confirm_error is not None:
+            raise self.confirm_error
+
+    def release(self) -> None:
+        """Record a release."""
+        self.calls.append(("release", None))
+
+    def pending(self) -> None:
+        """Record a pending hold."""
+        self.calls.append(("pending", None))
+
+    def settle(self) -> None:
+        """Record a settle, with the box state at that time, or fail as the test sets.
+
+        Raises:
+            BaseException: The error that the test sets.
+        """
+        self.calls.append(("settle", [box.terminated for box in CLOUD.boxes]))
+        if self.settle_error is not None:
+            raise self.settle_error
+
+    def names(self) -> list[str]:
+        """Return the names of the recorded calls.
+
+        Returns:
+            The call names in order.
+        """
+        return [name for name, _ in self.calls]
+
+
+def _protected(**spec: Any) -> tuple[SailEnvironment, list[FakeUsage]]:
+    """Open a protected box whose reservations are fakes.
+
+    Args:
+        **spec: Spec fields to replace.
+
+    Returns:
+        The box and the list that gets its reservation.
+    """
+    made: list[FakeUsage] = []
+
+    def factory_(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make and keep one fake reservation.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        assert budget == "budget"
+        made.append(FakeUsage(request, operation_key))
+        return made[-1]
+
+    env = SailEnvironment(_spec(operation_key="box-1", **spec), budget="budget", usage_factory=factory_)
+    return env, made
+
+
+def test_sail_is_billable_and_has_a_usage_adapter() -> None:
+    """Let hosted Skynet meter Sail: the provider is billable and its adapter exists."""
+    assert sail.SAIL_CAPABILITIES.billable is True
+    assert usage_adapter("sail") is not None
+    assert factory.PROVIDERS["sail"].production_allowed is False
+
+
+def test_a_protected_box_needs_an_operation_key() -> None:
+    """Refuse a budget without an operation key, before any call."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        SailEnvironment(_spec(), budget="budget")
+
+
+async def test_a_protected_box_reserves_before_the_create_and_settles_after_the_terminate(
+    fake_sdk: FakeCloud,
+) -> None:
+    """Reserve the whole lifetime first, confirm the created box, and settle once it terminated."""
+    env, made = _protected(lifetime_seconds=300.5)
+    async with env:
+        pass
+    usage = made[0]
+    assert usage.operation_key == "box-1"
+    assert usage.request["lifetime_ms"] == 301_000
+    assert usage.request["size"] == "cpu-1"
+    assert usage.request["network_disabled"] is False
+    assert usage.calls == [
+        ("begin_create", 0),
+        ("bind", "sb-1"),
+        ("confirm", 64 * 1024),
+        ("settle", [True]),
+    ]
+
+
+async def test_a_box_over_its_funding_is_terminated_and_settled(fake_sdk: FakeCloud) -> None:
+    """End the start when the box is larger than its funding, and still settle the box that exists."""
+    env, made = _protected()
+    made_error = UsagePendingError("too large")
+
+    def failing(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation whose confirm fails.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        made.append(FakeUsage(request, operation_key))
+        made[-1].confirm_error = made_error
+        return made[-1]
+
+    env._usage_factory = failing
+    with pytest.raises(UsagePendingError, match="too large"):
+        await env.start()
+    assert made[0].names() == ["begin_create", "bind", "confirm", "settle"]
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+
+
+async def test_a_failed_create_releases_the_reservation(fake_sdk: FakeCloud) -> None:
+    """Let the reservation release or keep its hold when the create returns no box."""
+    fake_sdk.create_error = FakeSailError("quota")
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert made[0].names() == ["begin_create", "release"]
+
+
+async def test_a_cancelled_protected_start_settles_the_box(fake_sdk: FakeCloud) -> None:
+    """Terminate the box of a cancelled start, then settle it."""
+    fake_sdk.create_delay = 0.05
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    await fake_sdk.create_started.wait()
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    assert made[0].names() == ["begin_create", "bind", "settle"]
+    assert made[0].calls[-1] == ("settle", [True])
+
+
+async def test_a_box_that_did_not_terminate_stays_pending(fake_sdk: FakeCloud) -> None:
+    """Keep the hold pending, and raise it from stop, when the terminate fails."""
+    env, made = _protected()
+    await env.start()
+    fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
+    with pytest.raises(UsagePendingError, match="did not terminate"):
+        await env.stop()
+    assert made[0].names()[-1] == "pending"
+    assert "settle" not in made[0].names()
+
+
+async def test_a_settle_failure_is_raised_once(fake_sdk: FakeCloud) -> None:
+    """Raise a failed settle from the first stop only, as a pending usage error."""
+    env, made = _protected()
+    await env.start()
+    made[0].settle_error = RuntimeError("spend API down")
+    with pytest.raises(UsagePendingError, match="not yet settled") as raised:
+        await env.stop()
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    await env.stop()
+    assert made[0].names().count("settle") == 1
+
+
+async def test_the_job_sweep_goes_on_after_a_pending_settle(fake_sdk: FakeCloud) -> None:
+    """Keep sweeping the job when one protected box cannot settle."""
+    first, made_first = _protected(tags={JOB_TAG: "job-1"})
+    second, _ = _protected(tags={JOB_TAG: "job-1"}, name="box-b")
+    for env in (first, second):
+        await env.start()
+    made_first[0].settle_error = UsagePendingError("late spend")
+    assert await SailEnvironment.stop_job_sandboxes("job-1") == 2
+    assert [box.terminated for box in fake_sdk.boxes] == [True, True]
