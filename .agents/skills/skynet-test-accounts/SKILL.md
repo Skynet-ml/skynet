@@ -144,31 +144,21 @@ secret changes nothing and exits 0.
 ### Credit on new accounts
 
 - A new staging account gets no credit. For a check that needs a paid run,
-  get Gilad's approval in chat and fund the check account with "Grant test
-  credit" below. Or record the gap.
+  fund the check account with "Grant test credit" below.
 - Never add funds except through "Grant test credit" below.
 - Staging keeps the setup intake for new accounts.
 
 ### Grant test credit (staging only)
 
 A staging check that needs a paid run can fund its own check account with
-the grant command `python -m core.billing.grant_test_credit`. All of these
-rules apply:
+the grant command `python -m core.billing.grant_test_credit`. It can also
+fund a named staging account (SKY-971). These facts apply:
 
-- Use it only for a check account you created for this check with
-  `account.py`, or for a named staging account that Gilad names in his chat
-  approval (SKY-971). Never grant on production, to real customers or to
-  other manual accounts.
-- Amounts depend on the check. Before each grant, ask Gilad in chat for a
-  specific dollar amount: the smallest amount the check needs, with a short
-  cost estimate. Gilad approves that amount, or a larger one if he thinks
-  the check needs more. Spend as little as possible.
-- Grant only after Gilad approves that grant in chat. Put his approval text
-  in `--approval`. The command writes it to the task log only. The account
-  sees the ledger row, so the row holds only `Test grant: <reason>`.
+- `--approval` holds who asked for the grant. The command writes it to the
+  task log only. The account sees the ledger row, so the row holds only
+  `Test grant: <reason>`.
 - All grants on all accounts share one $50 cap for each UTC day, kept in the
   staging database. The command refuses a grant that passes it.
-- Never use a raw wallet INSERT, Stripe or any other path.
 
 The command refuses unless `APP_ENVIRONMENT` is `staging`, the database
 host is the `skynet-staging` RDS instance, and the database is named
@@ -178,7 +168,7 @@ staging shape. A named account is given with `--account-sha256` in place of
 `--account-id`: the SHA-256 of its lowercased email, so the email stays out
 of the command line. The account must have a user row and no debt. Amounts are
 dollars with at most 2 decimals. A retry with the same `--idempotency-key`
-credits nothing more. Use a new key for each approved grant, for example
+credits nothing more. Use a new key for each grant, for example
 `<account-id>-1`. The key has at most 54 characters. `--reason` has at most
 243 characters.
 
@@ -210,10 +200,11 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
 - For a named account, replace `"--account-id", $id` with
   `"--account-sha256", $id` and set `ACCOUNT_ID` to the hash, for example
   `printf %s "$EMAIL" | tr A-Z a-z | shasum -a 256 | cut -c1-64`. Never print
-  or log the email.
-- Set `ACCOUNT_ID` to the id `account.py` printed, `DOLLARS` to the approved
-  amount, `REASON` to the check, `APPROVAL` to Gilad's words, and `KEY` to a
-  new key.
+  or log the email, and never put it in the key. Use the first 12 hex
+  characters of the hash in the key, for example `<12 hex>-1`.
+- For a check account, set `ACCOUNT_ID` to the id `account.py` printed.
+  Set `DOLLARS` to the amount, `REASON` to the check, `APPROVAL` to who asked
+  for the grant, and `KEY` to a new key.
 - Exit code `0` prints `Granted $X to <id>` (for a named account, `to
   account sha256 <first 12 hex>`) or, on a retry, `Already
   granted`. Exit code `2` prints `Grant refused: <reason>` and writes
@@ -224,7 +215,10 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
   `Already granted` means the first run wrote the grant. Report the result.
 - Exit code `2` with usage text and no `Grant refused:` means a missing or
   bad argument. Fix the command line; nothing was written.
-- Record the grant (account id, dollars, key) on the Linear issue.
+- Record the grant (account id, dollars, key) on the Linear issue. For a
+  named account, record only the first 12 hex characters of the hash. The
+  repository is public, and anyone who can guess the email can check a full
+  hash.
 
 ### Authentication changes
 
@@ -254,8 +248,7 @@ Record on the Linear issue that you used fresh accounts and real codes.
   values, never real personal data.
 - Never add funds, grant credits, change billing or change balances. Use only
   test allowances that already exist. The one exception is the staging
-  test-credit grant command ("Grant test credit" in section 4), under all of
-  its rules.
+  test-credit grant command ("Grant test credit" in section 4).
 - Do not start expensive or scheduled runs only to see their UI. Follow the
   costly-workflow rule in the `skynet-pr-workflow` skill.
 - Never borrow another agent's account, Gilad's session or a personal

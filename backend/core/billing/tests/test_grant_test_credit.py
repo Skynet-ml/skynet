@@ -727,6 +727,16 @@ def test_email_sha256_lookup_checks_the_deployment_before_reading_users(monkeypa
         StripeBillingService(engine=no_tables).account_for_email_sha256(NAMED_SHA256)
 
 
+def test_email_sha256_lookup_checks_the_database_before_reading_users(
+    staging: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a non-staging database the lookup refuses before any query."""
+    monkeypatch.setattr(billing_service, "_is_staging_database", lambda _url: False)
+    no_tables = create_engine("sqlite:///:memory:")
+    with pytest.raises(GrantRefusedError, match="staging database"):
+        StripeBillingService(engine=no_tables).account_for_email_sha256(NAMED_SHA256)
+
+
 def test_cli_grants_a_named_account_and_prints_only_the_hash_prefix(
     engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

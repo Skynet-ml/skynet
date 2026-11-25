@@ -77,14 +77,14 @@ def _parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="python -m core.billing.grant_test_credit",
-        description="Grant test credit to a staging check account. Needs Gilad's approval in chat first.",
+        description="Grant test credit to a staging check account or a named staging account.",
     )
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--account-id", help="Account id from the test-account tool.")
     target.add_argument("--account-sha256", help="SHA-256 of a named account's lowercased email.")
     parser.add_argument("--dollars", required=True, help="Amount in dollars, for example 2.50.")
     parser.add_argument("--reason", required=True, help="Why the check needs the money.")
-    parser.add_argument("--approval", required=True, help="Gilad's approval text from chat.")
+    parser.add_argument("--approval", required=True, help="Who asked for the grant, for the task log.")
     parser.add_argument("--idempotency-key", required=True, help="Key that makes a retry credit nothing.")
     return parser
 
