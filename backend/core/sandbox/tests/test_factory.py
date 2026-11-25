@@ -151,7 +151,6 @@ def test_registry_lists_every_provider() -> None:
     assert sorted(PROVIDERS) == [
         "apple_container",
         "blaxel",
-        "boxd",
         "daytona",
         "docker",
         "e2b",
