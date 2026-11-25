@@ -1267,6 +1267,7 @@ async def test_a_protected_box_reserves_before_the_create_and_settles_after_the_
     env, made = _protected(lifetime_seconds=300.5)
     async with env:
         pass
+    await _spent()
     usage = made[0]
     assert usage.operation_key == "box-1"
     assert usage.request["lifetime_ms"] == 301_000
