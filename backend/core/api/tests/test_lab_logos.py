@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from .. import lab_logos
 from ..lab_logos import ICON_CDN, LabLogoCache
 from ..routers.models import create_models_router
 
@@ -131,3 +132,25 @@ def test_bad_icon_responses_are_404_and_cached(response: httpx.Response) -> None
     assert len(calls) == 2
     assert client.get("/models/logos/mistral").status_code == 404
     assert len(calls) == 2
+
+
+def test_full_cache_fetches_no_new_slug_until_an_entry_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cap the cache, so random slugs cannot grow memory or the CDN calls without a bound."""
+    monkeypatch.setattr(lab_logos, "_MAX_ENTRIES", 2)
+    clock = [1000.0]
+    monkeypatch.setattr(lab_logos.time, "monotonic", lambda: clock[0])
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return _svg(COLOR_SVG)
+
+    cache = LabLogoCache(_client_factory(handler))
+    assert cache.get("meta") is not None
+    assert cache.get("mistral") is not None
+    assert cache.get("stepfun") is None, "a full cache refuses a new slug"
+    assert cache.get("meta") is not None, "a cached slug still serves"
+    assert len(calls) == 2
+    clock[0] += lab_logos.LOGO_TTL_SECONDS + 1
+    assert cache.get("stepfun") is not None, "expired entries make room again"
+    assert len(calls) == 3

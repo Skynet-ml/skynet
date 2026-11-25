@@ -45,6 +45,10 @@ LOGO_TTL_SECONDS = 24 * 60 * 60
 # A failed fetch retries sooner, so a short outage does not hide a logo all day.
 _FAILURE_TTL_SECONDS = 60 * 60
 _MAX_ICON_BYTES = 256 * 1024
+# The route needs no sign-in and takes any well-formed slug, so the cache has a
+# cap. A full cache makes no new fetches, which also caps the CDN calls a
+# caller can cause. Real labs number well under this.
+_MAX_ENTRIES = 512
 _SLUG = re.compile(r"[a-z0-9-]{1,40}")
 _SVG_OPEN = re.compile(rb"<svg\b")
 
@@ -140,7 +144,8 @@ class LabLogoCache:
             slug: The frontend provider slug.
 
         Returns:
-            The logo, or None for an invalid slug or a failed fetch.
+            The logo, or None for an invalid slug, a failed fetch, or a new
+            slug while the cache is full.
         """
         if not _SLUG.fullmatch(slug):
             return None
@@ -149,8 +154,12 @@ class LabLogoCache:
         now = time.monotonic()
         with self._lock:
             entry = self._entries.get(slug)
-        if entry is not None and entry[0] > now:
-            return entry[1]
+            if entry is not None and entry[0] > now:
+                return entry[1]
+            if entry is None and len(self._entries) >= _MAX_ENTRIES:
+                self._entries = {key: value for key, value in self._entries.items() if value[0] > now}
+                if len(self._entries) >= _MAX_ENTRIES:
+                    return None
         with self._make_client() as client:
             logo = fetch_lab_logo(client, ICON_NAMES.get(slug, slug))
         ttl = LOGO_TTL_SECONDS if logo is not None else _FAILURE_TTL_SECONDS
