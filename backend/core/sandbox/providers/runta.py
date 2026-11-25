@@ -987,13 +987,16 @@ class RuntaEnvironment(SandboxEnvironment):
             job_id: The job tag value.
 
         Returns:
-            The number of runtimes that were deleted. A box that fails to
+            The number of runtimes that this sweep deleted. A box that fails to
             delete or settle is logged and the sweep goes on.
 
         Raises:
             Exception: The first stop error that is not a usage or budget error.
         """
         envs = list(_JOB_BOXES.get(job_id, ()))
+        # A box that keeps a duplicate comes back with its runtime deleted
+        # already, so count only the runtimes that this sweep deleted.
+        deleted_before = [env._deleted for env in envs]
         results = await asyncio.gather(*(env.stop() for env in envs), return_exceptions=True)
         unexpected: BaseException | None = None
         for env, result in zip(envs, results, strict=True):
@@ -1003,4 +1006,4 @@ class RuntaEnvironment(SandboxEnvironment):
                 unexpected = result
         if unexpected is not None:
             raise unexpected
-        return sum(1 for env in envs if env._deleted)
+        return sum(1 for env, before in zip(envs, deleted_before, strict=True) if env._deleted and not before)

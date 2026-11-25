@@ -22,7 +22,7 @@ from core.billing.runta_usage import RETENTION_SEC
 from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
-from core.sandbox.environment import NetworkPolicy
+from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import runta
@@ -1505,3 +1505,28 @@ async def test_a_late_unprotected_duplicate_fails_with_an_infra_error(
     first, duplicate = fake_sdk.boxes
     assert first.deleted
     assert not duplicate.deleted
+
+
+async def test_a_job_sweep_counts_a_deleted_runtime_once(fake_sdk: FakeCloud) -> None:
+    """Count only the runtimes that a sweep deletes, not a box that only retries its duplicate.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    tags = {JOB_TAG: "job-sweep"}
+    plain, _ = _protected(tags=tags)
+    await plain.start()
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails_for = ["rt-3"] * 4
+    kept, made = _protected(tags=tags)
+    with pytest.raises(SandboxInfraError):
+        await kept.start()
+    plain_box, kept_box, duplicate = fake_sdk.boxes
+    assert kept_box.deleted
+    assert await RuntaEnvironment.stop_job_sandboxes("job-sweep") == 1
+    assert plain_box.deleted
+    assert await RuntaEnvironment.stop_job_sandboxes("job-sweep") == 0
+    assert not duplicate.deleted
+    assert made[0].names()[-1] == "pending"
