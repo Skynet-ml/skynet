@@ -15,6 +15,9 @@ output limit and the delete on stop come from
   running-session limit (``auto_shutdown_after_secs``) at the spec lifetime
   and a short retention (``auto_delete_after_secs``), and the provider also
   deletes the box itself when the lifetime ends.
+- A closed or allowlist network policy also sends an empty
+  ``tcp_allowlist``, because Runta denies raw TCP only for an empty list.
+  Harbor sends no TCP list.
 - The requests and the limits of vCPU and memory are equal, so the priced
   size is the billed size. Harbor sends no limits.
 - A spec image is refused: the direct path runs Runta's default runtime
@@ -25,7 +28,8 @@ output limit and the delete on stop come from
 - The create is sent with ``wait=False`` under a shield, as in Harbor. A
   create that a timeout or a stop cancels gets a short grace to return its
   handle. A create that is still running after the grace goes to a
-  background task that deletes and settles its box when the handle arrives.
+  background task that deletes and settles its box when the handle arrives,
+  or looks up its name when the late create fails.
 - After a failed create the provider looks up the runtime by its unique
   name. A found runtime is deleted and settled. The hold is released only
   when Runta clearly refused the create and the lookup finds no runtime.
@@ -199,33 +203,79 @@ async def _release_late(reserving: asyncio.Future[Any]) -> None:
     await asyncio.to_thread(usage.fail)
 
 
-async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any) -> None:
+async def _list_named(client: Any, name: str) -> list[Any]:
+    """List the runtimes with this exact name, and delete every match but the first.
+
+    Args:
+        client: The Runta client.
+        name: The unique name of the runtime.
+
+    Returns:
+        A list with the first match, or an empty list.
+
+    Raises:
+        Exception: The list call failed or timed out.
+    """
+    listed = await asyncio.wait_for(client.runtimes.list(), STOP_TIMEOUT)
+    # Only a runtime with this exact name can belong to this create; never
+    # touch another runtime that the list returns.
+    found = [runtime for runtime in listed if runtime.name == name]
+    for extra in found[1:]:
+        await _bounded(extra.delete(), "delete a duplicate runtime")
+    return found[:1]
+
+
+async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, name: str) -> None:
     """Delete and settle the runtime of a create that outlived its grace.
 
-    This task owns the hold. A failed create or a failed delete keeps the
-    hold pending with the runtime name as evidence.
+    This task owns the hold. A failed create is looked up by name, as in the
+    grace. The delete always runs once a runtime is known. A failed lookup,
+    a failed delete or a failed confirm keeps the hold pending with the
+    runtime name as evidence.
 
     Args:
         create: The create task.
         usage: The usage reservation of the box, or ``None``.
         client: The Runta client, closed at the end.
+        name: The unique name of the runtime.
+
+    Raises:
+        UsagePendingError: The lookup, the confirm or the delete failed.
     """
     try:
         try:
             runtime = await create
-        except Exception:
-            if usage is not None:
-                await asyncio.to_thread(usage.pending)
-            raise
+        except Exception as create_error:
+            try:
+                found = await _list_named(client, name)
+            except Exception as error:
+                raise UsagePendingError(
+                    "Runta could not list runtimes after a late failed create, so the hold stays."
+                ) from error
+            if not found:
+                if usage is not None:
+                    await asyncio.to_thread(usage.fail, _refused_create(create_error))
+                return
+            runtime = found[0]
+        confirmed = True
         if usage is not None and usage.runtime_id is None:
-            await asyncio.to_thread(usage.confirm_created, runtime)
+            try:
+                await asyncio.to_thread(usage.confirm_created, runtime)
+            except Exception as error:
+                # The delete must still run, or the box runs to Runta's own shutdown.
+                confirmed = False
+                logger.warning("Runta could not confirm the late runtime %s: %s", name, type(error).__name__)
         if not await _bounded(runtime.delete(), "delete a late runtime"):
             if usage is not None:
                 await asyncio.to_thread(usage.pending)
             raise UsagePendingError("A late Runta runtime did not delete, so its hold stays pending.")
-        if usage is not None:
-            usage.stopped()
-            await asyncio.to_thread(usage.settle)
+        if usage is None:
+            return
+        if not confirmed:
+            await asyncio.to_thread(usage.pending)
+            raise UsagePendingError("A late Runta runtime has no confirmed id, so its hold stays pending.")
+        usage.stopped()
+        await asyncio.to_thread(usage.settle)
     finally:
         await _bounded(client.close(), "close the client")
 
@@ -246,6 +296,24 @@ def _egress_policy(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> Any:
     if mode is NetworkMode.ALLOWLIST:
         return EgressPolicy(mode=EgressMode.ALLOWLIST, allowed_hosts=list(dict.fromkeys(allowed_hosts)))
     return EgressPolicy(mode=EgressMode.DENYLIST, denied_hosts=[])
+
+
+def _tcp_create(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> dict[str, list[str]]:
+    """Return the raw TCP argument of the create for a network policy.
+
+    The egress policy covers only HTTP hosts; Runta denies raw TCP on a new
+    runtime only when the create sends an empty ``tcp_allowlist``.
+
+    Args:
+        disabled: True when the box has no egress.
+        allowed_hosts: The hosts that egress may reach; empty means any host.
+
+    Returns:
+        ``{"tcp_allowlist": []}`` for a closed or allowlist policy, else no argument.
+    """
+    if network_mode(disabled=disabled, allowed_hosts=allowed_hosts) is NetworkMode.OPEN:
+        return {}
+    return {"tcp_allowlist": []}
 
 
 def _runtime_request(spec: SandboxSpec) -> dict[str, int]:
@@ -320,6 +388,8 @@ class RuntaEnvironment(SandboxEnvironment):
         self._create_task: asyncio.Future[Any] | None = None
         self._create_error: BaseException | None = None
         self._cap_task: asyncio.Future[None] | None = None
+        self._capped = False
+        self._confirming: asyncio.Future[None] | None = None
         self._starting: asyncio.Future[None] | None = None
         self._started = False
         self._deleted = False
@@ -409,6 +479,7 @@ class RuntaEnvironment(SandboxEnvironment):
                             disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts)
                         ),
                         "auto_shutdown_after_secs": request["lifetime_ms"] // 1000,
+                        **_tcp_create(disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts)),
                         "auto_delete_after_secs": RETENTION_SEC,
                         "wait": False,
                     }
@@ -427,14 +498,18 @@ class RuntaEnvironment(SandboxEnvironment):
                     raise
                 self._keep(runtime)
                 if self._usage is not None:
-                    await asyncio.to_thread(self._usage.confirm_created, runtime)
+                    # A cancel cannot stop the ledger thread; the teardown
+                    # waits for this future before it settles.
+                    self._confirming = asyncio.ensure_future(asyncio.to_thread(self._usage.confirm_created, runtime))
+                    await asyncio.shield(self._confirming)
                 ready_limit = BOOT_LIMIT_SEC if limit is None else min(limit, BOOT_LIMIT_SEC)
-                try:
-                    await runtime.wait_until_ready(timeout=ready_limit)
-                except TimeoutError:
-                    raise StartTimeoutError(ready_limit) from None
-                except RuntimeError as error:
-                    raise SandboxInfraError(f"The Runta runtime failed to start: {error}") from error
+                with _mapped("wait for the runtime"):
+                    try:
+                        await runtime.wait_until_ready(timeout=ready_limit)
+                    except TimeoutError:
+                        raise StartTimeoutError(ready_limit) from None
+                    except RuntimeError as error:
+                        raise SandboxInfraError(f"The Runta runtime failed to start: {error}") from error
         except TimeoutError:
             if limit is None or not deadline.expired():
                 raise
@@ -463,6 +538,8 @@ class RuntaEnvironment(SandboxEnvironment):
             seconds: The lifetime from the create call.
         """
         await _cap_sleep(seconds)
+        # The teardown must not cancel this task, or the warning below is lost.
+        self._capped = True
         logger.warning("Runta sandbox %s reached its lifetime; it is deleted.", self._name)
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._teardown())
@@ -618,6 +695,9 @@ class RuntaEnvironment(SandboxEnvironment):
             await runtime.egress.set_policy(
                 _egress_policy(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts)
             )
+            # An open policy cannot list every TCP host, so it keeps the raw TCP list as it is.
+            if _tcp_create(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts):
+                await runtime.egress.set_tcp_allowlist([])
 
     async def stop(self) -> None:
         """Delete the runtime once and settle its hold. Safe to call again and before start.
@@ -662,8 +742,14 @@ class RuntaEnvironment(SandboxEnvironment):
             elif not reserving.cancelled() and reserving.exception() is None:
                 self._usage = reserving.result()
         cap = self._cap_task
-        if cap is not None and not cap.done():
+        if cap is not None and not cap.done() and not self._capped:
             cap.cancel()
+        confirming = self._confirming
+        if confirming is not None:
+            await asyncio.wait({confirming})
+            if not confirming.cancelled() and confirming.exception() is not None:
+                # _end_usage tries the confirm again when no runtime id came back.
+                logger.warning("Runta sandbox %s did not confirm its runtime.", self._name)
         create = self._create_task
         if self._runtime is None and create is not None:
             await asyncio.wait({create}, timeout=CREATE_GRACE)
@@ -699,7 +785,7 @@ class RuntaEnvironment(SandboxEnvironment):
                 "Runta deletes the late runtime %s of the pending hold %s.", self._name, self.spec.operation_key
             )
             await asyncio.to_thread(usage.pending)
-        _keep_late(asyncio.ensure_future(_delete_late(create, usage, client)))
+        _keep_late(asyncio.ensure_future(_delete_late(create, usage, client, self._name)))
         return []
 
     async def _end_usage(self) -> None:
@@ -736,9 +822,13 @@ class RuntaEnvironment(SandboxEnvironment):
             # The runtime can still run. Keep the handle and the hold, so a
             # later stop() or the job sweep tries the delete again.
             self._keep(runtime)
-            self._stop_task = None
-            if usage is not None:
-                await asyncio.to_thread(usage.pending)
+            try:
+                if usage is not None:
+                    await asyncio.to_thread(usage.pending)
+            finally:
+                # Reset only now: a stop() during the pending call must share
+                # this teardown, not start a second owner of the hold.
+                self._stop_task = None
             raise UsagePendingError("The Runta runtime did not delete, so its hold stays pending.")
         self._runtime = None
         self._deleted = True
@@ -759,19 +849,18 @@ class RuntaEnvironment(SandboxEnvironment):
             UsagePendingError: The lookup failed, so the hold stays pending.
         """
         try:
-            listed = await asyncio.wait_for(self._client.runtimes.list(), STOP_TIMEOUT)
+            found = await _list_named(self._client, self._name)
         except Exception as error:
-            self._stop_task = None
-            if self._usage is not None:
-                await asyncio.to_thread(self._usage.pending)
+            try:
+                if self._usage is not None:
+                    await asyncio.to_thread(self._usage.pending)
+            finally:
+                # Reset only now: a stop() during the pending call must share
+                # this teardown, not start a second owner of the hold.
+                self._stop_task = None
             raise UsagePendingError(
                 "Runta could not list runtimes after a failed create, so the hold stays."
             ) from error
-        # Only a runtime with this exact name can belong to this create; never
-        # touch another runtime that the list returns.
-        found = [runtime for runtime in listed if runtime.name == self._name]
-        for extra in found[1:]:
-            await _bounded(extra.delete(), "delete a duplicate runtime")
         return found[0] if found else None
 
     async def _close(self) -> None:

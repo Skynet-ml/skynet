@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import shlex
+import threading
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -72,6 +73,7 @@ class BoxState:
     params: dict[str, Any]
     deleted: bool = False
     egress: Any = None
+    tcp: list[str] | None = None
     files: dict[str, bytes] = field(default_factory=dict)
     dirs: set[str] = field(default_factory=lambda: {"/", "/tmp"})
 
@@ -92,6 +94,9 @@ class FakeCloud:
     ready_started: asyncio.Event = field(default_factory=asyncio.Event)
     list_error: BaseException | None = None
     delete_fails: int = 0
+    delete_calls: int = 0
+    confirm_gate: Any = None
+    confirm_gate_entered: threading.Event = field(default_factory=threading.Event)
     exec_hangs: bool = False
     exec_exit: int | None = None
     closed: int = 0
@@ -109,7 +114,12 @@ class FakeCloud:
         Returns:
             The new runtime.
         """
-        box = BoxState(id=f"rt-{next(self.ids)}", params=params, egress=params.get("egress_policy"))
+        box = BoxState(
+            id=f"rt-{next(self.ids)}",
+            params=params,
+            egress=params.get("egress_policy"),
+            tcp=params.get("tcp_allowlist"),
+        )
         self.boxes.append(box)
         return box
 
@@ -210,6 +220,14 @@ class FakeEgress:
         """
         self.box.egress = policy
 
+    async def set_tcp_allowlist(self, hosts: list[str]) -> None:
+        """Replace the raw TCP allowlist.
+
+        Args:
+            hosts: The new list; empty denies raw TCP.
+        """
+        self.box.tcp = list(hosts)
+
 
 class FakeRuntime:
     """Stand in for ``runta.AsyncRuntime``."""
@@ -256,6 +274,7 @@ class FakeRuntime:
         Raises:
             FakeApiError: The fake cloud fails this delete.
         """
+        CLOUD.delete_calls += 1
         if CLOUD.delete_fails:
             CLOUD.delete_fails -= 1
             raise FakeApiError(503)
@@ -445,6 +464,11 @@ class FakeUsage:
         self.calls: list[tuple[str, Any]] = [("reserve", CLOUD.create_calls)]
         self.runtime_id: str | None = None
         self.settle_error: BaseException | None = None
+        self.confirm_error: BaseException | None = None
+        # Threading events, because the provider calls the ledger from a thread.
+        self.confirm_gate: threading.Event | None = CLOUD.confirm_gate
+        self.pending_gate: threading.Event | None = None
+        self.pending_entered = threading.Event()
 
     def sent(self, name: str) -> None:
         """Record the create call, with the creates that ran before it.
@@ -459,9 +483,17 @@ class FakeUsage:
 
         Args:
             handle: The runtime handle.
+
+        Raises:
+            BaseException: The error that the test sets.
         """
-        self.runtime_id = handle.id
         self.calls.append(("confirm", handle.id))
+        CLOUD.confirm_gate_entered.set()
+        if self.confirm_gate is not None:
+            self.confirm_gate.wait(5)
+        if self.confirm_error is not None:
+            raise self.confirm_error
+        self.runtime_id = handle.id
 
     def stopped(self) -> None:
         """Record the end of the clock, with the box state at that time."""
@@ -486,8 +518,11 @@ class FakeUsage:
         self.calls.append(("fail", absent))
 
     def pending(self) -> None:
-        """Record a pending hold."""
+        """Record a pending hold, and wait at the gate that the test sets."""
         self.calls.append(("pending", None))
+        self.pending_entered.set()
+        if self.pending_gate is not None:
+            self.pending_gate.wait(5)
 
     def names(self) -> list[str]:
         """Return the names of the recorded calls.
@@ -621,6 +656,7 @@ async def test_create_sends_equal_limits_and_the_lifetime_knobs(fake_sdk: FakeCl
     assert params["auto_delete_after_secs"] == RETENTION_SEC
     assert params["wait"] is False
     assert params["egress_policy"] == FakeEgressPolicy(mode="denylist")
+    assert "tcp_allowlist" not in params
     assert fake_sdk.cap_seconds == [301]
     assert fake_sdk.boxes[0].deleted
     assert fake_sdk.closed == 1
@@ -651,7 +687,7 @@ async def test_sizes_map_to_whole_units(fake_sdk: FakeCloud) -> None:
 async def test_the_spec_network_maps_to_the_create_egress(
     fake_sdk: FakeCloud, network: dict[str, Any], expected: FakeEgressPolicy
 ) -> None:
-    """Send a deny-all or allowlist egress policy with the create.
+    """Send a deny-all or allowlist egress policy and an empty raw TCP list with the create.
 
     Args:
         fake_sdk: The fake Runta cloud.
@@ -661,10 +697,11 @@ async def test_the_spec_network_maps_to_the_create_egress(
     async with RuntaEnvironment(_spec(**network)):
         pass
     assert fake_sdk.boxes[0].params["egress_policy"] == expected
+    assert fake_sdk.boxes[0].params["tcp_allowlist"] == []
 
 
 async def test_set_network_policy_changes_the_box_egress(fake_sdk: FakeCloud) -> None:
-    """Send a new egress policy to the running runtime.
+    """Send a new egress policy and an empty raw TCP list to the running runtime.
 
     Args:
         fake_sdk: The fake Runta cloud.
@@ -672,6 +709,7 @@ async def test_set_network_policy_changes_the_box_egress(fake_sdk: FakeCloud) ->
     async with RuntaEnvironment(_spec()) as env:
         await env.set_network_policy(NetworkPolicy(allowed_hosts=("b.example",)))
         assert fake_sdk.boxes[0].egress == FakeEgressPolicy(mode="allowlist", allowed_hosts=["b.example"])
+        assert fake_sdk.boxes[0].tcp == []
 
 
 async def test_exec_sends_argv_env_timeout_and_cwd(fake_sdk: FakeCloud) -> None:
@@ -774,8 +812,8 @@ async def test_the_lifetime_cap_deletes_and_settles_the_box(fake_sdk: FakeCloud)
     await env.start()
     assert fake_sdk.cap_seconds == [90]
     fake_sdk.cap.set()
-    # The teardown cancels the cap task after the cap starts the teardown.
     await asyncio.wait({env._cap_task})
+    assert not env._cap_task.cancelled()
     await asyncio.wait({env._stop_task})
     assert made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
     with pytest.raises(SandboxInfraError, match="not running"):
@@ -1010,3 +1048,178 @@ async def test_a_refused_reserve_sends_no_create(fake_sdk: FakeCloud) -> None:
         await env.start()
     assert fake_sdk.create_calls == 0
     assert fake_sdk.closed == 0
+
+
+async def test_an_sdk_error_while_waiting_is_infra_and_settles(fake_sdk: FakeCloud) -> None:
+    """Map an SDK error of the ready wait to an infra error, and delete and settle the box.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.ready_error = FakeApiError(503)
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError, match="wait for the runtime: FakeApiError"):
+        await env.start()
+    assert made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
+    assert fake_sdk.boxes[0].deleted
+
+
+async def test_a_stop_during_the_pending_call_shares_the_teardown(fake_sdk: FakeCloud) -> None:
+    """Start no second teardown while the first one marks the hold pending after a failed delete.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    env, made = _protected()
+    await env.start()
+    usage = made[0]
+    usage.pending_gate = threading.Event()
+    fake_sdk.delete_fails = 1
+    first = asyncio.ensure_future(env.stop())
+    await asyncio.to_thread(usage.pending_entered.wait, 5)
+    second = asyncio.ensure_future(env.stop())
+    await asyncio.sleep(0)
+    usage.pending_gate.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert sum(isinstance(result, UsagePendingError) for result in results) == 1
+    assert fake_sdk.delete_calls == 1
+    assert usage.names().count("pending") == 1
+    await env.stop()
+    assert usage.names()[-2:] == ["stopped", "settle"]
+
+
+async def test_the_lifetime_cap_logs_a_failed_settle(fake_sdk: FakeCloud, caplog: pytest.LogCaptureFixture) -> None:
+    """Log the pending hold when the delete at the lifetime cap fails.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        caplog: The log capture.
+    """
+    env, made = _protected()
+    await env.start()
+    fake_sdk.delete_fails = 1
+    with caplog.at_level("WARNING", logger=runta.__name__):
+        fake_sdk.cap.set()
+        await asyncio.wait({env._cap_task})
+    assert "did not settle at its lifetime: UsagePendingError" in caplog.text
+    assert made[0].names()[-1] == "pending"
+    await env.stop()
+    assert made[0].names()[-2:] == ["stopped", "settle"]
+
+
+async def test_a_cancel_during_the_confirm_waits_for_the_ledger_thread(fake_sdk: FakeCloud) -> None:
+    """Let the confirm thread end before the teardown settles, so the confirm runs once.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.confirm_gate = threading.Event()
+    env, made = _protected()
+    task = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(fake_sdk.confirm_gate_entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    fake_sdk.confirm_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
+
+
+async def _late_create(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> FakeUsage:
+    """End a start whose create outlives its grace, and return its reservation.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Returns:
+        The reservation, which the background task owns now.
+    """
+    monkeypatch.setattr(runta, "CREATE_GRACE", 0.01)
+    fake_sdk.create_gate = asyncio.Event()
+    env, made = _protected(timeouts=_timeouts(start=0.02))
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    assert made[0].names() == ["reserve", "sent", "pending"]
+    return made[0]
+
+
+async def test_a_late_failed_confirm_still_deletes_and_keeps_the_hold(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete a late runtime when its confirm fails, and keep the hold pending.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    usage = await _late_create(fake_sdk, monkeypatch)
+    usage.confirm_error = UsagePendingError("ledger down")
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    assert fake_sdk.boxes[0].deleted
+    assert usage.names() == ["reserve", "sent", "pending", "confirm", "pending"]
+
+
+async def test_a_late_refused_create_without_a_box_releases(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Look up a late refused create by name, and release the hold when no runtime exists.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    usage = await _late_create(fake_sdk, monkeypatch)
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    assert usage.calls[-1] == ("fail", True)
+
+
+async def test_a_late_unknown_create_stays_pending(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the hold of a late create with an unknown outcome when no runtime has its name.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    usage = await _late_create(fake_sdk, monkeypatch)
+    fake_sdk.create_error = FakeApiError(500)
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    assert usage.calls[-1] == ("fail", False)
+
+
+async def test_a_late_failed_create_that_made_a_box_is_deleted_and_settled(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Find the runtime of a late failed create by name, then delete and settle it.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    usage = await _late_create(fake_sdk, monkeypatch)
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    assert fake_sdk.boxes[0].deleted
+    assert usage.names() == ["reserve", "sent", "pending", "confirm", "stopped", "settle"]
+
+
+async def test_a_late_failed_lookup_keeps_the_hold(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the pending hold when the lookup after a late failed create fails.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    usage = await _late_create(fake_sdk, monkeypatch)
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.list_error = FakeApiError(503)
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    assert usage.names() == ["reserve", "sent", "pending"]

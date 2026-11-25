@@ -383,7 +383,11 @@ class RuntaUsageReservation:
             )
             self.runtime.unpin(self.operation.id)
         except BaseException:
-            self.pending()
+            # A failed pending call must not replace the first error.
+            try:
+                self.pending()
+            except Exception as pending_error:
+                logger.warning("Runta could not mark the hold pending: %s", type(pending_error).__name__)
             raise
 
 

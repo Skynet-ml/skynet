@@ -227,6 +227,49 @@ def test_settle_without_a_confirmed_delete_keeps_the_hold_pending(database: Engi
     assert runtime._pinned != {}
 
 
+def test_a_failed_pending_call_keeps_the_first_settle_error(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Raise the ledger settle error, not the error of the pending call after it.
+
+    Args:
+        database: The SQLite ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+        caplog: The log capture.
+    """
+    runtime = _runtime(database)
+    reservation = RuntaUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent("skynet-box")
+    reservation.confirm_created(SimpleNamespace(id="rt-1"))
+    reservation.stopped()
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        """Fail like a ledger that is down.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            ConnectionError: Always.
+        """
+        raise ConnectionError("ledger down")
+
+    def broken_pending() -> None:
+        """Fail the pending call.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("pending down")
+
+    monkeypatch.setattr(runtime.service, "settle", broken)
+    monkeypatch.setattr(reservation, "pending", broken_pending)
+    with caplog.at_level("WARNING", logger=runta_usage.__name__), pytest.raises(ConnectionError, match="ledger down"):
+        reservation.settle()
+    assert "could not mark the hold pending: RuntimeError" in caplog.text
+
+
 def test_confirm_refuses_a_runtime_with_no_id(database: Engine) -> None:
     """Refuse a created runtime that carries no Runta id."""
     reservation = RuntaUsageReservation(_runtime(database), CREATE, operation_key="box-one")
