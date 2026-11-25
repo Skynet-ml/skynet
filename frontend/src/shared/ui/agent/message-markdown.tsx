@@ -26,7 +26,7 @@ import {
   INLINE_MATH_MARK,
   codeBlockLabel,
   endsInOpenFence,
-  isSafeImageSrc,
+  isInlineImageSrc,
   prepareMath,
   repairStreamingMarkdown,
 } from "./markdown-source";
@@ -447,7 +447,7 @@ function rehypeTableColumns() {
 const REHYPE_PLUGINS = [rehypeTableColumns];
 
 const urlTransform: UrlTransform = (url, key, node) =>
-  key === "src" && node.tagName === "img" && isSafeImageSrc(url) ? url : defaultUrlTransform(url);
+  key === "src" && node.tagName === "img" && isInlineImageSrc(url) ? url : defaultUrlTransform(url);
 
 function PreBlock({ end, children }: { end?: number; children?: React.ReactNode }) {
   const { userTone, openFenceEnd } = React.useContext(MarkdownContext);
@@ -510,9 +510,10 @@ const COMPONENTS: Components = {
     </TableBlock>
   ),
   img: ({ node: _node, src, alt }) =>
-    typeof src === "string" && isSafeImageSrc(src) ? (
-      // Chat images come from any https host, so next/image's host allowlist cannot cover them.
-      <img src={src} alt={alt ?? ""} loading="lazy" />
+    // A remote image would load with no click, so an injected reply could send chat data to
+    // any host in its URL. A link would skip `allowLink` and can nest inside a Markdown link.
+    typeof src === "string" && isInlineImageSrc(src) ? (
+      <img src={src} alt={alt ?? ""} />
     ) : (
       <span>{alt}</span>
     ),
