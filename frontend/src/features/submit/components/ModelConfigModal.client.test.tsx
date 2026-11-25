@@ -180,7 +180,7 @@ async function click(el: Element) {
   await settle();
 }
 
-void test("a Claude Code model gets the slider over the CLI's levels, its reset, and no model line or switch", async () => {
+void test("a Claude Code model gets the slider over the CLI's levels, with no reset, model line or switch", async () => {
   setLocal(true);
   const m = await mount({
     name: "anthropic/claude-opus-4.5",
@@ -197,7 +197,7 @@ void test("a Claude Code model gets the slider over the CLI's levels, its reset,
     const box = slider.closest(".effort-charge")!;
     assert.deepEqual(
       [...box.querySelectorAll("button")].map((b) => b.getAttribute("aria-label")),
-      ["Reset to the model default"],
+      [],
     );
     assert.equal(dialog().querySelector('[role="switch"]'), null);
   } finally {
@@ -268,7 +268,7 @@ void test("a Codex model gets its CLI levels and keeps a level it takes", async 
   }
 });
 
-void test("an OpenRouter model keeps the catalog's levels as segment buttons", async () => {
+void test("an OpenRouter model gets the composer slider over the catalog's levels", async () => {
   setLocal(false);
   const m = await mount({
     name: "openrouter/anthropic/claude-opus-4.5",
@@ -276,14 +276,13 @@ void test("an OpenRouter model keeps the catalog's levels as segment buttons", a
     extra: { reasoning_effort: "max" },
   } as ModelConfig);
   try {
-    assert.equal(dialog().querySelector('[role="slider"]'), null);
-    const radios = [...dialog().querySelectorAll('[role="radiogroup"] [role="radio"]')].filter(
-      (r) => ["Low", "Medium", "High", "Extra high", "Max"].includes(r.textContent ?? ""),
+    const slider = dialog().querySelector('[role="slider"]');
+    assert.ok(slider, "the dialog uses the composer's slider");
+    assert.match(slider.getAttribute("aria-valuetext") ?? "", /Max/);
+    const segments = [...dialog().querySelectorAll('[role="radio"]')].filter((r) =>
+      ["Low", "Medium", "High", "Extra high", "Max"].includes(r.textContent ?? ""),
     );
-    assert.deepEqual(
-      radios.map((r) => r.textContent),
-      ["Low", "Medium", "High", "Extra high", "Max"],
-    );
+    assert.equal(segments.length, 0, "no effort segments remain");
     assert.ok(dialog().querySelector('[role="switch"]'), "the thinking switch stays");
     await click(buttonByText("Save")!);
     assert.equal(m.saved[0]!.extra?.reasoning_effort, "max");

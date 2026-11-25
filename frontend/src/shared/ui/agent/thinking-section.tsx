@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import dynamic from "next/dynamic";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Brain, CaretRight } from "@/shared/ui/icons";
 
@@ -10,14 +9,17 @@ import { cn } from "@/shared/lib/utils";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { thoughtSeconds } from "@/shared/lib/thinking-segments";
 
+import type { MessageMarkdown as MessageMarkdownComponent } from "./message-markdown";
 import { ThinkingDots } from "./thinking-dots";
 import type { AgentThinking } from "./types";
 
-// Lazy for the same reason as in agent-bubble: the parser stays out of the
-// first-load chunk until a trace is opened.
-const MessageMarkdown = dynamic(() => import("./message-markdown").then((m) => m.MessageMarkdown), {
-  ssr: false,
-});
+// The parser stays out of the first-load chunk, as in agent-bubble, but loads
+// when the row mounts, not on the first open. next/dynamic loaded it on open
+// behind an empty view: the panel grew to an empty box and the text snapped
+// in ~300ms later. Measured, a Suspense text fallback still jumped 35px.
+let loadedMarkdown: typeof MessageMarkdownComponent | null = null;
+const loadMarkdown = () =>
+  import("./message-markdown").then((m) => (loadedMarkdown = m.MessageMarkdown));
 
 // Within this many px of the bottom still counts as "at the bottom", so
 // momentum scrolling and fractional positions don't break follow mode.
@@ -43,6 +45,19 @@ export function ThinkingSection({ thinking, compact = false, open: openProp, onO
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const stickToBottomRef = React.useRef(true);
   const reduce = useReducedMotion();
+  const [Markdown, setMarkdown] = React.useState(() => loadedMarkdown);
+  const hasReasoning = Boolean(reasoning);
+
+  React.useEffect(() => {
+    if (Markdown || !hasReasoning) return;
+    let live = true;
+    void loadMarkdown().then((component) => {
+      if (live) setMarkdown(() => component);
+    });
+    return () => {
+      live = false;
+    };
+  }, [Markdown, hasReasoning]);
 
   // Follow the stream only while the reader is at the bottom, so scrolling
   // up to read earlier reasoning isn't yanked back down by new tokens.
@@ -130,9 +145,11 @@ export function ThinkingSection({ thinking, compact = false, open: openProp, onO
               dir="auto"
               className="mb-1.5 max-h-48 overflow-y-auto ps-5.5 pe-2 text-[0.8125rem] leading-relaxed text-muted-foreground/80 break-words"
             >
-              <React.Suspense fallback={<span className="whitespace-pre-wrap">{reasoning}</span>}>
-                <MessageMarkdown content={reasoning} />
-              </React.Suspense>
+              {Markdown ? (
+                <Markdown content={reasoning} />
+              ) : (
+                <span className="whitespace-pre-wrap">{reasoning}</span>
+              )}
             </div>
           </motion.div>
         )}

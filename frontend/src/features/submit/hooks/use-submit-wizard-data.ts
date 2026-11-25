@@ -12,77 +12,7 @@ import {
   getModelCatalog,
 } from "@/shared/lib/model-catalog";
 import type { ModelCatalogResponse, ModelConfig } from "@/shared/types/api";
-import { MAX_RECENT, RECENT_KEY } from "../constants";
 import { callHoldKey } from "../lib/run-floor";
-
-export function useRecentModelConfigs() {
-  // Initial state must be empty: this hook is client-only but Next.js still
-  // renders client components on the server. Touching `localStorage` in the
-  // initializer throws ReferenceError under SSR, the try/catch falls back
-  // to [], and the UI hydrates without any recent configs. Hydrate via an
-  // effect instead.
-  const [recentConfigs, setRecentConfigs] = useState<ModelConfig[]>([]);
-
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(RECENT_KEY);
-      if (stored) setRecentConfigs(JSON.parse(stored));
-    } catch {
-      // Private-mode Safari / disabled storage / corrupt JSON — keep [].
-    }
-  }, []);
-
-  const saveToRecent = useCallback((config: ModelConfig) => {
-    if (!config.name) return;
-    // Legacy inline connection fields are never persisted; BYOK references
-    // the encrypted Settings → Providers vault by slug instead.
-    const {
-      api_key: _ApiKey,
-      api_base: _ApiBase,
-      base_url: _ExtraBaseUrl,
-      ...safeExtra
-    } = config.extra ?? {};
-    const { base_url: _baseUrl, ...safeFields } = config;
-    const safeConfig: ModelConfig = {
-      ...safeFields,
-      extra: Object.keys(safeExtra).length > 0 ? safeExtra : undefined,
-    };
-    setRecentConfigs((prev) => {
-      const deduped = prev.filter((c) => c.name !== safeConfig.name);
-      const next = [safeConfig, ...deduped].slice(0, MAX_RECENT);
-      try {
-        localStorage.setItem(RECENT_KEY, JSON.stringify(next));
-      } catch {
-        // Quota exceeded or storage disabled — in-memory list still updates.
-      }
-      return next;
-    });
-  }, []);
-
-  const clearRecentConfigs = useCallback(() => {
-    setRecentConfigs([]);
-    try {
-      localStorage.removeItem(RECENT_KEY);
-    } catch {
-      // Storage disabled — already cleared in-memory.
-    }
-  }, []);
-
-  const removeRecentConfig = useCallback((name: string) => {
-    setRecentConfigs((prev) => {
-      const next = prev.filter((c) => c.name !== name);
-      try {
-        if (next.length === 0) localStorage.removeItem(RECENT_KEY);
-        else localStorage.setItem(RECENT_KEY, JSON.stringify(next));
-      } catch {
-        // Storage disabled — in-memory list is still updated.
-      }
-      return next;
-    });
-  }, []);
-
-  return { recentConfigs, saveToRecent, clearRecentConfigs, removeRecentConfig };
-}
 
 // One object, so a memo that reads the list does not rerun on every render while it loads.
 const SANDBOXES_LOADING: SandboxProviders = { status: "loading", catalog: null };

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Coins, Desktop, Key, X } from "@/shared/ui/icons";
+import { Coins, Desktop, Key } from "@/shared/ui/icons";
 import { useByokKeys, litellmProviderForByok, type TokenSourceMode } from "@/features/billing";
 import {
   SubscriptionSourcePicker,
@@ -24,20 +24,19 @@ import { Label } from "@/shared/ui/primitives/label";
 import { Switch } from "@/shared/ui/primitives/switch";
 import { Separator } from "@/shared/ui/primitives/separator";
 import { ModelPicker, modelSupportsThinking } from "./ModelPicker";
-import { ProviderLogo } from "@/shared/ui/provider-logo";
-import { modelDisplayName, modelProviderSlug } from "@/shared/lib/model-provider";
 import { effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
 import { NumberInput } from "@/shared/ui/number-input";
 import { Segmented } from "@/shared/ui/segmented";
 import { Disclosure } from "./Disclosure";
+import { cnGrid } from "./blackbox/shared";
 import { ReasoningEffortControl } from "./ReasoningEffortControl";
-import { runnableEffort, usesEffortSlider } from "../lib/model-config";
+import { runnableEffort, startingParams, temperatureMax } from "../lib/model-config";
 import { cn } from "@/shared/lib/utils";
 import type { ModelConfig, CatalogModel } from "@/shared/types/api";
 import { HelpTip } from "@/shared/ui/help-tip";
 import { tip } from "@/shared/lib/tooltips";
 import { TERMS } from "@/shared/lib/terms";
-import { formatMsg, msg } from "@/shared/lib/messages";
+import { msg } from "@/shared/lib/messages";
 import { defaultOpen, isVisible, useExperienceLevel } from "@/features/experience";
 
 interface ModelConfigModalProps {
@@ -49,10 +48,6 @@ interface ModelConfigModalProps {
   roleLabel?: string;
   /** Catalog models for thinking detection */
   catalogModels?: CatalogModel[];
-  /** Recently used configs — shown as quick-select at top */
-  recentConfigs?: ModelConfig[];
-  /** Remove a single recent config by its model name (rendered as a per-row X). */
-  onRemoveRecent?: (name: string) => void;
   /**
    * Only the model id is chosen; billing source, sampling and thinking are
    * hidden and never saved. For targets that take nothing but a model id.
@@ -162,8 +157,6 @@ export function ModelConfigModal({
   onSave,
   roleLabel = msg("auto.features.submit.components.modelconfigmodal.literal.1"),
   catalogModels,
-  recentConfigs,
-  onRemoveRecent,
   nameOnly = false,
   modelDefaultsOnly = false,
   byokOnlyLocally = false,
@@ -239,20 +232,6 @@ export function ModelConfigModal({
         ? subscriptionModels
         : catalogModels;
 
-  // Recent chips follow the chosen source: a remembered managed model never
-  // shows under BYOK (and vice versa), and a chip whose model the active
-  // catalog no longer serves — a removed key, a retired model — is dropped.
-  const visibleRecent = React.useMemo(() => {
-    if (!recentConfigs?.length) return [];
-    const served = detectionModels ? new Set(detectionModels.map((m) => m.value)) : null;
-    return recentConfigs.filter(
-      (rc) =>
-        (rc.token_source ?? "managed") === mode &&
-        (mode !== "subscription" || rc.cli_provider === draft.cli_provider) &&
-        (!served || served.has(rc.name)),
-    );
-  }, [recentConfigs, detectionModels, mode, draft.cli_provider]);
-
   // Sync draft when config changes externally (e.g. opening with different model)
   React.useEffect(() => {
     if (open) {
@@ -301,6 +280,9 @@ export function ModelConfigModal({
   };
   const { mandatory: thinkingMandatory, defaultOn: thinkingDefaultOn } = thinkingInfo(draft.name);
   const canThink = modelSupportsThinking(draft.name, detectionModels);
+  const maxTemperature = temperatureMax(draft.name);
+  const takesTemperature =
+    detectionModels?.find((m) => m.value === draft.name)?.takes_temperature !== false;
   const savedEffort = draft.extra?.reasoning_effort as string | undefined;
   const cliLevels =
     mode === "subscription"
@@ -309,10 +291,6 @@ export function ModelConfigModal({
   const storedEffort = runnableEffort(savedEffort, cliLevels ?? undefined);
   const thinkingEnabled =
     thinkingMandatory || (storedEffort ? storedEffort !== "none" : thinkingDefaultOn);
-  const reasoningEffort =
-    storedEffort && effortLadder.includes(storedEffort)
-      ? storedEffort
-      : defaultEffort(draft.name, effortLadder);
 
   const withEffort = (extra: ModelConfig["extra"], effort: string | null) => {
     const rest = { ...extra };
@@ -352,11 +330,14 @@ export function ModelConfigModal({
       });
     } else {
       onSave(
-        withoutInlineConnection(
-          storedEffort === savedEffort
-            ? draft
-            : { ...draft, extra: withEffort(draft.extra, storedEffort ?? null) },
-        ),
+        withoutInlineConnection({
+          ...draft,
+          // A model that takes no temperature rejects one, so a saved value drops.
+          temperature: takesTemperature ? draft.temperature : undefined,
+          ...(storedEffort !== savedEffort && {
+            extra: withEffort(draft.extra, storedEffort ?? null),
+          }),
+        }),
       );
     }
     onOpenChange(false);
@@ -368,64 +349,6 @@ export function ModelConfigModal({
         <DialogTitleRow title={roleLabel} className="shrink-0 px-4 pt-6 sm:px-6" />
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
-          {visibleRecent.length > 0 && (
-            <div className="space-y-1.5">
-              <Label className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">
-                {msg("auto.features.submit.components.modelconfigmodal.2")}
-              </Label>
-              <div className="flex gap-1.5 overflow-x-auto pb-1.5 scrollbar-thin" dir="ltr">
-                {visibleRecent.map((rc, i) => {
-                  const isActive = draft.name === rc.name;
-                  return (
-                    <div
-                      key={`${rc.name}-${i}`}
-                      className={cn(
-                        "group/recent flex shrink-0 items-center gap-1.5 rounded-md border ps-2 pe-1 py-1 text-[0.6875rem] font-mono transition-all",
-                        isActive
-                          ? "on-primary"
-                          : "border-border/40 bg-muted/30 text-muted-foreground hover:border-primary-fill/40 hover:text-foreground hover:bg-muted/50",
-                      )}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDraft(withoutInlineConnection(rc));
-                          setParametersOpen(paramsFirstOpen || hasParams(rc));
-                        }}
-                        className="flex items-center gap-1.5 cursor-pointer outline-none"
-                      >
-                        <ProviderLogo slug={modelProviderSlug(rc.name)} size={16} />
-                        <span className="truncate max-w-[120px]" dir="ltr">
-                          {modelDisplayName(rc.name, detectionModels)}
-                        </span>
-                        {!nameOnly && !modelDefaultsOnly && showParameters && (
-                          <span className="text-[9px] opacity-60">{rc.temperature}</span>
-                        )}
-                      </button>
-                      {onRemoveRecent && (
-                        <button
-                          type="button"
-                          aria-label={formatMsg(
-                            "auto.features.submit.components.modelconfigmodal.recent.remove",
-                            { model: modelDisplayName(rc.name, detectionModels) },
-                          )}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onRemoveRecent(rc.name);
-                          }}
-                          className="close-button [--close-btn-size:20px] [--close-btn-radius:6px] [--close-btn-icon:12px] ms-0.5"
-                        >
-                          <X />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <Separator />
-            </div>
-          )}
-
           {!nameOnly && (
             <>
               <div className="space-y-2">
@@ -449,10 +372,10 @@ export function ModelConfigModal({
                     options={(remote
                       ? REMOTE_SEGMENTS
                       : byokOnly
-                      ? LOCAL_BYOK_ONLY_SEGMENTS
-                      : localMode
-                        ? LOCAL_TOKEN_SOURCE_SEGMENTS
-                        : TOKEN_SOURCE_SEGMENTS
+                        ? LOCAL_BYOK_ONLY_SEGMENTS
+                        : localMode
+                          ? LOCAL_TOKEN_SOURCE_SEGMENTS
+                          : TOKEN_SOURCE_SEGMENTS
                     ).map(({ mode: value, icon: Icon, labelKey }) => ({
                       value,
                       label: msg(labelKey),
@@ -460,11 +383,6 @@ export function ModelConfigModal({
                     }))}
                   />
                 </div>
-                {mode === "managed" && (
-                  <div className="flex items-center gap-2 rounded-md bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground">
-                    <span className="min-w-0 flex-1">{msg("billing.mode.managed_hint")}</span>
-                  </div>
-                )}
                 {byokOnly && (
                   <div className="flex items-center gap-2 rounded-md bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground">
                     <span className="min-w-0 flex-1" dir="auto">
@@ -511,7 +429,9 @@ export function ModelConfigModal({
             </>
           )}
 
-          <div className="space-y-2">
+          {/* The parameters below open with their own top padding, so the
+              collapsed panel adds no gap under the picker. */}
+          <div className="mb-0 space-y-2">
             <Label>
               <HelpTip text={tip("model_config.model")}>
                 {msg("auto.features.submit.components.modelconfigmodal.4")}
@@ -521,25 +441,20 @@ export function ModelConfigModal({
               value={draft.name}
               selectedByokProvider={draft.byok_provider}
               onChange={(next) => {
-                setDraft((p) => {
-                  // Carry the thinking choice across, translated into what the
-                  // new model accepts: "off" becomes the default when the new
-                  // model can't turn off (or is off anyway), and a level
-                  // outside its ladder moves to its default level.
-                  const ladder = ladderFor(next);
-                  const { mandatory, defaultOn } = thinkingInfo(next);
-                  let effort = (p.extra?.reasoning_effort as string | undefined) ?? null;
-                  if (!modelSupportsThinking(next, detectionModels)) effort = null;
-                  else if (effort === "none") effort = mandatory || !defaultOn ? null : "none";
-                  else if (effort && ladder.length === 0) effort = defaultOn ? null : "medium";
-                  else if (effort && !ladder.includes(effort)) effort = defaultEffort(next, ladder);
-                  return { ...p, name: next, extra: withEffort(p.extra, effort) };
-                });
+                // The first pick opens Parameters as they appear.
+                if (!draft.name && next) setParametersOpen(true);
+                // A new model starts at its own default thinking level.
+                setDraft((p) =>
+                  next === p.name ? p : { ...p, name: next, extra: withEffort(p.extra, null) },
+                );
               }}
               onSelect={(model) =>
                 setDraft((current) => ({
                   ...current,
                   byok_provider: mode === "byok" ? (model.byok_provider ?? undefined) : undefined,
+                  // A new model starts at its own values: the last model's
+                  // output limit may be past what this one allows.
+                  ...(!modelDefaultsOnly && model.value !== draft.name && startingParams(model)),
                 }))
               }
               byokMode={mode === "byok"}
@@ -551,106 +466,126 @@ export function ModelConfigModal({
           </div>
 
           {!nameOnly && (!modelDefaultsOnly || canThink) && (
-            <>
-              <Separator />
+            // A run's parameters depend on the model, so they appear only once
+            // one is chosen. The Settings variant shows only thinking, which
+            // already needs a model.
+            <div
+              className={cn(
+                cnGrid(modelDefaultsOnly || !!draft.name),
+                !(modelDefaultsOnly || draft.name) && "duration-150",
+                "motion-reduce:transition-none",
+              )}
+              inert={!(modelDefaultsOnly || draft.name)}
+            >
+              <div className="min-h-0 overflow-hidden">
+                <div className="space-y-4 pt-4">
+                  <Separator />
 
-              <Disclosure
-                id={parametersId}
-                label={msg("auto.features.submit.components.modelconfigmodal.section.parameters")}
-                open={parametersOpen}
-                onOpenChange={setParametersOpen}
-              >
-                <div className="space-y-4">
-                  {!modelDefaultsOnly && (
-                    <>
-                      <div className="space-y-2">
-                        <Label htmlFor={`${parametersId}-temperature`}>
-                          <HelpTip text={tip("model_config.temperature")}>
-                            {msg("auto.features.submit.components.modelconfigmodal.5")}
-                          </HelpTip>
-                        </Label>
-                        <NumberInput
-                          id={`${parametersId}-temperature`}
-                          min={0}
-                          max={2}
-                          step={0.1}
-                          value={draft.temperature ?? ""}
-                          onChange={(value) =>
-                            setDraft((current) => ({ ...current, temperature: value }))
-                          }
-                          onClear={() =>
-                            setDraft((current) => ({ ...current, temperature: undefined }))
-                          }
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor={`${parametersId}-max-tokens`}>
-                          <HelpTip text={tip("model_config.max_tokens")}>
-                            {msg("auto.features.submit.components.modelconfigmodal.7")}
-                          </HelpTip>
-                        </Label>
-                        <NumberInput
-                          id={`${parametersId}-max-tokens`}
-                          min={1}
-                          step={256}
-                          value={draft.max_tokens ?? ""}
-                          onChange={(value) =>
-                            setDraft((current) => ({ ...current, max_tokens: value }))
-                          }
-                          onClear={() =>
-                            setDraft((current) => ({ ...current, max_tokens: undefined }))
-                          }
-                        />
-                      </div>
-                    </>
-                  )}
-
-                  {canThink && (
-                    <>
-                      {!modelDefaultsOnly && <Separator />}
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <Label>{msg("auto.features.submit.components.modelconfigmodal.8")}</Label>
-                          {/* A CLI has no off level: the backend drops "none" and the
-                              CLI runs its default, so a CLI model gets no switch. */}
-                          {mode !== "subscription" && (
-                            <Switch
-                              checked={thinkingEnabled}
-                              onCheckedChange={setThinking}
-                              disabled={
-                                thinkingMandatory || (thinkingDefaultOn && harnessRefusesOff)
+                  <Disclosure
+                    id={parametersId}
+                    label={msg(
+                      "auto.features.submit.components.modelconfigmodal.section.parameters",
+                    )}
+                    open={parametersOpen}
+                    onOpenChange={setParametersOpen}
+                  >
+                    <div className="space-y-4">
+                      {!modelDefaultsOnly && (
+                        <>
+                          {takesTemperature && (
+                            <div className="space-y-2">
+                              <Label htmlFor={`${parametersId}-temperature`}>
+                                <HelpTip text={tip("model_config.temperature")}>
+                                  {msg("auto.features.submit.components.modelconfigmodal.5")}
+                                </HelpTip>
+                              </Label>
+                              <NumberInput
+                                id={`${parametersId}-temperature`}
+                                min={0}
+                                max={maxTemperature}
+                                step={0.1}
+                                value={draft.temperature ?? ""}
+                                onChange={(value) =>
+                                  setDraft((current) => ({ ...current, temperature: value }))
+                                }
+                                onClear={() =>
+                                  setDraft((current) => ({ ...current, temperature: undefined }))
+                                }
+                              />
+                            </div>
+                          )}
+                          <div className="space-y-2">
+                            <Label htmlFor={`${parametersId}-max-tokens`}>
+                              <HelpTip text={tip("model_config.max_tokens")}>
+                                {msg("auto.features.submit.components.modelconfigmodal.7")}
+                              </HelpTip>
+                            </Label>
+                            <NumberInput
+                              id={`${parametersId}-max-tokens`}
+                              min={1}
+                              step={256}
+                              value={draft.max_tokens ?? ""}
+                              onChange={(value) =>
+                                setDraft((current) => ({ ...current, max_tokens: value }))
+                              }
+                              onClear={() =>
+                                setDraft((current) => ({ ...current, max_tokens: undefined }))
                               }
                             />
-                          )}
-                        </div>
-                        {thinkingMandatory && (
-                          <p className="text-xs text-muted-foreground">
-                            {msg("submit.model_config.thinking_always_on")}
-                          </p>
-                        )}
-                        {!thinkingMandatory &&
-                          thinkingDefaultOn &&
-                          harnessRefusesOff &&
-                          mode !== "subscription" && (
-                            <p className="text-xs text-muted-foreground">
-                              {msg("submit.model_config.thinking_harness_on")}
-                            </p>
-                          )}
-                        {thinkingEnabled && effortLadder.length > 0 && (
-                          <ReasoningEffortControl
-                            cli={usesEffortSlider(mode, thinkingDefaultOn)}
-                            efforts={effortLadder}
-                            stored={storedEffort ?? null}
-                            fallback={reasoningEffort}
-                            onChange={setEffort}
-                          />
-                        )}
-                      </div>
-                    </>
-                  )}
+                          </div>
+                        </>
+                      )}
+
+                      {canThink && (
+                        <>
+                          {!modelDefaultsOnly && <Separator />}
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <Label>
+                                {msg("auto.features.submit.components.modelconfigmodal.8")}
+                              </Label>
+                              {/* A CLI has no off level: the backend drops "none" and the
+                              CLI runs its default, so a CLI model gets no switch. */}
+                              {mode !== "subscription" && (
+                                <Switch
+                                  checked={thinkingEnabled}
+                                  onCheckedChange={setThinking}
+                                  disabled={
+                                    thinkingMandatory || (thinkingDefaultOn && harnessRefusesOff)
+                                  }
+                                />
+                              )}
+                            </div>
+                            {!thinkingMandatory &&
+                              thinkingDefaultOn &&
+                              harnessRefusesOff &&
+                              mode !== "subscription" && (
+                                <p className="text-xs text-muted-foreground">
+                                  {msg("submit.model_config.thinking_harness_on")}
+                                </p>
+                              )}
+                            {thinkingEnabled && effortLadder.length > 0 && (
+                              <ReasoningEffortControl
+                                efforts={effortLadder}
+                                stored={storedEffort ?? null}
+                                // A model that runs without thinking by default has no
+                                // default stop: there, clearing the level turns thinking off.
+                                defaultLevel={
+                                  thinkingDefaultOn
+                                    ? undefined
+                                    : defaultEffort(draft.name, effortLadder)
+                                }
+                                onChange={setEffort}
+                              />
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </Disclosure>
                 </div>
-              </Disclosure>
-            </>
+              </div>
+            </div>
           )}
         </div>
 
@@ -665,10 +600,11 @@ export function ModelConfigModal({
               (mode === "subscription" && !draft.cli_provider) ||
               (!nameOnly &&
                 !modelDefaultsOnly &&
-                ((draft.temperature != null &&
+                ((takesTemperature &&
+                  draft.temperature != null &&
                   (!Number.isFinite(draft.temperature) ||
                     draft.temperature < 0 ||
-                    draft.temperature > 2)) ||
+                    draft.temperature > maxTemperature)) ||
                   (draft.max_tokens != null &&
                     (!Number.isInteger(draft.max_tokens) || draft.max_tokens < 1))))
             }

@@ -45,7 +45,7 @@ after(() => dom.window.close());
 const CLAUDE = ["low", "medium", "high", "xhigh", "max"];
 const CODEX = ["low", "medium", "high", "xhigh"];
 
-async function mount(props: { cli: boolean; efforts: string[]; stored: string | null }) {
+async function mount(props: { efforts: string[]; stored: string | null; defaultLevel?: string }) {
   const calls: Array<string | null> = [];
   const container = document.createElement("div");
   document.body.append(container);
@@ -53,7 +53,7 @@ async function mount(props: { cli: boolean; efforts: string[]; stored: string | 
   await React.act(async () => {
     root.render(
       <TooltipProvider>
-        <ReasoningEffortControl {...props} fallback="medium" onChange={(e) => calls.push(e)} />
+        <ReasoningEffortControl {...props} onChange={(e) => calls.push(e)} />
       </TooltipProvider>,
     );
   });
@@ -80,7 +80,7 @@ for (const [name, efforts] of [
   ["Codex", CODEX],
 ] as const) {
   void test(`a ${name} model gets the slider over its own levels`, async () => {
-    const m = await mount({ cli: true, efforts: [...efforts], stored: "high" });
+    const m = await mount({ efforts: [...efforts], stored: "high" });
     try {
       assert.equal(m.container.querySelector('[role="radiogroup"]'), null);
       const slider = m.container.querySelector('[role="slider"]')!;
@@ -96,7 +96,7 @@ for (const [name, efforts] of [
 }
 
 void test("a CLI model with no saved level sits on the default stop", async () => {
-  const m = await mount({ cli: true, efforts: CODEX, stored: null });
+  const m = await mount({ efforts: CODEX, stored: null });
   try {
     const slider = m.container.querySelector('[role="slider"]')!;
     assert.equal(slider.getAttribute("aria-valuenow"), "0");
@@ -107,13 +107,13 @@ void test("a CLI model with no saved level sits on the default stop", async () =
   }
 });
 
-void test("the dialog's slider keeps reset, omits the model line, and Home reaches the default stop", async () => {
-  const m = await mount({ cli: true, efforts: CLAUDE, stored: "max" });
+void test("the dialog's slider has no reset or model line, and Home reaches the default stop", async () => {
+  const m = await mount({ efforts: CLAUDE, stored: "max" });
   try {
     const buttons = [...m.container.querySelectorAll("button")];
     assert.deepEqual(
       buttons.map((b) => b.getAttribute("aria-label")),
-      ["Reset to the model default"],
+      [],
     );
     // The model line is the only truncated text in the slider.
     assert.equal(m.container.querySelector(".truncate"), null);
@@ -126,20 +126,21 @@ void test("the dialog's slider keeps reset, omits the model line, and Home reach
     await m.unmount();
   }
 });
-void test("an OpenRouter model keeps the segments", async () => {
-  const m = await mount({ cli: false, efforts: ["low", "medium", "high"], stored: null });
+void test("a model that thinks only on request gets the slider with no default stop", async () => {
+  const m = await mount({
+    efforts: ["low", "medium", "high"],
+    stored: null,
+    defaultLevel: "medium",
+  });
   try {
-    assert.equal(m.container.querySelector('[role="slider"]'), null);
-    const radios = [...m.container.querySelectorAll('[role="radio"]')];
-    assert.deepEqual(
-      radios.map((r) => r.textContent),
-      ["Low", "Medium", "High"],
-    );
-    assert.equal(radios[1]!.getAttribute("aria-checked"), "true");
-    await React.act(async () => {
-      radios[2]!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-    });
-    assert.deepEqual(m.calls, ["high"]);
+    assert.equal(m.container.querySelector('[role="radiogroup"]'), null);
+    const slider = m.container.querySelector('[role="slider"]')!;
+    assert.equal(slider.getAttribute("aria-valuemax"), "2");
+    assert.equal(slider.getAttribute("aria-valuenow"), "1");
+    assert.match(slider.getAttribute("aria-valuetext") ?? "", /^Medium/);
+    await key(slider, "Home");
+    await key(slider, "End");
+    assert.deepEqual(m.calls, ["low", "high"]);
   } finally {
     await m.unmount();
   }

@@ -144,26 +144,22 @@ export function cachedByokCatalog(): ModelCatalogResponse | null {
 
 export type ModelRanking = "best_value" | "smartest" | "fastest";
 
-/** One section of a picker tab; `kind` picks the section's header. */
-export interface RankedGroup {
-  kind: "ranked" | "dominated" | "unrated" | "no_speed";
-  models: CatalogModel[];
+/**
+ * Price of one token at Artificial Analysis's 3:1 input:output blend, or null
+ * without both prices. One price alone misranks models: a cheap input with a
+ * dear output looked like the best value.
+ */
+export function blendedPricePerToken(m: CatalogModel): number | null {
+  if (m.input_cost_per_token == null || m.output_cost_per_token == null) return null;
+  return (3 * m.input_cost_per_token + m.output_cost_per_token) / 4;
 }
 
-/** Benchmark points per input dollar (infinite when free), or null without both a score and a price. */
-function scorePerDollar(m: CatalogModel): number | null {
-  if (m.intelligence_index == null || m.input_cost_per_token == null) return null;
-  if (m.input_cost_per_token === 0) return Number.POSITIVE_INFINITY;
-  return m.intelligence_index / m.input_cost_per_token;
-}
-
-/** Whether `a` scores at least as high for at most the price, and is strictly better on one. */
-function dominates(a: CatalogModel, b: CatalogModel): boolean {
-  const sa = a.intelligence_index ?? 0;
-  const sb = b.intelligence_index ?? 0;
-  const pa = a.input_cost_per_token ?? 0;
-  const pb = b.input_cost_per_token ?? 0;
-  return sa >= sb && pa <= pb && (sa > sb || pa < pb);
+/** Benchmark points per blended dollar (infinite when free), or null without both a score and a price. */
+export function scorePerDollar(m: CatalogModel): number | null {
+  const price = blendedPricePerToken(m);
+  if (m.intelligence_index == null || price == null) return null;
+  if (price === 0) return Number.POSITIVE_INFINITY;
+  return m.intelligence_index / price;
 }
 
 const nameOf = (m: CatalogModel) => m.display_name || m.label || m.value;
@@ -178,47 +174,19 @@ function bestFirst(key: (m: CatalogModel) => number) {
 
 const byScore = bestFirst((m) => m.intelligence_index ?? -1);
 
-/** Top labs first and Chinese labs last (the backend's `lab_tier`), then by score. */
-const byLabThenScore = (a: CatalogModel, b: CatalogModel) =>
-  (a.lab_tier ?? 1) - (b.lab_tier ?? 1) || byScore(a, b);
+// Two free models compare Infinity - Infinity = NaN, which is falsy, so the
+// score breaks that tie.
+const byValue = bestFirst((m) => scorePerDollar(m) ?? -1);
 
 /**
- * Order models for one picker tab, the best by that tab's measure first.
- * Best value lists the Pareto frontier of score against input price, then the
- * rated models the frontier beats, then the unrated; each group by lab tier
- * (top labs first, Chinese labs last), then intelligence index. Smartest sorts by intelligence index, unrated last.
- * Fastest sorts by output tokens per second, unmeasured last. Ties go to the
- * higher score, then the name. Empty groups are dropped.
+ * Order models for one picker tab, the best by that tab's measure first: points
+ * per blended dollar, intelligence index, or output tokens per second. A model
+ * without that measure is left out. Ties go to the higher score, then the name.
  */
-export function rankModels(models: CatalogModel[], ranking: ModelRanking): RankedGroup[] {
-  const unrated = models.filter((m) => m.intelligence_index == null).sort(byScore);
-  let groups: RankedGroup[];
+export function rankModels(models: CatalogModel[], ranking: ModelRanking): CatalogModel[] {
   if (ranking === "fastest") {
-    groups = [
-      {
-        kind: "ranked",
-        models: models
-          .filter((m) => !!m.throughput_tps)
-          .sort(bestFirst((m) => m.throughput_tps ?? 0)),
-      },
-      { kind: "no_speed", models: models.filter((m) => !m.throughput_tps).sort(byScore) },
-    ];
-  } else if (ranking === "smartest") {
-    groups = [
-      { kind: "ranked", models: models.filter((m) => m.intelligence_index != null).sort(byScore) },
-      { kind: "unrated", models: unrated },
-    ];
-  } else {
-    const priced = models.filter((m) => scorePerDollar(m) !== null);
-    const frontier = priced.filter((m) => !priced.some((other) => dominates(other, m)));
-    const onFrontier = new Set(frontier);
-    // A score without a price can't sit on the frontier, but it is still rated.
-    const dominated = models.filter((m) => m.intelligence_index != null && !onFrontier.has(m));
-    groups = [
-      { kind: "ranked", models: frontier.sort(byLabThenScore) },
-      { kind: "dominated", models: dominated.sort(byLabThenScore) },
-      { kind: "unrated", models: unrated },
-    ];
+    return models.filter((m) => !!m.throughput_tps).sort(bestFirst((m) => m.throughput_tps ?? 0));
   }
-  return groups.filter((g) => g.models.length > 0);
+  if (ranking === "smartest") return models.filter((m) => m.intelligence_index != null).sort(byScore);
+  return models.filter((m) => scorePerDollar(m) !== null).sort(byValue);
 }

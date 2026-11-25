@@ -422,6 +422,7 @@
     "agent_settings.not_writable": "Чат не может изменить {key}. Измените это на вкладке {tab}.",
     "agent_settings.missing_target": "Действию {action} нужна цель.",
     "agent_settings.invalid_page": "Этой страницы нет в приложении.",
+    "agent_settings.missing_page": "Укажите путь в приложении, например /submit, или вкладку настроек.",
     "hosted_link.failed": "Облачный сайт {term.appName} не принял привязку. Начните привязку заново.",
     "hosted_link.unreachable": "Приложение для Mac не может подключиться к облачному сайту {term.appName}. Проверьте подключение и повторите попытку.",
     "hosted_link.revoked": "Этот Mac больше не привязан к вашему аккаунту {term.appName}. Привяжите его снова, чтобы продолжить.",

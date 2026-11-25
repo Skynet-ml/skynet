@@ -139,6 +139,27 @@ class CatalogModel(BaseModel):
     )
     available: bool = Field(default=False, description="True if backend has an API key for this model.")
     max_input_tokens: int | None = Field(default=None, description="Context window size.")
+    max_output_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Most tokens the model writes in one reply: the provider's live listing "
+            "when probed, else LiteLLM's table. None when neither says."
+        ),
+    )
+    default_temperature: float | None = Field(
+        default=None,
+        description=(
+            "Temperature the provider recommends for this model (OpenRouter's "
+            "default parameters), or None when it recommends none."
+        ),
+    )
+    takes_temperature: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the model accepts a temperature (OpenRouter's supported "
+            "parameters), or None when the listing does not say."
+        ),
+    )
     input_cost_per_token: float | None = Field(
         default=None,
         description=(
@@ -832,6 +853,67 @@ def _probe_item_max_input_tokens(item: dict) -> int | None:
         if isinstance(val, int):
             return val
     return None
+
+
+def _probe_item_max_output_tokens(item: dict) -> int | None:
+    """Read the most tokens one reply may hold from a probe item, if present.
+
+    Args:
+        item: The raw provider item dict (may be empty for string entries).
+
+    Returns:
+        OpenRouter's ``top_provider.max_completion_tokens``, else a top-level
+        ``max_output_tokens``, when it is a positive ``int``; else ``None``.
+    """
+    top = item.get("top_provider")
+    for val in ((top if isinstance(top, dict) else {}).get("max_completion_tokens"), item.get("max_output_tokens")):
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+    return None
+
+
+def _meta_max_output_tokens(meta: dict) -> int | None:
+    """Read LiteLLM's output-token limit for a model.
+
+    Args:
+        meta: The model's LiteLLM ``model_cost`` entry.
+
+    Returns:
+        ``max_output_tokens`` when it is a positive ``int``, else ``None``.
+    """
+    val = meta.get("max_output_tokens")
+    return val if isinstance(val, int) and not isinstance(val, bool) and val > 0 else None
+
+
+def _probe_item_default_temperature(item: dict) -> float | None:
+    """Read the provider's recommended temperature from a probe item.
+
+    Args:
+        item: The raw provider item dict (may be empty for string entries).
+
+    Returns:
+        OpenRouter's ``default_parameters.temperature`` when it is a number
+        from 0 to 2, else ``None``.
+    """
+    params = item.get("default_parameters")
+    val = params.get("temperature") if isinstance(params, dict) else None
+    if isinstance(val, int | float) and not isinstance(val, bool) and 0 <= val <= 2:
+        return float(val)
+    return None
+
+
+def _probe_item_takes_temperature(item: dict) -> bool | None:
+    """Read whether a probe item accepts a temperature.
+
+    Args:
+        item: The raw provider item dict (may be empty for string entries).
+
+    Returns:
+        Whether OpenRouter's ``supported_parameters`` lists ``temperature``,
+        or ``None`` when the item has no such list.
+    """
+    params = item.get("supported_parameters")
+    return "temperature" in params if isinstance(params, list) else None
 
 
 def _probe_item_cost(item: dict, key: str) -> float | None:
@@ -1540,6 +1622,9 @@ def get_catalog() -> ModelCatalogResponse:
                     supports_vision=bool(meta.get("supports_vision")),
                     available=available,
                     max_input_tokens=meta.get("max_input_tokens"),
+                    max_output_tokens=_probe_item_max_output_tokens(probe_item) or _meta_max_output_tokens(meta),
+                    default_temperature=_probe_item_default_temperature(probe_item),
+                    takes_temperature=_probe_item_takes_temperature(probe_item),
                     # The live listing is what the provider bills today; LiteLLM's
                     # static table lags it and only fills in unprobed models.
                     input_cost_per_token=_probe_item_cost(probe_item, "prompt")
@@ -1595,6 +1680,9 @@ def get_catalog() -> ModelCatalogResponse:
                     supports_vision=_probe_item_supports_vision(item),
                     available=True,
                     max_input_tokens=_probe_item_max_input_tokens(item),
+                    max_output_tokens=_probe_item_max_output_tokens(item),
+                    default_temperature=_probe_item_default_temperature(item),
+                    takes_temperature=_probe_item_takes_temperature(item),
                     input_cost_per_token=_probe_item_cost(item, "prompt"),
                     output_cost_per_token=_probe_item_cost(item, "completion"),
                 )
@@ -1979,6 +2067,7 @@ def get_byok_catalog() -> ModelCatalogResponse:
                 supports_vision=bool(meta.get("supports_vision")),
                 available=True,
                 max_input_tokens=meta.get("max_input_tokens"),
+                max_output_tokens=_meta_max_output_tokens(meta),
                 input_cost_per_token=_positive_cost(meta, "input_cost_per_token"),
                 output_cost_per_token=_positive_cost(meta, "output_cost_per_token"),
             )
@@ -2113,6 +2202,9 @@ def narrow_models_to_served(
                 supports_vision=_probe_item_supports_vision(item),
                 available=True,
                 max_input_tokens=_probe_item_max_input_tokens(item),
+                max_output_tokens=_probe_item_max_output_tokens(item),
+                default_temperature=_probe_item_default_temperature(item),
+                takes_temperature=_probe_item_takes_temperature(item),
             )
         )
     kept.sort(key=lambda m: m.value)

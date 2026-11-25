@@ -23,9 +23,13 @@ export function cliEffort(effort: string | null, levels: readonly string[]): str
   return live && levels.includes(live) ? live : null;
 }
 
-/** The slider's stops, weakest first: the model default (`null`), then each level. */
-export function sliderStops(efforts: readonly string[]): Array<string | null> {
-  return [null, ...efforts];
+/**
+ * The slider's stops, weakest first: the model default (`null`), then each
+ * level. A model whose default runs without thinking has no default stop
+ * (`withDefault` false): its thinking switch is the off level.
+ */
+export function sliderStops(efforts: readonly string[], withDefault = true): Array<string | null> {
+  return withDefault ? [null, ...efforts] : [...efforts];
 }
 
 /**
@@ -38,8 +42,9 @@ export function stepEffort(
   current: string | null,
   key: string,
   rtl: boolean,
+  withDefault = true,
 ): string | null | undefined {
-  const stops = sliderStops(efforts);
+  const stops = sliderStops(efforts, withDefault);
   // A saved level the model does not take sits on the default stop.
   const at = Math.max(0, stops.indexOf(current));
   const up = rtl ? "ArrowLeft" : "ArrowRight";
@@ -53,9 +58,13 @@ export function stepEffort(
   return stops[Math.min(stops.length - 1, Math.max(0, next))];
 }
 
-/** How far along the track `level` sits, from 0 (default) to 1 (top stop). */
-export function effortFill(efforts: readonly string[], level: string | null): number {
-  const stops = sliderStops(efforts);
+/** How far along the track `level` sits, from 0 (first stop) to 1 (top stop). */
+export function effortFill(
+  efforts: readonly string[],
+  level: string | null,
+  withDefault = true,
+): number {
+  const stops = sliderStops(efforts, withDefault);
   if (stops.length < 2) return 0;
   return Math.max(0, stops.indexOf(level)) / (stops.length - 1);
 }
