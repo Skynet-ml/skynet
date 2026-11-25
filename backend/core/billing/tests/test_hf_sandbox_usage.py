@@ -207,7 +207,11 @@ def test_unpinned_or_unbounded_box_is_not_quoted(change: dict[str, Any]) -> None
 
 
 def test_reserve_then_settle_charges_the_job_minutes(database: Engine) -> None:
-    """Settle a stopped box at the job's own minutes, with the job id in the evidence."""
+    """Settle a stopped box at the job's own minutes, with the job id in the evidence.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, clock = _reservation(database)
     reservation.sent("skynet-label")
     reservation.confirm_created(SimpleNamespace(id="job-1"))
@@ -228,7 +232,11 @@ def test_reserve_then_settle_charges_the_job_minutes(database: Engine) -> None:
 
 
 def test_settle_charges_from_created_at_and_keeps_both_times_in_the_evidence(database: Engine) -> None:
-    """Charge from created_at, not started_at or the running time, and keep the times and durations for audits."""
+    """Charge from created_at, not started_at or the running time, and keep the times and durations for audits.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, clock = _reservation(database)
     reservation.sent("skynet-label")
     reservation.confirm_created(SimpleNamespace(id="job-1"))
@@ -246,7 +254,11 @@ def test_settle_charges_from_created_at_and_keeps_both_times_in_the_evidence(dat
 
 
 def test_settle_falls_back_to_the_measured_wall_time(database: Engine) -> None:
-    """Settle from the create-to-stop wall time when HF reports no usable job times."""
+    """Settle from the create-to-stop wall time when HF reports no usable job times.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, clock = _reservation(database)
     reservation.sent("skynet-label")
     reservation.confirm_created(SimpleNamespace(id="job-1"))
@@ -282,7 +294,11 @@ def test_settle_clamps_to_the_hold_with_a_warning(database: Engine, caplog: pyte
 
 
 def test_settle_runs_only_once(database: Engine) -> None:
-    """Ignore a second settle, so one hold is never charged twice."""
+    """Ignore a second settle, so one hold is never charged twice.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     reservation.sent("skynet-label")
     reservation.confirm_created(SimpleNamespace(id="job-1"))
@@ -294,7 +310,11 @@ def test_settle_runs_only_once(database: Engine) -> None:
 
 
 def test_settle_without_a_job_id_keeps_the_hold_pending(database: Engine) -> None:
-    """Keep the hold pending when the box has no job id, because no usage can be tied to a job."""
+    """Keep the hold pending when the box has no job id, because no usage can be tied to a job.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     reservation.sent("skynet-label")
     reservation.stopped()
@@ -304,14 +324,22 @@ def test_settle_without_a_job_id_keeps_the_hold_pending(database: Engine) -> Non
 
 
 def test_confirm_refuses_a_job_with_no_id(database: Engine) -> None:
-    """Refuse a created sandbox that carries no job id."""
+    """Refuse a created sandbox that carries no job id.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     with pytest.raises(UsagePendingError, match="no job id"):
         reservation.confirm_created(SimpleNamespace(id=None))
 
 
 def test_confirm_writes_the_job_id_into_the_pending_evidence(database: Engine) -> None:
-    """Record the job id and the label at once, so a dead worker leaves enough to reconcile."""
+    """Record the job id and the label at once, so a dead worker leaves enough to reconcile.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     reservation.sent("skynet-label")
     reservation.confirm_created(SimpleNamespace(id="job-1"))
@@ -323,7 +351,11 @@ def test_confirm_writes_the_job_id_into_the_pending_evidence(database: Engine) -
 
 
 def test_unsent_create_releases_the_hold(database: Engine) -> None:
-    """Release the hold when no create reached HF."""
+    """Release the hold when no create reached HF.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     reservation.fail()
     assert _operation(database).state == "released"
@@ -331,7 +363,11 @@ def test_unsent_create_releases_the_hold(database: Engine) -> None:
 
 
 def test_refused_create_with_no_job_releases_the_hold(database: Engine) -> None:
-    """Release the hold when HF refused the create and the label lookup found no job."""
+    """Release the hold when HF refused the create and the label lookup found no job.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     reservation.sent("skynet-label")
     reservation.fail(absent=True)
@@ -340,7 +376,11 @@ def test_refused_create_with_no_job_releases_the_hold(database: Engine) -> None:
 
 
 def test_unknown_create_keeps_the_hold_pending(database: Engine) -> None:
-    """Keep the hold pending when a sent create failed in a way that does not prove no job exists."""
+    """Keep the hold pending when a sent create failed in a way that does not prove no job exists.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     reservation.sent("skynet-label")
     reservation.fail()
@@ -350,7 +390,11 @@ def test_unknown_create_keeps_the_hold_pending(database: Engine) -> None:
 
 
 def test_absent_after_a_job_id_keeps_the_hold(database: Engine) -> None:
-    """Keep the hold when a job id exists, even if a later lookup found no job."""
+    """Keep the hold when a job id exists, even if a later lookup found no job.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     reservation.sent("skynet-label")
     reservation.confirm_created(SimpleNamespace(id="job-1"))
@@ -359,7 +403,11 @@ def test_absent_after_a_job_id_keeps_the_hold(database: Engine) -> None:
 
 
 def test_extend_is_refused(database: Engine) -> None:
-    """Refuse an extension, because HF cannot lengthen a running job's timeout."""
+    """Refuse an extension, because HF cannot lengthen a running job's timeout.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation, _ = _reservation(database)
     before = _operation(database).max_units
     with pytest.raises(UnpricedOperationError, match="cannot lengthen"):
