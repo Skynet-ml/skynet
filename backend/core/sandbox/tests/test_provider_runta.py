@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import re
 import shlex
 import threading
 from dataclasses import dataclass, field
@@ -96,6 +97,8 @@ class FakeCloud:
     delete_fails: int = 0
     delete_calls: int = 0
     confirm_gate: Any = None
+    confirm_error: BaseException | None = None
+    pending_error: BaseException | None = None
     confirm_gate_entered: threading.Event = field(default_factory=threading.Event)
     exec_hangs: bool = False
     exec_exit: int | None = None
@@ -464,7 +467,8 @@ class FakeUsage:
         self.calls: list[tuple[str, Any]] = [("reserve", CLOUD.create_calls)]
         self.runtime_id: str | None = None
         self.settle_error: BaseException | None = None
-        self.confirm_error: BaseException | None = None
+        self.confirm_error: BaseException | None = CLOUD.confirm_error
+        self.pending_error: BaseException | None = CLOUD.pending_error
         # Threading events, because the provider calls the ledger from a thread.
         self.confirm_gate: threading.Event | None = CLOUD.confirm_gate
         self.pending_gate: threading.Event | None = None
@@ -518,11 +522,17 @@ class FakeUsage:
         self.calls.append(("fail", absent))
 
     def pending(self) -> None:
-        """Record a pending hold, and wait at the gate that the test sets."""
+        """Record a pending hold, wait at the gate, or fail, as the test sets.
+
+        Raises:
+            BaseException: The error that the test sets.
+        """
         self.calls.append(("pending", None))
         self.pending_entered.set()
         if self.pending_gate is not None:
             self.pending_gate.wait(5)
+        if self.pending_error is not None:
+            raise self.pending_error
 
     def names(self) -> list[str]:
         """Return the names of the recorded calls.
@@ -1145,10 +1155,10 @@ async def _late_create(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> 
     return made[0]
 
 
-async def test_a_late_failed_confirm_still_deletes_and_keeps_the_hold(
+async def test_a_late_failed_confirm_still_deletes_and_settles(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Delete a late runtime when its confirm fails, and keep the hold pending.
+    """Delete a late runtime when its confirm fails, then settle it as the teardown does.
 
     Args:
         fake_sdk: The fake Runta cloud.
@@ -1159,7 +1169,7 @@ async def test_a_late_failed_confirm_still_deletes_and_keeps_the_hold(
     fake_sdk.create_gate.set()
     await _late_tasks_done()
     assert fake_sdk.boxes[0].deleted
-    assert usage.names() == ["reserve", "sent", "pending", "confirm", "pending"]
+    assert usage.names() == ["reserve", "sent", "pending", "confirm", "stopped", "settle"]
 
 
 async def test_a_late_refused_create_without_a_box_releases(
@@ -1223,3 +1233,96 @@ async def test_a_late_failed_lookup_keeps_the_hold(fake_sdk: FakeCloud, monkeypa
     fake_sdk.create_gate.set()
     await _late_tasks_done()
     assert usage.names() == ["reserve", "sent", "pending"]
+
+
+async def test_a_ledger_error_in_the_confirm_still_deletes_and_settles(fake_sdk: FakeCloud) -> None:
+    """Map a ledger error of the confirm to an infra error, then still delete and settle the box.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.confirm_error = ConnectionError("ledger down")
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError, match="confirm the runtime in the ledger") as caught:
+        await env.start()
+    assert isinstance(caught.value.__cause__, ConnectionError)
+    assert fake_sdk.boxes[0].deleted
+    assert made[0].names() == ["reserve", "sent", "confirm", "confirm", "stopped", "settle"]
+
+
+async def test_a_failed_pending_call_still_hands_off_the_late_create(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete and settle a late runtime even when the hand-off cannot mark the hold pending.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    fake_sdk.pending_error = ConnectionError("ledger down")
+    monkeypatch.setattr(runta, "CREATE_GRACE", 0.01)
+    fake_sdk.create_gate = asyncio.Event()
+    env, made = _protected(timeouts=_timeouts(start=0.02))
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    with pytest.raises(UsagePendingError, match="late runtime pending") as caught:
+        await env.stop()
+    assert isinstance(caught.value.__cause__, ConnectionError)
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    assert fake_sdk.boxes[0].deleted
+    assert fake_sdk.closed == 1
+    assert made[0].names() == ["reserve", "sent", "pending", "confirm", "stopped", "settle"]
+
+
+def test_the_runtime_name_is_cleaned_and_short() -> None:
+    """Keep a long, odd spec name to Runta's characters and 63 characters, with the random suffix."""
+    env = RuntaEnvironment(_spec(name="My Eval/Run:" + "X" * 100))
+    assert len(env._name) == 63
+    assert re.fullmatch(r"my-eval-run-x+-[0-9a-f]{12}", env._name)
+    assert RuntaEnvironment(_spec(name="//"))._name.startswith("skynet-")
+
+
+async def test_a_failed_delete_blocks_commands_but_not_a_later_stop(fake_sdk: FakeCloud) -> None:
+    """Refuse commands after a failed delete, and let a later stop delete and settle the box.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    env, made = _protected()
+    await env.start()
+    fake_sdk.delete_fails = 1
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    for call in (env.exec("true"), env.upload_files({"/tmp/a": "a"}), env.download_file("/tmp/a")):
+        with pytest.raises(SandboxInfraError, match="not running"):
+            await call
+    await env.stop()
+    assert made[0].names()[-2:] == ["stopped", "settle"]
+
+
+async def test_a_failed_tcp_close_leaves_the_egress_policy_unchanged(fake_sdk: FakeCloud) -> None:
+    """Close raw TCP before the egress policy changes, so a failure opens nothing.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+
+    async def broken(hosts: list[str]) -> None:
+        """Fail the raw TCP change.
+
+        Args:
+            hosts: Ignored.
+
+        Raises:
+            FakeApiError: Always.
+        """
+        raise FakeApiError(503)
+
+    async with RuntaEnvironment(_spec()) as env:
+        before = fake_sdk.boxes[0].egress
+        runtime = env._runtime
+        runtime.egress.set_tcp_allowlist = broken
+        with pytest.raises(SandboxInfraError, match="egress policy"):
+            await env.set_network_policy(NetworkPolicy(disabled=True))
+        assert fake_sdk.boxes[0].egress == before
