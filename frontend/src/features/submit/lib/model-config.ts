@@ -69,8 +69,8 @@ export function prepareModelConfig(config: ModelConfig): ModelConfig {
 }
 
 /**
- * The highest temperature a model accepts: Anthropic caps Claude at 1, and
- * every other provider (and OpenRouter for all models) takes up to 2.
+ * The highest temperature a model accepts: Anthropic caps Claude at 1 on
+ * every route, OpenRouter included, and every other model takes up to 2.
  */
 export function temperatureMax(name: string): number {
   return /claude|(^|\/)anthropic\//i.test(name) ? 1 : 2;

@@ -1,5 +1,5 @@
 {
-  "downloads.search_keywords": "הורדה אפליקציה התקנה מחשב macOS Mac Windows iOS Android CLI",
+  "downloads.search_keywords": "הורדה אפליקציה התקנה מחשב macOS Mac",
   "downloads.title": "הורדות",
   "downloads.back": "חזרה ל-{term.appName}",
   "downloads.hero": "{term.appName}, בכל מקום שבו עובדים.",
@@ -1161,7 +1161,7 @@
   "billing.history.byok_tag": "מפתח שלך",
   "billing.mode.aria": "בחירת אופן החיוב על האופטימיזציות",
   "billing.mode.byok": "המפתח שלך",
-  "billing.mode.byok_hint": "הספק מחייב את הטוקנים למפתח שלך, {term.appName} אינו גובה עמלה על המודל.",
+  "billing.mode.byok_hint": "הספק מחייב את הטוקנים למפתח שלך. {term.appName} אינו גובה עמלה על המודל.",
   "billing.mode.label": "מקור הטוקנים",
   "billing.mode.manage_keys": "ניהול מפתחות",
   "billing.mode.managed": "יתרת {term.appName}",

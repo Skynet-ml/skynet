@@ -3,7 +3,7 @@
   "downloads.hero": "{term.appName}, onde você trabalha.",
   "downloads.intro": "Use o {term.appName} no navegador, no seu Mac ou em qualquer agente.",
   "downloads.mac_description": "Execute toda a stack localmente. As chamadas aos modelos usam seu plano da CLI de programação.",
-  "downloads.search_keywords": "download aplicativo instalação desktop macOS Mac Windows iOS Android CLI",
+  "downloads.search_keywords": "download aplicativo instalação desktop macOS Mac",
   "downloads.web": "Aplicativo web",
   "downloads.browser": "Abrir o aplicativo web",
   "downloads.mac_app": "Aplicativo para Mac",

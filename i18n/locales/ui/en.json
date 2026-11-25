@@ -1,5 +1,5 @@
 {
-  "downloads.search_keywords": "download app install desktop macOS Mac Windows iOS Android CLI",
+  "downloads.search_keywords": "download app install desktop macOS Mac",
   "downloads.title": "Downloads",
   "downloads.back": "Back to {term.appName}",
   "downloads.hero": "{term.appName}, wherever you work.",
@@ -1311,7 +1311,7 @@
   "billing.history.byok_tag": "BYOK",
   "billing.mode.aria": "Choose how optimizations are billed",
   "billing.mode.byok": "Your own key",
-  "billing.mode.byok_hint": "Your provider bills tokens to your key, {term.appName} charges no model fee.",
+  "billing.mode.byok_hint": "Your provider bills tokens to your key. {term.appName} charges no model fee.",
   "billing.mode.label": "Token source",
   "billing.mode.manage_keys": "Manage keys",
   "billing.mode.managed": "{term.appName} balance",

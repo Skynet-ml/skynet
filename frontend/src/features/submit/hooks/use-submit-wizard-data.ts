@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getModelCallHolds, getSandboxProviders } from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
 import { reportHandledError } from "@/shared/lib/report-error";
@@ -11,7 +11,7 @@ import {
   getHostedModelCatalog,
   getModelCatalog,
 } from "@/shared/lib/model-catalog";
-import type { ModelCatalogResponse, ModelConfig } from "@/shared/types/api";
+import type { ModelCatalogResponse } from "@/shared/types/api";
 import { callHoldKey } from "../lib/run-floor";
 
 // One object, so a memo that reads the list does not rerun on every render while it loads.
