@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import shlex
 import shutil
 import subprocess
 import threading
@@ -1195,13 +1196,14 @@ async def test_exec_cwd_wraps_any_command(command: str, built: str, stdout: str,
     box = next(iter(FakeSandbox.live.values()))
     sent, _ = box.commands.runs[-1]
     await env.stop()
-    assert sent == f"cd {folder} && {built}"
+    quoted = shlex.quote(folder)
+    assert sent == f"cd {quoted} && {built}"
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash is not installed")
     result = await asyncio.to_thread(subprocess.run, [bash, "-c", sent], capture_output=True, text=True, check=False)
     assert (result.returncode, result.stdout) == (0, stdout.format(dir=folder))
-    missing = sent.replace(folder, folder + "/missing", 1)
+    missing = sent.replace(quoted, shlex.quote(folder + "/missing"), 1)
     failed = await asyncio.to_thread(subprocess.run, [bash, "-c", missing], capture_output=True, text=True, check=False)
     assert failed.returncode != 0
     assert failed.stdout == ""
