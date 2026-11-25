@@ -105,7 +105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         service = StripeBillingService(engine=_engine())
         if args.account_sha256 is not None:
             username = service.account_for_email_sha256(args.account_sha256)
-            label = f"account sha256 {args.account_sha256.strip().lower()[:12]}"
+            label = "a named account"
         else:
             username = check_account_email(args.account_id)
             label = args.account_id.strip().lower()

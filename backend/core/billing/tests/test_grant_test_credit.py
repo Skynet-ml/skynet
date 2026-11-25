@@ -737,16 +737,17 @@ def test_email_sha256_lookup_checks_the_database_before_reading_users(
         StripeBillingService(engine=no_tables).account_for_email_sha256(NAMED_SHA256)
 
 
-def test_cli_grants_a_named_account_and_prints_only_the_hash_prefix(
+def test_cli_grants_a_named_account_and_prints_no_email_or_hash(
     engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The command grants by email hash and prints a hash prefix, never the email."""
+    """The command grants by email hash and prints neither the email nor the hash."""
     _add_user(engine, NAMED_EMAIL)
     monkeypatch.setattr("core.billing.grant_test_credit._engine", lambda: engine)
     argv = ["--account-sha256", NAMED_SHA256, "--dollars", "5", "--reason", "r", "--approval", "a"]
     assert main([*argv, "--idempotency-key", "cli-n"]) == 0
     out = capsys.readouterr().out
-    assert out.strip() == f"Granted $5.00 to account sha256 {NAMED_SHA256[:12]}. Balance: $5.00. Key: cli-n."
+    assert out.strip() == "Granted $5.00 to a named account. Balance: $5.00. Key: cli-n."
+    assert NAMED_SHA256[:12] not in out
     assert "@" not in out
     assert _balance(engine, NAMED_EMAIL) == 500
 

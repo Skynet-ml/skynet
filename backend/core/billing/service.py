@@ -1525,7 +1525,7 @@ class StripeBillingService:
                 or a named account's email from :meth:`account_for_email_sha256`.
             cents: Amount to credit, in cents.
             reason: Why the check needs the money.
-            approval: The approval text for this grant, logged as given.
+            approval: Who asked for the grant, logged as given.
             idempotency_key: Caller key; a repeated key credits nothing.
             named_account: Skip the test-account shape check, because the
                 caller found the account with :meth:`account_for_email_sha256`.
@@ -1644,7 +1644,7 @@ class StripeBillingService:
             # moment the cap total is read.
             now = datetime.now(UTC)
             if session.get(UserModel, username) is None:
-                raise GrantRefusedError("the test account has no user row; sign it up first")
+                raise GrantRefusedError("the account has no user row; sign it up first")
             customer = session.get(BillingCustomerModel, username, with_for_update=True)
             prior = session.execute(
                 select(WalletLedgerModel.username, WalletLedgerModel.delta_cents).where(

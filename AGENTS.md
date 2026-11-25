@@ -153,6 +153,9 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   session. Never print or commit passwords, tokens, cookies or email codes.
 - New staging accounts get no credit. For a paid check, fund the account
   with the staging test-credit grant (`skynet-test-accounts`).
+- Never add funds, grant credits or change balances by any other path. Never
+  grant on production or to real customers. Never use a raw wallet INSERT
+  or Stripe for it.
 - Never change live billing configuration. Never deploy production.
 - Create, sign in, delete, served-commit check: `skynet-test-accounts`.
 

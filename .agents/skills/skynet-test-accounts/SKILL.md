@@ -200,14 +200,15 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
 - For a named account, replace `"--account-id", $id` with
   `"--account-sha256", $id` and set `ACCOUNT_ID` to the hash, for example
   `python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].strip().lower().encode()).hexdigest())' "$EMAIL"`.
-  This matches the command's own hash. Never print or log the email or the
-  hash, and never put either in the key. Use a key such as
-  `named-<YYYYMMDD>-1`.
+  This matches the command's own hash. The command prints neither the email
+  nor the hash. The full hash stays in the private ECS task record. Never
+  print the email or the hash yourself, and never put either in the key,
+  on Linear, in a PR or in chat. Use a key such as `named-<YYYYMMDD>-1`.
 - For a check account, set `ACCOUNT_ID` to the id `account.py` printed.
   Set `DOLLARS` to the amount, `REASON` to the check, `APPROVAL` to who asked
   for the grant, and `KEY` to a new key.
 - Exit code `0` prints `Granted $X to <id>` (for a named account, `to
-  account sha256 <first 12 hex>`) or, on a retry, `Already
+  a named account`) or, on a retry, `Already
   granted`. Exit code `2` prints `Grant refused: <reason>` and writes
   nothing. Report a refusal; do not work around it.
 - Exit code `1` prints `Grant failed: <error class>`. It usually writes
