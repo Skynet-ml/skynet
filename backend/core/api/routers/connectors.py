@@ -824,7 +824,6 @@ def create_connectors_router(*, job_store) -> APIRouter:
         response_model=GithubCreatedRepository,
         status_code=201,
         summary="Create a GitLab or Bitbucket repository seeded with the run's objective, scorer and cases",
-        tags=["agent"],
     )
     def create_host_repository(
         provider: OtherRepoHost,
