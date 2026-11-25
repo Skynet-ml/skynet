@@ -13,16 +13,28 @@ the kill come from it. Harbor 0.25.0 has no Superserve provider. Changes:
   lifetime before the create, checks the created box against its funded
   size, and settles its measured runtime at the published rates after the
   kill, also after a failed or cancelled start.
-- Every box gets ``timeout_seconds`` from the spec lifetime, so Superserve
-  pauses a box that a lost process never stops, and a short
-  ``auto_delete_seconds``, so Superserve then deletes it. The provider also
-  enforces the lifetime itself: a cap task kills the box at the lifetime.
+- Every box gets ``timeout_seconds`` from the spec lifetime, at least
+  60 s, so Superserve pauses a box that a lost process never stops, and a
+  short ``auto_delete_seconds``, so Superserve then deletes it. The hold
+  funds that vendor bound. The provider also enforces the spec lifetime
+  itself: a cap task kills the box at the lifetime.
+- SDK 0.14.1 calls ``timeout_seconds`` the auto-pause timeout
+  (``async_sandbox.py`` lines 876-877). It is a separate knob from
+  ``idle_timeout_seconds``, which pauses a box after no activity (line 260)
+  and which the provider never sends. The SDK does not say whether the
+  auto-pause timer counts wall time from the create. If Superserve counts
+  only active time, a busy box outlives its hold when the Skynet process
+  dies, and the cap task is then the only bound. The SDK has no other
+  absolute-lifetime knob.
 - The provider adds no retry of its own (SKY-406 D3, D10). The SDK sends the
   create once. A create that Superserve answered with a definite refusal and
   for which the label lookup finds no box releases its hold; any other
   failed create keeps its hold pending.
 - Commands run in the foreground through ``commands.run``. Harbor's
   detached jobs, the job polling and the transient retries are left out.
+- A hostname allowlist relies on Superserve's own resolver: the provider
+  adds no public DNS resolver, because ``NetworkConfig`` has no ports and
+  such a rule would open every port of that address.
 - Harbor's Dockerfile and compose builds, the DinD strategy, directory
   transfer, attach, secrets, template eviction, the build concurrency limit
   and pause-on-stop are left out.
@@ -38,7 +50,6 @@ import json
 import logging
 import math
 import os
-import re
 import shlex
 import uuid
 from collections.abc import Callable, Iterator, Mapping
@@ -92,6 +103,13 @@ _TIMEOUT_EXIT_CODE = 124
 # Superserve publishes no range for timeout_seconds; this is Skynet's own
 # ceiling, equal to the longest idle timeout that Superserve accepts.
 _MAX_LIFETIME_SEC = 604_800
+# The idle timeout's documented floor; the provider assumes timeout_seconds
+# has the same floor, so a short lifetime cannot get a 400.
+_MIN_TIMEOUT_SEC = 60
+# Harbor's file transfer timeout.
+_TRANSFER_TIMEOUT_SEC = 1800
+# The download limit of the other providers (sbx, kernel).
+MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 # Seconds a paused box is kept before Superserve deletes it. A paused box
 # bills only its disk, which the usage margin covers.
 _AUTO_DELETE_SEC = 60
@@ -102,8 +120,6 @@ _ATTEMPT_KEY = "skynet.attempt"
 _TMP_ON_DISK = "umount /tmp 2>/dev/null || umount -l /tmp"
 # Bumping this rebuilds every template the provider made.
 _TEMPLATE_VERSION = 1
-# The sandbox's DNS resolvers, which a hostname allowlist must allow.
-_DNS_RESOLVERS = ("1.1.1.1/32", "8.8.8.8/32")
 _DENY_ALL = "0.0.0.0/0"
 # The SDK sends the create POST once and never retries it, so these
 # statuses are definite answers that made no box.
@@ -180,17 +196,14 @@ def _network_config(policy: NetworkPolicy) -> Any:
         policy: The egress policy.
 
     Returns:
-        The ``NetworkConfig``. A hostname allowlist also allows the DNS resolvers.
+        The ``NetworkConfig``.
     """
     mode = network_mode(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts)
     if mode is NetworkMode.OPEN:
         return NetworkConfig(allow_out=[], deny_out=[])
     if mode is NetworkMode.DENY_ALL:
         return NetworkConfig(allow_out=[], deny_out=[_DENY_ALL])
-    hosts = list(dict.fromkeys(policy.allowed_hosts))
-    if any(re.search(r"[A-Za-z]", host) for host in hosts):
-        hosts += [resolver for resolver in _DNS_RESOLVERS if resolver not in hosts]
-    return NetworkConfig(allow_out=hosts, deny_out=[_DENY_ALL])
+    return NetworkConfig(allow_out=list(dict.fromkeys(policy.allowed_hosts)), deny_out=[_DENY_ALL])
 
 
 def _template_name(spec: dict[str, Any]) -> str:
@@ -226,7 +239,7 @@ async def _bounded(awaitable: Any, action: str) -> bool:
     return True
 
 
-async def _kill_and_settle(sandbox_id: str, usage: Any | None) -> None:
+async def _kill_and_settle(sandbox_id: str, usage: Any | None, handle: Any | None = None) -> None:
     """Kill one box, then settle its usage.
 
     A kill that fails still settles: the usage then bills the whole funded
@@ -236,9 +249,16 @@ async def _kill_and_settle(sandbox_id: str, usage: Any | None) -> None:
     Args:
         sandbox_id: The Superserve sandbox id.
         usage: The usage reservation of a protected box, or ``None``.
+        handle: The SDK sandbox handle, or ``None`` for a box found by a lookup.
+            Its ``kill`` also closes the handle's HTTP client.
+
+    Raises:
+        SandboxInfraError: The kill failed or timed out.
     """
     try:
-        await asyncio.wait_for(AsyncSandbox.kill_by_id(sandbox_id), STOP_TIMEOUT)
+        with _mapped("kill the box"):
+            kill = handle.kill() if handle is not None else AsyncSandbox.kill_by_id(sandbox_id)
+            await asyncio.wait_for(kill, STOP_TIMEOUT)
     except BaseException:
         if usage is not None:
             try:
@@ -386,7 +406,7 @@ def _on_late_create(usage: Any | None, create: asyncio.Future[Any]) -> None:
             refused = not create.cancelled() and _refused_create(create.exception().__cause__)
             _keep(asyncio.ensure_future(_fail_usage(usage, refused)))
             return
-        _keep(asyncio.ensure_future(_kill_and_settle(create.result().id, usage)))
+        _keep(asyncio.ensure_future(_kill_and_settle(create.result().id, usage, create.result())))
     except Exception:
         logger.exception("Could not stop a Superserve box that arrived after a cancelled start.")
 
@@ -489,12 +509,21 @@ class SuperserveEnvironment(SandboxEnvironment):
         vcpu, memory, disk = self._size()
         return {
             "image": self.spec.image or DEFAULT_IMAGE,
-            "lifetime_ms": math.ceil(self.spec.lifetime_seconds) * 1000,
+            # The hold funds Superserve's own bound, which can be longer than the lifetime.
+            "lifetime_ms": self._timeout_seconds() * 1000,
             "vcpu": vcpu,
             "memory_mib": memory,
             "disk_mib": disk,
             "gpu": bool(self.spec.resources.gpu or self.spec.gpu_type),
         }
+
+    def _timeout_seconds(self) -> int:
+        """Return the ``timeout_seconds`` that the create sends.
+
+        Returns:
+            The spec lifetime in whole seconds, at least ``_MIN_TIMEOUT_SEC``.
+        """
+        return max(_MIN_TIMEOUT_SEC, math.ceil(self.spec.lifetime_seconds))
 
     async def start(self) -> None:
         """Create the Superserve box. Do nothing when the box already runs.
@@ -528,7 +557,7 @@ class SuperserveEnvironment(SandboxEnvironment):
                 refused = not create.cancelled() and _refused_create(create.exception().__cause__)
                 await _fail_usage_through_cancels(usage, refused)
                 raise
-            kill = asyncio.ensure_future(_kill_and_settle(create.result().id, usage))
+            kill = asyncio.ensure_future(_kill_and_settle(create.result().id, usage, create.result()))
             await _wait_through_cancels(kill, STOP_TIMEOUT)
             if not kill.done():
                 _keep(kill)
@@ -628,19 +657,21 @@ class SuperserveEnvironment(SandboxEnvironment):
         if usage is not None:
             # The box tag ties the box to its hold for a reconcile.
             metadata[BOX_KEY] = usage.box
+        arguments = {
+            "name": name,
+            "from_template": template,
+            "timeout_seconds": self._timeout_seconds(),
+            "auto_delete_seconds": _AUTO_DELETE_SEC,
+            "metadata": metadata,
+            "env_vars": dict(spec.env) or None,
+            "network": _network_config(self._network_policy or NetworkPolicy(disabled=True)),
+        }
+        # The clock starts only when nothing can fail before the create call.
+        if usage is not None:
             usage.sent(name, attempt)
         self._sent_at = asyncio.get_running_loop().time()
-        policy = self._network_policy or NetworkPolicy(disabled=True)
         with _mapped("create the box"):
-            sandbox = await AsyncSandbox.create(
-                name=name,
-                from_template=template,
-                timeout_seconds=math.ceil(spec.lifetime_seconds),
-                auto_delete_seconds=_AUTO_DELETE_SEC,
-                metadata=metadata,
-                env_vars=dict(spec.env) or None,
-                network=_network_config(policy),
-            )
+            sandbox = await AsyncSandbox.create(**arguments)
         if usage is not None:
             try:
                 await asyncio.to_thread(usage.bind, sandbox.id)
@@ -649,7 +680,7 @@ class SuperserveEnvironment(SandboxEnvironment):
                 usage.check_size(info)
             except BaseException:
                 try:
-                    await _kill_and_settle(sandbox.id, usage)
+                    await _kill_and_settle(sandbox.id, usage, sandbox)
                 except Exception:
                     # The confirm error goes on; the sweep can stop a leaked box.
                     logger.exception("Could not stop a Superserve box whose usage was not confirmed.")
@@ -678,6 +709,7 @@ class SuperserveEnvironment(SandboxEnvironment):
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the kill.
+            SandboxInfraError: The kill failed or timed out.
             UsagePendingError: The usage could not settle; the hold stays pending.
             BudgetError: The usage broke the reserved bounds.
         """
@@ -691,7 +723,7 @@ class SuperserveEnvironment(SandboxEnvironment):
             usage, self._usage = self._usage, None
             self._sandbox = None
             self._stopped = True
-            self._stop_task = asyncio.ensure_future(_kill_and_settle(sandbox.id, usage))
+            self._stop_task = asyncio.ensure_future(_kill_and_settle(sandbox.id, usage, sandbox))
         kill = self._stop_task
         try:
             await asyncio.shield(kill)
@@ -793,12 +825,13 @@ class SuperserveEnvironment(SandboxEnvironment):
         sandbox = self._require_running()
         parents = sorted({str(PurePosixPath(path).parent) for path in files} - {".", "/"})
         if parents:
-            made = await self.exec("mkdir -p " + " ".join(shlex.quote(parent) for parent in parents))
+            # Harbor makes the directories as root, so a path outside the user's home works.
+            made = await self.exec("mkdir -p " + " ".join(shlex.quote(parent) for parent in parents), sudo=True)
             if not made.ok:
                 raise SandboxInfraError("Superserve could not make the upload directories.")
         for path, text in files.items():
             with _mapped("write a file"):
-                await sandbox.files.write(path, text.encode("utf-8"))
+                await sandbox.files.write(path, text.encode("utf-8"), timeout=_TRANSFER_TIMEOUT_SEC)
 
     async def download_file(self, path: str) -> str | None:
         """Read one UTF-8 text file from the box.
@@ -811,12 +844,12 @@ class SuperserveEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The box is not running, the read failed, or
-                the file is not UTF-8 text.
+                the file is not UTF-8 text, or it is larger than ``MAX_DOWNLOAD_BYTES``.
         """
         sandbox = self._require_running()
         try:
             with _mapped("read a file"):
-                data = await sandbox.files.read(path)
+                data = await sandbox.files.read(path, timeout=_TRANSFER_TIMEOUT_SEC, max_bytes=MAX_DOWNLOAD_BYTES)
         except SandboxInfraError as error:
             if NotFoundError is not None and isinstance(error.__cause__, NotFoundError):
                 return None

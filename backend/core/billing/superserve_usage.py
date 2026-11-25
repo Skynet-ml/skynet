@@ -8,10 +8,14 @@ so the template size is the billed size, and it checks the created box
 against that size.
 
 The hold funds the box's whole lifetime plus a margin. The provider sends
-the lifetime as Superserve's ``timeout_seconds`` with a short
-``auto_delete_seconds``, so Superserve pauses and then deletes a box that
-nobody stops. The provider
-also kills the box itself at the lifetime. The clock runs from the create
+the lifetime, at least 60 s, as Superserve's ``timeout_seconds`` with a
+short ``auto_delete_seconds``, so Superserve pauses and then deletes a box
+that nobody stops; the lifetime in the request is that vendor bound. SDK
+0.14.1 calls ``timeout_seconds`` the auto-pause timeout
+(``async_sandbox.py`` lines 876-877), separate from the activity-based
+``idle_timeout_seconds`` (line 260). It does not say whether the timer
+counts wall time, so if the Skynet process dies, a busy box may run past
+its hold. The provider also kills the box itself at the lifetime. The clock runs from the create
 call to the confirmed kill. A box whose measured time or size is larger than
 its funding settles at the funded amount, logs a warning and flags
 ``over_funded`` in its evidence, so the settle never goes above the hold.
@@ -257,6 +261,9 @@ class SuperserveUsageReservation:
     def check_size(self, info: Any) -> None:
         """Check that the created box is no larger than its funding and cannot grow.
 
+        The SDK 0.14.1 ``SandboxInfo`` has no disk field; the template fixes
+        the disk. A disk that a later SDK reports must match the funded disk.
+
         Args:
             info: The ``SandboxInfo`` of the created box.
 
@@ -268,6 +275,7 @@ class SuperserveUsageReservation:
             and getattr(info, "memory_mib", None) == self.request["memory_mib"]
             and getattr(info, "vcpu_max", None) is None
             and getattr(info, "memory_max_mib", None) is None
+            and getattr(info, "disk_mib", None) in (None, self.request["disk_mib"])
         )
         if not self.size_ok:
             raise UsagePendingError("The Superserve sandbox does not have the funded size.")

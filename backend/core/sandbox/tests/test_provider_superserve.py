@@ -99,6 +99,8 @@ class FakeBox:
         self.run_error: Exception | None = None
         self.run_hook: Callable[[], Awaitable[None]] | None = None
         self.exit_override: int | None = None
+        self.closed = False
+        self.transfers: list[dict[str, Any]] = []
         self.info = SimpleNamespace(
             id=self.id,
             vcpu_count=sdk.size["vcpu"],
@@ -116,6 +118,14 @@ class FakeBox:
             The fake ``SandboxInfo``.
         """
         return self.info
+
+    async def kill(self) -> None:
+        """Delete the box through its handle, then close the handle's client, like the SDK does."""
+        self.sdk.handle_kills.append(self.id)
+        try:
+            await self.sdk._kill(self.id)
+        finally:
+            self.closed = True
 
     async def update(self, *, network: Any) -> None:
         """Record a network update.
@@ -162,20 +172,31 @@ class FakeBox:
             code = self.exit_override
         return SimpleNamespace(stdout=stdout, stderr="", exit_code=code, truncated=False)
 
-    async def _write(self, path: str, content: bytes) -> None:
+    # The fake keeps the SDK's keyword names, so the provider's calls match the real signature.
+    async def _write(self, path: str, content: bytes, *, timeout: float | None = None) -> None:  # noqa: ASYNC109
         """Store one file.
 
         Args:
             path: The file path.
             content: The file bytes.
+            timeout: The transfer timeout.
         """
+        self.transfers.append({"write": path, "timeout": timeout})
         self.data[path] = content
 
-    async def _read(self, path: str) -> bytes:
+    async def _read(
+        self,
+        path: str,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109
+        max_bytes: int | None = None,
+    ) -> bytes:
         """Return one file.
 
         Args:
             path: The file path.
+            timeout: The transfer timeout.
+            max_bytes: The download limit.
 
         Returns:
             The file bytes.
@@ -183,6 +204,7 @@ class FakeBox:
         Raises:
             FakeNotFoundError: The file does not exist.
         """
+        self.transfers.append({"read": path, "timeout": timeout, "max_bytes": max_bytes})
         if path not in self.data:
             raise FakeNotFoundError()
         return self.data[path]
@@ -231,6 +253,7 @@ class FakeSuperserve:
         self.boxes: list[FakeBox] = []
         self.templates: list[FakeTemplate] = []
         self.killed: list[str] = []
+        self.handle_kills: list[str] = []
         self.size = {"vcpu": 2, "memory_mib": 4096}
         self.create_error: Exception | None = None
         self.create_makes_box = False
@@ -538,13 +561,13 @@ async def test_failed_template_is_rebuilt(sdk: FakeSuperserve) -> None:
             {"allow_out": ["10.0.0.0/8"], "deny_out": ["0.0.0.0/0"]},
         ),
         (
-            NetworkPolicy(allowed_hosts=("pypi.org",)),
-            {"allow_out": ["pypi.org", "1.1.1.1/32", "8.8.8.8/32"], "deny_out": ["0.0.0.0/0"]},
+            NetworkPolicy(allowed_hosts=("pypi.org", "10.0.0.0/8", "pypi.org")),
+            {"allow_out": ["pypi.org", "10.0.0.0/8"], "deny_out": ["0.0.0.0/0"]},
         ),
     ],
 )
 def test_network_config_maps_each_policy(policy: NetworkPolicy, expected: dict[str, list[str]]) -> None:
-    """Map open, deny-all and allowlist policies to Superserve egress rules, with DNS for host names.
+    """Map open, deny-all and allowlist policies to Superserve egress rules, with no added DNS resolvers.
 
     Args:
         policy: The egress policy.
@@ -608,18 +631,22 @@ async def test_protected_box_reserves_before_create_and_settles_after_the_kill(s
     await env.stop()
     assert usage.names() == ["sent", "bind", "check_size", "stopped", "settle"]
     assert sdk.killed == ["sbx-1"]
+    assert sdk.handle_kills == ["sbx-1"]
+    assert sdk.box().closed
     with pytest.raises(SandboxInfraError, match="cannot start again"):
         await env.start()
 
 
 async def test_wrong_size_kills_and_settles_the_box(sdk: FakeSuperserve) -> None:
-    """Kill and settle a box that is not the funded size, and raise."""
+    """Kill and settle a box that is not the funded size through its handle, and raise."""
     usage = FakeUsage()
     usage.size_error = UsagePendingError("size")
     env = _protected(usage)
     with pytest.raises(UsagePendingError):
         await env.start()
     assert sdk.killed == ["sbx-1"]
+    assert sdk.handle_kills == ["sbx-1"]
+    assert sdk.box().closed
     assert usage.names()[-3:] == ["stopped", "settle", "fail"]
 
 
@@ -747,15 +774,92 @@ async def test_create_that_ends_after_the_grace_is_killed_in_the_background(
 
 
 async def test_failed_kill_still_settles_and_raises(sdk: FakeSuperserve) -> None:
-    """Settle the funded lifetime when the kill fails, and raise the kill error."""
+    """Settle the funded lifetime when the kill fails, and raise the kill error as an infra error."""
     usage = FakeUsage()
     env = _protected(usage)
     await env.start()
     sdk.kill_error = FakeSDKError("down", 503)
-    with pytest.raises(FakeSDKError):
+    with pytest.raises(SandboxInfraError, match="kill the box") as raised:
         await env.stop()
+    assert isinstance(raised.value.__cause__, FakeSDKError)
     assert usage.names()[-1] == "settle"
     assert "stopped" not in usage.names()
+    assert sdk.box().closed
+
+
+async def test_kill_timeout_still_settles_and_raises_an_infra_error(
+    sdk: FakeSuperserve, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Map a kill that runs past ``STOP_TIMEOUT`` to an infra error, and still settle."""
+    monkeypatch.setattr(provider, "STOP_TIMEOUT", 0.01)
+    usage = FakeUsage()
+    env = _protected(usage)
+    await env.start()
+    sdk.kill_hook = asyncio.Event().wait
+    with pytest.raises(SandboxInfraError, match="kill the box") as raised:
+        await env.stop()
+    assert isinstance(raised.value.__cause__, TimeoutError)
+    assert usage.names()[-1] == "settle"
+    assert "stopped" not in usage.names()
+
+
+async def test_short_lifetime_sends_the_timeout_floor_and_funds_it(
+    sdk: FakeSuperserve, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send at least 60 s as the timeout, fund that bound, and keep the cap at the spec lifetime."""
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        """Record the cap sleep and never wake.
+
+        Args:
+            seconds: The requested sleep.
+        """
+        slept.append(seconds)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(provider, "_cap_sleep", fake_sleep)
+    requests: list[dict[str, Any]] = []
+    usage = FakeUsage()
+    spec = SandboxSpec(lifetime_seconds=10, resources=ResourceRequest(cpus=2, memory_mb=4096), operation_key="op-1")
+    env = SuperserveEnvironment(
+        spec, budget=object(), usage_factory=lambda budget, request, **_: requests.append(request) or usage
+    )
+    await env.start()
+    await _settle_loop()
+    try:
+        assert sdk.box().kwargs["timeout_seconds"] == 60
+        assert requests[0]["lifetime_ms"] == 60_000
+        assert 9 < slept[0] <= 10
+    finally:
+        await env.stop()
+
+
+async def test_create_arguments_are_built_before_the_clock_starts(
+    sdk: FakeSuperserve, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start no clock when building the create arguments fails, so the hold is released as never sent."""
+
+    def broken(policy: NetworkPolicy) -> Any:
+        """Fail as a bad egress map would.
+
+        Args:
+            policy: The egress policy.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("bad policy")
+
+    monkeypatch.setattr(provider, "_network_config", broken)
+    usage = FakeUsage()
+    env = _protected(usage)
+    with pytest.raises(RuntimeError, match="bad policy"):
+        await env.start()
+    assert "sent" not in usage.names()
+    assert env._sent_at is None
+    assert usage.calls[-1] == ("fail", False)
+    assert not sdk.boxes
 
 
 async def test_cancel_during_stop_still_kills_and_settles(sdk: FakeSuperserve) -> None:
@@ -861,13 +965,18 @@ async def test_sdk_error_in_exec_is_an_infra_error(sdk: FakeSuperserve) -> None:
 
 
 async def test_upload_makes_parents_and_writes_bytes(sdk: FakeSuperserve) -> None:
-    """Make the parent directories once, then write UTF-8 bytes."""
+    """Make the parent directories once as root, then write UTF-8 bytes; both transfers have bounds."""
     async with SuperserveEnvironment(_SPEC) as env:
         await env.upload_files({"/a/b/c.txt": "שלום\r\n"})
         box = sdk.box()
         assert box.run_calls[0]["command"] == "mkdir -p /a/b"
+        assert box.run_calls[0]["user"] == "root"
         assert box.data["/a/b/c.txt"] == "שלום\r\n".encode()
         assert await env.download_file("/a/b/c.txt") == "שלום\r\n"
+        assert box.transfers == [
+            {"write": "/a/b/c.txt", "timeout": provider._TRANSFER_TIMEOUT_SEC},
+            {"read": "/a/b/c.txt", "timeout": provider._TRANSFER_TIMEOUT_SEC, "max_bytes": 1024**3},
+        ]
 
 
 async def test_download_refuses_binary_data(sdk: FakeSuperserve) -> None:
@@ -885,6 +994,8 @@ async def test_stop_job_sandboxes_skips_deleted_boxes_and_survives_a_failure(sdk
         await env.start()
     sdk.boxes[0].status = "deleted"
     assert await SuperserveEnvironment.stop_job_sandboxes("job") == 1
+    assert sdk.killed == ["sbx-2"]
+    assert not sdk.handle_kills
     sdk.kill_error = FakeSDKError("down", 503)
     assert await SuperserveEnvironment.stop_job_sandboxes("job") == 0
 

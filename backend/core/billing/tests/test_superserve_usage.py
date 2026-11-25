@@ -280,6 +280,32 @@ def test_box_of_the_wrong_size_settles_at_the_hold(database: Engine, clock: list
     assert _evidence(database, "superserve-stop:sbx-1")["size_ok"] is False
 
 
+@pytest.mark.parametrize(
+    ("disk_mib", "ok"),
+    [(None, True), (10240, True), (20480, False), (5120, False)],
+)
+def test_check_size_compares_a_reported_disk_with_the_funded_disk(
+    database: Engine, disk_mib: int | None, ok: bool
+) -> None:
+    """Accept a box with no disk field or the funded disk, and refuse any other disk."""
+    reservation = SuperserveUsageReservation(_runtime(database), CREATE, operation_key=f"disk-{disk_mib}")
+    info = _info() if disk_mib is None else _info(disk_mib=disk_mib)
+    if ok:
+        reservation.check_size(info)
+    else:
+        with pytest.raises(UsagePendingError, match="funded size"):
+            reservation.check_size(info)
+    assert reservation.size_ok is ok
+
+
+def test_charge_conversion_rounds_a_fraction_up() -> None:
+    """Round a provider cost below the ledger precision up, never down to zero."""
+    snapshot = quote_superserve_sandbox(CREATE).price_snapshot
+    charge = superserve_usage.vercel_charge_policy(snapshot).convert(Decimal("1e-15"))
+    assert charge.total > 0
+    assert charge.wallet > 0
+
+
 def test_bind_records_the_start_for_reconciliation(database: Engine, clock: list[float]) -> None:
     """Write the box id, name, attempt and wall-clock start into the pending evidence at once."""
     reservation = SuperserveUsageReservation(_runtime(database), CREATE, operation_key="box-one")
