@@ -51,7 +51,7 @@ Você pode comparar uma versão com outra. A aba também mostra o **Feedback do 
 
 ### Branches em um novo repositório
 
-Quando o Skynet criou o repositório para a execução, ele envia cada candidato para o seu próprio branch, `skynet/candidate-<version id>`. O branch `skynet/best` sempre aponta para a melhor versão. Ele avança quando aparece uma versão melhor.
+Quando o Skynet criou o repositório para a execução no GitHub, ele envia cada candidato para o seu próprio branch, `skynet/candidate-<version id>`. O branch `skynet/best` sempre aponta para a melhor versão. Ele avança quando aparece uma versão melhor.
 
 ## Servir a melhor versão
 

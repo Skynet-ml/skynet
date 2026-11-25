@@ -51,7 +51,7 @@ You can compare a version with another version. The tab also shows the **Scorer 
 
 ### Branches in a new repository
 
-When Skynet created the repository for the run, it pushes each candidate to its own branch, `skynet/candidate-<version id>`. The `skynet/best` branch always points at the best version. It moves when a better version appears.
+When Skynet created the repository for the run on GitHub, it pushes each candidate to its own branch, `skynet/candidate-<version id>`. The `skynet/best` branch always points at the best version. It moves when a better version appears.
 
 ## Serve the best version
 

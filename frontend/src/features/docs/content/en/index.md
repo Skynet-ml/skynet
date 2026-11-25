@@ -6,8 +6,8 @@ Every run optimizes a repository. You can start in two ways:
 
 | Start                   | What happens                                                                                   |
 | ----------------------- | ---------------------------------------------------------------------------------------------- |
-| Use a repository        | Skynet changes the files in the paths that you allow, in a GitHub repository that you connect. |
-| Create a new repository | You give a task and data. Skynet creates a new GitHub repository in your account and writes a first solution. |
+| Use a repository        | Skynet changes the files in the paths that you allow, in a GitHub, GitLab or Bitbucket repository that you connect. |
+| Create a new repository | You give a task and data. Skynet creates a new repository in your GitHub, GitLab or Bitbucket account and writes a first solution. |
 
 The code in the repository can be anything: an application, a service, a script or a library. It can use any library.
 

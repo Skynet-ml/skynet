@@ -6,8 +6,8 @@ Cada ejecución optimiza un repositorio. Puedes empezar de dos formas:
 
 | Inicio                   | Qué pasa                                                                                        |
 | ------------------------ | ----------------------------------------------------------------------------------------------- |
-| Usar un repositorio      | Skynet cambia los archivos de las rutas que permites, en un repositorio de GitHub que conectas. |
-| Crear un repositorio nuevo | Das una tarea y datos. Skynet crea un repositorio nuevo de GitHub en tu cuenta y escribe una primera solución. |
+| Usar un repositorio      | Skynet cambia los archivos de las rutas que permites, en un repositorio de GitHub, GitLab o Bitbucket que conectas. |
+| Crear un repositorio nuevo | Das una tarea y datos. Skynet crea un repositorio nuevo en tu cuenta de GitHub, GitLab o Bitbucket y escribe una primera solución. |
 
 El código del repositorio puede ser cualquier cosa: una aplicación, un servicio, un script o una biblioteca. Puede usar cualquier biblioteca.
 

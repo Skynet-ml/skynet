@@ -51,7 +51,7 @@ Bir sürümü başka bir sürümle karşılaştırabilirsiniz. Sekme bir sürüm
 
 ### Yeni bir depodaki dallar
 
-Skynet depoyu çalıştırma için oluşturduysa her adayı kendi dalına, `skynet/candidate-<version id>` dalına gönderir. `skynet/best` dalı her zaman en iyi sürümü gösterir. Daha iyi bir sürüm çıktığında bu dal yer değiştirir.
+Skynet depoyu çalıştırma için GitHub'da oluşturduysa her adayı kendi dalına, `skynet/candidate-<version id>` dalına gönderir. `skynet/best` dalı her zaman en iyi sürümü gösterir. Daha iyi bir sürüm çıktığında bu dal yer değiştirir.
 
 ## En iyi sürümü sunun
 
