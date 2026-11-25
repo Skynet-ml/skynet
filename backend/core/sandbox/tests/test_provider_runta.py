@@ -1417,3 +1417,91 @@ async def test_a_failed_tcp_close_leaves_the_egress_policy_unchanged(fake_sdk: F
         with pytest.raises(SandboxInfraError, match="egress policy"):
             await env.set_network_policy(NetworkPolicy(disabled=True))
         assert fake_sdk.boxes[0].egress == before
+
+
+async def test_a_late_duplicate_is_deleted_again_and_the_hold_settles(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete a late create's duplicate once more after the runtime deletes, then settle.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails_for = ["rt-2"]
+    usage = await _late_create(fake_sdk, monkeypatch)
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    assert all(box.deleted for box in fake_sdk.boxes)
+    assert usage.names() == ["reserve", "sent", "pending", "stray", "confirm", "stray_gone", "stopped", "settle"]
+
+
+async def test_a_late_duplicate_that_does_not_delete_keeps_the_hold(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the hold pending when a late create's duplicate fails its second delete too.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails_for = ["rt-2", "rt-2"]
+    usage = await _late_create(fake_sdk, monkeypatch)
+    fake_sdk.create_gate.set()
+    await _late_tasks_done()
+    first, duplicate = fake_sdk.boxes
+    assert first.deleted
+    assert not duplicate.deleted
+    assert usage.names() == ["reserve", "sent", "pending", "stray", "confirm", "stopped", "pending"]
+
+
+async def test_an_unprotected_duplicate_raises_an_infra_error(fake_sdk: FakeCloud) -> None:
+    """Name the duplicate in an infra error when a box with no hold cannot delete it.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails_for = ["rt-2", "rt-2", "rt-2"]
+    env = RuntaEnvironment(_spec())
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    with pytest.raises(SandboxInfraError, match="duplicate Runta runtime rt-2"):
+        await env.stop()
+    assert not fake_sdk.boxes[1].deleted
+
+
+async def test_a_late_unprotected_duplicate_fails_with_an_infra_error(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """End a late create's task with an infra error when a box with no hold keeps a duplicate.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+        caplog: The log capture.
+    """
+    monkeypatch.setattr(runta, "CREATE_GRACE", 0.01)
+    fake_sdk.create_gate = asyncio.Event()
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails_for = ["rt-2", "rt-2"]
+    env = RuntaEnvironment(_spec(), timeouts=_timeouts(start=0.02))
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    with caplog.at_level("WARNING", logger=runta.__name__):
+        fake_sdk.create_gate.set()
+        await _late_tasks_done()
+    assert "A late Runta task failed: SandboxInfraError" in caplog.text
+    first, duplicate = fake_sdk.boxes
+    assert first.deleted
+    assert not duplicate.deleted

@@ -19,10 +19,13 @@ output limit and the delete on stop come from
   ``tcp_allowlist``, because Runta denies raw TCP only for an empty list.
   Harbor sends no TCP list.
 - A duplicate runtime with the box's name that does not delete keeps the
-  hold pending, with its id in the evidence, and a later stop tries its
-  delete again. A duplicate that never deletes stays pending, and its cost
-  above the hold is not covered; this is rare, because the SDK sends one
-  idempotency key for all create retries.
+  hold pending, with its id in the evidence. The teardown tries its delete
+  again after the runtime deletes, and each later stop tries once more. A
+  late create's background task tries it once more and then stops. A
+  duplicate that never deletes stays pending, and its cost above the hold
+  is not covered; this is rare, because the SDK sends one idempotency key
+  for all create retries. An unprotected box raises an infra error that
+  names the duplicate.
 - The requests and the limits of vCPU and memory are equal, so the priced
   size is the billed size. Harbor sends no limits.
 - A spec image is refused: the direct path runs Runta's default runtime
@@ -253,8 +256,10 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
 
     This task owns the hold. A failed create is looked up by name, as in the
     grace. The delete always runs once a runtime is known, and a confirmed
-    delete settles, as in the teardown. A failed lookup or a failed delete
-    keeps the hold pending with the runtime name as evidence.
+    delete settles, as in the teardown. Each duplicate that the lookup could
+    not delete gets one more delete after the runtime deletes. A failed
+    lookup, a failed delete or a duplicate that is left keeps the hold
+    pending with the runtime name as evidence.
 
     Args:
         create: The create task.
@@ -263,14 +268,16 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
         name: The unique name of the runtime.
 
     Raises:
-        UsagePendingError: The lookup or the delete failed.
+        UsagePendingError: The lookup or the delete failed, or a duplicate is left.
+        SandboxInfraError: A duplicate of an unprotected box is left.
     """
+    strays: list[Any] = []
     try:
         try:
             runtime = await create
         except Exception as create_error:
             try:
-                found, _ = await _list_named(client, name, usage)
+                found, strays = await _list_named(client, name, usage)
             except Exception as error:
                 raise UsagePendingError(
                     "Runta could not list runtimes after a late failed create, so the hold stays."
@@ -290,9 +297,19 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
             if usage is not None:
                 await asyncio.to_thread(usage.pending)
             raise UsagePendingError("A late Runta runtime did not delete, so its hold stays pending.")
+        for stray in list(strays):
+            if await _bounded(stray.delete(), "delete a duplicate runtime"):
+                strays.remove(stray)
+                if usage is not None:
+                    usage.stray_gone(stray.id)
         if usage is None:
+            if strays:
+                raise SandboxInfraError(f"The duplicate Runta runtime {strays[0].id} of {name} did not delete.")
             return
         usage.stopped()
+        if strays:
+            await asyncio.to_thread(usage.pending)
+            raise UsagePendingError("A duplicate of a late Runta runtime did not delete, so its hold stays pending.")
         await asyncio.to_thread(usage.settle)
     finally:
         await _bounded(client.close(), "close the client")
@@ -808,7 +825,7 @@ class RuntaEnvironment(SandboxEnvironment):
         try:
             await self._end_usage()
         except Exception as error:
-            if isinstance(error, UsagePendingError | BudgetError):
+            if isinstance(error, UsagePendingError | BudgetError | SandboxInfraError):
                 return [error]
             pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
             pending.__cause__ = error
@@ -902,6 +919,7 @@ class RuntaEnvironment(SandboxEnvironment):
 
         Raises:
             UsagePendingError: A duplicate did not delete, so the hold stays pending.
+            SandboxInfraError: A duplicate of an unprotected box did not delete.
             BudgetError: The ledger refused the settlement.
         """
         for stray in list(self._strays):
@@ -919,6 +937,10 @@ class RuntaEnvironment(SandboxEnvironment):
                     await asyncio.to_thread(usage.pending)
             finally:
                 self._stop_task = None
+            if usage is None:
+                raise SandboxInfraError(
+                    f"The duplicate Runta runtime {self._strays[0].id} of {self._name} did not delete."
+                )
             raise UsagePendingError("A duplicate Runta runtime did not delete, so its hold stays pending.")
         self._forget()
         await self._close()
