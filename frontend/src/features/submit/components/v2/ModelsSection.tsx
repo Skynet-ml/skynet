@@ -46,7 +46,7 @@ import { msg } from "@/shared/lib/messages";
 
 import { emptyModelConfig } from "../../constants";
 import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
-import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
+import { useModelCatalog } from "../../hooks/use-submit-wizard-data";
 import {
   DEFAULT_PROPOSER,
   HARNESS_DEFAULT_PICK,
@@ -96,7 +96,6 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
   const t = (key: string) => v2Msg(key, guided);
   const level = useExperienceLevel();
   const catalog = useModelCatalog(runSource);
-  const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
   const [editing, setEditing] = React.useState<Editing | null>(null);
   const [proposerOpen, setProposerOpen] = React.useState(() =>
     defaultOpen("wizard.optimizer_settings", level),
@@ -452,13 +451,10 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
           config={editing.config}
           onSave={(config) => {
             editing.onSave(config);
-            if (config.name.trim()) saveToRecent(keepEconomy(config, null));
             setEditing(null);
           }}
           roleLabel={editing.label}
           catalogModels={catalog?.models}
-          recentConfigs={recentConfigs}
-          onRemoveRecent={removeRecentConfig}
           modelDefaultsOnly={editing.modelDefaultsOnly}
           remote={runSource === "hosted"}
           harnessEfforts={editing.harnessEfforts}

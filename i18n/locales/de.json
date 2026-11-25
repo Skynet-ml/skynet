@@ -422,6 +422,7 @@
     "agent_settings.not_writable": "Der Chat kann {key} nicht ändern. Ändere es im Tab {tab}.",
     "agent_settings.missing_target": "Die Aktion {action} benötigt ein Ziel.",
     "agent_settings.invalid_page": "Diese Seite gibt es in der App nicht.",
+    "agent_settings.missing_page": "Gib einen App-Pfad wie /submit oder einen Einstellungs-Tab an.",
     "hosted_link.failed": "Die gehostete {term.appName}-Website hat die Verknüpfung nicht angenommen. Starten Sie die Verknüpfung erneut.",
     "hosted_link.unreachable": "Die Mac-App kann die gehostete {term.appName}-Website nicht erreichen. Prüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
     "hosted_link.revoked": "Dieser Mac ist nicht mehr mit Ihrem {term.appName}-Konto verknüpft. Verknüpfen Sie ihn erneut, um fortzufahren.",

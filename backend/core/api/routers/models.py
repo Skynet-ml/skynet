@@ -26,7 +26,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from ...billing.openrouter_quotes import fetch_endpoint_prices, price_text_request, resolve_model_slug
@@ -41,6 +41,7 @@ from ...service_gateway.optimization.blackbox.sandbox_runtime import COVERAGE_SL
 from ..artificial_analysis import with_artificial_analysis_links
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..interview_model import with_interview_default
+from ..lab_logos import LOGO_TTL_SECONDS, LabLogoCache, lab_slug
 from ..model_catalog import (
     CatalogModel,
     ModelCatalogResponse,
@@ -398,12 +399,17 @@ def call_hold_cents(name: str, token_source: str, *, client: httpx.Client) -> De
         return None
 
 
-def create_models_router(*, http_client: Callable[[], httpx.Client] | None = None) -> APIRouter:
+def create_models_router(
+    *,
+    http_client: Callable[[], httpx.Client] | None = None,
+    logo_cache: LabLogoCache | None = None,
+) -> APIRouter:
     """Build the models router.
 
     Args:
         http_client: Factory for the client that reads OpenRouter prices; tests
             pass one over a mock transport.
+        logo_cache: The lab logo cache; tests pass one over a mock transport.
 
     Returns:
         A FastAPI ``APIRouter`` exposing ``/models``, ``/models/for-agent``,
@@ -413,6 +419,7 @@ def create_models_router(*, http_client: Callable[[], httpx.Client] | None = Non
     make_client = http_client or (lambda: httpx.Client(timeout=10, follow_redirects=False, trust_env=False))
     hold_cache: dict[tuple[str, str], tuple[float, Decimal | None]] = {}
     hold_lock = threading.Lock()
+    logos = logo_cache or LabLogoCache()
 
     @router.get(
         "/models",
@@ -432,6 +439,42 @@ def create_models_router(*, http_client: Callable[[], httpx.Client] | None = Non
             The cached catalog including each model's availability flag.
         """
         return with_artificial_analysis_links(with_interview_default(with_zero_retention(get_catalog_cached())))
+
+    @router.get("/models/logos/{slug}", summary="Get a model lab's current icon", include_in_schema=False)
+    def lab_logo(slug: str) -> Response:
+        """Serve a lab's icon from the LobeHub icon set, one file for both themes.
+
+        Args:
+            slug: The frontend provider slug, for example ``stepfun``.
+
+        Returns:
+            The SVG icon, cached by the browser for a day.
+
+        Raises:
+            HTTPException: 404 for a slug the catalog does not know, or when no icon loads, so
+                the frontend shows its bundled mark.
+        """
+        # The route needs no sign-in, so it fetches only for labs the catalog
+        # knows. Any other slug would cost a CDN call and a cache entry.
+        catalog = get_catalog_cached()
+        known = {lab_slug(m.value) for m in catalog.models} | {p.slug for p in catalog.providers}
+        logo = logos.get(slug) if slug in known else None
+        if logo is None:
+            raise HTTPException(status_code=404, detail="No logo for this provider")
+        return Response(
+            content=logo.svg(),
+            media_type="image/svg+xml",
+            headers={
+                "Cache-Control": f"public, max-age={LOGO_TTL_SECONDS}",
+                "X-Content-Type-Options": "nosniff",
+                # The icon is third-party SVG; this keeps a direct open of it inert.
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                # The page reads the icon with a CORS fetch. Without this, a copy
+                # cached by a plain request (no CORS headers) would answer that
+                # fetch for a day, and the fetch would fail.
+                "Vary": "Origin",
+            },
+        )
 
     @router.get("/models/fast-mode", summary="Check priority endpoint availability")
     def model_fast_mode(model: str, current_user: AuthenticatedUserDep) -> dict[str, bool]:

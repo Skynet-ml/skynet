@@ -422,6 +422,7 @@
     "agent_settings.not_writable": "채팅에서 {key}을(를) 변경할 수 없습니다. {tab} 탭에서 변경하세요.",
     "agent_settings.missing_target": "{action} 작업에는 대상이 필요합니다.",
     "agent_settings.invalid_page": "앱에 이 페이지가 없습니다.",
+    "agent_settings.missing_page": "/submit 같은 앱 내 경로나 설정 탭을 지정하세요.",
     "hosted_link.failed": "호스팅된 {term.appName} 사이트가 연결을 수락하지 않았습니다. 연결을 다시 시작하세요.",
     "hosted_link.unreachable": "Mac 앱이 호스팅된 {term.appName} 사이트에 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도하세요.",
     "hosted_link.revoked": "이 Mac은 더 이상 {term.appName} 계정에 연결되어 있지 않습니다. 계속하려면 다시 연결하세요.",

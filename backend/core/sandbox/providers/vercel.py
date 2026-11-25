@@ -183,6 +183,10 @@ DIRECT_WRITE_PREFIXES = (ROOT_MODEL_PREFIX,)
 # ``timeout``: in a real box the SDK's ``kill_after`` did not end such a step.
 # A copy is a small local file, so a short deadline is enough, and a FIFO
 # costs one short wait. ``UPLOAD_KILL_AFTER`` is only the backstop of a step.
+# The uutils ``timeout`` (Ubuntu 26.04) kills only its direct child, and bash
+# 5.3 forks the last command, so ``exec`` keeps the FIFO open in that child.
+# ``--preserve-status`` gives 137 there too; GNU ``timeout`` kills itself and
+# gives 137 anyway (SKY-969).
 # Each copy first removes the target, as the file API did, so a read-only file
 # that the box user owns (for example a runner that a version made 0444) is
 # still replaced, and a link, FIFO or empty folder at the name goes away when
@@ -191,8 +195,8 @@ UPLOAD_COPY_DEADLINE = 10
 UPLOAD_SCRIPT = (
     'stage="$1"; shift; index=0; for path in "$@"; do '
     'case "$path" in */*) folder="${path%/*}"; [ -z "$folder" ] || /bin/mkdir -p -- "$folder" || exit 1;; esac; '
-    f"/usr/bin/timeout --signal=KILL {UPLOAD_COPY_DEADLINE}s /bin/bash --noprofile --norc -c "
-    '\'/bin/rmdir -- "$2" 2>/dev/null; /bin/rm -f -- "$2" 2>/dev/null; /bin/cat -- "$1" > "$2"\' copy "$stage/$index" "$path" || exit; index=$((index + 1)); done'
+    f"/usr/bin/timeout --preserve-status --signal=KILL {UPLOAD_COPY_DEADLINE}s /bin/bash --noprofile --norc -c "
+    '\'/bin/rmdir -- "$2" 2>/dev/null; /bin/rm -f -- "$2" 2>/dev/null; exec /bin/cat -- "$1" > "$2"\' copy "$stage/$index" "$path" || exit; index=$((index + 1)); done'
 )
 UPLOAD_KILL_AFTER = 120.0
 # A model mailbox empties its folder only after every answer write ends, so a

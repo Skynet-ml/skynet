@@ -15,6 +15,8 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from fastmcp import Client, FastMCP
+from fastmcp.server.providers.openapi.routing import MCPType, RouteMap
 from mcp.types import Tool as McpTool
 from mcp.types import ToolAnnotations
 
@@ -29,6 +31,7 @@ from ...service_gateway.agents.generalist import (
 )
 from ...service_gateway.optimization.training_ground import run_react
 from ..errors import DomainError
+from ..mcp_mount import AGENT_TAG, _trim_tool_spec
 from ..routers import agent_settings as agent_settings_module
 from ..routers.agent_settings import MASK, create_agent_settings_router, mask_secrets
 from .conftest import bypass_auth
@@ -305,6 +308,49 @@ def test_open_page_returns_navigation() -> None:
     for path in ("//evil.example", "https://evil.example", "javascript:alert(1)", ""):
         assert client.post("/agent/open-page", json={"path": path}).status_code == 422
     assert client.post("/agent/open-page", json={"tab": "secret"}).status_code == 422
+
+
+def test_open_page_tells_the_model_to_give_a_path_or_a_tab() -> None:
+    """A call with no usable argument gets a steering error, not FastAPI's bare body error.
+
+    FastMCP sends no body when the model gives only null or unknown arguments.
+    """
+    client, _ = _client()
+    responses = [
+        client.post("/agent/open-page"),
+        client.post("/agent/open-page", json={}),
+        client.post("/agent/open-page", json={"url": "/submit"}),
+        client.post("/agent/open-page", json={"path": None, "tab": None}),
+    ]
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["code"] == "agent_settings.missing_page"
+    response = client.post("/agent/open-page", json={"path": "https://evil.example"})
+    assert response.json()["code"] == "agent_settings.invalid_page"
+
+
+async def test_open_page_through_mcp_maps_path_and_steers_a_bad_call() -> None:
+    """Through FastMCP, a path opens the page and a call with no usable argument gets the steering error.
+
+    A nullable body schema once stopped FastMCP from mapping ``path`` into the body.
+    """
+    client, _ = _client()
+    server = FastMCP.from_fastapi(
+        app=client.app,
+        route_maps=[RouteMap(tags={AGENT_TAG}, mcp_type=MCPType.TOOL), RouteMap(mcp_type=MCPType.EXCLUDE)],
+        mcp_component_fn=_trim_tool_spec,
+    )
+    async with Client(server) as mcp:
+        tool = {t.name: t for t in await mcp.list_tools()}["open_page"]
+        assert "path" in tool.description
+        assert "tab" in tool.description
+        assert len(tool.description) <= 240
+        opened = await mcp.call_tool("open_page", {"path": "/submit"})
+        assert opened.content[0].text == '{"navigate":{"kind":"route","path":"/submit"}}'
+        for args in ({}, {"url": "/submit"}, {"path": None, "tab": None}):
+            result = await mcp.call_tool("open_page", args, raise_on_error=False)
+            assert result.is_error, args
+            assert "agent_settings.missing_page" in result.content[0].text, args
 
 
 def test_open_page_prefers_a_safe_path_over_the_tab() -> None:

@@ -1,7 +1,7 @@
 import { isCliProvider } from "@/shared/lib/cli-providers";
 import { cliEffort } from "@/shared/lib/effort-slider";
 import { isLocalMode } from "@/shared/lib/runtime-env";
-import type { ModelConfig } from "@/shared/types/api";
+import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 
 /**
  * Whether a model can run in economy mode: only managed models go through the
@@ -10,18 +10,6 @@ import type { ModelConfig } from "@/shared/types/api";
 export function economyEligible(config: ModelConfig | null | undefined): boolean {
   if (!config?.name.trim() || isLocalMode()) return false;
   return (config.token_source ?? "managed") === "managed" && config.cli_provider == null;
-}
-
-/**
- * Whether the config dialog's effort picker is the slider: only for a local CLI
- * model, and only when no saved level still runs with thinking on, since the
- * slider's default stop clears the level.
- */
-export function usesEffortSlider(
-  tokenSource: ModelConfig["token_source"],
-  thinkingDefaultOn: boolean,
-): boolean {
-  return tokenSource === "subscription" && thinkingDefaultOn;
 }
 
 /**
@@ -77,5 +65,41 @@ export function prepareModelConfig(config: ModelConfig): ModelConfig {
     extra: Object.keys(safeExtra).length > 0 ? safeExtra : undefined,
     ...(fields.cli_provider != null &&
       !isCliProvider(fields.cli_provider) && { cli_provider: null }),
+  };
+}
+
+/**
+ * The highest temperature a model accepts: Anthropic caps Claude at 1 on
+ * every route, OpenRouter included, and every other model takes up to 2.
+ */
+export function temperatureMax(name: string): number {
+  return /claude|(^|\/)anthropic\//i.test(name) ? 1 : 2;
+}
+
+// A cap on the starting max tokens: a model's full output limit (often 128k)
+// lets one runaway reply run up the bill.
+const STARTING_MAX_TOKENS = 32768;
+
+/**
+ * The temperature and max tokens a newly picked model starts with: the
+ * provider's recommended temperature (else 1, which every model accepts, also
+ * with thinking on) within the model's range, and the model's output limit
+ * capped at 32k. A field stays empty (so the provider default runs) for a
+ * model that takes no temperature or whose listing carries no data, such as
+ * a model listed with the user's own key.
+ */
+export function startingParams(
+  model: Pick<
+    CatalogModel,
+    "value" | "default_temperature" | "max_output_tokens" | "takes_temperature"
+  >,
+): Pick<ModelConfig, "temperature" | "max_tokens"> {
+  return {
+    temperature: model.takes_temperature
+      ? Math.min(model.default_temperature ?? 1, temperatureMax(model.value))
+      : undefined,
+    max_tokens: model.max_output_tokens
+      ? Math.min(model.max_output_tokens, STARTING_MAX_TOKENS)
+      : undefined,
   };
 }

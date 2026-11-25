@@ -44,6 +44,8 @@ _DROPPABLE_SUFFIX_RE = re.compile(r"-(it|instruct|preview|v1|exp|\d{4})$")
 _TITLE_RE = re.compile(r"<title>([^<]*)</title>")
 _CANONICAL_RE = re.compile(r'<link rel="canonical" href="([^"]*)"')
 _PARENS_RE = re.compile(r"\([^)]*\)")
+# Model-family pages title themselves "<name> Models - ..."; the word is not part of the name.
+_MODELS_SUFFIX_RE = re.compile(r"\s+Models$")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 # OpenRouter and Artificial Analysis disagree on whether these are part of a name.
 _IGNORED_TOKENS = frozenset({"instruct", "preview"})
@@ -112,6 +114,8 @@ def names_match(display_name: str, page_title: str) -> bool:
     The page title reads ``"Claude Opus 4.5 (non-reasoning) - Intelligence, ..."``;
     the parenthetical names a reasoning setting, so it is compared both with
     and without it (``Qwen3.8 Max (0902)`` keeps its date in parentheses).
+    A model-family page reads ``"Claude Fable 5.2 Models - ..."``; the trailing
+    ``Models`` is dropped before the compare.
 
     Args:
         display_name: OpenRouter's name for the model.
@@ -120,7 +124,7 @@ def names_match(display_name: str, page_title: str) -> bool:
     Returns:
         ``True`` when the names carry the same tokens.
     """
-    model = html.unescape(page_title).split(" - ", 1)[0]
+    model = _MODELS_SUFFIX_RE.sub("", html.unescape(page_title).split(" - ", 1)[0])
     wanted = _name_tokens(display_name)
     return bool(wanted) and wanted in (_name_tokens(model), _name_tokens(_PARENS_RE.sub(" ", model)))
 

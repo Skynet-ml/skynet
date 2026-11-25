@@ -1,22 +1,11 @@
 "use client";
 
 import * as React from "react";
-import {
-  Copy,
-  Trash,
-  Plus,
-  Thermometer,
-  TextT,
-  Eye,
-  Brain,
-  Info,
-  Coins,
-  Desktop,
-  Key,
-} from "@/shared/ui/icons";
+import { Copy, Trash, Plus, Info, Eye, Thermometer, Hash, Brain, Wallet } from "@/shared/ui/icons";
 import { cn } from "@/shared/lib/utils";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import { msg } from "@/shared/lib/messages";
+import { APP_NAME } from "@/shared/lib/brand";
 import { effortLabel } from "@/shared/lib/model-efforts";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { Button } from "@/shared/ui/primitives/button";
@@ -69,41 +58,13 @@ export function MicroPill({
     <span
       className={cn(
         "inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-semibold",
-        tone === "primary" ? "bg-primary-fill text-primary-foreground" : "bg-muted/50 text-muted-foreground/80",
+        tone === "primary"
+          ? "bg-primary-fill text-primary-foreground"
+          : "bg-muted/50 text-muted-foreground/80",
         className,
       )}
       {...props}
     />
-  );
-}
-
-function ReasoningPill({ value }: { value: string | null | undefined }) {
-  const label = reasoningEffortLabel(value);
-  if (!label) return null;
-  return (
-    <MicroPill title={`Reasoning effort: ${label}`}>
-      <Brain className="size-2.5" />
-      {label}
-    </MicroPill>
-  );
-}
-
-function TokenSourcePill({ source }: { source: ModelConfig["token_source"] }) {
-  // Keep this to a compact echo; the dialog owns the explanation and provider management.
-  if (!source) return null;
-  const Icon = source === "byok" ? Key : source === "subscription" ? Desktop : Coins;
-  const label = msg(
-    source === "byok"
-      ? "billing.mode.byok"
-      : source === "subscription"
-        ? "subscription.mode"
-        : "billing.mode.managed",
-  );
-  return (
-    <MicroPill dir="auto">
-      <Icon className="size-2.5" aria-hidden="true" />
-      {label}
-    </MicroPill>
   );
 }
 
@@ -142,6 +103,48 @@ export function ModelChip({
     : name;
   const supportsVision = !!catalogModels?.find((m) => m.value === config.name)?.supports_vision;
 
+  const effortText = reasoningEffortLabel(effort);
+  const billingText =
+    config.token_source === "managed"
+      ? APP_NAME
+      : config.token_source
+        ? msg(config.token_source === "byok" ? "billing.mode.byok" : "subscription.mode")
+        : null;
+  // A config that carries only a model id (e.g. the tagger's tagging model)
+  // lists no parameters: a made-up temperature would read as a real setting.
+  const details = (
+    [
+      [Thermometer, msg("auto.features.submit.components.modelconfigmodal.5"), temperature],
+      [Hash, msg("auto.features.submit.components.modelconfigmodal.7"), maxTokens],
+      [Brain, msg("auto.features.submit.components.modelconfigmodal.8"), effortText],
+      [Wallet, msg("shared.model_chip.billing"), billingText],
+      [
+        Eye,
+        msg("submit.modelpicker.detail.vision"),
+        supportsVision ? msg("submit.modelpicker.detail.vision_yes") : null,
+      ],
+    ] as Array<[typeof Eye, string, string | number | null | undefined]>
+  ).filter((row): row is [typeof Eye, string, string | number] => !isEmpty && row[2] != null);
+  const infoBody =
+    tooltip || details.length > 0 ? (
+      <span className="flex flex-col gap-1.5 text-start">
+        {tooltip && <span>{tooltip}</span>}
+        {details.length > 0 && (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[0.6875rem]">
+            {details.map(([Icon, label, value]) => (
+              <React.Fragment key={label}>
+                <dt className="inline-flex items-center gap-1 font-normal text-muted-foreground">
+                  <Icon className="size-3 shrink-0" aria-hidden="true" />
+                  {label}
+                </dt>
+                <dd className="text-end font-medium tabular-nums">{value}</dd>
+              </React.Fragment>
+            ))}
+          </dl>
+        )}
+      </span>
+    ) : null;
+
   const content = (
     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
       {fallbackName ? (
@@ -166,46 +169,6 @@ export function ModelChip({
           {isEmpty ? name : modelDisplayName(name, catalogModels)}
         </span>
       )}
-      {/* A config that carries only a model id (e.g. the tagger's tagging
-            model) renders no parameter row at all — a fabricated temperature
-            would read as a setting the surface doesn't actually have. */}
-      {!isEmpty &&
-        (temperature != null ||
-          maxTokens != null ||
-          effort ||
-          supportsVision ||
-          config.token_source) && (
-          <div
-            className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[0.625rem] text-muted-foreground"
-            dir="ltr"
-          >
-            {temperature != null && (
-              <span
-                className="inline-flex items-center gap-0.5"
-                title={msg("auto.features.submit.components.modelconfigmodal.5")}
-              >
-                <Thermometer className="size-2.5" />
-                {temperature}
-              </span>
-            )}
-            {maxTokens != null && (
-              <span
-                className="inline-flex items-center gap-0.5"
-                title={msg("auto.features.submit.components.modelconfigmodal.7")}
-              >
-                <TextT className="size-2.5" aria-hidden="true" />
-                {maxTokens}
-              </span>
-            )}
-            {effort && <ReasoningPill value={effort} />}
-            <TokenSourcePill source={config.token_source} />
-            {supportsVision && (
-              <MicroPill tone="primary" title={msg("shared.model_chip.vision_badge")}>
-                <Eye className="size-2.5" />
-              </MicroPill>
-            )}
-          </div>
-        )}
     </div>
   );
 
@@ -225,26 +188,28 @@ export function ModelChip({
         onClick={onClick}
         aria-haspopup="dialog"
         aria-label={roleLabel ? `${roleLabel}: ${ariaName}` : ariaName}
-        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-start outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        // The card looks clickable edge to edge, so the button's hit area
+        // covers its padding too; the side actions sit above it.
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-start outline-none after:absolute after:inset-0 after:rounded-lg focus-visible:ring-2 focus-visible:ring-ring"
       >
         {!isEmpty && <ProviderLogo slug={modelProviderSlug(config.name)} size={24} />}
         {fallback && <ProviderLogo slug={modelProviderSlug(fallback.value)} size={24} />}
         {content}
       </button>
 
-      <div className="flex shrink-0 items-center gap-1">
-        {tooltip && (
+      <div className="relative z-10 flex shrink-0 items-center gap-1">
+        {infoBody && (
           <TooltipButton
-            tooltip={tooltip}
+            tooltip={infoBody}
             side="top"
             dir={getActiveDir()}
-            contentClassName="max-w-64 text-center leading-relaxed"
+            contentClassName="max-w-60 px-2.5 py-2 text-start leading-snug text-pretty"
           >
             <Button
               type="button"
               variant="ghost"
               size="icon-xs"
-              aria-label={tooltip}
+              aria-label={tooltip ?? msg("shared.model_chip.details")}
               onClick={(e) => e.stopPropagation()}
               className="text-muted-foreground hover:text-foreground"
             >

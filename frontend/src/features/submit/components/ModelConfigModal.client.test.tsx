@@ -135,7 +135,10 @@ async function settle() {
   }
 }
 
-async function mount(config: ModelConfig) {
+async function mount(
+  config: ModelConfig,
+  props: Partial<React.ComponentProps<typeof ModelConfigModal>> = {},
+) {
   const saved: ModelConfig[] = [];
   const container = document.createElement("div");
   document.body.append(container);
@@ -152,6 +155,7 @@ async function mount(config: ModelConfig) {
                 config={config}
                 onSave={(c) => saved.push(c)}
                 catalogModels={CATALOG}
+                {...props}
               />
             </TooltipProvider>
           </ByokKeysProvider>
@@ -180,7 +184,7 @@ async function click(el: Element) {
   await settle();
 }
 
-void test("a Claude Code model gets the slider over the CLI's levels, its reset, and no model line or switch", async () => {
+void test("a Claude Code model gets the slider over the CLI's levels, with no reset, model line or switch", async () => {
   setLocal(true);
   const m = await mount({
     name: "anthropic/claude-opus-4.5",
@@ -197,7 +201,7 @@ void test("a Claude Code model gets the slider over the CLI's levels, its reset,
     const box = slider.closest(".effort-charge")!;
     assert.deepEqual(
       [...box.querySelectorAll("button")].map((b) => b.getAttribute("aria-label")),
-      ["Reset to the model default"],
+      [],
     );
     assert.equal(dialog().querySelector('[role="switch"]'), null);
   } finally {
@@ -268,7 +272,7 @@ void test("a Codex model gets its CLI levels and keeps a level it takes", async 
   }
 });
 
-void test("an OpenRouter model keeps the catalog's levels as segment buttons", async () => {
+void test("an OpenRouter model gets the composer slider over the catalog's levels", async () => {
   setLocal(false);
   const m = await mount({
     name: "openrouter/anthropic/claude-opus-4.5",
@@ -276,17 +280,127 @@ void test("an OpenRouter model keeps the catalog's levels as segment buttons", a
     extra: { reasoning_effort: "max" },
   } as ModelConfig);
   try {
-    assert.equal(dialog().querySelector('[role="slider"]'), null);
-    const radios = [...dialog().querySelectorAll('[role="radiogroup"] [role="radio"]')].filter(
-      (r) => ["Low", "Medium", "High", "Extra high", "Max"].includes(r.textContent ?? ""),
+    const slider = dialog().querySelector('[role="slider"]');
+    assert.ok(slider, "the dialog uses the composer's slider");
+    assert.match(slider.getAttribute("aria-valuetext") ?? "", /Max/);
+    const segments = [...dialog().querySelectorAll('[role="radio"]')].filter((r) =>
+      ["Low", "Medium", "High", "Extra high", "Max"].includes(r.textContent ?? ""),
     );
-    assert.deepEqual(
-      radios.map((r) => r.textContent),
-      ["Low", "Medium", "High", "Extra high", "Max"],
-    );
+    assert.equal(segments.length, 0, "no effort segments remain");
     assert.ok(dialog().querySelector('[role="switch"]'), "the thinking switch stays");
     await click(buttonByText("Save")!);
     assert.equal(m.saved[0]!.extra?.reasoning_effort, "max");
+  } finally {
+    await m.unmount();
+  }
+});
+
+// Hosted models for the remote picker, which lists `catalogModels` as given.
+const HOSTED = [
+  {
+    value: "openai/model-a",
+    label: "Model A",
+    provider: "openai",
+    supports_thinking: true,
+    supports_vision: false,
+    reasoning_efforts: ["low", "medium", "high"],
+    available: true,
+    takes_temperature: true,
+    default_temperature: 0.3,
+    max_output_tokens: 4000,
+  },
+  {
+    value: "openai/model-b",
+    label: "Model B",
+    provider: "openai",
+    supports_thinking: true,
+    supports_vision: false,
+    reasoning_efforts: ["low", "medium", "high"],
+    available: true,
+    takes_temperature: true,
+    default_temperature: 0.7,
+    max_output_tokens: 100000,
+  },
+  {
+    value: "openai/no-temperature",
+    label: "No Temperature",
+    provider: "openai",
+    supports_thinking: false,
+    supports_vision: false,
+    available: true,
+    takes_temperature: false,
+    max_output_tokens: 8000,
+  },
+] as CatalogModel[];
+
+const field = (suffix: string) =>
+  dialog().querySelector<HTMLInputElement>(`input[id$="-${suffix}"]`);
+
+void test("picking another model starts its own temperature and max tokens and clears the thinking level", async () => {
+  setLocal(false);
+  const m = await mount(
+    {
+      name: "openai/model-a",
+      token_source: "managed",
+      temperature: 0.2,
+      max_tokens: 1000,
+      extra: { reasoning_effort: "high" },
+    } as ModelConfig,
+    { remote: true, catalogModels: HOSTED },
+  );
+  try {
+    await click(dialog().querySelector('button[aria-haspopup="listbox"]')!);
+    const row = [...document.querySelectorAll('[role="option"]')].find((o) =>
+      o.textContent?.includes("Model B"),
+    );
+    assert.ok(row, "the picker lists Model B");
+    await click(row);
+    assert.equal(Number(field("temperature")?.value), 0.7);
+    assert.equal(Number(field("max-tokens")?.value), 32768);
+    await click(buttonByText("Save")!);
+    assert.equal(m.saved.length, 1);
+    assert.equal(m.saved[0]!.name, "openai/model-b");
+    assert.equal(m.saved[0]!.temperature, 0.7);
+    assert.equal(m.saved[0]!.max_tokens, 32768);
+    assert.equal(m.saved[0]!.extra?.reasoning_effort, undefined);
+  } finally {
+    await m.unmount();
+  }
+});
+
+void test("a model that takes no temperature hides the field and Save drops a stored temperature", async () => {
+  setLocal(false);
+  const m = await mount(
+    {
+      name: "openai/no-temperature",
+      token_source: "managed",
+      temperature: 0.5,
+      max_tokens: 2000,
+    } as ModelConfig,
+    { remote: true, catalogModels: HOSTED },
+  );
+  try {
+    assert.ok(field("max-tokens"), "the max tokens field shows");
+    assert.equal(field("max-tokens")!.closest("[inert]"), null, "a chosen model is not inert");
+    assert.equal(field("temperature"), null);
+    await click(buttonByText("Save")!);
+    assert.equal(m.saved.length, 1);
+    assert.equal(m.saved[0]!.temperature, undefined);
+    assert.equal(m.saved[0]!.max_tokens, 2000);
+  } finally {
+    await m.unmount();
+  }
+});
+
+void test("with no model chosen the Parameters section is inert", async () => {
+  setLocal(false);
+  const m = await mount({ name: "", token_source: "managed" } as ModelConfig, {
+    remote: true,
+    catalogModels: HOSTED,
+  });
+  try {
+    const wrapper = field("max-tokens")?.closest("[inert]");
+    assert.ok(wrapper, "the parameters sit inside an inert wrapper");
   } finally {
     await m.unmount();
   }
