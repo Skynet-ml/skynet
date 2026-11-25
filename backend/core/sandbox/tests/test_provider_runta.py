@@ -97,10 +97,13 @@ class FakeCloud:
     ready_started: asyncio.Event = field(default_factory=asyncio.Event)
     list_error: BaseException | None = None
     delete_fails: int = 0
+    # Runtime ids whose next delete fails, once for each entry.
+    delete_fails_for: list[str] = field(default_factory=list)
     delete_calls: int = 0
     confirm_gate: Any = None
     confirm_error: BaseException | None = None
     pending_error: BaseException | None = None
+    stray_error: BaseException | None = None
     confirm_gate_entered: threading.Event = field(default_factory=threading.Event)
     exec_hangs: bool = False
     exec_exit: int | None = None
@@ -280,6 +283,9 @@ class FakeRuntime:
             FakeApiError: The fake cloud fails this delete.
         """
         CLOUD.delete_calls += 1
+        if self.box.id in CLOUD.delete_fails_for:
+            CLOUD.delete_fails_for.remove(self.box.id)
+            raise FakeApiError(503)
         if CLOUD.delete_fails:
             CLOUD.delete_fails -= 1
             raise FakeApiError(503)
@@ -472,6 +478,7 @@ class FakeUsage:
         self.settle_error: BaseException | None = None
         self.confirm_error: BaseException | None = CLOUD.confirm_error
         self.pending_error: BaseException | None = CLOUD.pending_error
+        self.stray_error: BaseException | None = CLOUD.stray_error
         # Threading events, because the provider calls the ledger from a thread.
         self.confirm_gate: threading.Event | None = CLOUD.confirm_gate
         self.pending_gate: threading.Event | None = None
@@ -509,6 +516,16 @@ class FakeUsage:
             runtime_id: The id of the duplicate runtime.
         """
         self.calls.append(("stray", runtime_id))
+        if self.stray_error is not None:
+            raise self.stray_error
+
+    def stray_gone(self, runtime_id: str) -> None:
+        """Record a duplicate runtime that a later delete removed.
+
+        Args:
+            runtime_id: The id of the duplicate runtime.
+        """
+        self.calls.append(("stray_gone", runtime_id))
 
     def stopped(self) -> None:
         """Record the end of the clock, with the box state at that time."""
@@ -962,7 +979,7 @@ async def test_a_failed_create_that_made_a_box_is_deleted_and_settled(fake_sdk: 
 
 
 async def test_a_duplicate_that_does_not_delete_is_kept_in_the_hold(fake_sdk: FakeCloud) -> None:
-    """Record a duplicate runtime whose delete fails, so the hold keeps its id.
+    """Record a duplicate runtime whose two deletes fail, so the hold keeps its id.
 
     Args:
         fake_sdk: The fake Runta cloud.
@@ -970,15 +987,58 @@ async def test_a_duplicate_that_does_not_delete_is_kept_in_the_hold(fake_sdk: Fa
     fake_sdk.create_error = FakeApiError(422)
     fake_sdk.create_makes_box = True
     fake_sdk.create_duplicates = 1
-    fake_sdk.delete_fails = 1
+    fake_sdk.delete_fails_for = ["rt-2", "rt-2", "rt-2"]
     env, made = _protected()
     with pytest.raises(SandboxInfraError):
         await env.start()
     first, duplicate = fake_sdk.boxes
     assert first.deleted
     assert not duplicate.deleted
-    assert made[0].names() == ["reserve", "sent", "stray", "confirm", "stopped", "settle"]
+    assert made[0].names() == ["reserve", "sent", "stray", "confirm", "stopped", "pending"]
     assert ("stray", duplicate.id) in made[0].calls
+    with pytest.raises(UsagePendingError, match="duplicate"):
+        await env.stop()
+    assert made[0].names()[-1] == "pending"
+    assert not duplicate.deleted
+
+
+async def test_a_failed_stray_record_still_deletes_the_runtime(fake_sdk: FakeCloud) -> None:
+    """Delete the real runtime when the ledger cannot record a duplicate that did not delete.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails_for = ["rt-2", "rt-2"]
+    fake_sdk.stray_error = ConnectionError("ledger down")
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    first, duplicate = fake_sdk.boxes
+    assert first.deleted
+    assert not duplicate.deleted
+    assert made[0].names() == ["reserve", "sent", "stray", "confirm", "stopped", "pending"]
+
+
+async def test_a_later_stop_deletes_the_stray_and_settles(fake_sdk: FakeCloud) -> None:
+    """Delete a duplicate on the next stop, and settle the hold once no duplicate is left.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails_for = ["rt-2", "rt-2"]
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    await env.stop()
+    assert all(box.deleted for box in fake_sdk.boxes)
+    assert made[0].names() == ["reserve", "sent", "stray", "confirm", "stopped", "pending", "stray_gone", "settle"]
+    assert fake_sdk.closed == 1
 
 
 async def test_a_failed_lookup_keeps_the_hold(fake_sdk: FakeCloud) -> None:

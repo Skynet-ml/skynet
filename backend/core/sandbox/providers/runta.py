@@ -19,7 +19,10 @@ output limit and the delete on stop come from
   ``tcp_allowlist``, because Runta denies raw TCP only for an empty list.
   Harbor sends no TCP list.
 - A duplicate runtime with the box's name that does not delete keeps the
-  hold pending, with its id in the evidence.
+  hold pending, with its id in the evidence, and a later stop tries its
+  delete again. A duplicate that never deletes stays pending, and its cost
+  above the hold is not covered; this is rare, because the SDK sends one
+  idempotency key for all create retries.
 - The requests and the limits of vCPU and memory are equal, so the priced
   size is the billed size. Harbor sends no limits.
 - A spec image is refused: the direct path runs Runta's default runtime
@@ -208,7 +211,7 @@ async def _release_late(reserving: asyncio.Future[Any]) -> None:
     await asyncio.to_thread(usage.fail)
 
 
-async def _list_named(client: Any, name: str, usage: Any) -> list[Any]:
+async def _list_named(client: Any, name: str, usage: Any) -> tuple[list[Any], list[Any]]:
     """List the runtimes with this exact name, and delete every match but the first.
 
     The list is complete or it raises: runta-sdk 0.2.7 ``AsyncRuntimes.list``
@@ -220,20 +223,29 @@ async def _list_named(client: Any, name: str, usage: Any) -> list[Any]:
         usage: The box's reservation, or ``None`` for an unprotected box.
 
     Returns:
-        A list with the first match, or an empty list.
+        A list with the first match, or an empty list, and the duplicates
+        that did not delete.
 
     Raises:
-        Exception: The list call failed or timed out, or the ledger did not
-            record a duplicate that did not delete.
+        Exception: The list call failed or timed out.
     """
     listed = await asyncio.wait_for(client.runtimes.list(), STOP_TIMEOUT)
     # Only a runtime with this exact name can belong to this create; never
     # touch another runtime that the list returns.
     found = [runtime for runtime in listed if runtime.name == name]
+    strays = []
     for extra in found[1:]:
-        if not await _bounded(extra.delete(), "delete a duplicate runtime") and usage is not None:
-            await asyncio.to_thread(usage.keep_stray, extra.id)
-    return found[:1]
+        if await _bounded(extra.delete(), "delete a duplicate runtime"):
+            continue
+        strays.append(extra)
+        if usage is not None:
+            try:
+                await asyncio.to_thread(usage.keep_stray, extra.id)
+            except Exception as error:
+                # keep_stray records the id before its ledger write, so the
+                # settle still refuses; the real runtime must still be deleted.
+                logger.warning("Runta could not record the duplicate %s: %s", extra.id, type(error).__name__)
+    return found[:1], strays
 
 
 async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, name: str) -> None:
@@ -258,7 +270,7 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
             runtime = await create
         except Exception as create_error:
             try:
-                found = await _list_named(client, name, usage)
+                found, _ = await _list_named(client, name, usage)
             except Exception as error:
                 raise UsagePendingError(
                     "Runta could not list runtimes after a late failed create, so the hold stays."
@@ -417,6 +429,8 @@ class RuntaEnvironment(SandboxEnvironment):
         self._starting: asyncio.Future[None] | None = None
         self._started = False
         self._deleted = False
+        # Duplicate runtimes with this box's name that did not delete yet.
+        self._strays: list[Any] = []
         # Set when a teardown starts and never reset after a start, so a
         # failed delete does not reopen the box for commands.
         self._closing = False
@@ -837,6 +851,10 @@ class RuntaEnvironment(SandboxEnvironment):
         """
         usage = self._usage
         runtime = self._runtime
+        if self._deleted:
+            # An earlier stop deleted the runtime but left a duplicate.
+            await self._finish(usage)
+            return
         if runtime is None and self._sent:
             runtime = await self._find_failed_create()
             if runtime is None:
@@ -872,11 +890,40 @@ class RuntaEnvironment(SandboxEnvironment):
             raise UsagePendingError("The Runta runtime did not delete, so its hold stays pending.")
         self._runtime = None
         self._deleted = True
+        if usage is not None:
+            usage.stopped()
+        await self._finish(usage)
+
+    async def _finish(self, usage: Any) -> None:
+        """Delete the duplicates that are left, then settle the hold of the deleted runtime.
+
+        Args:
+            usage: The box's reservation, or ``None``.
+
+        Raises:
+            UsagePendingError: A duplicate did not delete, so the hold stays pending.
+            BudgetError: The ledger refused the settlement.
+        """
+        for stray in list(self._strays):
+            if await _bounded(stray.delete(), "delete a duplicate runtime"):
+                self._strays.remove(stray)
+                if usage is not None:
+                    usage.stray_gone(stray.id)
+        if self._strays:
+            # Keep the client, the usage and the job entry, so a later stop()
+            # or the job sweep tries the delete again.
+            if self._job_id is not None:
+                _JOB_BOXES.setdefault(self._job_id, set()).add(self)
+            try:
+                if usage is not None:
+                    await asyncio.to_thread(usage.pending)
+            finally:
+                self._stop_task = None
+            raise UsagePendingError("A duplicate Runta runtime did not delete, so its hold stays pending.")
         self._forget()
         await self._close()
         self._usage = None
         if usage is not None:
-            usage.stopped()
             await asyncio.to_thread(usage.settle)
 
     async def _find_failed_create(self) -> Any:
@@ -889,7 +936,7 @@ class RuntaEnvironment(SandboxEnvironment):
             UsagePendingError: The lookup failed, so the hold stays pending.
         """
         try:
-            found = await _list_named(self._client, self._name, self._usage)
+            found, strays = await _list_named(self._client, self._name, self._usage)
         except Exception as error:
             try:
                 if self._usage is not None:
@@ -901,6 +948,7 @@ class RuntaEnvironment(SandboxEnvironment):
             raise UsagePendingError(
                 "Runta could not list runtimes after a failed create, so the hold stays."
             ) from error
+        self._strays.extend(strays)
         return found[0] if found else None
 
     async def _close(self) -> None:

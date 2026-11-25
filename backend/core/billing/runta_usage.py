@@ -269,8 +269,18 @@ class RuntaUsageReservation:
         Args:
             runtime_id: The Runta id of the duplicate runtime.
         """
-        self.strays.append(runtime_id)
+        if runtime_id not in self.strays:
+            self.strays.append(runtime_id)
         self.pending()
+
+    def stray_gone(self, runtime_id: str) -> None:
+        """Forget a duplicate runtime once a later delete of it succeeded.
+
+        Args:
+            runtime_id: The Runta id of the duplicate runtime.
+        """
+        if runtime_id in self.strays:
+            self.strays.remove(runtime_id)
 
     def stopped(self) -> None:
         """Stop the clock once Runta confirmed the delete."""

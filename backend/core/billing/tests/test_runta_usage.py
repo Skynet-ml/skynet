@@ -344,6 +344,21 @@ def test_a_stray_duplicate_keeps_the_hold_pending_with_its_id(database: Engine) 
     assert all(row.evidence["stray_runtime_ids"] == ["rt-2"] for row in rows)
 
 
+def test_a_stray_is_kept_once_and_a_gone_stray_lets_the_hold_settle(database: Engine) -> None:
+    """Keep one entry for a repeated duplicate id, and settle once its later delete succeeded."""
+    runtime = _runtime(database)
+    reservation = RuntaUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent("skynet-box")
+    reservation.keep_stray("rt-2")
+    reservation.keep_stray("rt-2")
+    assert reservation.strays == ["rt-2"]
+    reservation.confirm_created(SimpleNamespace(id="rt-1"))
+    reservation.stopped()
+    reservation.stray_gone("rt-2")
+    reservation.settle()
+    assert _operation(database).state == "settled"
+
+
 def test_failure_before_the_create_releases_the_hold(database: Engine) -> None:
     """Release the hold when no create reached Runta."""
     runtime = _runtime(database)
