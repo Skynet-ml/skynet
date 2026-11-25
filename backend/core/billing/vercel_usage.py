@@ -7,7 +7,6 @@ import re
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -73,7 +72,6 @@ PACKAGE_REGISTRY_HOSTS = tuple(
 # packages while it stays offline otherwise (E57). files.pythonhosted.org
 # serves the files that pypi.org's index points to.
 PROPOSER_REGISTRY_HOSTS = ("files.pythonhosted.org", "pypi.org", "registry.npmjs.org")
-_PYPI_HOSTS = frozenset({"files.pythonhosted.org", "pypi.org"})
 _MS_PER_HOUR = Decimal(3_600_000)
 # Assumed snapshot storage price and size bound (SKY-430): the public pricing
 # page names no snapshot rate yet, so the hold uses this rate and cap, and a
@@ -119,12 +117,11 @@ def vercel_sandbox_cost_range(request: Mapping[str, Any]) -> tuple[Decimal, Deci
     return minimum, maximum
 
 
-def proposer_hosts(network: tuple[str, ...] | None, index_url: str | None = None) -> tuple[str, ...]:
+def proposer_hosts(network: tuple[str, ...] | None) -> tuple[str, ...]:
     """Return the hosts a proposer box may reach besides the relay.
 
     Args:
         network: The ``[proposer] network`` list, or None when the file sets none.
-        index_url: The account's saved package index; PyPI when None.
 
     Returns:
         Sorted hosts: the registries when ``network`` is None, nothing when it
@@ -132,13 +129,7 @@ def proposer_hosts(network: tuple[str, ...] | None, index_url: str | None = None
     """
     if network is not None and not network:
         return ()
-    registries = set(PROPOSER_REGISTRY_HOSTS)
-    index_host = urlsplit(index_url).hostname if index_url else None
-    if index_host and index_host not in _PYPI_HOSTS:
-        # A custom index names no file host, so the box reaches only the index;
-        # an index that serves its files from another host fails the install.
-        registries = (registries - _PYPI_HOSTS) | {index_host}
-    return tuple(sorted(registries | set(network or ())))
+    return tuple(sorted(set(PROPOSER_REGISTRY_HOSTS) | set(network or ())))
 
 
 def _integer(value: Any, name: str) -> int:

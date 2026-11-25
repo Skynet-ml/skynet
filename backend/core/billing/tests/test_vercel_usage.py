@@ -290,7 +290,6 @@ def test_unbounded_allowlist_is_not_quoted(change: dict[str, Any]) -> None:
 def test_a_proposer_with_no_network_key_reaches_only_the_registries() -> None:
     """Give a proposer the package registries by default, and nothing else (E57)."""
     assert proposer_hosts(None) == PROPOSER_REGISTRY_HOSTS
-    assert proposer_hosts(None, "https://pypi.org/simple") == PROPOSER_REGISTRY_HOSTS
     assert "raw.githubusercontent.com" not in proposer_hosts(None)
 
 
@@ -298,8 +297,3 @@ def test_a_proposer_network_list_adds_hosts_and_an_empty_list_stays_offline() ->
     """Add listed hosts to the registries, and treat ``network = []`` as relay only."""
     assert proposer_hosts(()) == ()
     assert proposer_hosts(("docs.python.org",)) == tuple(sorted((*PROPOSER_REGISTRY_HOSTS, "docs.python.org")))
-
-
-def test_a_custom_index_replaces_the_pypi_hosts() -> None:
-    """Reach a saved custom index instead of pypi.org and its file host."""
-    assert proposer_hosts(None, "https://pkgs.example.com/simple") == ("pkgs.example.com", "registry.npmjs.org")

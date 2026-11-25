@@ -111,7 +111,6 @@ def _stage(
     fetch.mkdir()
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
-    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
     monkeypatch.setattr(
         repo_staging,
         "fetch_snapshot",

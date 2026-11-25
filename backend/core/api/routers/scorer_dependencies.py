@@ -1,4 +1,4 @@
-"""Resolve scorer packages using the caller's registry and protected setup budget."""
+"""Resolve scorer packages from PyPI using the caller's protected setup budget."""
 
 from __future__ import annotations
 
@@ -6,16 +6,16 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 from ...billing.operation_pricing import json_fingerprint
 from ...config import settings
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..protected_preview import run_protected_preview
 from ..rate_limit import enforce_submission_rate
-from .package_registry import package_registry_for
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+# SKY-966 removed the per-account package index, so every scorer lock resolves from PyPI.
+PYPI_INDEX = "https://pypi.org/simple"
 
 
 class ScorerDependenciesRequest(BaseModel):
@@ -43,21 +43,19 @@ def create_scorer_dependencies_router(*, job_store: Any) -> APIRouter:
 
         Args:
             body: Scorer source, optional overrides, and authorized shared budget.
-            user: Authenticated owner of the registry and spending limit.
+            user: Authenticated owner of the spending limit.
 
         Returns:
             Signed exact package lock and authoritative setup spending state.
         """
         enforce_submission_rate(user.username)
-        with Session(job_store.engine) as session:
-            registry = package_registry_for(session, user.username).index_url
         payload = {
             "scorer": {"kind": "python", "metric_code": body.code},
             "requirements": body.requirements,
             "seed_candidate": body.seed_candidate,
             "runtime_image": settings.vercel_sandbox_image,
-            "registry_url": registry,
-            "dependency_registry": registry,
+            "registry_url": PYPI_INDEX,
+            "dependency_registry": PYPI_INDEX,
             "execution_budget_id": body.execution_budget_id,
             "execution_budget_revision": body.execution_budget_revision,
         }

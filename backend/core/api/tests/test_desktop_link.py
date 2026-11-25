@@ -601,7 +601,6 @@ _POLICY_CASES: list[tuple[str, bool]] = [
     ("/telemetry/summary", False),
     ("/account/export", False),
     ("/account/delete", False),
-    ("/account/package-registry", True),
     ("/agent/protected-settings", False),
     ("/billing/checkout", False),
     ("/billing/portal", False),
@@ -706,6 +705,21 @@ def test_sync_route_policy(path: str, allowed: bool) -> None:
 def test_policy_cases_are_live_routes(live_route_paths: set[str]) -> None:
     """Every policy case names a route the app really serves."""
     assert {path for path, _ in _POLICY_CASES} - live_route_paths == set()
+
+
+def test_removed_account_index_routes_are_not_served() -> None:
+    """The real app answers 404 on the account package index routes that SKY-966 removed."""
+    with (
+        patch("core.api.app.get_job_store", return_value=MagicMock()),
+        patch("core.api.app.get_worker", return_value=MagicMock()),
+    ):
+        application = create_app(registry=ServiceRegistry())
+    client = TestClient(application)
+    assert client.get("/account/package-registry").status_code == 404
+    assert client.put("/account/package-registry", json={"index_url": "https://pypi.org/simple"}).status_code == 404
+    assert (
+        client.post("/account/package-registry/check", json={"index_url": "https://pypi.org/simple"}).status_code == 404
+    )
 
 
 def test_no_open_route_is_sensitive(live_route_paths: set[str]) -> None:

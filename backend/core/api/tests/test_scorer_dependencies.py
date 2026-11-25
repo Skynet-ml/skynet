@@ -1,4 +1,4 @@
-"""Verify dependency resolution uses the authenticated account registry and budget."""
+"""Verify dependency resolution uses PyPI and the authenticated account budget."""
 
 from __future__ import annotations
 
@@ -8,29 +8,20 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
 from core.api import protected_preview
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.routers import scorer_dependencies
 from core.api.tests.test_protected_previews import previews as _previews_fixture
 from core.api.tests.test_protected_submissions import harness as _harness_fixture
-from core.storage.models import Base, PackageRegistryPreferenceModel
 
 
-def test_registry_and_budget_are_account_owned(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Forward only the caller's saved registry with their exact authorized budget.
+def test_lock_resolves_from_pypi_with_the_callers_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forward PyPI as the index for every account, with the caller's exact authorized budget.
 
     Args:
         monkeypatch: Fixture replacing paid execution while observing the route contract.
     """
-    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    with Session(engine) as session:
-        session.add(PackageRegistryPreferenceModel(username="alice", index_url="https://registry.example/simple"))
-        session.commit()
     seen: list[dict[str, Any]] = []
 
     def execute(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -49,13 +40,15 @@ def test_registry_and_budget_are_account_owned(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(scorer_dependencies, "run_protected_preview", execute)
     monkeypatch.setattr(scorer_dependencies, "enforce_submission_rate", lambda username: None)
     app = FastAPI()
-    app.include_router(scorer_dependencies.create_scorer_dependencies_router(job_store=SimpleNamespace(engine=engine)))
+    # The route must not read account storage: an engine-less store proves no index lookup remains.
+    app.include_router(scorer_dependencies.create_scorer_dependencies_router(job_store=SimpleNamespace()))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser("alice", "user", ())
     with TestClient(app) as client:
         body = {"code": "import example", "execution_budget_id": "owned-budget", "execution_budget_revision": 2}
         assert client.post("/wizard/scorer-dependencies", json=body).status_code == 200
         assert client.post("/wizard/scorer-dependencies", json=body).status_code == 200
-        assert seen[0]["registry_url"] == "https://registry.example/simple"
+        assert seen[0]["registry_url"] == "https://pypi.org/simple"
+        assert seen[0]["dependency_registry"] == "https://pypi.org/simple"
         assert seen[0]["owner"] == "alice"
         assert seen[0]["execution_budget_id"] == "owned-budget"
         assert seen[0]["seed_candidate"] is None
@@ -66,10 +59,10 @@ def test_registry_and_budget_are_account_owned(monkeypatch: pytest.MonkeyPatch) 
         assert seen[-1]["key"] != seen[0]["key"]
         app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser("bob", "user", ())
         assert client.post("/wizard/scorer-dependencies", json=body).status_code == 200
-        assert seen[-1]["registry_url"] == "https://pypi.org/simple"
+        assert seen[-1]["owner"] == "bob"
+        assert seen[-1]["registry_url"] == seen[-1]["dependency_registry"] == "https://pypi.org/simple"
         app.dependency_overrides.clear()
         assert client.post("/wizard/scorer-dependencies", json=body).status_code == 401
-    engine.dispose()
 
 
 harness = _harness_fixture

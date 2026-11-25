@@ -615,15 +615,6 @@ class AgentEnginePreferenceModel(Base):
     )
 
 
-class PackageRegistryPreferenceModel(Base):
-    """Store a caller's package index independently of local password accounts."""
-
-    __tablename__ = "package_registry_preferences"
-
-    username: Mapped[str] = mapped_column(String(255), primary_key=True)
-    index_url: Mapped[str] = mapped_column(String(2048), nullable=False)
-
-
 class WebAuthnCredentialModel(Base):
     """A registered passkey (WebAuthn credential) owned by one identity.
 
