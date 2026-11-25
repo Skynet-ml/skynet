@@ -241,6 +241,7 @@ class HfSandboxUsageReservation:
         self.job_ms: int | None = None
         self.job_created_at: str | None = None
         self.job_started_at: str | None = None
+        self.job_durations: dict[str, Any] | None = None
         self._clock = clock
         self._sent_wall: float | None = None
         self._settled = False
@@ -274,21 +275,32 @@ class HfSandboxUsageReservation:
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, job_id)
         self.pending()
 
-    def stopped(self, created_at: Any = None, finished_at: Any = None, *, started_at: Any = None) -> None:
+    def stopped(
+        self, created_at: Any = None, finished_at: Any = None, *, started_at: Any = None, durations: Any = None
+    ) -> None:
         """Stop the wall clock once HF confirmed a terminal stage, and keep the job's own times.
 
         Args:
             created_at: The job's ``created_at``, or ``None``.
             finished_at: The job's ``finished_at``, or ``None``.
             started_at: The job's ``started_at``, or ``None``; kept only as evidence.
+            durations: The job's ``JobDurations``, or ``None``; kept only as evidence.
         """
         self.stopped_at = self._clock()
-        # The charge runs from created_at, not started_at, as a deliberate upper
-        # bound: HF does not document whether its Starting time is billed, and
-        # Skynet must not undercharge. started_at stays in the evidence for audits.
+        # The charge runs from created_at, a deliberate upper bound. HF bills
+        # the Starting and Running phases, but JobStage has no Starting stage,
+        # and huggingface_hub 1.33.0 documents scheduling_secs only as the time
+        # "before starting to run". So no source shows that scheduling_secs
+        # leaves out Starting, and subtracting it could undercharge. The
+        # durations and started_at stay in the evidence for audits.
         self.job_ms = _job_ms(created_at, finished_at)
         self.job_created_at = created_at.isoformat() if isinstance(created_at, datetime) else None
         self.job_started_at = started_at.isoformat() if isinstance(started_at, datetime) else None
+        self.job_durations = (
+            {name: getattr(durations, name, None) for name in ("scheduling_secs", "running_secs", "total_secs")}
+            if durations is not None
+            else None
+        )
 
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
         """Refuse an extension, because HF cannot lengthen a running job's timeout.
@@ -317,7 +329,7 @@ class HfSandboxUsageReservation:
 
         Returns:
             The job id, the label, the wall-clock start, the job's creation and
-            start times, and the measured, job and funded times.
+            start times and durations, and the measured, job and funded times.
         """
         return {
             "provider": "hf_sandbox",
@@ -327,6 +339,7 @@ class HfSandboxUsageReservation:
             "measured_ms": self._measured_ms(),
             "job_created_at": self.job_created_at,
             "job_started_at": self.job_started_at,
+            "job_durations": self.job_durations,
             "job_ms": self.job_ms,
             "funded_ms": self.lifetime_ms,
         }

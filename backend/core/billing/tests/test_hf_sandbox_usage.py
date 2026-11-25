@@ -228,17 +228,20 @@ def test_reserve_then_settle_charges_the_job_minutes(database: Engine) -> None:
 
 
 def test_settle_charges_from_created_at_and_keeps_both_times_in_the_evidence(database: Engine) -> None:
-    """Charge from created_at, not started_at, and keep both times for audits."""
+    """Charge from created_at, not started_at or the running time, and keep the times and durations for audits."""
     reservation, clock = _reservation(database)
     reservation.sent("skynet-label")
     reservation.confirm_created(SimpleNamespace(id="job-1"))
     clock.now += 900
     started = START + timedelta(minutes=2)
-    reservation.stopped(START, START + timedelta(minutes=4, seconds=1), started_at=started)
+    durations = SimpleNamespace(scheduling_secs=120, running_secs=121, total_secs=241)
+    reservation.stopped(START, START + timedelta(minutes=4, seconds=1), started_at=started, durations=durations)
     reservation.settle()
     evidence = _evidence(database, "hf-sandbox-stop:job-1")
     assert evidence["job_created_at"] == START.isoformat()
     assert evidence["job_started_at"] == started.isoformat()
+    assert evidence["job_durations"] == {"scheduling_secs": 120, "running_secs": 121, "total_secs": 241}
+    # The 2 scheduling minutes stay in the charge, because HF may bill Starting inside them.
     assert evidence["billed_minutes"] == 5
 
 

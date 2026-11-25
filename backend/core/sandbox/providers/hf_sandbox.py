@@ -192,6 +192,7 @@ def _create_outcome(error: BaseException) -> str:
     spec, then sends the one ``run_job`` request, then waits for the box. The
     frames of the error show which step raised it; the names are those of
     huggingface_hub 1.33.0. An error in no known step counts as unknown.
+    The outcome alone never frees a hold: the label lookup must also find no job.
 
     Args:
         error: The error of ``Sandbox.create``.
@@ -396,7 +397,7 @@ class HfSandboxEnvironment(SandboxEnvironment):
         usage = self._usage
         if usage is not None:
             usage.sent(self._label)
-        self._sent_at = asyncio.get_running_loop().time()
+        self._sent_at = _monotonic()
         create = asyncio.ensure_future(asyncio.to_thread(self._create_sync))
         try:
             sandbox = await asyncio.shield(create)
@@ -416,7 +417,7 @@ class HfSandboxEnvironment(SandboxEnvironment):
                 raise
             raise SandboxInfraError(f"HF Sandbox could not create the sandbox: {type(error).__name__}.") from error
         await self._adopt(sandbox)
-        remaining = self.spec.lifetime_seconds - (asyncio.get_running_loop().time() - self._sent_at)
+        remaining = self.spec.lifetime_seconds - (_monotonic() - self._sent_at)
         self._watchdog = asyncio.ensure_future(self._expire(max(0.0, remaining)))
         _keep_task(self._watchdog, "end a sandbox at its lifetime cap")
 
@@ -525,6 +526,7 @@ class HfSandboxEnvironment(SandboxEnvironment):
             logger.warning("HF Sandbox could not stop an unconfirmed box: %s", type(error).__name__)
         if cancelled is not None:
             raise cancelled
+        assert failure is not None
         raise failure
 
     async def _finish_late_create(self, create: asyncio.Future[Any]) -> None:
@@ -553,13 +555,9 @@ class HfSandboxEnvironment(SandboxEnvironment):
             error: The create error.
         """
         usage = self._usage
+        # The frame names are private to the SDK and can change, so the label
+        # lookup always runs; the outcome only allows a release when it finds no job.
         outcome = _create_outcome(error)
-        if outcome == "unsent":
-            # The create failed before its job request, so no job can exist.
-            if usage is not None:
-                self._usage = None
-                await asyncio.to_thread(usage.fail, True)
-            return
         try:
             found = await asyncio.to_thread(_find_jobs, self._label, self._namespace)
         except Exception as lookup_error:
@@ -582,7 +580,7 @@ class HfSandboxEnvironment(SandboxEnvironment):
             return
         if usage is not None:
             self._usage = None
-            await asyncio.to_thread(usage.fail, outcome == "refused")
+            await asyncio.to_thread(usage.fail, outcome in {"unsent", "refused"})
 
     async def _expire(self, delay: float) -> None:
         """Cancel the job at the spec lifetime, because HF's own timeout is 24 hours.
@@ -763,6 +761,11 @@ class HfSandboxEnvironment(SandboxEnvironment):
             await asyncio.wait({starting})
         late = self._late
         if late is not None and not late.done() and late is not asyncio.current_task():
+            logger.debug(
+                "HF Sandbox %s (job %s): its create still runs, so its background task ends the box.",
+                self._label,
+                self._job_id,
+            )
             return
         await self._end()
 
@@ -821,6 +824,7 @@ class HfSandboxEnvironment(SandboxEnvironment):
                 getattr(job, "created_at", None),
                 getattr(job, "finished_at", None),
                 started_at=getattr(job, "started_at", None),
+                durations=getattr(job, "durations", None),
             )
             # The usage is already detached, so no later stop can settle it again.
             await asyncio.to_thread(usage.settle)

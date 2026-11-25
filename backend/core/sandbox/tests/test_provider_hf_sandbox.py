@@ -8,6 +8,7 @@ provider module for fakes, so the suite needs no network, no token and no
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import shlex
 import threading
@@ -79,6 +80,9 @@ class Job:
     stage: str = "RUNNING"
     created_at: datetime = CREATED
     started_at: datetime = STARTED
+    durations: Any = field(
+        default_factory=lambda: SimpleNamespace(scheduling_secs=10, running_secs=170, total_secs=180)
+    )
     finished_at: datetime | None = None
     files: dict[str, bytes] = field(default_factory=dict)
 
@@ -275,6 +279,8 @@ class FakeSandbox:
             HUB.create_gate.wait(5)
         if HUB.create_error is not None and HUB.create_error_at == "create":
             raise HUB.create_error
+        # An unnamed helper call, as ``HfApi(token=...)`` is in the SDK.
+        _step("HfApi")
 
         def _effective_token() -> None:
             """Read the token, as the SDK does before the job request."""
@@ -446,15 +452,18 @@ class FakeUsage:
         """
         self.calls.append(("fail", absent))
 
-    def stopped(self, created_at: Any = None, finished_at: Any = None, *, started_at: Any = None) -> None:
+    def stopped(
+        self, created_at: Any = None, finished_at: Any = None, *, started_at: Any = None, durations: Any = None
+    ) -> None:
         """Record the job's own times.
 
         Args:
             created_at: The job's creation time.
             finished_at: The job's end time.
             started_at: The job's start time.
+            durations: The job's timing breakdown.
         """
-        self.calls.append(("stopped", (created_at, finished_at, started_at)))
+        self.calls.append(("stopped", (created_at, finished_at, started_at, durations)))
 
     def settle(self) -> None:
         """Record a settle."""
@@ -684,7 +693,7 @@ async def test_reserve_then_settle_after_a_confirmed_cancel() -> None:
     assert usage.calls[0] == ("reserve", 0)
     assert usage.names() == ["reserve", "sent", "confirm", "stopped", "settle"]
     assert usage.request == {"flavor": "cpu-basic", "lifetime_ms": 300_000, "exposed_ports": 1, "image": "python:3.12"}
-    assert usage.calls[3][1] == (CREATED, CREATED + timedelta(minutes=3), STARTED)
+    assert usage.calls[3][1] == (CREATED, CREATED + timedelta(minutes=3), STARTED, HUB.job("job-1").durations)
     assert HUB.cancels == ["job-1"]
     assert hf_sandbox._JOB_BOXES == {}
 
@@ -776,22 +785,71 @@ async def test_refusal_after_the_job_request_settles_the_found_job() -> None:
 
 
 @pytest.mark.parametrize("step", ["_effective_token", "_bootstrap_job_spec"])
-async def test_failure_before_the_job_request_releases_without_a_lookup(step: str) -> None:
-    """Release the hold at once when the create failed before its job request, so no job can exist.
+async def test_failure_before_the_job_request_releases_after_the_lookup(step: str) -> None:
+    """Release the hold when the create failed before its job request and the label lookup finds no job.
 
     Args:
         step: The create step that fails.
     """
     HUB.create_error = RuntimeError("no token")
     HUB.create_error_at = step
-    # A lookup would fail and keep the hold pending, so a release proves that none ran.
-    HUB.list_error = RuntimeError("down")
     usages = UsageFactory()
     with pytest.raises(SandboxInfraError):
         await _protected(usages).start()
     assert usages.made[0].names() == ["reserve", "sent", "fail"]
     assert usages.made[0].calls[-1] == ("fail", True)
     assert HUB.jobs == []
+
+
+@pytest.mark.parametrize("step", ["_effective_token", "create"])
+async def test_failed_lookup_keeps_an_unsent_create_pending(step: str) -> None:
+    """Keep the hold pending when the lookup fails, also for a create that looks unsent.
+
+    Args:
+        step: The create step that fails.
+    """
+    HUB.create_error = ValueError("bad label")
+    HUB.create_error_at = step
+    HUB.list_error = RuntimeError("down")
+    usages = UsageFactory()
+    with pytest.raises(SandboxInfraError):
+        await _protected(usages).start()
+    assert usages.made[0].names() == ["reserve", "sent", "pending"]
+
+
+async def test_create_step_that_looks_unsent_still_settles_a_found_job() -> None:
+    """Settle a job that the lookup finds, even when the error frames say the create was unsent."""
+    HUB.create_error = RuntimeError("renamed step")
+    HUB.create_error_at = "_bootstrap_job_spec"
+    usages = UsageFactory()
+    env = _protected(usages)
+    HUB.jobs.append(Job(id="job-9", labels={BOX_LABEL: env._label}, params={}))
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert usages.made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
+    assert HUB.job("job-9").stage == "CANCELED"
+
+
+async def test_unnamed_pre_request_value_error_keeps_the_hold() -> None:
+    """Keep the hold for a ValueError from a step that the classifier cannot name, such as ``HfApi``."""
+    HUB.create_error = ValueError("bad token")
+    HUB.create_error_at = "HfApi"
+    usages = UsageFactory()
+    with pytest.raises(SandboxInfraError):
+        await _protected(usages).start()
+    assert usages.made[0].calls[-1] == ("fail", False)
+
+
+def test_the_sdk_create_still_has_the_step_names_that_the_classifier_reads() -> None:
+    """Fail when a new huggingface_hub renames a step of ``Sandbox.create``, so the classifier cannot drift."""
+    hub = pytest.importorskip("huggingface_hub")
+    sdk_sandbox = getattr(hub, "Sandbox", None)
+    if sdk_sandbox is None:
+        pytest.skip("This huggingface_hub has no Sandbox.")
+    create = inspect.unwrap(inspect.getattr_static(sdk_sandbox, "create"))
+    names = set(getattr(create, "__func__", create).__code__.co_names)
+    expected = hf_sandbox._BEFORE_RUN_JOB | hf_sandbox._AFTER_RUN_JOB | {"run_job"}
+    assert expected <= names
 
 
 async def test_failed_lookup_keeps_the_hold_pending() -> None:
