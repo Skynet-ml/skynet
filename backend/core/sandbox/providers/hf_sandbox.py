@@ -47,6 +47,7 @@ import functools
 import logging
 import math
 import time
+import traceback
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any, NamedTuple
@@ -101,6 +102,10 @@ _TERMINAL_STAGES = frozenset({"COMPLETED", "CANCELED", "ERROR", "DELETED"})
 # out: they do not prove that HF did not start the job. A refused create
 # still releases its hold only when the label lookup finds no job.
 _REFUSED_CREATE_STATUSES = frozenset({400, 401, 402, 403, 404, 422})
+# The steps of huggingface_hub 1.33.0 ``Sandbox.create`` before and after its
+# ``run_job`` request; ``_create_outcome`` reads them from the error frames.
+_BEFORE_RUN_JOB = frozenset({"_effective_token", "_derive_sandbox_token", "_bootstrap_job_spec"})
+_AFTER_RUN_JOB = frozenset({"from_job", "wait_ready"})
 
 
 class _Flavor(NamedTuple):
@@ -128,6 +133,10 @@ HF_SANDBOX_CAPABILITIES = EnvironmentCapabilities(
 # Process-local, keyed by the job tag (``None`` for untagged boxes): every
 # box whose job HF has not confirmed as ended, so a later stop can retry.
 _JOB_BOXES: dict[str | None, set[HfSandboxEnvironment]] = {}
+# Clock seams, so tests drive the stop wait and the lifetime cap without real time.
+_monotonic = time.monotonic
+_sleep = time.sleep
+_async_sleep = asyncio.sleep
 # Strong references to the background tasks, so the event loop does not drop them.
 _TASKS: set[asyncio.Future[Any]] = set()
 
@@ -176,22 +185,33 @@ def _on_task_done(action: str, task: asyncio.Future[Any]) -> None:
         logger.warning("HF Sandbox could not %s: %s", action, type(task.exception()).__name__)
 
 
-def _refused_create(error: BaseException | None) -> bool:
-    """Tell whether a create failure shows that HF made no job.
+def _create_outcome(error: BaseException) -> str:
+    """Tell from a create error whether HF can have made the job.
 
-    This check alone never frees a hold; the label lookup must also find no job.
+    ``Sandbox.create`` checks the labels, reads the token and builds the job
+    spec, then sends the one ``run_job`` request, then waits for the box. The
+    frames of the error show which step raised it; the names are those of
+    huggingface_hub 1.33.0. An error in no known step counts as unknown.
 
     Args:
-        error: The error of ``Sandbox.create``, or ``None``.
+        error: The error of ``Sandbox.create``.
 
     Returns:
-        True for an HTTP refusal, or for the SDK's label check that runs before any request.
+        ``"unsent"`` when the error came before the ``run_job`` request,
+        ``"refused"`` when HF refused that request, otherwise ``"unknown"``.
     """
-    if error is None:
-        return False
-    if HfHubHTTPError is not None and isinstance(error, HfHubHTTPError):
-        return getattr(getattr(error, "response", None), "status_code", None) in _REFUSED_CREATE_STATUSES
-    return type(error) is ValueError
+    frames = [frame.f_code.co_name for frame, _ in traceback.walk_tb(error.__traceback__)]
+    if "run_job" in frames:
+        refused = HfHubHTTPError is not None and isinstance(error, HfHubHTTPError)
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        return "refused" if refused and status in _REFUSED_CREATE_STATUSES else "unknown"
+    if _AFTER_RUN_JOB.intersection(frames):
+        return "unknown"
+    if _BEFORE_RUN_JOB.intersection(frames):
+        return "unsent"
+    if type(error) is ValueError and frames and frames[-1] == "create":
+        return "unsent"
+    return "unknown"
 
 
 def _stage(job: Any) -> str | None:
@@ -232,7 +252,7 @@ def _cancel_and_wait(job_id: str, namespace: str | None) -> Any | None:
         within ``STOP_TIMEOUT``.
     """
     api = HfApi()
-    deadline = time.monotonic() + STOP_TIMEOUT
+    deadline = _monotonic() + STOP_TIMEOUT
     try:
         api.cancel_job(job_id=job_id, namespace=namespace)
     except Exception as error:
@@ -245,9 +265,9 @@ def _cancel_and_wait(job_id: str, namespace: str | None) -> Any | None:
                 return job
         except Exception as error:
             logger.warning("HF Sandbox could not read job %s: %s", job_id, type(error).__name__)
-        if time.monotonic() >= deadline:
+        if _monotonic() >= deadline:
             return None
-        time.sleep(POLL_INTERVAL)
+        _sleep(POLL_INTERVAL)
 
 
 class HfSandboxEnvironment(SandboxEnvironment):
@@ -342,10 +362,16 @@ class HfSandboxEnvironment(SandboxEnvironment):
                 start, or HF could not create the box.
             SandboxSpecError: Skynet cannot price the box.
             SandboxFatalError: The SDK or the token is missing.
+            UsagePendingError: The box could not end after a failed start, so
+                its hold stays pending.
+            BudgetError: The reserve failed, or the ledger refused the settlement
+                of a box that could not finish its start.
         """
         if self._started:
             raise SandboxInfraError("The HF Sandbox already started once; it cannot start again.")
         self._started = True
+        # A stop before the start leaves a finished teardown that must not stand for this box.
+        self._stop_task = None
         self.preflight()
         self._starting = asyncio.ensure_future(self._start())
         try:
@@ -363,6 +389,8 @@ class HfSandboxEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: HF could not create the box.
+            UsagePendingError: A box that failed its start could not end.
+            BudgetError: The reserve failed, or the ledger refused a settlement.
         """
         await self._reserve()
         usage = self._usage
@@ -476,14 +504,28 @@ class HfSandboxEnvironment(SandboxEnvironment):
         self._keep(sandbox.id, sandbox)
         if self._usage is None:
             return
-        try:
-            await asyncio.to_thread(self._usage.confirm_created, sandbox)
-        except BaseException:
+        confirming = asyncio.ensure_future(asyncio.to_thread(self._usage.confirm_created, sandbox))
+        cancelled: asyncio.CancelledError | None = None
+        failure: BaseException | None = None
+        # The ledger call cannot be cancelled, so the teardown waits for it, as in _reserve.
+        while not confirming.done():
             try:
-                await self._end()
-            except Exception as error:
-                logger.warning("HF Sandbox could not stop an unconfirmed box: %s", type(error).__name__)
-            raise
+                await asyncio.shield(confirming)
+            except asyncio.CancelledError as error:
+                cancelled = cancelled or error
+            except Exception:
+                break
+        if not confirming.cancelled() and confirming.exception() is not None:
+            failure = confirming.exception()
+        if cancelled is None and failure is None:
+            return
+        try:
+            await self._end()
+        except Exception as error:
+            logger.warning("HF Sandbox could not stop an unconfirmed box: %s", type(error).__name__)
+        if cancelled is not None:
+            raise cancelled
+        raise failure
 
     async def _finish_late_create(self, create: asyncio.Future[Any]) -> None:
         """End and settle the box of a create whose start was cancelled.
@@ -511,6 +553,13 @@ class HfSandboxEnvironment(SandboxEnvironment):
             error: The create error.
         """
         usage = self._usage
+        outcome = _create_outcome(error)
+        if outcome == "unsent":
+            # The create failed before its job request, so no job can exist.
+            if usage is not None:
+                self._usage = None
+                await asyncio.to_thread(usage.fail, True)
+            return
         try:
             found = await asyncio.to_thread(_find_jobs, self._label, self._namespace)
         except Exception as lookup_error:
@@ -533,7 +582,7 @@ class HfSandboxEnvironment(SandboxEnvironment):
             return
         if usage is not None:
             self._usage = None
-            await asyncio.to_thread(usage.fail, _refused_create(error))
+            await asyncio.to_thread(usage.fail, outcome == "refused")
 
     async def _expire(self, delay: float) -> None:
         """Cancel the job at the spec lifetime, because HF's own timeout is 24 hours.
@@ -541,7 +590,7 @@ class HfSandboxEnvironment(SandboxEnvironment):
         Args:
             delay: Seconds until the lifetime cap.
         """
-        await asyncio.sleep(delay)
+        await _async_sleep(delay)
         self._watchdog = None
         logger.warning("HF Sandbox job %s reached its lifetime cap; it is cancelled.", self._job_id)
         await self.stop()
@@ -590,6 +639,18 @@ class HfSandboxEnvironment(SandboxEnvironment):
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
         sink = on_output or current_output_sink()
         loop = asyncio.get_running_loop()
+        # The SDK thread can stream on after exec returns; the flag drops those chunks.
+        returned = False
+
+        def deliver(stream: str, chunk: str) -> None:
+            """Hand one chunk to the sink on the loop, unless exec already returned.
+
+            Args:
+                stream: ``stdout`` or ``stderr``.
+                chunk: The text.
+            """
+            if not returned:
+                sink(stream, chunk)
 
         def forward(stream: str) -> Callable[[str], None] | None:
             """Build the SDK callback that hands one stream's chunks to the sink on the loop.
@@ -602,7 +663,17 @@ class HfSandboxEnvironment(SandboxEnvironment):
             """
             if sink is None:
                 return None
-            return lambda chunk: loop.call_soon_threadsafe(sink, stream, chunk)
+
+            def send(chunk: str) -> None:
+                """Queue one chunk for the loop, unless exec already returned.
+
+                Args:
+                    chunk: The text.
+                """
+                if not returned:
+                    loop.call_soon_threadsafe(deliver, stream, chunk)
+
+            return send
 
         try:
             async with asyncio.timeout(limit + EXEC_GRACE if limit is not None else None):
@@ -619,7 +690,12 @@ class HfSandboxEnvironment(SandboxEnvironment):
                         check=False,
                     )
         except TimeoutError:
+            # The SDK call hung past its own timeout. The thread cannot be
+            # cancelled and nothing kills the command; the lifetime cap or
+            # stop() ends it with the job.
             return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
+        finally:
+            returned = True
         stdout = result.stdout or ""
         stderr = result.stderr or ""
         if result.timed_out:
@@ -741,7 +817,11 @@ class HfSandboxEnvironment(SandboxEnvironment):
                 logger.warning("HF Sandbox could not close its client: %s", type(error).__name__)
         usage, self._usage = self._usage, None
         if usage is not None:
-            usage.stopped(getattr(job, "created_at", None), getattr(job, "finished_at", None))
+            usage.stopped(
+                getattr(job, "created_at", None),
+                getattr(job, "finished_at", None),
+                started_at=getattr(job, "started_at", None),
+            )
             # The usage is already detached, so no later stop can settle it again.
             await asyncio.to_thread(usage.settle)
 

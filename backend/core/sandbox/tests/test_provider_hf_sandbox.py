@@ -40,6 +40,7 @@ from core.storage.models import Base, BillingCustomerModel, ExecutionOperationMo
 from .test_environment import SandboxEnvironmentContract
 
 CREATED = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+STARTED = CREATED + timedelta(seconds=10)
 
 
 class FakeHttpError(Exception):
@@ -77,6 +78,7 @@ class Job:
     params: dict[str, Any]
     stage: str = "RUNNING"
     created_at: datetime = CREATED
+    started_at: datetime = STARTED
     finished_at: datetime | None = None
     files: dict[str, bytes] = field(default_factory=dict)
 
@@ -97,6 +99,7 @@ class FakeHub:
     jobs: list[Job] = field(default_factory=list)
     create_calls: int = 0
     create_error: BaseException | None = None
+    create_error_at: str = "run_job"
     create_makes_job: bool = True
     create_started: threading.Event = field(default_factory=threading.Event)
     create_gate: threading.Event | None = None
@@ -106,6 +109,7 @@ class FakeHub:
     runs: list[dict[str, Any]] = field(default_factory=list)
     exec_times_out: bool = False
     exec_gate: threading.Event | None = None
+    run_done: threading.Event = field(default_factory=threading.Event)
     read_error: BaseException | None = None
     token: str | None = "hf_fake"
     job_minutes: float = 3.0
@@ -124,6 +128,46 @@ class FakeHub:
 
 
 HUB = FakeHub()
+
+
+class FakeClock:
+    """Give the stop wait a clock whose sleep moves time on at once."""
+
+    def __init__(self) -> None:
+        """Start at zero."""
+        self.now = 0.0
+        self._lock = threading.Lock()
+
+    def monotonic(self) -> float:
+        """Return the fake time.
+
+        Returns:
+            Seconds since the fake start.
+        """
+        with self._lock:
+            return self.now
+
+    def sleep(self, seconds: float) -> None:
+        """Move the fake time on without a real wait.
+
+        Args:
+            seconds: The time to move on.
+        """
+        with self._lock:
+            self.now += seconds
+
+
+def _step(name: str) -> None:
+    """Raise the create error when the test sets it for this step of ``Sandbox.create``.
+
+    Args:
+        name: The step name.
+
+    Raises:
+        BaseException: The create error that the test sets.
+    """
+    if HUB.create_error is not None and HUB.create_error_at == name:
+        raise HUB.create_error
 
 
 def _shell(job: Job, command: str, env: dict[str, str]) -> tuple[int, str, str]:
@@ -219,6 +263,9 @@ class FakeSandbox:
         Returns:
             The handle of the new job.
 
+        The steps have the names of the SDK's own steps, because the provider
+        reads them from the error frames.
+
         Raises:
             BaseException: The create error that the test sets.
         """
@@ -226,12 +273,38 @@ class FakeSandbox:
         HUB.create_started.set()
         if HUB.create_gate is not None:
             HUB.create_gate.wait(5)
-        job = None
-        if HUB.create_error is None or HUB.create_makes_job:
-            job = Job(id=f"job-{next(HUB.ids)}", labels=dict(params["labels"]), params={"image": image, **params})
-            HUB.jobs.append(job)
-        if HUB.create_error is not None:
+        if HUB.create_error is not None and HUB.create_error_at == "create":
             raise HUB.create_error
+
+        def _effective_token() -> None:
+            """Read the token, as the SDK does before the job request."""
+            _step("_effective_token")
+
+        def _bootstrap_job_spec() -> None:
+            """Build the job spec, as the SDK does before the job request."""
+            _step("_bootstrap_job_spec")
+
+        def run_job() -> Job | None:
+            """Send the job request; HF can make the job and still fail the call.
+
+            Returns:
+                The new job, or ``None`` when the test makes no job.
+            """
+            job = None
+            if HUB.create_error is None or HUB.create_makes_job:
+                job = Job(id=f"job-{next(HUB.ids)}", labels=dict(params["labels"]), params={"image": image, **params})
+                HUB.jobs.append(job)
+            _step("run_job")
+            return job
+
+        def wait_ready() -> None:
+            """Wait for the box server, as the SDK does after the job request."""
+            _step("wait_ready")
+
+        _effective_token()
+        _bootstrap_job_spec()
+        job = run_job()
+        wait_ready()
         return cls(job)
 
     def run(self, argv: list[str], **options: Any) -> SimpleNamespace:
@@ -247,16 +320,19 @@ class FakeSandbox:
         assert argv[:2] == ["/bin/bash", "-c"]
         assert options["check"] is False
         HUB.runs.append({"argv": argv, **options})
-        if HUB.exec_gate is not None:
-            HUB.exec_gate.wait(5)
-        if HUB.exec_times_out:
-            return SimpleNamespace(exit_code=None, stdout="partial", stderr="", timed_out=True)
-        code, stdout, stderr = _shell(self.job, argv[2], options["env"] or {})
-        if stdout and options["on_stdout"] is not None:
-            options["on_stdout"](stdout)
-        if stderr and options["on_stderr"] is not None:
-            options["on_stderr"](stderr)
-        return SimpleNamespace(exit_code=code, stdout=stdout, stderr=stderr, timed_out=False)
+        try:
+            if HUB.exec_gate is not None:
+                HUB.exec_gate.wait(5)
+            if HUB.exec_times_out:
+                return SimpleNamespace(exit_code=None, stdout="partial", stderr="", timed_out=True)
+            code, stdout, stderr = _shell(self.job, argv[2], options["env"] or {})
+            if stdout and options["on_stdout"] is not None:
+                options["on_stdout"](stdout)
+            if stderr and options["on_stderr"] is not None:
+                options["on_stderr"](stderr)
+            return SimpleNamespace(exit_code=code, stdout=stdout, stderr=stderr, timed_out=False)
+        finally:
+            HUB.run_done.set()
 
     def close(self) -> None:
         """Mark the HTTP client as closed."""
@@ -312,17 +388,27 @@ class FakeApi:
 class FakeUsage:
     """Record the reservation calls of a protected box."""
 
-    def __init__(self, request: dict[str, Any], operation_key: str) -> None:
+    def __init__(
+        self,
+        request: dict[str, Any],
+        operation_key: str,
+        confirm_gate: threading.Event | None = None,
+        confirm_entered: threading.Event | None = None,
+    ) -> None:
         """Keep the priced request and the operation key.
 
         Args:
             request: The request that the provider priced.
             operation_key: The box's operation key.
+            confirm_gate: When set, the confirm waits for it before it records the job.
+            confirm_entered: Set when the confirm starts; a new event by default.
         """
         self.request = request
         self.operation_key = operation_key
         self.calls: list[tuple[str, Any]] = [("reserve", HUB.create_calls)]
         self.confirm_error: BaseException | None = None
+        self.confirm_gate = confirm_gate
+        self.confirm_entered = confirm_entered or threading.Event()
 
     def sent(self, label: str) -> None:
         """Record the create call.
@@ -341,6 +427,9 @@ class FakeUsage:
         Raises:
             BaseException: The error that the test sets.
         """
+        self.confirm_entered.set()
+        if self.confirm_gate is not None:
+            self.confirm_gate.wait(5)
         self.calls.append(("confirm", job.id))
         if self.confirm_error is not None:
             raise self.confirm_error
@@ -353,18 +442,19 @@ class FakeUsage:
         """Record a failure, and whether no job can exist.
 
         Args:
-            absent: True when HF refused the create and the lookup found no job.
+            absent: True when the provider knows that HF made no job.
         """
         self.calls.append(("fail", absent))
 
-    def stopped(self, created_at: Any = None, finished_at: Any = None) -> None:
+    def stopped(self, created_at: Any = None, finished_at: Any = None, *, started_at: Any = None) -> None:
         """Record the job's own times.
 
         Args:
             created_at: The job's creation time.
             finished_at: The job's end time.
+            started_at: The job's start time.
         """
-        self.calls.append(("stopped", (created_at, finished_at)))
+        self.calls.append(("stopped", (created_at, finished_at, started_at)))
 
     def settle(self) -> None:
         """Record a settle."""
@@ -382,14 +472,17 @@ class FakeUsage:
 class UsageFactory:
     """Make one ``FakeUsage`` for each protected box, as ``USAGE.reserve`` would."""
 
-    def __init__(self, gate: threading.Event | None = None) -> None:
+    def __init__(self, gate: threading.Event | None = None, confirm_gate: threading.Event | None = None) -> None:
         """Start with no reservations.
 
         Args:
             gate: When set, each reserve waits for it, so a test can cancel during the reserve.
+            confirm_gate: When set, each confirm waits for it, so a test can stop during the confirm.
         """
         self.made: list[FakeUsage] = []
         self.gate = gate
+        self.confirm_gate = confirm_gate
+        self.confirm_entered = threading.Event()
         self.entered = threading.Event()
 
     def __call__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
@@ -406,7 +499,7 @@ class UsageFactory:
         self.entered.set()
         if self.gate is not None:
             self.gate.wait(5)
-        usage = FakeUsage(request, operation_key)
+        usage = FakeUsage(request, operation_key, self.confirm_gate, self.confirm_entered)
         self.made.append(usage)
         return usage
 
@@ -430,12 +523,22 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeHub]:
     monkeypatch.setattr(hf_sandbox, "HfSandboxError", FakeSdkError)
     monkeypatch.setattr(hf_sandbox, "STOP_TIMEOUT", 0.2)
     monkeypatch.setattr(hf_sandbox, "POLL_INTERVAL", 0.01)
+    clock = FakeClock()
+    monkeypatch.setattr(hf_sandbox, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(hf_sandbox, "_sleep", clock.sleep)
     monkeypatch.setattr(hf_sandbox, "_JOB_BOXES", {})
     monkeypatch.setattr(hf_sandbox, "_TASKS", set())
     yield HUB
     for gate in (HUB.create_gate, HUB.exec_gate):
         if gate is not None:
             gate.set()
+    for usage in USAGES_TO_OPEN:
+        usage.set()
+    USAGES_TO_OPEN.clear()
+
+
+# Confirm gates that the fixture opens at the end, so no fake thread waits on.
+USAGES_TO_OPEN: list[threading.Event] = []
 
 
 async def _background() -> None:
@@ -581,7 +684,7 @@ async def test_reserve_then_settle_after_a_confirmed_cancel() -> None:
     assert usage.calls[0] == ("reserve", 0)
     assert usage.names() == ["reserve", "sent", "confirm", "stopped", "settle"]
     assert usage.request == {"flavor": "cpu-basic", "lifetime_ms": 300_000, "exposed_ports": 1, "image": "python:3.12"}
-    assert usage.calls[3][1] == (CREATED, CREATED + timedelta(minutes=3))
+    assert usage.calls[3][1] == (CREATED, CREATED + timedelta(minutes=3), STARTED)
     assert HUB.cancels == ["job-1"]
     assert hf_sandbox._JOB_BOXES == {}
 
@@ -608,14 +711,19 @@ async def test_refused_create_that_still_left_a_job_settles_and_does_not_release
     assert usages.made[0].names()[-1] == "settle"
 
 
-@pytest.mark.parametrize("error", [FakeHttpError(422), FakeHttpError(402), ValueError("bad label")])
-async def test_refused_create_with_no_job_releases(error: BaseException) -> None:
+@pytest.mark.parametrize(
+    ("error", "step"),
+    [(FakeHttpError(422), "run_job"), (FakeHttpError(402), "run_job"), (ValueError("bad label"), "create")],
+)
+async def test_refused_create_with_no_job_releases(error: BaseException, step: str) -> None:
     """Release the hold only when HF refused the create and the label lookup finds no job.
 
     Args:
         error: The create error.
+        step: The create step that raises it.
     """
     HUB.create_error = error
+    HUB.create_error_at = step
     HUB.create_makes_job = False
     usages = UsageFactory()
     with pytest.raises(SandboxInfraError):
@@ -637,6 +745,53 @@ async def test_unknown_create_with_no_job_does_not_release(error: BaseException)
     with pytest.raises(SandboxInfraError):
         await _protected(usages).start()
     assert usages.made[0].calls[-1] == ("fail", False)
+
+
+@pytest.mark.parametrize("status", [404, 422])
+async def test_refusal_after_the_job_request_is_not_a_refused_create(status: int) -> None:
+    """Keep the hold when a 4xx comes from the ready wait, because the job request already made a job.
+
+    Args:
+        status: The HTTP status of the ready wait.
+    """
+    HUB.create_error = FakeHttpError(status)
+    HUB.create_error_at = "wait_ready"
+    HUB.create_makes_job = False
+    usages = UsageFactory()
+    with pytest.raises(SandboxInfraError):
+        await _protected(usages).start()
+    assert usages.made[0].names() == ["reserve", "sent", "fail"]
+    assert usages.made[0].calls[-1] == ("fail", False)
+
+
+async def test_refusal_after_the_job_request_settles_the_found_job() -> None:
+    """Settle the job that a 4xx in the ready wait left, because the job request made it."""
+    HUB.create_error = FakeHttpError(422)
+    HUB.create_error_at = "wait_ready"
+    usages = UsageFactory()
+    with pytest.raises(SandboxInfraError):
+        await _protected(usages).start()
+    assert usages.made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
+    assert HUB.job("job-1").stage == "CANCELED"
+
+
+@pytest.mark.parametrize("step", ["_effective_token", "_bootstrap_job_spec"])
+async def test_failure_before_the_job_request_releases_without_a_lookup(step: str) -> None:
+    """Release the hold at once when the create failed before its job request, so no job can exist.
+
+    Args:
+        step: The create step that fails.
+    """
+    HUB.create_error = RuntimeError("no token")
+    HUB.create_error_at = step
+    # A lookup would fail and keep the hold pending, so a release proves that none ran.
+    HUB.list_error = RuntimeError("down")
+    usages = UsageFactory()
+    with pytest.raises(SandboxInfraError):
+        await _protected(usages).start()
+    assert usages.made[0].names() == ["reserve", "sent", "fail"]
+    assert usages.made[0].calls[-1] == ("fail", True)
+    assert HUB.jobs == []
 
 
 async def test_failed_lookup_keeps_the_hold_pending() -> None:
@@ -717,15 +872,66 @@ async def test_unconfirmed_cancel_stays_pending_and_the_job_sweep_retries() -> N
     assert hf_sandbox._JOB_BOXES == {}
 
 
-async def test_lifetime_cap_cancels_and_settles_the_job() -> None:
-    """Cancel the job at the spec lifetime, because HF's own job timeout is 24 hours."""
+async def test_stop_before_start_does_not_disarm_the_later_stop() -> None:
+    """Cancel and settle a box whose stop also came once before its start."""
     usages = UsageFactory()
-    env = _protected(usages, lifetime_seconds=0.05)
+    env = _protected(usages)
+    await env.stop()
     await env.start()
-    for _ in range(200):
-        if env._ended:
-            break
-        await asyncio.sleep(0.01)
+    await env.stop()
+    assert HUB.cancels == ["job-1"]
+    assert usages.made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
+    assert hf_sandbox._JOB_BOXES == {}
+
+
+async def test_stop_during_the_confirm_waits_for_the_confirm() -> None:
+    """Let the confirm thread finish before the teardown, so the job binds to the hold first."""
+    gate = threading.Event()
+    USAGES_TO_OPEN.append(gate)
+    usages = UsageFactory(confirm_gate=gate)
+    env = _protected(usages)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(usages.confirm_entered.wait, 5)
+    stop = asyncio.ensure_future(env.stop())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not stop.done()
+    assert HUB.cancels == []
+    gate.set()
+    await stop
+    with pytest.raises(SandboxInfraError, match="stopped during its start"):
+        await start
+    assert usages.made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
+    assert HUB.cancels == ["job-1"]
+
+
+async def test_lifetime_cap_cancels_and_settles_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancel the job at the spec lifetime, because HF's own job timeout is 24 hours.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    cap = asyncio.Event()
+    delays: list[float] = []
+
+    async def wait_for_cap(delay: float) -> None:
+        """Record the watchdog delay and wait until the test reaches the cap.
+
+        Args:
+            delay: The seconds that the watchdog would sleep.
+        """
+        delays.append(delay)
+        await cap.wait()
+
+    monkeypatch.setattr(hf_sandbox, "_async_sleep", wait_for_cap)
+    usages = UsageFactory()
+    env = _protected(usages)
+    await env.start()
+    watchdog = env._watchdog
+    assert watchdog is not None
+    cap.set()
+    await watchdog
+    assert 0 < delays[0] <= 300
     assert HUB.job("job-1").stage == "CANCELED"
     assert usages.made[0].names()[-1] == "settle"
     with pytest.raises(SandboxInfraError, match="not running"):
@@ -776,10 +982,15 @@ async def test_exec_reports_a_timeout_as_exit_code_124(monkeypatch: pytest.Monke
         assert HUB.runs[-1]["timeout"] == 5
         HUB.exec_times_out = False
         HUB.exec_gate = threading.Event()
-        monkeypatch.setattr(hf_sandbox, "EXEC_GRACE", 0.05)
-        result = await env.exec("true", timeout_sec=0.01)
+        HUB.run_done.clear()
+        monkeypatch.setattr(hf_sandbox, "EXEC_GRACE", 0)
+        seen: list[tuple[str, str]] = []
+        result = await env.exec("echo late", timeout_sec=0, on_output=lambda stream, text: seen.append((stream, text)))
         assert (result.exit_code, result.timed_out) == (124, True)
         HUB.exec_gate.set()
+        await asyncio.to_thread(HUB.run_done.wait, 5)
+        await asyncio.sleep(0)
+        assert seen == []
 
 
 async def test_download_maps_sdk_errors() -> None:

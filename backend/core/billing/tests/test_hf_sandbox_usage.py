@@ -227,6 +227,21 @@ def test_reserve_then_settle_charges_the_job_minutes(database: Engine) -> None:
     assert evidence["over_funded"] is False
 
 
+def test_settle_charges_from_created_at_and_keeps_both_times_in_the_evidence(database: Engine) -> None:
+    """Charge from created_at, not started_at, and keep both times for audits."""
+    reservation, clock = _reservation(database)
+    reservation.sent("skynet-label")
+    reservation.confirm_created(SimpleNamespace(id="job-1"))
+    clock.now += 900
+    started = START + timedelta(minutes=2)
+    reservation.stopped(START, START + timedelta(minutes=4, seconds=1), started_at=started)
+    reservation.settle()
+    evidence = _evidence(database, "hf-sandbox-stop:job-1")
+    assert evidence["job_created_at"] == START.isoformat()
+    assert evidence["job_started_at"] == started.isoformat()
+    assert evidence["billed_minutes"] == 5
+
+
 def test_settle_falls_back_to_the_measured_wall_time(database: Engine) -> None:
     """Settle from the create-to-stop wall time when HF reports no usable job times."""
     reservation, clock = _reservation(database)

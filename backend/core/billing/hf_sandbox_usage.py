@@ -239,6 +239,8 @@ class HfSandboxUsageReservation:
         self.sent_at: float | None = None
         self.stopped_at: float | None = None
         self.job_ms: int | None = None
+        self.job_created_at: str | None = None
+        self.job_started_at: str | None = None
         self._clock = clock
         self._sent_wall: float | None = None
         self._settled = False
@@ -272,15 +274,21 @@ class HfSandboxUsageReservation:
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, job_id)
         self.pending()
 
-    def stopped(self, created_at: Any = None, finished_at: Any = None) -> None:
+    def stopped(self, created_at: Any = None, finished_at: Any = None, *, started_at: Any = None) -> None:
         """Stop the wall clock once HF confirmed a terminal stage, and keep the job's own times.
 
         Args:
             created_at: The job's ``created_at``, or ``None``.
             finished_at: The job's ``finished_at``, or ``None``.
+            started_at: The job's ``started_at``, or ``None``; kept only as evidence.
         """
         self.stopped_at = self._clock()
+        # The charge runs from created_at, not started_at, as a deliberate upper
+        # bound: HF does not document whether its Starting time is billed, and
+        # Skynet must not undercharge. started_at stays in the evidence for audits.
         self.job_ms = _job_ms(created_at, finished_at)
+        self.job_created_at = created_at.isoformat() if isinstance(created_at, datetime) else None
+        self.job_started_at = started_at.isoformat() if isinstance(started_at, datetime) else None
 
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
         """Refuse an extension, because HF cannot lengthen a running job's timeout.
@@ -308,7 +316,8 @@ class HfSandboxUsageReservation:
         """Return the provider evidence of this box.
 
         Returns:
-            The job id, the label, the wall-clock start and the measured, job and funded times.
+            The job id, the label, the wall-clock start, the job's creation and
+            start times, and the measured, job and funded times.
         """
         return {
             "provider": "hf_sandbox",
@@ -316,6 +325,8 @@ class HfSandboxUsageReservation:
             "label": self.label,
             "sent_at": self._sent_wall,
             "measured_ms": self._measured_ms(),
+            "job_created_at": self.job_created_at,
+            "job_started_at": self.job_started_at,
             "job_ms": self.job_ms,
             "funded_ms": self.lifetime_ms,
         }
@@ -337,11 +348,11 @@ class HfSandboxUsageReservation:
 
         No job exists when the create was never sent. A sent create that
         failed may still have made one, so its hold is released only when no
-        job id came back, HF refused the create and the label lookup found
-        no job.
+        job id came back and the caller knows that HF made no job.
 
         Args:
-            absent: True when HF refused the create and the label lookup found no job.
+            absent: True when the create failed before its job request, or HF
+                refused that request and the label lookup found no job.
         """
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
         if current.state in {"settled", "released"}:
@@ -353,7 +364,10 @@ class HfSandboxUsageReservation:
                 reason = "The create call was never sent."
             else:
                 key = f"hf-sandbox-absent:{self.operation.id}"
-                reason = "HF refused the create and the label lookup found no job."
+                reason = (
+                    "HF made no job: the create failed before its job request, "
+                    "or HF refused it and the label lookup found no job."
+                )
             try:
                 self.runtime.service.reject(
                     self.operation.id,
