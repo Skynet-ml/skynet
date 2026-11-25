@@ -84,7 +84,10 @@ const COLUMN_LABEL_KEYS: Record<ModelRanking, MessageKey> = {
 // Each score's help is a title of at most five words and a muted description
 // of at most two sentences; model-picker-help.test.ts holds every catalog to it.
 const COLUMN_HELP_KEYS: Record<ModelRanking, [MessageKey, MessageKey]> = {
-  best_value: ["submit.modelpicker.col.best_value_help", "submit.modelpicker.col.best_value_help_note"],
+  best_value: [
+    "submit.modelpicker.col.best_value_help",
+    "submit.modelpicker.col.best_value_help_note",
+  ],
   smartest: ["submit.modelpicker.col.smartest_help", "submit.modelpicker.col.smartest_help_note"],
   fastest: ["submit.modelpicker.col.fastest_help", "submit.modelpicker.col.fastest_help_note"],
 };
@@ -243,7 +246,11 @@ function RankScore({ model, ranking }: { model: CatalogModel; ranking: ModelRank
         ? "∞"
         : // Points per token is tiny; per $1M of tokens reads as a plain number.
           number(ranking === "best_value" ? value / 1e6 : value, ranking === "fastest" ? 0 : 1);
-  return <span className={cn(SCORE_COL, "text-[0.6875rem] tabular-nums text-muted-foreground")}>{text}</span>;
+  return (
+    <span className={cn(SCORE_COL, "text-[0.6875rem] tabular-nums text-muted-foreground")}>
+      {text}
+    </span>
+  );
 }
 
 /** The sticky column header: rank, model, the active tab's score with its meaning in a tooltip, and links. */
@@ -252,7 +259,9 @@ function ColumnHeader({ ranking }: { ranking: ModelRanking }) {
     <div className="sticky top-0 z-10 flex items-center bg-background text-[0.625rem] font-semibold text-muted-foreground/70">
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1">
         <span className="w-5 shrink-0 text-center">{msg("submit.modelpicker.col.rank")}</span>
-        <span className="min-w-0 flex-1 truncate text-start">{msg("submit.modelpicker.col.model")}</span>
+        <span className="min-w-0 flex-1 truncate text-start">
+          {msg("submit.modelpicker.col.model")}
+        </span>
         <span className={cn(SCORE_COL, "flex justify-end")}>
           <RowIconTip
             label={msg("submit.modelpicker.col.help_label")}
@@ -273,7 +282,9 @@ function ColumnHeader({ ranking }: { ranking: ModelRanking }) {
         </span>
         <span className="size-3.5 shrink-0" aria-hidden="true" />
       </div>
-      <span className={cn(LINKS_COL, "justify-center truncate")}>{msg("submit.modelpicker.col.links")}</span>
+      <span className={cn(LINKS_COL, "justify-center truncate")}>
+        {msg("submit.modelpicker.col.links")}
+      </span>
     </div>
   );
 }
@@ -336,7 +347,12 @@ function RankBadge({ rank }: { rank: number }) {
   const bevel = `${id}bevel`;
   const shine = `${id}shine`;
   return (
-    <svg viewBox="0 0 20 24" className="-my-0.5 h-6 w-5 shrink-0 drop-shadow-sm" role="img" aria-label={String(rank)}>
+    <svg
+      viewBox="0 0 20 24"
+      className="-my-0.5 h-6 w-5 shrink-0 drop-shadow-sm"
+      role="img"
+      aria-label={String(rank)}
+    >
       <defs>
         <linearGradient id={face} x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor={medal.light} />
@@ -369,7 +385,14 @@ function RankBadge({ rank }: { rank: number }) {
       <circle cx="10" cy="15.5" r="7.6" fill={`url(#${rim})`} />
       <circle cx="10" cy="15.5" r="6.5" fill={`url(#${bevel})`} />
       <circle cx="10" cy="15.5" r="5.7" fill={`url(#${face})`} />
-      <ellipse cx="8" cy="13.2" rx="3" ry="1.6" transform="rotate(-35 8 13.2)" fill={`url(#${shine})`} />
+      <ellipse
+        cx="8"
+        cy="13.2"
+        rx="3"
+        ry="1.6"
+        transform="rotate(-35 8 13.2)"
+        fill={`url(#${shine})`}
+      />
     </svg>
   );
 }
@@ -651,9 +674,7 @@ export function ModelPicker({
                 <ProviderLogo slug={modelProviderSlug(m.value)} size={14} />
                 <span className="flex min-w-0 flex-1 flex-col" dir="ltr">
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate text-[0.8125rem]">
-                      {m.display_name || m.label}
-                    </span>
+                    <span className="truncate text-[0.8125rem]">{m.display_name || m.label}</span>
                     {showRetention && dataPolicy === "zdr" && m.zero_retention === false && (
                       <MicroPill
                         className="bg-[var(--warning-dim)] text-[var(--warning)]"
@@ -673,10 +694,7 @@ export function ModelPicker({
                 </span>
                 <RankScore model={m} ranking={ranking} />
                 <Check
-                  className={cn(
-                    "size-3.5 shrink-0",
-                    isSelected(m) ? "opacity-100" : "opacity-0",
-                  )}
+                  className={cn("size-3.5 shrink-0", isSelected(m) ? "opacity-100" : "opacity-0")}
                 />
               </button>
               <span className={LINKS_COL}>

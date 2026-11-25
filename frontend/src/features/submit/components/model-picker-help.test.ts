@@ -35,7 +35,10 @@ test(`score tooltip titles have at most ${MAX_TITLE_WORDS} words and one sentenc
       const title = strings[`submit.modelpicker.col.${ranking}_help`];
       if (title == null) continue;
       const words = title.split(/\s+/).filter(Boolean).length;
-      assert.ok(words <= MAX_TITLE_WORDS, `${locale} ${ranking} title has ${words} words: ${title}`);
+      assert.ok(
+        words <= MAX_TITLE_WORDS,
+        `${locale} ${ranking} title has ${words} words: ${title}`,
+      );
       assert.equal(sentenceCount(title), 1, `${locale} ${ranking} title: ${title}`);
     }
   }
@@ -47,7 +50,10 @@ test(`score tooltip descriptions have at most ${MAX_SENTENCES} sentences`, () =>
       const note = strings[`submit.modelpicker.col.${ranking}_help_note`];
       if (note == null) continue;
       const sentences = sentenceCount(note);
-      assert.ok(sentences <= MAX_SENTENCES, `${locale} ${ranking} has ${sentences} sentences: ${note}`);
+      assert.ok(
+        sentences <= MAX_SENTENCES,
+        `${locale} ${ranking} has ${sentences} sentences: ${note}`,
+      );
     }
   }
 });

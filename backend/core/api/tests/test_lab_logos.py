@@ -3,18 +3,38 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from .. import lab_logos
-from ..lab_logos import ICON_CDN, LabLogoCache
+from ..lab_logos import ICON_CDN, LabLogoCache, lab_slug
+from ..routers import models as models_router
 from ..routers.models import create_models_router
 
 COLOR_SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><path fill="#0866FF" d="M0 0h1v1z"/></svg>'
 MONO_SVG = b'<svg fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>'
+
+
+CATALOG = SimpleNamespace(
+    models=[
+        SimpleNamespace(value=value)
+        for value in ("openrouter/meta-llama/llama-4", "openrouter/moonshotai/kimi-k2", "mistral/mistral-large")
+    ],
+    providers=[SimpleNamespace(slug="openai")],
+)
+
+
+@pytest.fixture(autouse=True)
+def _catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve a small fixed catalog, so the route knows meta, moonshotai, mistral and openai.
+
+    Args:
+        monkeypatch: Pytest's patch fixture.
+    """
+    monkeypatch.setattr(models_router, "get_catalog_cached", lambda: CATALOG)
 
 
 def _svg(body: bytes) -> httpx.Response:
@@ -100,9 +120,9 @@ def test_thinking_machines_uses_the_local_mark_without_a_fetch() -> None:
     assert b"<rect" in body
 
 
-@pytest.mark.parametrize("slug", ["Bad_Slug", "x" * 41])
+@pytest.mark.parametrize("slug", ["Bad_Slug", "x" * 41, "not-a-catalog-lab"])
 def test_invalid_slug_is_404_without_any_fetch(slug: str) -> None:
-    """Fetch nothing for a slug outside the allowed shape."""
+    """Fetch nothing for a malformed slug or a lab the catalog does not know."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"unexpected fetch of {request.url}")
@@ -134,23 +154,16 @@ def test_bad_icon_responses_are_404_and_cached(response: httpx.Response) -> None
     assert len(calls) == 2
 
 
-def test_full_cache_fetches_no_new_slug_until_an_entry_expires(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cap the cache, so random slugs cannot grow memory or the CDN calls without a bound."""
-    monkeypatch.setattr(lab_logos, "_MAX_ENTRIES", 2)
-    clock = [1000.0]
-    monkeypatch.setattr(lab_logos.time, "monotonic", lambda: clock[0])
-    calls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        return _svg(COLOR_SVG)
-
-    cache = LabLogoCache(_client_factory(handler))
-    assert cache.get("meta") is not None
-    assert cache.get("mistral") is not None
-    assert cache.get("stepfun") is None, "a full cache refuses a new slug"
-    assert cache.get("meta") is not None, "a cached slug still serves"
-    assert len(calls) == 2
-    clock[0] += lab_logos.LOGO_TTL_SECONDS + 1
-    assert cache.get("stepfun") is not None, "expired entries make room again"
-    assert len(calls) == 3
+@pytest.mark.parametrize(
+    ("model_id", "slug"),
+    [
+        ("openrouter/meta-llama/llama-4", "meta"),
+        ("openrouter/x-ai/grok-4", "xai"),
+        ("anthropic/claude-haiku-5-5", "anthropic"),
+        ("subscription/codex/openai/gpt-5", "openai"),
+        ("openrouter/auto", "openrouter"),
+    ],
+)
+def test_lab_slug_matches_the_frontend_rule(model_id: str, slug: str) -> None:
+    """Derive the same lab slug as the frontend's ``modelProviderSlug``."""
+    assert lab_slug(model_id) == slug

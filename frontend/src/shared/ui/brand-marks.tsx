@@ -344,5 +344,10 @@ export const ThinkingMachines = colorBrand({
   title: "Thinking Machines",
   viewBox: "16 16 148 148",
   disc: "#ebebeb",
-  paths: [["M41 31h98a10 10 0 0 1 10 10v98a10 10 0 0 1-10 10H41a10 10 0 0 1-10-10V41a10 10 0 0 1 10-10Z", "#31373d"]],
+  paths: [
+    [
+      "M41 31h98a10 10 0 0 1 10 10v98a10 10 0 0 1-10 10H41a10 10 0 0 1-10-10V41a10 10 0 0 1 10-10Z",
+      "#31373d",
+    ],
+  ],
 });

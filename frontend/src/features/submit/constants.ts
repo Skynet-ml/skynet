@@ -35,7 +35,6 @@ export const WIZARD_STAGE_ICONS: Record<WizardStageId, Icon> = {
 export const WIZARD_STAGES: ReadonlyArray<{ id: WizardStageId; label: () => string }> =
   WIZARD_STAGE_ORDER.map((id) => ({ id, label: STAGE_LABELS[id] }));
 
-
 /** RTL: forward = slide from left, backward = slide from right. */
 export const slideVariants = {
   enter: (direction: number) => ({
