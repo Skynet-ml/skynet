@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import shlex
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -590,6 +591,7 @@ async def test_upload_creates_the_parent_as_root(fake_sdk: FakeCloud) -> None:
         await env.upload_files({"/srv/app/a.txt": "x"})
         assert fake_sdk.boxes[0].execs[-1]["command"] == "mkdir -p /srv/app"
         assert fake_sdk.boxes[0].execs[-1]["run_as"] == "root"
+        assert fake_sdk.boxes[0].execs[-1]["timeout_sec"] == 10
         fake_sdk.mkdir_exit = 1
         with pytest.raises(SandboxInfraError, match="/srv/b"):
             await env.upload_files({"/srv/b/a.txt": "x"})
@@ -621,13 +623,19 @@ async def test_a_failed_runtime_fix_stops_the_box(fake_sdk: FakeCloud) -> None:
     assert fake_sdk.boxes[0].stopped
 
 
-async def test_the_lifetime_cap_stops_the_box(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stop the box when the spec lifetime ends on the fake clock.
+@pytest.mark.parametrize(("cap_at", "left"), [(1030.0, 60.0), (1100.0, 0.0)])
+async def test_the_lifetime_cap_stops_the_box(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, cap_at: float, left: float
+) -> None:
+    """Stop the box when the spec lifetime, counted from the create request, ends on the fake clock.
 
     Args:
         fake_sdk: The fake Hyperbrowser cloud.
         monkeypatch: The pytest monkeypatch fixture.
+        cap_at: The fake time when the cap starts; the create was sent at 1000.
+        left: The lifetime that the cap must still wait.
     """
+    monkeypatch.setattr(hyperbrowser, "_monotonic", iter([1000.0, cap_at]).__next__)
     slept: list[float] = []
     ring = asyncio.Event()
 
@@ -644,7 +652,7 @@ async def test_the_lifetime_cap_stops_the_box(fake_sdk: FakeCloud, monkeypatch: 
     env, made = _protected(lifetime_seconds=90)
     await env.start()
     await asyncio.sleep(0)
-    assert slept == [90]
+    assert slept == [left]
     ring.set()
     for _ in range(5):
         await asyncio.sleep(0)
@@ -957,6 +965,102 @@ async def test_a_create_past_the_grace_is_stopped_when_it_returns(
     await _late()
     assert made[0].names() == ["reserve", "sent", "confirm", "stopped", "report", "settle"]
     assert fake_sdk.boxes[0].stopped
+
+
+async def test_a_create_past_the_grace_that_fails_keeps_the_hold(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the hold of a create that fails with a server error after the cancel grace.
+
+    Args:
+        fake_sdk: The fake Hyperbrowser cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(hyperbrowser, "_CANCEL_GRACE_SEC", 0.01)
+    fake_sdk.create_gate = asyncio.Event()
+    env, made = _protected()
+    start = asyncio.ensure_future(env.start())
+    await fake_sdk.create_started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    fake_sdk.create_error = FakeHyperbrowserError("server", status_code=503)
+    fake_sdk.create_gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await _late()
+    assert made[0].names() == ["reserve", "sent", "fail"]
+    assert made[0].calls[-1] == ("fail", False)
+    assert fake_sdk.boxes == []
+
+
+async def test_a_reservation_past_the_cancel_grace_is_released(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Release a reservation that the factory returns after the start was cancelled, and send no create.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(hyperbrowser, "_CANCEL_GRACE_SEC", 0.01)
+    gate = threading.Event()
+    entered = threading.Event()
+    made: list[FakeUsage] = []
+
+    def factory_(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Block until the test opens the gate, then make the fake reservation.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        entered.set()
+        gate.wait(5)
+        made.append(FakeUsage(request, operation_key))
+        return made[-1]
+
+    env = HyperbrowserEnvironment(_spec(operation_key="box-1"), budget="budget", usage_factory=factory_)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(entered.wait, 5)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert made == []
+    gate.set()
+    for _ in range(500):
+        if made and made[0].calls:
+            break
+        await asyncio.sleep(0.01)
+    await _late()
+    assert made[0].calls == [("fail", False)]
+    assert CLOUD.create_calls == 0
+
+
+async def test_the_real_reservation_stays_pending_after_a_late_failed_create(
+    fake_sdk: FakeCloud, ledger: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the real hold pending when a create past the cancel grace fails with a server error.
+
+    Args:
+        fake_sdk: The fake Hyperbrowser cloud.
+        ledger: The funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(hyperbrowser, "_CANCEL_GRACE_SEC", 0.01)
+    fake_sdk.create_gate = asyncio.Event()
+    start = asyncio.ensure_future(_ledger_env(ledger).start())
+    await fake_sdk.create_started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    fake_sdk.create_error = FakeHyperbrowserError("server", status_code=503)
+    fake_sdk.create_gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await _late()
+    assert _state(ledger) == "pending"
 
 
 async def test_a_cancel_during_the_stop_still_settles(fake_sdk: FakeCloud) -> None:

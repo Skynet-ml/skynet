@@ -43,6 +43,7 @@ import math
 import os
 import posixpath
 import shlex
+import time
 from collections.abc import Callable, Mapping
 from typing import Any, ClassVar
 
@@ -111,8 +112,9 @@ _FIX_RUNTIME_COMMAND = "([ -e /dev/fd ] || ln -sf /proc/self/fd /dev/fd) && mkdi
 _JOB_BOXES: dict[str, set[HyperbrowserEnvironment]] = {}
 # The loop holds tasks only by weak reference, so background stops live here.
 _LATE_TASKS: set[asyncio.Future[Any]] = set()
-# The lifetime cap sleeps through this name, so tests can use a fake clock.
+# The lifetime cap sleeps and reads the time through these names, so tests can use a fake clock.
 _sleep = asyncio.sleep
+_monotonic = time.monotonic
 
 
 class HyperbrowserEnvironment(SandboxEnvironment):
@@ -155,6 +157,7 @@ class HyperbrowserEnvironment(SandboxEnvironment):
         self._client: Any = None
         self._sandbox: Any = None
         self._cap: asyncio.Task[None] | None = None
+        self._create_sent = 0.0
         self._stopped = False
         self._job_id = (spec.tags or {}).get(JOB_TAG)
         if budget is not None:
@@ -356,7 +359,7 @@ class HyperbrowserEnvironment(SandboxEnvironment):
         for path, text in files.items():
             parent = posixpath.dirname(path)
             if parent and parent != "/":
-                made = await sandbox.exec(f"mkdir -p {shlex.quote(parent)}", run_as="root")
+                made = await sandbox.exec(f"mkdir -p {shlex.quote(parent)}", timeout_sec=10, run_as="root")
                 if made.exit_code != 0:
                     raise SandboxInfraError(f"Could not create {parent} in the hyperbrowser sandbox.")
             await files_api.upload(path, text.encode("utf-8"))
@@ -423,9 +426,14 @@ class HyperbrowserEnvironment(SandboxEnvironment):
         await sandbox.update_network(network_kwargs(policy, for_update=True))
 
     async def _enforce_lifetime(self) -> None:
-        """Stop the box when the spec lifetime ends, in case Hyperbrowser's timeout does not."""
+        """Stop the box when the spec lifetime ends, in case Hyperbrowser's timeout does not.
+
+        The lifetime counts from the create request, the same start as the
+        usage clock, so the cap fires before Hyperbrowser's own timeout and
+        the measured runtime stays inside the funded time.
+        """
         try:
-            await _sleep(self.spec.lifetime_seconds)
+            await _sleep(max(0.0, self.spec.lifetime_seconds - (_monotonic() - self._create_sent)))
             logger.warning("A hyperbrowser sandbox reached its lifetime; stopping it.")
             await self.stop()
         except asyncio.CancelledError:
@@ -510,6 +518,7 @@ class HyperbrowserEnvironment(SandboxEnvironment):
         try:
             # A local check error here made no request, so its hold is released.
             body = CreateSandboxParams(**params) if CreateSandboxParams is not None else params
+            self._create_sent = _monotonic()
             if usage is not None:
                 usage.sent()
             sandbox = await client.sandboxes.create(body)
@@ -669,7 +678,13 @@ async def _stop_and_settle(client: Any, sandbox: Any, usage: Any | None) -> None
     """Stop one sandbox, settle its usage and close its client.
 
     A stop that fails still settles: the usage then bills the whole funded
-    lifetime, because Hyperbrowser ends the box at its timeout.
+    lifetime, because Hyperbrowser ends the box at its timeout. This also
+    covers a stop on a box that Hyperbrowser already ended: SDK 1.15.6 does
+    not document the stop answer for an ended box, nor the unit of
+    ``end_time`` or the ``close_reason`` values, so the provider cannot prove
+    the vendor end time and bills the funded time. The lifetime cap counts
+    from the create request, so it normally stops the box before that
+    timeout.
 
     Args:
         client: The SDK client of the box.
