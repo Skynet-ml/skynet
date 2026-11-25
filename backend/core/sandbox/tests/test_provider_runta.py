@@ -975,7 +975,8 @@ async def test_a_duplicate_that_does_not_delete_is_kept_in_the_hold(fake_sdk: Fa
     with pytest.raises(SandboxInfraError):
         await env.start()
     first, duplicate = fake_sdk.boxes
-    assert first.deleted and not duplicate.deleted
+    assert first.deleted
+    assert not duplicate.deleted
     assert made[0].names() == ["reserve", "sent", "stray", "confirm", "stopped", "settle"]
     assert ("stray", duplicate.id) in made[0].calls
 
