@@ -91,13 +91,14 @@ _CREATE_TIMEOUT_SEC = 50
 # A box with one of these statuses was deleted already: Blaxel returns its
 # record from ``get`` for about 5 minutes after the delete, not a 404.
 _GONE_STATUSES = frozenset({"DELETING", "TERMINATED"})
-# The Blaxel create docs (SDK 0.4.28) list these statuses as answers that make
-# no box. The create models only 400, 401, 403, 409 and 500 as a
-# SandboxAPIError; any other status comes as an UnexpectedStatus. 409 and 429 are left out: 409 means the unique name already has a
-# box, and a 429 says nothing about an earlier attempt. A
-# SandboxCreationTimeoutError (408) is left out too: the docs say the control
-# plane releases its box, but not whether that box was billed. A refused
-# create still releases its hold only when the name lookup finds no box.
+# These 4xx client errors reject the create request before a box is made. A
+# release still needs a 404 from the name lookup, so a wrong guess here keeps
+# the hold pending and fails safe. The SDK 0.4.28 create models only 400, 401,
+# 403, 409 and 500 as a SandboxAPIError; any other status comes as an
+# UnexpectedStatus. 409 and 429 are left out: 409 means the unique name
+# already has a box, and a 429 says nothing about an earlier attempt. A
+# SandboxCreationTimeoutError (408) is left out too: the SDK says the control
+# plane releases its box, but not whether that box was billed.
 _REFUSED_CREATE_STATUSES = frozenset({400, 401, 402, 403, 404, 413, 422})
 # The SDK create docs say a 503 with this code is answered before anything is
 # created. Any other 503 says nothing about the box.
