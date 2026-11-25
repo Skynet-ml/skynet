@@ -126,6 +126,8 @@ _TMP_ON_DISK = "umount /tmp 2>/dev/null || umount -l /tmp"
 # Bumping this rebuilds every template the provider made.
 _TEMPLATE_VERSION = 1
 _DENY_ALL = "0.0.0.0/0"
+# SDK 0.14.1 SandboxStatus values (types.py lines 27-28) of a box that is not running.
+_GONE_STATUSES = frozenset({"failed", "deleted"})
 # The SDK sends the create POST once and never retries it, so these
 # statuses are definite answers that made no box.
 _REFUSED_STATUSES = frozenset({400, 401, 402, 403, 404, 409, 429})
@@ -280,16 +282,20 @@ async def _kill_and_settle(sandbox_id: str, usage: Any | None, handle: Any | Non
 async def _find_boxes(attempt: str | None) -> list[Any] | None:
     """Look up the boxes that a create attempt made.
 
+    A box in status ``failed`` or ``deleted`` never ran or is gone, so it
+    does not count: binding it would bill seconds that no box ran.
+
     Args:
         attempt: The attempt label of the create.
 
     Returns:
-        The boxes, or ``None`` when the lookup failed.
+        The live boxes, or ``None`` when the lookup failed.
     """
     if attempt is None:
         return None
     try:
-        return list(await AsyncSandbox.list(metadata={_ATTEMPT_KEY: attempt}))
+        boxes = await AsyncSandbox.list(metadata={_ATTEMPT_KEY: attempt})
+        return [box for box in boxes if getattr(box.status, "value", box.status) not in _GONE_STATUSES]
     except Exception:
         logger.exception("Could not look up a Superserve box after a failed create; its hold stays pending.")
         return None

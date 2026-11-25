@@ -747,6 +747,44 @@ async def test_unknown_create_keeps_the_hold_pending(sdk: FakeSuperserve, error:
     assert usage.calls[-1] == ("fail", False)
 
 
+@pytest.mark.parametrize("status", ["failed", "deleted"])
+@pytest.mark.parametrize(("status_code", "absent"), [(503, False), (409, True)])
+async def test_lookup_ignores_boxes_that_are_not_running(
+    sdk: FakeSuperserve, status: str, status_code: int, absent: bool
+) -> None:
+    """Treat a failed or deleted box like no box: bind and kill nothing, release only on a refusal.
+
+    Args:
+        sdk: The fake SDK.
+        status: The status of the box that the lookup finds.
+        status_code: The status of the create error.
+        absent: Whether the hold is released as absent.
+    """
+    usage = FakeUsage()
+    sdk.create_error = FakeSDKError("create", status_code)
+    sdk.create_makes_box = True
+    listing = sdk.AsyncSandbox.list
+
+    async def list_after_the_box_ended(*, metadata: dict[str, str]) -> list[FakeBox]:
+        """End the box, then list.
+
+        Args:
+            metadata: The pairs to match.
+
+        Returns:
+            The matching boxes.
+        """
+        sdk.box().status = status
+        return await listing(metadata=metadata)
+
+    sdk.AsyncSandbox.list = list_after_the_box_ended
+    with pytest.raises(SandboxInfraError):
+        await _protected(usage).start()
+    assert not sdk.killed
+    assert usage.names() == ["sent", "fail"]
+    assert usage.calls[-1] == ("fail", absent)
+
+
 async def test_failed_lookup_keeps_a_refused_hold_pending(sdk: FakeSuperserve) -> None:
     """Keep the hold pending when the lookup after a refused create fails."""
     usage = FakeUsage()
