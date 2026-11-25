@@ -89,8 +89,9 @@ _MEMORY_MIB_PER_CPU = 2048
 # Harbor never asks for a smaller disk.
 _MIN_DISK_MIB = 2048
 # Harbor raises the SDK's 30 s request timeout, because parallel creates and
-# stops can take longer. The usage stop margin (``_LIFETIME_MARGIN_MS``) must
-# be at least this long.
+# stops can take longer. The usage stop margin (``_LIFETIME_MARGIN_MS``) is
+# this long, so it covers a slow stop in the normal case; httpx applies the
+# timeout to each request phase, so the settle clamp covers a longer stop.
 _SDK_REQUEST_TIMEOUT_SEC = 120
 # Hyperbrowser's own exec timeout ends the command first; this bound only
 # stops a lost connection from blocking exec past the limit.

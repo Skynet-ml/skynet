@@ -11,7 +11,7 @@ import asyncio
 import itertools
 import shlex
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -379,6 +379,27 @@ async def _late() -> None:
         await asyncio.wait(set(hyperbrowser._LATE_TASKS))
 
 
+async def _until(done: Callable[[], bool]) -> None:
+    """Wait until a check passes, then wait for the background tasks.
+
+    Background work runs settles and releases in real threads, so a fixed
+    number of loop turns can end before it does.
+
+    Args:
+        done: The check that passes when the background work ended.
+
+    Raises:
+        AssertionError: The check did not pass in 5 seconds.
+    """
+    for _ in range(500):
+        if done():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("The background work did not end in 5 seconds.")
+    await _late()
+
+
 def test_hyperbrowser_is_billable_dev_only_and_has_a_usage_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Meter Hyperbrowser, find its usage adapter, and refuse it in production.
 
@@ -653,9 +674,10 @@ async def test_the_lifetime_cap_stops_the_box(
     await env.start()
     await asyncio.sleep(0)
     assert slept == [left]
+    cap = env._cap
+    assert cap is not None
     ring.set()
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await asyncio.wait_for(cap, 5)
     assert fake_sdk.boxes[0].stopped
     assert made[0].names()[-3:] == ["stopped", "report", "settle"]
     with pytest.raises(RuntimeError, match="not running"):
@@ -960,9 +982,7 @@ async def test_a_create_past_the_grace_is_stopped_when_it_returns(
         await start
     assert made[0].names() == ["reserve", "sent"]
     fake_sdk.create_gate.set()
-    for _ in range(10):
-        await asyncio.sleep(0)
-    await _late()
+    await _until(lambda: "settle" in made[0].names())
     assert made[0].names() == ["reserve", "sent", "confirm", "stopped", "report", "settle"]
     assert fake_sdk.boxes[0].stopped
 
@@ -986,9 +1006,7 @@ async def test_a_create_past_the_grace_that_fails_keeps_the_hold(
         await start
     fake_sdk.create_error = FakeHyperbrowserError("server", status_code=503)
     fake_sdk.create_gate.set()
-    for _ in range(10):
-        await asyncio.sleep(0)
-    await _late()
+    await _until(lambda: "fail" in made[0].names())
     assert made[0].names() == ["reserve", "sent", "fail"]
     assert made[0].calls[-1] == ("fail", False)
     assert fake_sdk.boxes == []
@@ -1029,11 +1047,7 @@ async def test_a_reservation_past_the_cancel_grace_is_released(monkeypatch: pyte
         await start
     assert made == []
     gate.set()
-    for _ in range(500):
-        if made and made[0].calls:
-            break
-        await asyncio.sleep(0.01)
-    await _late()
+    await _until(lambda: bool(made and made[0].calls))
     assert made[0].calls == [("fail", False)]
     assert CLOUD.create_calls == 0
 
@@ -1049,6 +1063,20 @@ async def test_the_real_reservation_stays_pending_after_a_late_failed_create(
         monkeypatch: The pytest monkeypatch fixture.
     """
     monkeypatch.setattr(hyperbrowser, "_CANCEL_GRACE_SEC", 0.01)
+    failed: list[bool] = []
+    real_fail = HyperbrowserUsageReservation.fail
+
+    def fail(self: HyperbrowserUsageReservation, absent: bool = False) -> None:
+        """Record the late fail call, then run the real one.
+
+        Args:
+            self: The real reservation.
+            absent: True when the provider saw a refused create.
+        """
+        real_fail(self, absent)
+        failed.append(absent)
+
+    monkeypatch.setattr(HyperbrowserUsageReservation, "fail", fail)
     fake_sdk.create_gate = asyncio.Event()
     start = asyncio.ensure_future(_ledger_env(ledger).start())
     await fake_sdk.create_started.wait()
@@ -1057,9 +1085,8 @@ async def test_the_real_reservation_stays_pending_after_a_late_failed_create(
         await start
     fake_sdk.create_error = FakeHyperbrowserError("server", status_code=503)
     fake_sdk.create_gate.set()
-    for _ in range(10):
-        await asyncio.sleep(0)
-    await _late()
+    await _until(lambda: bool(failed))
+    assert failed == [False]
     assert _state(ledger) == "pending"
 
 

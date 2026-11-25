@@ -62,8 +62,10 @@ _MIB_PER_GIB = Decimal(1024)
 # Hyperbrowser publishes no maximum timeout; this is Skynet's own ceiling.
 _MAX_TIMEOUT_MINUTES = 24 * 60
 # The stop call can end after the timeout ends, so the hold funds this much
-# more. It equals the provider's 120 s SDK request timeout, so a slow stop
-# that still succeeds stays inside the funded time.
+# more. It equals the provider's 120 s SDK request timeout, so it covers a
+# slow stop in the normal case. httpx applies that timeout to each phase of
+# the request, not to the whole request, so a stop can still run longer; the
+# settle then clamps the bill to the funded time and flags ``over_funded``.
 _LIFETIME_MARGIN_MS = 120_000
 
 
