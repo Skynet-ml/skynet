@@ -3,6 +3,8 @@
 Runs only in the trusted parent, with the token of the user's GitHub
 connection. The ``repo`` scope that connection already asks for allows
 ``POST /user/repos`` and pushes, so no new OAuth permission is needed.
+The first-commit push works for every repository host; GitLab and Bitbucket
+create their repositories in their own modules.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from ..api.errors import DomainError
 from .github import API_URL, PROVIDER, _headers
 from .github_publish import _NO_LFS, COMMIT_AUTHOR
-from .github_repo import GITHUB_HOST, RepoFetchError, _git, git_auth_env
+from .github_repo import RepoFetchError, _git, git_auth_env, git_host
 from .transport import get_json, request
 
 
@@ -120,7 +122,7 @@ def _safe_path(raw: str) -> PurePosixPath:
     return path
 
 
-def _checked_paths(files: dict[str, str]) -> dict[str, PurePosixPath]:
+def checked_paths(files: dict[str, str]) -> dict[str, PurePosixPath]:
     """Check every path of the first commit before anything is created.
 
     Args:
@@ -145,6 +147,7 @@ def push_initial_commit(
     token: str | None,
     *,
     remote: str | None = None,
+    provider: str = PROVIDER,
 ) -> str:
     """Push ``files`` as the first commit of ``branch`` in an empty repository.
 
@@ -152,12 +155,13 @@ def push_initial_commit(
     commit with exactly these files, that commit is returned and nothing is pushed.
 
     Args:
-        repository: ``owner/name``.
+        repository: The repository path on its host.
         branch: Branch to create, normally the default branch.
         files: Repository-relative path to text content.
         message: Commit message.
-        token: GitHub token; ``None`` for a local remote.
+        token: Host token; ``None`` for a local remote.
         remote: Push URL override, used by tests with a local repository.
+        provider: ``github``, ``gitlab`` or ``bitbucket``.
 
     Returns:
         The 40-character commit id on ``branch``.
@@ -166,12 +170,13 @@ def push_initial_commit(
         RepoCreateError: When ``files`` is empty or has a bad path, the branch
             already holds other content, or git fails.
     """
-    paths = _checked_paths(files)
-    environment = git_auth_env(token)
+    paths = checked_paths(files)
+    origin, user = git_host(provider)
+    environment = git_auth_env(token, origin, user)
     workdir = Path(tempfile.mkdtemp(prefix="app-create-"))
     try:
         _git(["init", "--quiet"], workdir, environment)
-        _git(["remote", "add", "origin", remote or f"{GITHUB_HOST}/{repository}.git"], workdir, environment)
+        _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], workdir, environment)
         for raw, path in paths.items():
             target = workdir.joinpath(*path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -224,7 +229,7 @@ def create_repository_with_files(
     Raises:
         RepoCreateError: When creation or the first push fails.
     """
-    _checked_paths(files)
+    checked_paths(files)
     full_name, branch = create_repository(token, name, private=private, description=description)
     commit = push_initial_commit(full_name, branch, files, message, token, remote=remote)
     return CreatedRepository(full_name=full_name, default_branch=branch, commit=commit)

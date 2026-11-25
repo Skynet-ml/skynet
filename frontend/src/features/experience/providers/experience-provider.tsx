@@ -13,7 +13,7 @@ import { DEFAULT_LEVEL, normalizeLevel, type ExperienceLevel } from "../lib/abst
 import { clearIntakeDraft, parseIntakeAnswers, type IntakeAnswers } from "../lib/intake";
 
 interface ExperienceContextValue {
-  /** The user's level; Guided until (and unless) the server says otherwise. */
+  /** The user's level; the default until (and unless) the server says otherwise. */
   level: ExperienceLevel;
   /** True once the server answered, or failed to, for this session. */
   loaded: boolean;
@@ -123,7 +123,7 @@ export function useExperienceOptional(): ExperienceContextValue | null {
   return React.useContext(ExperienceContext);
 }
 
-/** The user's abstraction level; Guided outside the provider or before it loads. */
+/** The user's abstraction level; the default outside the provider or before it loads. */
 export function useExperienceLevel(): ExperienceLevel {
   return React.useContext(ExperienceContext)?.level ?? DEFAULT_LEVEL;
 }

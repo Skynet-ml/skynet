@@ -10,10 +10,10 @@ import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
 import { ForkButton } from "./fork-button";
 
-import { autoResizeTextarea } from "./auto-resize";
 import { automaticTurnBody } from "./automatic-turn";
-import { Textarea } from "@/shared/ui/primitives/textarea";
-import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
+import { TEXTAREA_SURFACE_CLASS } from "@/shared/ui/primitives/textarea";
+import { RichMarkdownEditor } from "./rich-markdown/editor";
+import { enterIsEditing } from "./rich-markdown/rules";
 
 import { CollapsibleMessage } from "./collapsible-message";
 import { MessageTime } from "./message-actions";
@@ -130,7 +130,7 @@ export function UserBubble({
           >
             <CollapsibleMessage>
               <React.Suspense fallback={<span className="whitespace-pre-wrap">{text}</span>}>
-                <MessageMarkdown content={text} />
+                <MessageMarkdown content={text} tone="user-message" />
               </React.Suspense>
             </CollapsibleMessage>
           </div>
@@ -192,7 +192,7 @@ function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number
           </p>
           <CollapsibleMessage>
             <React.Suspense fallback={<span className="whitespace-pre-wrap">{body}</span>}>
-              <MessageMarkdown content={body} />
+              <MessageMarkdown content={body} tone="user-message" />
             </React.Suspense>
           </CollapsibleMessage>
         </div>
@@ -224,15 +224,10 @@ export function UserBubbleEditor({
   onCancel,
   disabled,
 }: UserBubbleEditorProps) {
-  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   // Line comments stay on the message while the user edits its text.
   const { rest, comments } = splitLineComments(value);
   const draft = splitPastes(rest);
   const change = (next: SplitMessage) => onChange(joinLineComments(joinPastes(next), comments));
-
-  React.useEffect(() => {
-    autoResizeTextarea(textareaRef.current);
-  }, [value]);
 
   return (
     <div className="flex justify-end">
@@ -269,29 +264,28 @@ export function UserBubbleEditor({
             ))}
           </div>
         )}
-        <MarkdownPreviewField value={draft.text}>
-          <Textarea
-            ref={textareaRef}
-            value={draft.text}
-            onChange={(e) => {
-              change({ ...draft, text: e.target.value });
-              autoResizeTextarea(e.target);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                onSubmit();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                onCancel();
-              }
-            }}
-            className="max-h-[120px] min-h-[40px]"
-            rows={1}
-            autoFocus
-            dir="auto"
-          />
-        </MarkdownPreviewField>
+        <RichMarkdownEditor
+          value={draft.text}
+          onChange={(text) => change({ ...draft, text })}
+          onKeyDown={(e, view) => {
+            // Enter sends, as in the composer; in a list or code it edits the text.
+            const plain = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
+            if (e.key === "Enter" && plain && !enterIsEditing(view.state)) {
+              onSubmit();
+              return true;
+            }
+            if (e.key === "Escape") {
+              onCancel();
+              return true;
+            }
+            return false;
+          }}
+          autoFocus
+          className={cn(
+            TEXTAREA_SURFACE_CLASS,
+            "block max-h-[120px] min-h-[40px] overflow-y-auto focus:border-ring focus:ring-[3px] focus:ring-ring/50",
+          )}
+        />
         <div className="flex justify-end gap-1.5">
           <button type="button" onClick={onCancel} className={USER_BUBBLE_EDIT_CANCEL_CLASS}>
             {msg("shared.agent.cancel")}

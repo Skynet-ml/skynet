@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Reorder, useDragControls } from "framer-motion";
+import { Reorder, useDragControls } from "motion/react";
 import {
   ArrowBendDownRight,
   DotsSixVertical,

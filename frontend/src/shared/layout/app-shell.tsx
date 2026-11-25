@@ -4,7 +4,7 @@ import * as React from "react";
 import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import { List } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
@@ -18,6 +18,7 @@ import { JobsStreamProvider } from "@/shared/hooks/use-jobs-stream";
 import { PageContainer } from "@/shared/layout/page-container";
 import { MobileShell } from "@/shared/layout/mobile-shell";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
+import { BalanceChip } from "@/features/billing";
 import { NotificationBell } from "@/features/notifications";
 import { ResourceModeSwitch } from "@/shared/ui/resource-mode-switch";
 import {
@@ -209,6 +210,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-1.5" dir={dir}>
+          <BalanceChip />
           <ResourceModeSwitch />
           <NotificationBell />
           <Button

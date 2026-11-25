@@ -31,7 +31,7 @@ import { keptOriginals } from "@/shared/ui/agent/file-originals";
 import { splitPastes } from "@/shared/ui/agent/pasted-text";
 import { withAutoReviewDenied } from "@/shared/ui/agent/denied-count";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
-import { CAPACITY_ERROR_CODE } from "@/shared/ui/agent/capacity-retry";
+import { CAPACITY_ERROR_CODE, PROVIDER_QUOTA_ERROR_CODE } from "@/shared/ui/agent/capacity-retry";
 import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/steer-queue";
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
 
@@ -1006,7 +1006,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                     ? msg("agent.error.context_too_long")
                     : code === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
                       ? msg("agent.error.insufficient_funds")
-                      : code === CAPACITY_ERROR_CODE
+                      : code === PROVIDER_QUOTA_ERROR_CODE
+                        ? msg("agent.error.provider_quota")
+                        : code === CAPACITY_ERROR_CODE
                         ? msg("agent.error.capacity")
                         : message),
                 errorCode: code ?? null,
@@ -1455,7 +1457,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                     ? msg("agent.compact.nothing")
                     : code === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
                       ? msg("agent.error.insufficient_funds")
-                      : message,
+                      : code === PROVIDER_QUOTA_ERROR_CODE
+                        ? msg("agent.error.provider_quota")
+                        : message,
                 );
               },
             },

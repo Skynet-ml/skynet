@@ -4,7 +4,7 @@ import { CountBadge, CountPill } from "@/shared/ui/count-badge";
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "motion/react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import {
   PaperPlaneTilt,

@@ -18,10 +18,10 @@ Sie können beide Felder bearbeiten. Der Assistent überschreibt Ihre Änderunge
 
 Skynet ist Optimize Anything: Jeder Durchlauf optimiert ein Repository. Wählen Sie eine von zwei Möglichkeiten:
 
-- **Repository verwenden**: Code in einem GitHub-Repository optimieren, das Sie verbunden haben.
-- **Neues Repository erstellen**: Skynet erstellt ein neues GitHub-Repository in Ihrem Konto. Der Assistent schreibt aus Ihrer Aufgabe und Ihren Daten eine erste Lösung. Diese Lösung ist die Ausgangsversion.
+- **Repository verwenden**: Code in einem GitHub-, GitLab- oder Bitbucket-Repository optimieren, das Sie verbunden haben.
+- **Neues Repository erstellen**: Skynet erstellt ein neues Repository in Ihrem GitHub-, GitLab- oder Bitbucket-Konto. Der Assistent schreibt aus Ihrer Aufgabe und Ihren Daten eine erste Lösung. Diese Lösung ist die Ausgangsversion.
 
-Verbinden Sie GitHub unter **Einstellungen → Connectors**, bevor Sie beginnen.
+Verbinden Sie GitHub, GitLab oder Bitbucket unter **Einstellungen → Connectors**, bevor Sie beginnen.
 
 ### Repository verwenden
 
@@ -36,10 +36,10 @@ Legen Sie diese Felder fest:
 
 Legen Sie diese Felder fest:
 
-- **Name**: der Name des neuen Repositorys. Ihr GitHub-Konto darf noch kein Repository mit diesem Namen haben.
-- **Privat** oder **Öffentlich**: wer das Repository auf GitHub sehen kann.
+- **Name**: der Name des neuen Repositorys. Ihr Konto beim Host darf noch kein Repository mit diesem Namen haben.
+- **Privat** oder **Öffentlich**: wer das Repository beim Host sehen kann.
 
-Skynet pusht jeden Kandidaten auf einen eigenen Branch. Der Branch `skynet/best` zeigt auf die beste Version.
+Auf GitHub pusht Skynet jeden Kandidaten auf einen eigenen Branch. Der Branch `skynet/best` zeigt auf die beste Version. Auf GitLab und Bitbucket öffnet Skynet einen Merge Request (Bitbucket: Pull Request) mit der besten Version.
 
 ## Schritt 2: Eingaben
 

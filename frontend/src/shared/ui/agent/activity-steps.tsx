@@ -50,6 +50,16 @@ const SUMMARY_KEYS = {
 
 const ERROR_TONE = "text-[var(--danger)]";
 
+// Codex's activity rows carry no padding and sit 4px apart; the fixed line
+// height keeps a row as tall when it finishes as while it runs.
+const ROW =
+  "flex w-full min-w-0 items-center gap-2 py-0.5 text-start text-[0.8125rem] leading-5 text-muted-foreground";
+// Codex's row chevron turns on its relaxed 300ms and shows only on hover or
+// once open. Keyboard focus and touch screens have no hover, so they show it too.
+const CHEVRON = "size-3 shrink-0 transition-[transform,opacity] duration-300";
+const CHEVRON_HIDDEN =
+  "rtl:-scale-x-100 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100";
+
 interface StepRowProps {
   icon: Icon;
   /** Verb and target, e.g. "Edited metric.py"; present tense while running. */
@@ -103,21 +113,11 @@ export function StepRow({
       {detail && <span className="min-w-0 truncate opacity-70">{detail}</span>}
       {marks}
       {canOpen && (
-        <CaretRight
-          className={cn(
-            "size-3 shrink-0 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
-            // Keyboard focus and touch screens have no hover, so they show it too.
-            open
-              ? "rotate-90"
-              : "rtl:-scale-x-100 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
-          )}
-          aria-hidden
-        />
+        <CaretRight className={cn(CHEVRON, open ? "rotate-90" : CHEVRON_HIDDEN)} aria-hidden />
       )}
     </>
   );
-  const lineClass =
-    "group flex w-full min-w-0 items-center gap-2 py-1 text-start text-[0.8125rem] text-muted-foreground";
+  const lineClass = cn("group", ROW);
   if (!canOpen && onSelect) {
     return (
       <button
@@ -209,7 +209,7 @@ export function ActivityGroup({
         type="button"
         onClick={() => setChoice(!open)}
         aria-expanded={open}
-        className="flex w-full min-w-0 cursor-pointer items-center gap-2 py-1 text-start text-[0.8125rem] text-muted-foreground transition-colors hover:text-foreground"
+        className={cn("group cursor-pointer transition-colors hover:text-foreground", ROW)}
       >
         {summary.failed ? (
           <Warning className={cn("size-3.5 shrink-0", ERROR_TONE)} aria-hidden />
@@ -219,16 +219,13 @@ export function ActivityGroup({
         <span className={cn("truncate", summary.running && "agent-shimmer-text")}>
           {(summary.running && activeLabel) || label}
         </span>
-        <CaretRight
-          className={cn(
-            "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
-            open ? "rotate-90" : "rtl:-scale-x-100",
-          )}
-          aria-hidden
-        />
+        <CaretRight className={cn(CHEVRON, open ? "rotate-90" : CHEVRON_HIDDEN)} aria-hidden />
       </button>
       <Reveal open={open}>
-        <FadeScroll>{children}</FadeScroll>
+        {/* Codex's guide line down the open group's rows, from the first row on. */}
+        <div className="relative before:pointer-events-none before:absolute before:start-2 before:top-3 before:bottom-0 before:border-s before:border-border before:content-['']">
+          <FadeScroll>{children}</FadeScroll>
+        </div>
       </Reveal>
     </div>
   );
@@ -261,8 +258,8 @@ const EDGE_FADE = "1.5rem";
 
 /**
  * An open burst's rows, as in Codex: at most 224px tall, scrolling inside,
- * with the edge that has more rows past it faded out. No gap: each row's own
- * ``py-1`` spaces it, so rows sit as far apart inside a group as outside (SKY-743).
+ * with the edge that has more rows past it faded out. Codex indents them 24px
+ * and sets them 12px apart; each row's own ``py-0.5`` holds 4px of that.
  */
 function FadeScroll({ children }: { children: React.ReactNode }) {
   const ref = React.useRef<HTMLDivElement>(null);
@@ -284,7 +281,7 @@ function FadeScroll({ children }: { children: React.ReactNode }) {
       ref={ref}
       onScroll={measure}
       style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
-      className="flex max-h-56 flex-col overflow-y-auto ps-2"
+      className="flex max-h-56 flex-col gap-2 overflow-y-auto pt-2.5 ps-6"
     >
       {children}
     </div>

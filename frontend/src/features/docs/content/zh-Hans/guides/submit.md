@@ -18,10 +18,10 @@
 
 Skynet 就是 Optimize Anything：每次运行都会优化一个仓库。请从两个选项中选择一个：
 
-- **使用现有仓库**：优化你已连接的 GitHub 仓库中的代码。
-- **创建新仓库**：Skynet 会在你的账户中创建一个新的 GitHub 仓库。助手根据你的任务和数据编写第一个解决方案。这个解决方案就是起始版本。
+- **使用现有仓库**：优化你已连接的 GitHub、GitLab 或 Bitbucket 仓库中的代码。
+- **创建新仓库**：Skynet 会在你的 GitHub、GitLab 或 Bitbucket 账户中创建一个新仓库。助手根据你的任务和数据编写第一个解决方案。这个解决方案就是起始版本。
 
-开始之前，请在 **设置 → 连接器** 中连接 GitHub。
+开始之前，请在 **设置 → 连接器** 中连接 GitHub、GitLab 或 Bitbucket。
 
 ### 使用现有仓库
 
@@ -36,10 +36,10 @@ Skynet 就是 Optimize Anything：每次运行都会优化一个仓库。请从�
 
 设置以下字段：
 
-- **名称**：新仓库的名称。你的 GitHub 账户中不能已有同名仓库。
-- **私有** 或 **公开**：谁可以在 GitHub 上看到该仓库。
+- **名称**：新仓库的名称。你在托管平台上的账户中不能已有同名仓库。
+- **私有** 或 **公开**：谁可以在托管平台上看到该仓库。
 
-Skynet 会把每个候选推送到各自的分支。`skynet/best` 分支指向最佳版本。
+在 GitHub 上，Skynet 会把每个候选推送到各自的分支。`skynet/best` 分支指向最佳版本。在 GitLab 和 Bitbucket 上，Skynet 会用最佳版本打开一个 merge request（Bitbucket 上为 pull request）。
 
 ## 第 2 步：输入
 

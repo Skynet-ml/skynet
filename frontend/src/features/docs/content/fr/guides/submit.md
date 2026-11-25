@@ -18,10 +18,10 @@ Vous pouvez modifier les deux champs. L'assistant IA n'écrase pas vos modificat
 
 Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Sélectionnez l'un de ces deux choix :
 
-- **Utiliser un dépôt** : optimiser le code d'un dépôt GitHub que vous avez connecté.
-- **Créer un nouveau dépôt** : Skynet crée un nouveau dépôt GitHub dans votre compte. L'assistant IA rédige une première solution à partir de votre tâche et de vos données. Cette solution est la version de départ.
+- **Utiliser un dépôt** : optimiser le code d'un dépôt GitHub, GitLab ou Bitbucket que vous avez connecté.
+- **Créer un nouveau dépôt** : Skynet crée un nouveau dépôt dans votre compte GitHub, GitLab ou Bitbucket. L'assistant IA rédige une première solution à partir de votre tâche et de vos données. Cette solution est la version de départ.
 
-Connectez GitHub dans **Paramètres → Connecteurs** avant de commencer.
+Connectez GitHub, GitLab ou Bitbucket dans **Paramètres → Connecteurs** avant de commencer.
 
 ### Utiliser un dépôt
 
@@ -36,10 +36,10 @@ Renseignez ces champs :
 
 Renseignez ces champs :
 
-- **Nom** : le nom du nouveau dépôt. Votre compte GitHub ne doit pas déjà avoir un dépôt de ce nom.
-- **Privé** ou **Public** : qui peut voir le dépôt sur GitHub.
+- **Nom** : le nom du nouveau dépôt. Votre compte sur l'hébergeur ne doit pas déjà avoir un dépôt de ce nom.
+- **Privé** ou **Public** : qui peut voir le dépôt sur l'hébergeur.
 
-Skynet pousse chaque candidat sur sa propre branche. La branche `skynet/best` pointe vers la meilleure version.
+Sur GitHub, Skynet pousse chaque candidat sur sa propre branche. La branche `skynet/best` pointe vers la meilleure version. Sur GitLab et Bitbucket, Skynet ouvre une merge request (Bitbucket : pull request) avec la meilleure version.
 
 ## Étape 2 : Entrées
 

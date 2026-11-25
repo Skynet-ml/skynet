@@ -90,7 +90,7 @@ O Auto lê o texto de feedback do seu avaliador.
 
 | A sua situação                            | Use                                                                                     |
 | ----------------------------------------- | --------------------------------------------------------------------------------------- |
-| Você tem código em um repositório do GitHub | **Usar um repositório**. O código no branch ou commit que você escolhe é o ponto de partida. |
+| Você tem código em um repositório do GitHub, GitLab ou Bitbucket | **Usar um repositório**. O código no branch ou commit que você escolhe é o ponto de partida. |
 | Você tem apenas uma tarefa e dados        | **Criar um repositório novo**. O Skynet escreve uma primeira solução. Esse é o ponto de partida. |
 
 > [!WARNING]

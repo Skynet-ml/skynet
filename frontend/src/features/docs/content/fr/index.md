@@ -6,8 +6,8 @@ Chaque exécution optimise un dépôt. Vous pouvez commencer de deux façons :
 
 | Départ                  | Ce qui se passe                                                                                          |
 | ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| Utiliser un dépôt       | Skynet modifie les fichiers des chemins que vous autorisez, dans un dépôt GitHub que vous connectez.      |
-| Créer un nouveau dépôt  | Vous fournissez une tâche et des données. Skynet crée un nouveau dépôt GitHub dans votre compte et rédige une première solution. |
+| Utiliser un dépôt       | Skynet modifie les fichiers des chemins que vous autorisez, dans un dépôt GitHub, GitLab ou Bitbucket que vous connectez.      |
+| Créer un nouveau dépôt  | Vous fournissez une tâche et des données. Skynet crée un nouveau dépôt dans votre compte GitHub, GitLab ou Bitbucket et rédige une première solution. |
 
 Le code du dépôt peut être de toute nature : une application, un service, un script ou une bibliothèque. Il peut utiliser n'importe quelle bibliothèque.
 

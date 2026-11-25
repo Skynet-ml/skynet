@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
 import { FileMagnifyingGlassIcon } from "@phosphor-icons/react/dist/ssr/FileMagnifyingGlass";
 import { HighlighterIcon } from "@phosphor-icons/react/dist/ssr/Highlighter";
 import { ParagraphIcon } from "@phosphor-icons/react/dist/ssr/Paragraph";

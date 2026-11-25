@@ -57,6 +57,7 @@ from ...api.interview_model import interview_model_id
 from ...api.model_catalog import agent_model_id, catalog_snapshot
 from ...api.suggest_model import byok_suggest_model, cli_suggest_model
 from ...billing.cli_dispatch import NEXT_PROMPT_ROLE, THINKING_LABEL_ROLE
+from ...billing.model_dispatch import BYOK_FUNDS_EXHAUSTED
 from ...brand import APP_NAME
 from ...config import settings
 from ...constants import TOKEN_SOURCE_BYOK
@@ -82,7 +83,7 @@ from .code import _agent_error_payload, _format_agent_error, _reply_language, _r
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
 from .feedback import FeedbackTarget, send_feedback_tool
-from .github_mcp import github_repo_tools
+from .github_mcp import github_repo_tools, tool_from_mcp
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
 from .secret_request import SECRET_REQUEST_TOOL, secret_request_problem, secret_request_result, secret_request_tool
@@ -2769,7 +2770,8 @@ SCREEN_FOCUS: dict[str, str] = {
         "When ``repo_provider`` is ``gitlab`` or ``bitbucket``, find the repository with "
         "``list_host_repositories_connectors`` (pass ``repo_provider`` as ``provider`` and the name as ``search``), copy "
         "its ``full_name``, and tell the user to connect that host on this screen when the listing says it "
-        "is not linked. Skynet creates new repositories only on GitHub. "
+        "is not linked. You create new repositories only on GitHub; on GitLab or Bitbucket, tell the user to use "
+        "Create a new repository on this screen. "
         "When ``repo_provider`` is ``github`` or absent and ``github_connected`` is true, find the repository the user names with "
         "``list_github_repositories`` (pass its name as ``search``) and copy its ``full_name``. The search "
         "matches words in the name and the description. When it finds nothing, or the user describes the "
@@ -3791,9 +3793,7 @@ async def _drive_generalist_agent(
         screen = wizard_state.get("wizard_screen") if "wizard_screen" in wizard_state else None
         dspy_tools = [
             _wrap_tool_with_approval(
-                note_sample_language(
-                    scope_wizard_tool(dspy.Tool.from_mcp_tool(session, spec), wizard_state), reply_language
-                ),
+                note_sample_language(scope_wizard_tool(tool_from_mcp(session, spec), wizard_state), reply_language),
                 trust_mode=trust_mode,
                 registry=registry,
                 emit=emit,
@@ -3985,6 +3985,39 @@ def _is_capacity_error(exc: BaseException) -> bool:
     return found
 
 
+def _is_spent_quota(exc: BaseException) -> bool:
+    """Tell whether a turn failed because the paying account has no funds left.
+
+    Args:
+        exc: The exception that ended the turn.
+
+    Returns:
+        True for a provider quota or credit refusal anywhere in the chain.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        leaf = stack.pop()
+        if id(leaf) in seen:
+            continue
+        seen.add(id(leaf))
+        text = str(leaf).lower()
+        if any(pattern in text for pattern in _SPENT_FUNDS_PATTERNS):
+            return True
+        if isinstance(leaf, BaseExceptionGroup):
+            stack.extend(leaf.exceptions)
+        stack.extend(linked for linked in (leaf.__cause__, leaf.__context__) if linked is not None)
+    return False
+
+
+# A BYOK key or provider account out of credits gets its own code, not the
+# Skynet wallet's: adding Skynet funds does not fix it (Gilad, 2026-11-25).
+# The relay's managed refusal (``managed_funds_exhausted``) is the platform's
+# problem, not the user's, so it is not in this list.
+_SPENT_FUNDS_PATTERNS = (*_QUOTA_PATTERNS, BYOK_FUNDS_EXHAUSTED, "insufficient credits")
+PROVIDER_QUOTA_CODE = "provider_quota"
+
+
 def _turn_error_payload(exc: BaseException) -> dict[str, str]:
     """Build the ``error`` event data for a failed turn.
 
@@ -3992,11 +4025,15 @@ def _turn_error_payload(exc: BaseException) -> dict[str, str]:
         exc: The exception that ended the turn.
 
     Returns:
-        The agent error payload. A capacity failure without another code gets
-        ``code="capacity"``, so the chat counts down and retries.
+        The agent error payload. A spent provider quota or credit gets
+        ``code="provider_quota"``. A capacity failure without
+        another code gets ``code="capacity"``, so the chat counts down and
+        retries.
     """
     payload = _agent_error_payload(exc)
-    if "code" not in payload and _is_capacity_error(exc):
+    if "code" not in payload and _is_spent_quota(exc):
+        payload["code"] = PROVIDER_QUOTA_CODE
+    elif "code" not in payload and _is_capacity_error(exc):
         payload["code"] = "capacity"
     return payload
 

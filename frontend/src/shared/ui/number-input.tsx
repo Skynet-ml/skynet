@@ -19,6 +19,10 @@ interface NumberInputProps {
   disabled?: boolean;
   /** ``"sm"`` for dense settings rows: 32px on desktop instead of 36px. */
   size?: "default" | "sm";
+  /** Digits after the point. Defaults to two for a fractional step, none otherwise. */
+  decimals?: number;
+  /** The field's accessible name when no ``<label htmlFor>`` points at it. */
+  "aria-label"?: string;
 }
 
 export function NumberInput({
@@ -32,9 +36,10 @@ export function NumberInput({
   className,
   disabled,
   size = "default",
+  decimals = step < 1 ? Math.max(String(step).split(".")[1]?.length ?? 0, 2) : 0,
+  "aria-label": ariaLabel,
 }: NumberInputProps) {
   const numValue = typeof value === "number" ? value : 0;
-  const decimals = step < 1 ? Math.max(String(step).split(".")[1]?.length ?? 0, 2) : 0;
   const round = (n: number) => (decimals ? parseFloat(n.toFixed(decimals)) : n);
   const clamp = (n: number) => {
     if (min != null && n < min) return min;
@@ -105,6 +110,7 @@ export function NumberInput({
       </button>
       <input
         id={id}
+        aria-label={ariaLabel}
         type="text"
         inputMode={decimals ? "decimal" : "numeric"}
         value={text}

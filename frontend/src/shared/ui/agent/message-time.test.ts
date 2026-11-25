@@ -4,8 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  formatMessageAge,
-  formatMessageDate,
+  messageTimeText,
   minuteClockNow,
   parseMessageTime,
   separatorParts,
@@ -18,32 +17,43 @@ const at = (y: number, mo: number, d: number, h: number, mi: number) =>
 const now = at(2026, 10, 12, 14, 42);
 const MIN = 60_000;
 
-test("shows a recent message as how long ago it was sent", () => {
-  assert.equal(formatMessageAge(now - 20_000, now, "en-US"), "now");
-  assert.equal(formatMessageAge(now - 5 * MIN, now, "en-US"), "5 minutes ago");
-  assert.equal(formatMessageAge(now - 3 * 60 * MIN, now, "en-US"), "3 hours ago");
-  assert.equal(formatMessageAge(now - 26 * 60 * MIN, now, "en-US"), "1 day ago");
-  assert.equal(formatMessageAge(now - 6 * 24 * 60 * MIN, now, "en-US"), "6 days ago");
+const plain = (text: string) => text.replace(/[\u202f\u00a0]/g, " ");
+
+test("shows a message under 58.5 minutes old as its narrow age (the Claude app's rule)", () => {
+  const age = (ms: number) => messageTimeText(ms, now, "en-US")?.label;
+  assert.equal(age(now - 20_000), "now");
+  assert.equal(age(now - 59_000), "now");
+  assert.equal(age(now - 90_000), "1m ago");
+  assert.equal(age(now - 91_000), "2m ago");
+  assert.equal(age(now - 5 * MIN), "5m ago");
+  assert.equal(age(now - 58 * MIN), "58m ago");
+  assert.equal(age(now + 30_000), "now");
 });
 
-test("shows the day and month from a week on, and the year only for other years", () => {
-  assert.equal(formatMessageAge(at(2026, 10, 5, 9, 3), now, "en-US"), "Nov 5");
-  assert.equal(formatMessageAge(at(2025, 10, 5, 9, 3), now, "en-US"), "Nov 5, 2025");
+test("gives a recent message the short date and time as its tooltip", () => {
+  const text = messageTimeText(now - 5 * MIN, now, "en-US")!;
+  assert.equal(plain(text.tooltip), "Nov 12, 2026, 2:37 PM");
+  assert.equal(plain(text.spoken), "Thursday, November 12, 2026 at 2:37 PM");
 });
 
-test("never shows a future time", () => {
-  assert.equal(formatMessageAge(now + 5 * MIN, now, "en-US"), "now");
+test("shows an older or future message as its time, with the full date as its tooltip", () => {
+  for (const ms of [now - 59 * MIN, at(2025, 10, 5, 9, 3) + 4_000, now + 2 * MIN]) {
+    const text = messageTimeText(ms, now, "en-US")!;
+    const d = new Date(ms);
+    assert.equal(
+      plain(text.label),
+      plain(d.toLocaleTimeString("en-US", { hour: "numeric", minute: "numeric" })),
+    );
+  }
+  const old = messageTimeText(at(2025, 10, 5, 9, 3) + 4_000, now, "en-US")!;
+  assert.equal(plain(old.tooltip), "Wednesday, November 5, 2025 at 9:03:04 AM");
+  assert.equal(old.spoken, "Wednesday, November 5, 2025");
 });
 
 test("shows no time when the message has none", () => {
-  assert.equal(formatMessageAge(undefined, now, "en-US"), "");
-  assert.equal(formatMessageAge(null, now, "en-US"), "");
-  assert.equal(formatMessageAge(Number.NaN, now, "en-US"), "");
-});
-
-test("gives the short date and time for the tooltip", () => {
-  const full = formatMessageDate(at(2026, 10, 7, 14, 42), "en-US").replace(/[\u202f\u00a0]/g, " ");
-  assert.equal(full, "Nov 7, 2026, 2:42 PM");
+  assert.equal(messageTimeText(undefined, now, "en-US"), null);
+  assert.equal(messageTimeText(null, now, "en-US"), null);
+  assert.equal(messageTimeText(Number.NaN, now, "en-US"), null);
 });
 
 test("builds each Intl formatter once and reuses it", () => {
@@ -64,15 +74,14 @@ test("builds each Intl formatter once and reuses it", () => {
   Object.assign(Intl, { DateTimeFormat: CountedDate, RelativeTimeFormat: CountedRelative });
   try {
     const formatAll = () => [
-      formatMessageAge(now - 5 * MIN, now, "fr-CA"),
-      formatMessageAge(now - 3 * 24 * 60 * MIN, now, "fr-CA"),
-      formatMessageAge(at(2026, 10, 5, 9, 3), now, "fr-CA"),
-      formatMessageDate(now, "fr-CA"),
+      messageTimeText(now - 5 * MIN, now, "fr-CA"),
+      messageTimeText(at(2026, 10, 5, 9, 3), now, "fr-CA"),
     ];
     const first = formatAll();
-    assert.equal(built, 4);
+    const once = built;
+    assert.ok(once > 0);
     assert.deepEqual(formatAll(), first);
-    assert.equal(built, 4);
+    assert.equal(built, once);
   } finally {
     Object.assign(Intl, { DateTimeFormat: real.date, RelativeTimeFormat: real.relative });
   }
@@ -149,4 +158,10 @@ test("names the day: today, a weekday, a short date, then a date with its year",
   assert.deepEqual(p(at(2026, 10, 9, 9, 5)), ["Monday", "9:05 AM", false]);
   assert.deepEqual(p(at(2026, 9, 1, 9, 5)), ["Thu, Oct 1", "9:05 AM", true]);
   assert.deepEqual(p(at(2025, 9, 1, 9, 5)), ["Oct 1, 2025", "9:05 AM", true]);
+});
+
+test("capitalizes the day name in English only, as Codex does", () => {
+  assert.equal(separatorParts(at(2026, 10, 12, 9, 5), now, "en-GB").date, "Today");
+  const fr = new Intl.RelativeTimeFormat("fr", { numeric: "auto" }).format(0, "day");
+  assert.equal(separatorParts(at(2026, 10, 12, 9, 5), now, "fr").date, fr);
 });

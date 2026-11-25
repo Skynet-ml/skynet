@@ -6,6 +6,9 @@
 /** The `error` event code the backend sends when the model provider has no capacity (SKY-705). */
 export const CAPACITY_ERROR_CODE = "capacity";
 
+/** Code for a turn that failed because the model key or provider account is out of credits. */
+export const PROVIDER_QUOTA_ERROR_CODE = "provider_quota";
+
 // Each capacity failure in a row waits longer. After the fourth, the user
 // must retry by hand.
 const RETRY_DELAYS_SECONDS = [10, 30, 120, 300] as const;

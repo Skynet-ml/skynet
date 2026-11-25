@@ -7,7 +7,7 @@ import { useCompletionNotification } from "@/shared/hooks/use-completion-notific
 import { createPortal } from "react-dom";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ArrowsIn,
   ArrowsInLineVertical,
@@ -25,12 +25,10 @@ import {
   SidebarSimple,
   PencilSimple,
   Plus,
-  MagicWand,
   Wallet,
 } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Button } from "@/shared/ui/primitives/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip-button";
@@ -112,7 +110,7 @@ import { latestCompactionIndex } from "../lib/compaction";
 import { expandOnAttention } from "../lib/float-attention";
 import { forkPoints } from "../lib/fork";
 import { modelChanges } from "../lib/model-changes";
-import { outputsByToolCalls, railItemsOf } from "../lib/rail-items";
+import { railItemsOf } from "../lib/rail-items";
 import { sessionStats } from "../lib/session-stats";
 import { ChatContextUsage } from "./ChatContextUsage";
 import { QueuedComments } from "./QueuedComments";
@@ -120,11 +118,7 @@ import { CompactionHold, CompactionMarker, CompactionStatus } from "./Compaction
 import { SessionStatsCard, useSessionCard } from "./SessionStatsCard";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import {
-  getConversation,
-  isHostedConversation,
-  loadConversation,
-} from "../lib/conversation-api";
+import { getConversation, isHostedConversation, loadConversation } from "../lib/conversation-api";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
@@ -191,7 +185,6 @@ import { MinimizedPill } from "./MinimizedPill";
 import { PresenceStrip } from "./PresenceStrip";
 import { ToolCallRow } from "./ToolCallRow";
 import { ChatSourceContext } from "./JobSummaryCard";
-import { ToolsShowcase } from "./ToolsShowcase";
 import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
 import { AGENT_PROMPT_EVENT, takeQueuedAgentPrompt } from "../lib/prompt-queue";
@@ -214,7 +207,6 @@ const RICH_CARD_TOOLS = new Set<string>([
 // play the splash banner, then route to the new optimization's details.
 const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_post"]);
 const NO_COMMENTS: readonly LineComment[] = [];
-const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
 /** Whether a composer file is read into dataset rows before it becomes a file card. */
 function isDatasetFile(file: File): boolean {
@@ -475,7 +467,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // need their before-state for the "Edited N files" card.
         wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
         wizardCtx.applyAgentPatch(patch);
-        liveStateRef.current = { ...liveStateRef.current, ...mergedPatch(liveStateRef.current, patch) };
+        liveStateRef.current = {
+          ...liveStateRef.current,
+          ...mergedPatch(liveStateRef.current, patch),
+        };
       }
       const nav = ev.status === "ok" ? parseScreenNav(ev.result) : null;
       if (nav) {
@@ -513,7 +508,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onConversationTitleMissed: reloadTitleLater,
   });
   // Declared before the screen effect: a setup chat's server load reads it.
-  const liveChatRef = React.useRef({ id: agent.conversationId, messages: agent.messages, busy: false });
+  const liveChatRef = React.useRef({
+    id: agent.conversationId,
+    messages: agent.messages,
+    busy: false,
+  });
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
   // A minimized floating chat hides its thread, so a turn that ends in an
@@ -668,9 +667,17 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const live = liveChatRef.current;
       if (load.detail) {
         if (setupChatUnchanged(setupChatRef.current, live, opened)) {
-          openConversation(opened.id, keepHiddenTurns(hideKickoffs(load.detail.messages), opened.messages));
+          openConversation(
+            opened.id,
+            keepHiddenTurns(hideKickoffs(load.detail.messages), opened.messages),
+          );
         }
-      } else if (load.missing && setupChatRef.current === opened.id && live.id === opened.id && !live.busy) {
+      } else if (
+        load.missing &&
+        setupChatRef.current === opened.id &&
+        live.id === opened.id &&
+        !live.busy
+      ) {
         restartSetupChat(live.messages);
       }
     },
@@ -812,8 +819,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // A chat on the web account must not stage rows or act on the Mac's data.
   // A new chat starts on the side picked in the header.
   const { web } = useResourceMode();
-  const webChat =
-    agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
+  const webChat = agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
   const localMenu = useLocalAgentMenuModels(agent.model, webChat);
   // Not in activeBusy: that also locks the composer, which stays open during /compact.
   // It counts as busy for the live chat, so a fork that returns during it does not
@@ -902,7 +908,17 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (action === "skip") return;
     autoTurnRef.current = { id: autoFeedback.id, started: false };
     sendToAgent(autoFeedback.text);
-  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, compacting, cloned, userSpoke, sendToAgent]);
+  }, [
+    inSetup,
+    autoFeedback,
+    panelDock,
+    activeBusy,
+    backgroundBusy,
+    compacting,
+    cloned,
+    userSpoke,
+    sendToAgent,
+  ]);
   // The wizard checks the code again only once the agent finished the turn
   // the failed check started, not on the end of some other turn.
   const setFinishedAutoFeedback = wizardCtx?.setFinishedAutoFeedback;
@@ -936,22 +952,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     },
     [writeBefore, repoBase, wizardCtx?.viewChanges],
   );
-  // The user message rail. Bookmarks stay in memory, for this chat view only.
-  const railOutputs = React.useMemo(
-    () =>
-      outputsByToolCalls((m) =>
-        writeBefore ? messageEdits(m, writeBefore, repoBase).map((e) => e.path) : [],
-      ),
-    [writeBefore, repoBase],
-  );
-  const railItems = React.useMemo(
-    () => railItemsOf(agent.messages, railOutputs),
-    [agent.messages, railOutputs],
-  );
-  const [bookmarks, setBookmarks] = React.useState<{ key: number; at: ReadonlySet<number> }>({
-    key: 0,
-    at: new Set(),
-  });
+  const railItems = React.useMemo(() => railItemsOf(agent.messages), [agent.messages]);
   const changedModels = React.useMemo(() => modelChanges(agent.messages), [agent.messages]);
   // Deleting the conversation you're currently viewing must drop you back to a
   // clean slate — otherwise the panel keeps showing the just-deleted thread and
@@ -1583,7 +1584,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               )}
               onClick={() => chatFloat.onExpand(!chatFloat.expanded)}
             >
-              {chatFloat.expanded ? <CaretDown className="size-4" /> : <CaretUp className="size-4" />}
+              {chatFloat.expanded ? (
+                <CaretDown className="size-4" />
+              ) : (
+                <CaretUp className="size-4" />
+              )}
             </FloatButton>
             <FloatButton label={msg("submit.agentic_ide.dock_chat")} onClick={chatFloat.onDock}>
               <ArrowsIn className="size-4" />
@@ -1601,35 +1606,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           <span className="inline-flex size-6 shrink-0 overflow-hidden rounded-full bg-secondary">
             <AppMark className="size-full" aria-hidden="true" />
           </span>
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 leading-tight">
-              <Popover>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <PopoverTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        className="text-muted-foreground hover:text-foreground"
-                        aria-label={msg(
-                          "auto.features.agent.panel.components.generalistpanel.literal.2",
-                        )}
-                      >
-                        <MagicWand className="size-3.5" />
-                      </Button>
-                    </PopoverTrigger>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom">
-                    {msg("auto.features.agent.panel.components.generalistpanel.4")}
-                  </TooltipContent>
-                </Tooltip>
-                <PopoverContent side="bottom" align="center" sideOffset={8} className="p-0">
-                  <ToolsShowcase />
-                </PopoverContent>
-              </Popover>
-            </div>
-          </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <CopyChatMenu messages={agent.messages} />
@@ -1665,38 +1641,38 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           )}
           {/* The setup's chat is the draft's own: no history or second chat. */}
           {!inSetup && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                onClick={() => setDrawerOpen(true)}
-                className="relative text-muted-foreground hover:text-foreground"
-                aria-label={msg(
-                  "auto.features.agent.panel.components.generalistpanel.history_button",
-                )}
-              >
-                <ClockCounterClockwise className="size-3.5" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={() => setDrawerOpen(true)}
+                  className="relative text-muted-foreground hover:text-foreground"
+                  aria-label={msg(
+                    "auto.features.agent.panel.components.generalistpanel.history_button",
+                  )}
+                >
+                  <ClockCounterClockwise className="size-3.5" />
+                  {agent.backgroundBusyCount > 0 && (
+                    <CountBadge overlay aria-hidden="true">
+                      {agent.backgroundBusyCount}
+                    </CountBadge>
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                {msg("auto.features.agent.panel.components.generalistpanel.history_button")}
                 {agent.backgroundBusyCount > 0 && (
-                  <CountBadge overlay aria-hidden="true">
-                    {agent.backgroundBusyCount}
-                  </CountBadge>
+                  <>
+                    {" · "}
+                    {formatMsg("agent.parallel.background_count", {
+                      p1: agent.backgroundBusyCount,
+                    })}
+                  </>
                 )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              {msg("auto.features.agent.panel.components.generalistpanel.history_button")}
-              {agent.backgroundBusyCount > 0 && (
-                <>
-                  {" · "}
-                  {formatMsg("agent.parallel.background_count", {
-                    p1: agent.backgroundBusyCount,
-                  })}
-                </>
-              )}
-            </TooltipContent>
-          </Tooltip>
+              </TooltipContent>
+            </Tooltip>
           )}
           {!inSetup && agent.messages.length > 0 && (
             <Tooltip>
@@ -1772,150 +1748,129 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             agent.statusLabel,
             agent.pendingApproval?.id ?? "",
           ]}
-          overlay={(scrollBox) => (
-            <UserMessageRail
-              items={railItems}
-              scrollBox={scrollBox}
-              bookmarks={bookmarks.key === chatView.key ? bookmarks.at : NO_BOOKMARKS}
-              onBookmarkChange={(index, on) =>
-                setBookmarks((prev) => {
-                  const next = new Set(prev.key === chatView.key ? prev.at : []);
-                  if (on) next.add(index);
-                  else next.delete(index);
-                  return { key: chatView.key, at: next };
-                })
-              }
-            />
-          )}
+          overlay={(scrollBox) => <UserMessageRail items={railItems} scrollBox={scrollBox} />}
         >
           <ChatSourceContext.Provider value={webChat ? "hosted" : "local"}>
-          <MediaUrlContext.Provider value={resolveChatMediaUrl}>
-            <LineCommentLinkContext.Provider value={wizardCtx?.viewChanges ?? null}>
-              <ChatTranscript
-                key={chatView.key}
-                messages={agent.messages}
-                streaming={streaming}
-                editAndResend={(index, content) => {
-                  // An edit drops the turns after it, so their bookmarks go too.
-                  setBookmarks((prev) => ({
-                    key: prev.key,
-                    at: new Set([...prev.at].filter((at) => at <= index)),
-                  }));
-                  agent.editAndResend(index, content);
-                }}
-                renderBeforeUser={(index) => {
-                  const change = changedModels.get(index);
-                  return (
-                    change && (
-                      <ModelChangedNotice
-                        fromModel={modelDisplayName(change.from, catalogAll)}
-                        toModel={modelDisplayName(change.to, catalogAll)}
-                      />
-                    )
-                  );
-                }}
-                renderToolCall={renderToolCall}
-                isStepCall={isStepCall}
-                stepKind={stepKind}
-                onRunCode={handleRunCode}
-                renderAfterContent={inSetup ? renderEditedFiles : undefined}
-                animatePairs
-                onFork={canFork ? (index) => void handleFork(index) : undefined}
-                renderCompaction={(entry) => <CompactionMarker entry={entry} />}
-                compacting={
-                  agent.compacting?.reason === "threshold" ? (
-                    <CompactionHold
-                      history={agent.messages}
-                      summarizedTurns={agent.compacting.summarizedTurns}
-                      startedAt={agent.compacting.startedAt}
-                    />
-                  ) : undefined
-                }
-                trailing={({ isEditingAny }) => (
-                  <>
-                    <CompactionStatus
-                      active={Boolean(agent.compacting)}
-                      latest={
-                        agent.messages[latestCompactionIndex(agent.messages)]?.compaction
-                          ?.createdAt ?? null
-                      }
-                    />
-                    <AnimatePresence>
-                      {agent.compacting?.reason === "manual" && (
-                        <CompactionHold
-                          key="compacting"
-                          history={agent.messages}
-                          summarizedTurns={agent.compacting.summarizedTurns}
-                          startedAt={agent.compacting.startedAt}
-                          header
+            <MediaUrlContext.Provider value={resolveChatMediaUrl}>
+              <LineCommentLinkContext.Provider value={wizardCtx?.viewChanges ?? null}>
+                <ChatTranscript
+                  key={chatView.key}
+                  messages={agent.messages}
+                  streaming={streaming}
+                  editAndResend={(index, content) => agent.editAndResend(index, content)}
+                  renderBeforeUser={(index) => {
+                    const change = changedModels.get(index);
+                    return (
+                      change && (
+                        <ModelChangedNotice
+                          fromModel={modelDisplayName(change.from, catalogAll)}
+                          toModel={modelDisplayName(change.to, catalogAll)}
                         />
-                      )}
-                    </AnimatePresence>
-                    {sessionCardOpen && (
-                      <SessionStatsCard
-                        stats={sessionStats(agent.messages, contextWindow)}
-                        onClose={closeSessionCard}
+                      )
+                    );
+                  }}
+                  renderToolCall={renderToolCall}
+                  isStepCall={isStepCall}
+                  stepKind={stepKind}
+                  onRunCode={handleRunCode}
+                  renderAfterContent={inSetup ? renderEditedFiles : undefined}
+                  animatePairs
+                  onFork={canFork ? (index) => void handleFork(index) : undefined}
+                  renderCompaction={(entry) => <CompactionMarker entry={entry} />}
+                  compacting={
+                    agent.compacting?.reason === "threshold" ? (
+                      <CompactionHold
+                        history={agent.messages}
+                        summarizedTurns={agent.compacting.summarizedTurns}
+                        startedAt={agent.compacting.startedAt}
                       />
-                    )}
-                    {choices &&
-                      !isEditingAny &&
-                      !streaming &&
-                      !agent.pendingApproval &&
-                      !agent.error && (
-                        <QuestionChoices
-                          options={choices}
-                          onSelect={(label) => agent.send(label)}
-                          hint={msg("agent.choices.hint")}
-                          ariaLabel={msg("agent.choices.label")}
-                        />
-                      )}
-                    {agent.pendingApproval && (
-                      <ApprovalCard
-                        payload={agent.pendingApproval}
-                        onResolve={agent.confirmApproval}
-                      />
-                    )}
-                    {agent.reconnect && (
-                      <ReconnectingNotice
-                        attempt={agent.reconnect.attempt}
-                        maxAttempts={agent.reconnect.maxAttempts}
-                      />
-                    )}
-                    {agent.error && (
-                      <ChatErrorBanner
-                        // A new key for each capacity failure starts its countdown again.
-                        key={agent.capacityFailures}
-                        message={agent.error}
-                        retryInSeconds={
-                          agent.errorCode === CAPACITY_ERROR_CODE && agent.capacityFailures > 0
-                            ? capacityRetryDelay(agent.capacityFailures - 1)
-                            : undefined
+                    ) : undefined
+                  }
+                  trailing={({ isEditingAny }) => (
+                    <>
+                      <CompactionStatus
+                        active={Boolean(agent.compacting)}
+                        latest={
+                          agent.messages[latestCompactionIndex(agent.messages)]?.compaction
+                            ?.createdAt ?? null
                         }
-                        retryLabel={msg(
-                          "auto.features.agent.panel.components.generalistpanel.error_retry",
+                      />
+                      <AnimatePresence>
+                        {agent.compacting?.reason === "manual" && (
+                          <CompactionHold
+                            key="compacting"
+                            history={agent.messages}
+                            summarizedTurns={agent.compacting.summarizedTurns}
+                            startedAt={agent.compacting.startedAt}
+                            header
+                          />
                         )}
-                        onRetry={
-                          agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
-                            ? undefined
-                            : agent.retry
-                        }
-                        action={
-                          agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                            <RetryIconButton
-                              label={msg("billing.action.add_funds")}
-                              icon={Wallet}
-                              onClick={() => openSettingsTo("billing")}
-                              className={CHAT_ERROR_ICON_BUTTON_CLASS}
-                            />
-                          ) : undefined
-                        }
-                      />
-                    )}
-                  </>
-                )}
-              />
-            </LineCommentLinkContext.Provider>
-          </MediaUrlContext.Provider>
+                      </AnimatePresence>
+                      {sessionCardOpen && (
+                        <SessionStatsCard
+                          stats={sessionStats(agent.messages, contextWindow)}
+                          onClose={closeSessionCard}
+                        />
+                      )}
+                      {choices &&
+                        !isEditingAny &&
+                        !streaming &&
+                        !agent.pendingApproval &&
+                        !agent.error && (
+                          <QuestionChoices
+                            options={choices}
+                            onSelect={(label) => agent.send(label)}
+                            hint={msg("agent.choices.hint")}
+                            ariaLabel={msg("agent.choices.label")}
+                          />
+                        )}
+                      {agent.pendingApproval && (
+                        <ApprovalCard
+                          payload={agent.pendingApproval}
+                          onResolve={agent.confirmApproval}
+                        />
+                      )}
+                      {agent.reconnect && (
+                        <ReconnectingNotice
+                          attempt={agent.reconnect.attempt}
+                          maxAttempts={agent.reconnect.maxAttempts}
+                        />
+                      )}
+                      {agent.error && (
+                        <ChatErrorBanner
+                          // A new key for each capacity failure starts its countdown again.
+                          key={agent.capacityFailures}
+                          message={agent.error}
+                          retryInSeconds={
+                            agent.errorCode === CAPACITY_ERROR_CODE && agent.capacityFailures > 0
+                              ? capacityRetryDelay(agent.capacityFailures - 1)
+                              : undefined
+                          }
+                          retryLabel={msg(
+                            "auto.features.agent.panel.components.generalistpanel.error_retry",
+                          )}
+                          onRetry={
+                            agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
+                              ? undefined
+                              : agent.retry
+                          }
+                          action={
+                            agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
+                              <RetryIconButton
+                                label={msg("billing.action.add_funds")}
+                                icon={Wallet}
+                                onClick={() => openSettingsTo("billing")}
+                                className={CHAT_ERROR_ICON_BUTTON_CLASS}
+                              />
+                            ) : undefined
+                          }
+                        />
+                      )}
+                    </>
+                  )}
+                />
+              </LineCommentLinkContext.Provider>
+            </MediaUrlContext.Provider>
           </ChatSourceContext.Provider>
         </AgentThread>
       </div>

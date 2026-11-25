@@ -72,8 +72,6 @@ const INDEXES = [0, 2, 4, 6];
 const items = INDEXES.map((index) => ({
   index,
   label: `Turn ${index}`,
-  preview: null,
-  outputs: [],
 }));
 
 const turn = (index: number) => {
@@ -90,16 +88,7 @@ void test("the rail follows turns that mount again after an edit is cancelled", 
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  await React.act(async () =>
-    root.render(
-      <UserMessageRail
-        items={items}
-        scrollBox={box}
-        bookmarks={new Set()}
-        onBookmarkChange={() => {}}
-      />,
-    ),
-  );
+  await React.act(async () => root.render(<UserMessageRail items={items} scrollBox={box} />));
   const current = () =>
     [...container.querySelectorAll('[aria-current="true"]')].map((el) =>
       Number(el.getAttribute("data-rail-position")),
@@ -137,32 +126,17 @@ void test("the rail follows turns that mount again after an edit is cancelled", 
   box.remove();
 });
 
-async function mountRail(
-  bookmarks: ReadonlySet<number>,
-  onBookmarkChange = (_i: number, _b: boolean) => {},
-) {
+async function mountRail() {
   const box = document.createElement("div");
   INDEXES.forEach((index) => box.append(turn(index)));
   document.body.append(box);
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  const render = (marks: ReadonlySet<number>) =>
-    React.act(async () =>
-      root.render(
-        <UserMessageRail
-          items={items}
-          scrollBox={box}
-          bookmarks={marks}
-          onBookmarkChange={onBookmarkChange}
-        />,
-      ),
-    );
-  await render(bookmarks);
+  await React.act(async () => root.render(<UserMessageRail items={items} scrollBox={box} />));
   return {
     box,
     container,
-    render,
     mark: (position: number) =>
       container.querySelector<HTMLElement>(`[data-rail-position="${position}"]`)!,
     unmount: async () => {
@@ -179,7 +153,7 @@ const pointer = (el: Element, type: string, buttons: number) =>
   });
 
 void test("a press released outside the rail does not leave it scrubbing", async () => {
-  const rail = await mountRail(new Set());
+  const rail = await mountRail();
   let scrolls = 0;
   rail.box.scrollTo = () => void scrolls++;
   const list = rail.mark(0).parentElement!;
@@ -200,36 +174,5 @@ void test("a press released outside the rail does not leave it scrubbing", async
   assert.equal(scrolls, 1, "a drag jumps to the turn under the pointer");
   await pointer(rail.mark(3), "pointerup", 0);
   under = null;
-  await rail.unmount();
-});
-
-void test("B on a focused mark bookmarks its turn from the keyboard", async () => {
-  const changes: Array<[number, boolean]> = [];
-  const rail = await mountRail(new Set(), (index, bookmarked) => changes.push([index, bookmarked]));
-  const key = (el: Element, init: KeyboardEventInit) =>
-    React.act(async () => {
-      el.dispatchEvent(new dom.window.KeyboardEvent("keydown", { bubbles: true, ...init }));
-    });
-  assert.equal(rail.mark(1).getAttribute("aria-keyshortcuts"), "B");
-
-  await key(rail.mark(1), { key: "b", code: "KeyB" });
-  await key(rail.mark(1), { key: "b", code: "KeyB", ctrlKey: true });
-  assert.deepEqual(changes, [[2, true]], "B bookmarks the turn; Ctrl+B does not");
-
-  await rail.render(new Set([2]));
-  await key(rail.mark(1), { key: "B", code: "KeyB" });
-  assert.deepEqual(changes, [
-    [2, true],
-    [2, false],
-  ]);
-
-  // A Hebrew layout sends key nun (U+05E0) for the physical B key.
-  await rail.render(new Set());
-  await key(rail.mark(1), { key: String.fromCharCode(0x05e0), code: "KeyB" });
-  assert.deepEqual(changes, [
-    [2, true],
-    [2, false],
-    [2, true],
-  ]);
   await rail.unmount();
 });

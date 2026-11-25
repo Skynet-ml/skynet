@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowLeft, ArrowRight, Check } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";

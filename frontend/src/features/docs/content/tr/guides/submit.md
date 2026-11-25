@@ -18,10 +18,10 @@ Görevinizi **Görev görüşmesi** sohbetinde asistana anlatın. Asistan sizin 
 
 Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. İki seçenekten birini seçin:
 
-- **Bir depo kullan**: bağladığınız bir GitHub deposundaki kodu optimize edin.
-- **Yeni depo oluştur**: Skynet hesabınızda yeni bir GitHub deposu oluşturur. Asistan, görevinizden ve verinizden ilk çözümü yazar. Bu çözüm başlangıç sürümüdür.
+- **Bir depo kullan**: bağladığınız bir GitHub, GitLab veya Bitbucket deposundaki kodu optimize edin.
+- **Yeni depo oluştur**: Skynet GitHub, GitLab veya Bitbucket hesabınızda yeni bir depo oluşturur. Asistan, görevinizden ve verinizden ilk çözümü yazar. Bu çözüm başlangıç sürümüdür.
 
-Başlamadan önce GitHub'ı **Ayarlar → Bağlayıcılar** bölümünde bağlayın.
+Başlamadan önce GitHub, GitLab veya Bitbucket'ı **Ayarlar → Bağlayıcılar** bölümünde bağlayın.
 
 ### Bir depo kullan
 
@@ -36,10 +36,10 @@ Başlamadan önce GitHub'ı **Ayarlar → Bağlayıcılar** bölümünde bağlay
 
 Şu alanları doldurun:
 
-- **Ad**: yeni deponun adı. GitHub hesabınızda bu adda bir depo zaten olmamalıdır.
-- **Özel** veya **Herkese açık**: depoyu GitHub'da kimin görebileceği.
+- **Ad**: yeni deponun adı. Barındırıcıdaki hesabınızda bu adda bir depo zaten olmamalıdır.
+- **Özel** veya **Herkese açık**: depoyu barındırıcıda kimin görebileceği.
 
-Skynet her adayı kendi dalına gönderir. `skynet/best` dalı en iyi sürümü gösterir.
+GitHub'da Skynet her adayı kendi dalına gönderir. `skynet/best` dalı en iyi sürümü gösterir. GitLab ve Bitbucket'ta Skynet, en iyi sürümle bir merge request (Bitbucket'ta pull request) açar.
 
 ## 2. adım: Girdiler
 

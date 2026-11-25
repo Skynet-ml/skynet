@@ -51,7 +51,7 @@ Skynet 根据验证用例选择版本，并在测试用例上报告最终分数�
 
 ### 新仓库中的分支
 
-当 Skynet 为本次运行创建了仓库时，它会把每个候选推送到各自的分支 `skynet/candidate-<version id>`。`skynet/best` 分支始终指向最佳版本。出现更好的版本时，它会随之移动。
+当 Skynet 在 GitHub 上为本次运行创建了仓库时，它会把每个候选推送到各自的分支 `skynet/candidate-<version id>`。`skynet/best` 分支始终指向最佳版本。出现更好的版本时，它会随之移动。
 
 ## 部署最佳版本
 

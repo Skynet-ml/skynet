@@ -6,8 +6,8 @@ Jeder Durchlauf optimiert ein Repository. Sie können auf zwei Arten beginnen:
 
 | Start                           | Was passiert                                                                                              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Repository verwenden        | Skynet ändert die Dateien in den Pfaden, die Sie freigeben, in einem GitHub-Repository, das Sie verbinden. |
-| Neues Repository erstellen  | Sie geben eine Aufgabe und Daten vor. Skynet erstellt ein neues GitHub-Repository in Ihrem Konto und schreibt eine erste Lösung. |
+| Repository verwenden        | Skynet ändert die Dateien in den Pfaden, die Sie freigeben, in einem GitHub-, GitLab- oder Bitbucket-Repository, das Sie verbinden. |
+| Neues Repository erstellen  | Sie geben eine Aufgabe und Daten vor. Skynet erstellt ein neues Repository in Ihrem GitHub-, GitLab- oder Bitbucket-Konto und schreibt eine erste Lösung. |
 
 Der Code im Repository kann alles sein: eine Anwendung, ein Dienst, ein Skript oder eine Bibliothek. Er kann jede Bibliothek verwenden.
 

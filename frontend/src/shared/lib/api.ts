@@ -2151,9 +2151,9 @@ export interface CreatedGithubRepository {
   commit: string;
 }
 
-/** Create a repository in the linked GitHub account and push its first commit. */
-export function createGithubRepository(body: CreateGithubRepositoryRequest) {
-  return request<CreatedGithubRepository>("/connectors/github/repos", {
+/** Create a repository in the linked host account and push its first commit. */
+export function createGithubRepository(body: CreateGithubRepositoryRequest, host: RepoHost = "github") {
+  return request<CreatedGithubRepository>(`/connectors/${host}/repos`, {
     method: "POST",
     body: JSON.stringify(body),
   });

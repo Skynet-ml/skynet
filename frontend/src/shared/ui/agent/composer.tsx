@@ -9,11 +9,9 @@ import { useLocale } from "@/shared/providers";
 import { Button } from "@/shared/ui/primitives/button";
 import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip-button";
 import { cn } from "@/shared/lib/utils";
-import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 import { FileTypeIcon } from "@/shared/ui/file-tree";
+import type { EditorView } from "prosemirror-view";
 
-import { autoResizeTextarea } from "./auto-resize";
-import { looksLikeMarkdown } from "@/shared/lib/markdown-hint";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, describeAttachments, splitClaimed } from "./file-attachments";
@@ -44,7 +42,9 @@ import {
 } from "./slash-commands";
 import type { AgentMessage } from "./types";
 import { DictationWave } from "./dictation-wave";
-import { insertMention, matchMentions, mentionAt } from "./file-mentions";
+import { matchMentions, mentionAt } from "./file-mentions";
+import { RichMarkdownEditor, type RichEditorHandle } from "./rich-markdown/editor";
+import { enterIsEditing } from "./rich-markdown/rules";
 import { formatRecSeconds, useDictation } from "./use-dictation";
 import { useNextPrompt, type SuggestFetcher } from "./use-next-prompt";
 
@@ -179,71 +179,46 @@ function SlashRow({
   );
 }
 
-// "@path" mentions paint as tokens too. The capture group keeps each mention
-// at an odd index of the split.
-const MENTION_TOKEN = /(?<=^|\s)(@[^\s@]+)/;
-const hasMention = (text: string) => MENTION_TOKEN.test(text);
-
-/**
- * Draws the draft again under the transparent textarea text, with the slash
- * command at its start marked as a token. The textarea keeps the caret, the
- * selection and the real text; this layer only paints.
- */
-function SlashTokenLayer({
-  text,
-  length,
-  mentions,
-  layerRef,
-  sourceRef,
-  className,
-}: {
+/** The cursor's block: its text, the cursor offset in it, and the block's start position. */
+interface CursorBlock {
   text: string;
-  length: number;
-  /** Paint "@path" mentions; a chat without file mentions shows "@word" as text. */
-  mentions: boolean;
-  /** The layer itself; the textarea's scroll handler moves it with no re-render. */
-  layerRef: React.RefObject<HTMLDivElement | null>;
-  /** The textarea the layer sits under. */
-  sourceRef: React.RefObject<HTMLTextAreaElement | null>;
-  className?: string;
-}) {
-  // Read the textarea's own scroll each render, so a new or remounted
-  // textarea never leaves the layer at a stale offset.
-  React.useLayoutEffect(() => {
-    if (layerRef.current && sourceRef.current)
-      layerRef.current.scrollTop = sourceRef.current.scrollTop;
-  });
-  return (
-    <div
-      ref={layerRef}
-      aria-hidden
-      className={cn(
-        // The same per-line direction as the textarea (globals.css), or RTL pages
-        // lay the token out apart from the caret.
-        "pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words text-start text-sm leading-[20px] text-foreground [unicode-bidi:plaintext]",
-        className,
-      )}
-    >
-      {/* Color only: a weight or padding change would move the glyphs off the caret. */}
-      <span className="text-primary">{text.slice(0, length)}</span>
-      {(mentions ? text.slice(length).split(MENTION_TOKEN) : [text.slice(length)]).map((part, i) =>
-        i % 2 ? (
-          <span key={i} className="text-primary">
-            {part}
-          </span>
-        ) : (
-          part
-        ),
-      )}
-      {/* A trailing newline in a textarea opens a line; the extra space keeps it here too. */}
-      {text.endsWith("\n") ? " " : null}
-    </div>
-  );
+  offset: number;
+  base: number;
+}
+
+/** Read the cursor's block from the editor, for the "@" file menu. */
+function cursorBlock(view: EditorView): CursorBlock {
+  const { $head } = view.state.selection;
+  const parent = $head.parent;
+  return {
+    text: parent.textBetween(0, parent.content.size, "\n", "\n"),
+    offset: $head.parentOffset,
+    base: $head.start(),
+  };
+}
+
+/** The whole draft as plain lines and the selection offsets in it, for Up/Down recall. */
+function historyField(view: EditorView) {
+  const { doc, selection } = view.state;
+  const upTo = (pos: number) => doc.textBetween(0, pos, "\n", "\n").length;
+  return {
+    value: doc.textBetween(0, doc.content.size, "\n", "\n"),
+    selectionStart: upTo(selection.from),
+    selectionEnd: upTo(selection.to),
+  };
+}
+
+/** Tell whether Tab belongs to the editor here: it indents a list or steps a heading. */
+function tabIsEditing(view: EditorView): boolean {
+  const { $from } = view.state.selection;
+  if ($from.parent.type.name === "heading") return true;
+  for (let d = $from.depth; d > 0; d--) if ($from.node(d).type.name === "list_item") return true;
+  return false;
 }
 
 /**
  * The shared chat composer, laid out Codex-style: one bordered box holding a
- * borderless textarea with a control row docked under it. The + attach button
+ * borderless rich Markdown editor with a control row docked under it. The + attach button
  * (any file type; the agent reads it at its workspace path) and the trust control sit at
  * the inline start; the model chip, the dictation mic and the circular
  * send/stop button sit at the inline end. While dictating, the textarea swaps
@@ -285,7 +260,7 @@ export function Composer({
   mentions,
 }: ComposerProps) {
   const inline = layout === "inline";
-  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const editorRef = React.useRef<RichEditorHandle | null>(null);
   const { locale } = useLocale();
 
   const valueRef = React.useRef(value);
@@ -297,15 +272,9 @@ export function Composer({
     onText: (text) => {
       const prev = valueRef.current;
       onChange(prev.trim() ? `${prev.replace(/\s+$/, "")} ${text}` : text);
-      // The textarea remounts from the recording strip on this same commit —
-      // focus and grow it once it's back in the tree.
-      requestAnimationFrame(() => {
-        const el = textareaRef.current;
-        if (el) {
-          el.focus();
-          autoResizeTextarea(el);
-        }
-      });
+      // The editor remounts from the recording strip on this same commit —
+      // focus it once it's back in the tree.
+      requestAnimationFrame(() => editorRef.current?.focus());
     },
   });
   const dictating = dictation.state.kind !== "idle";
@@ -347,36 +316,17 @@ export function Composer({
   // Escape hides the menu for this exact draft; typing shows it again.
   const [slashDismissed, setSlashDismissed] = React.useState<string | null>(null);
   const slashListId = React.useId();
-  // The menu shows only while the textarea has focus, so it never stays
+  // The menu shows only while the editor has focus, so it never stays
   // open next to the model menu or another popup.
   const [focused, setFocused] = React.useState(false);
   const plainDraft = !draft.pastes.length && !draft.files.length;
-  // An IME draws its composition underline in the text color, so the
-  // transparent text that a token needs would hide it.
-  const [composing, setComposing] = React.useState(false);
-  // A draft that runs as a command marks "/name" as a token. A markdown draft
-  // keeps its rendered preview instead.
+  // A draft that runs as a command marks "/name" as a token.
   const tokenLength =
-    slash &&
-    !picking &&
-    plainDraft &&
-    !disabled &&
-    !locked &&
-    !composing &&
-    !looksLikeMarkdown(draft.text)
+    slash && !picking && plainDraft && !disabled && !locked
       ? slashTokenLength(draft.text, slash.commands)
       : 0;
-  const painted =
-    tokenLength > 0 ||
-    (!picking &&
-      plainDraft &&
-      !disabled &&
-      !locked &&
-      !composing &&
-      !looksLikeMarkdown(draft.text) &&
-      !!mentions?.length &&
-      hasMention(draft.text));
-  const tokenLayerRef = React.useRef<HTMLDivElement>(null);
+  // The editor compares the fields, so a new object each render is fine.
+  const paint = { slashLength: tokenLength, mentions: Boolean(mentions?.length) && !picking };
   const pickingCommand = picking
     ? slash?.commands.find((c) => c.name === picking && !c.hidden && c.options?.length)
     : undefined;
@@ -395,13 +345,13 @@ export function Composer({
       : slashDismissed !== draft.text
         ? slashMenu(draft.text, slash.commands)
         : null;
-  // The caret decides which "@query" the file menu filters by.
-  const [caret, setCaret] = React.useState(0);
+  // The cursor decides which "@query" the file menu filters by.
+  const [cursor, setCursor] = React.useState<CursorBlock>({ text: "", offset: 0, base: 1 });
   const [mentionIndex, setMentionIndex] = React.useState(0);
-  // Escape hides the file menu for this draft and caret; typing shows it again.
+  // Escape hides the file menu for this draft and cursor; typing shows it again.
   const [mentionDismissed, setMentionDismissed] = React.useState<string | null>(null);
   const mentionListId = React.useId();
-  const mentionKey = `${caret}:${draft.text}`;
+  const mentionKey = `${cursor.base + cursor.offset}:${draft.text}`;
   const mention =
     mentions?.length &&
     !menu &&
@@ -410,7 +360,7 @@ export function Composer({
     !locked &&
     !dictating &&
     mentionDismissed !== mentionKey
-      ? mentionAt(draft.text, caret)
+      ? mentionAt(cursor.text, cursor.offset)
       : null;
   const mentionItems = mention && mentions ? matchMentions(mentions, mention.query) : [];
   const mentionRow = Math.min(mentionIndex, Math.max(0, mentionItems.length - 1));
@@ -470,13 +420,14 @@ export function Composer({
     onOriginalFiles?.(read.attached.map((a, i) => ({ file: a.file, card: added[i]!.id })));
   };
 
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const pasted = e.clipboardData.getData("text/plain");
+  /** Take a file paste or a long text paste as a card; true when the composer took it. */
+  const handlePaste = (e: ClipboardEvent): boolean => {
+    const pasted = e.clipboardData?.getData("text/plain") ?? "";
     // Office apps put a picture of the copied cells beside the text; only a
     // paste with no text is a file paste.
-    const pastedFiles = Array.from(e.clipboardData.files);
+    const pastedFiles = Array.from(e.clipboardData?.files ?? []);
     const attachesFiles = pastedFiles.length > 0 && !pasted;
-    if (!attachesFiles && !shouldAttachPaste(pasted)) return;
+    if (!attachesFiles && !shouldAttachPaste(pasted)) return false;
     e.preventDefault();
     // An attachment hides the menu, so an open picker closes and drops its
     // filter text, as a blur does; else that text would go out as a message.
@@ -484,38 +435,16 @@ export function Composer({
     if (attachesFiles) {
       if (picking) onChange("");
       attachFiles(pastedFiles, picking ? "" : undefined);
-      return;
+      return true;
     }
     setPastes([...draft.pastes, pasted], picking ? "" : draft.text);
+    return true;
   };
 
-  const resetHeight = () => {
-    if (textareaRef.current) textareaRef.current.style.height = inline ? "36px" : "42px";
-  };
-
-  // A draft set from outside (a fork puts a message back) gets no input event,
-  // so grow the textarea when that text no longer fits. Typing resizes itself.
-  // A draft cleared from outside (a reply-time send the panel takes over)
-  // shrinks it back: clearing the inline height keeps the CSS height, which
-  // is taller on touch screens.
-  React.useLayoutEffect(() => {
-    const el = textareaRef.current;
-    if (el && !value) el.style.height = "";
-    else if (el && el.scrollHeight > el.clientHeight && el.clientHeight < 120)
-      autoResizeTextarea(el);
-  }, [value]);
-
-  const refocus = () =>
-    requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      if (el) {
-        el.focus();
-        autoResizeTextarea(el);
-      }
-    });
+  const refocus = () => requestAnimationFrame(() => editorRef.current?.focus());
 
   // Finish turns into a disabled mic, so focus falls to the body, and the
-  // error strip has no textarea. Bring focus back when the textarea returns,
+  // error strip has no editor. Bring focus back when the editor returns,
   // unless the user moved it somewhere else meanwhile.
   const dictationKind = dictation.state.kind;
   const prevDictationKind = React.useRef(dictationKind);
@@ -540,7 +469,6 @@ export function Composer({
     setSlashIndex(0);
     setSlashDismissed(null);
     setPicking(null);
-    resetHeight();
     return true;
   };
 
@@ -562,18 +490,14 @@ export function Composer({
 
   const pickMention = (index: number) => {
     const path = mentionItems[index];
-    if (!mention || !path) return;
-    const next = insertMention(draft.text, caret, mention.start, path);
-    onChange(joinPastes({ ...draft, text: next.text }));
-    setCaret(next.caret);
+    const view = editorRef.current?.view;
+    if (!mention || !path || !view) return;
+    // As insertMention: "@path " replaces the query, and one space after the cursor merges in.
+    const from = cursor.base + mention.start;
+    const to = cursor.base + cursor.offset + (cursor.text[cursor.offset] === " " ? 1 : 0);
+    view.dispatch(view.state.tr.insertText(`@${path} `, from, to).scrollIntoView());
     setMentionIndex(0);
-    requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(next.caret, next.caret);
-      autoResizeTextarea(el);
-    });
+    view.focus();
   };
 
   const sendMidTurn = (mode: "steer" | "queue") => {
@@ -596,10 +520,9 @@ export function Composer({
     } else if (mode === "steer") midTurn.steer(value);
     else midTurn.queue(value);
     onChange("");
-    resetHeight();
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: { preventDefault: () => void }) => {
     e.preventDefault();
     // A command runs mid-turn too: a model or effort change applies to the next turn.
     if (!disabled && !dictating && runSlash(draft.text)) return;
@@ -624,14 +547,22 @@ export function Composer({
     refocus();
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    const controlledPopupId = e.currentTarget.getAttribute("aria-controls");
+  // The editor calls this before its own keys. A key it prevents is the
+  // composer's; any other key goes on to the editor (lists, code, breaks).
+  const handleKeyDown = (e: KeyboardEvent, view: EditorView): boolean => {
+    keyDown(e, view);
+    return e.defaultPrevented;
+  };
+
+  const keyDown = (e: KeyboardEvent, view: EditorView) => {
+    // An IME owns its keys; Safari sends keyCode 229 without isComposing.
+    if (e.isComposing || e.keyCode === 229) return;
+    const controlledPopupId = view.dom.getAttribute("aria-controls");
     const controlledPopup = controlledPopupId
-      ? e.currentTarget.ownerDocument.getElementById(controlledPopupId)
+      ? view.dom.ownerDocument.getElementById(controlledPopupId)
       : null;
     const menuOpen =
-      e.currentTarget.getAttribute("aria-expanded") === "true" ||
+      view.dom.getAttribute("aria-expanded") === "true" ||
       controlledPopup?.getAttribute("data-state") === "open";
     const popupOpen = Boolean(suggestion || menuOpen);
     if (
@@ -640,7 +571,7 @@ export function Composer({
         {
           streaming: Boolean(streaming),
           popupOpen,
-          composing: Boolean(e.nativeEvent.isComposing || e.keyCode === 229),
+          composing: false,
         },
         onStop,
       )
@@ -709,6 +640,10 @@ export function Composer({
       dismissSuggestion();
       return;
     }
+    // In a list, a heading or code, Enter and Tab edit the draft instead of sending it.
+    const plainKey = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
+    if (plainKey && e.key === "Enter" && enterIsEditing(view.state)) return;
+    if (plainKey && e.key === "Tab" && tabIsEditing(view)) return;
     if (midTurn && !disabled) {
       const action = midTurnKeyAction(e, {
         streaming: Boolean(streaming),
@@ -732,7 +667,8 @@ export function Composer({
         return;
       }
     }
-    const direction = menuOpen ? null : historyKeyDirection(e, e.currentTarget);
+    const inCode = Boolean(view.state.selection.$from.parent.type.spec.code);
+    const direction = menuOpen || inCode ? null : historyKeyDirection(e, historyField(view));
     if (direction) {
       const step = stepHistory(history, historyNav.current, value, direction);
       if (step) {
@@ -743,7 +679,7 @@ export function Composer({
       }
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       handleSubmit(e);
     }
@@ -1016,75 +952,52 @@ export function Composer({
             </div>
           )}
           {!dictating ? (
-            <MarkdownPreviewField
+            <RichMarkdownEditor
+              handleRef={editorRef}
               value={draft.text}
-              className={inline ? "min-w-0 flex-1" : undefined}
-              previewClassName={inline ? "px-3 py-2" : "px-4 py-[11px]"}
-            >
-              {painted && (
-                <SlashTokenLayer
-                  text={draft.text}
-                  length={tokenLength}
-                  mentions={!!mentions?.length}
-                  layerRef={tokenLayerRef}
-                  sourceRef={textareaRef}
-                  className={inline ? "px-3 py-2" : "px-4 py-[11px]"}
-                />
+              onChange={(text) => {
+                setSlashIndex(0);
+                setSlashDismissed(null);
+                setMentionIndex(0);
+                setMentionDismissed(null);
+                onChange(joinPastes({ ...draft, text }));
+              }}
+              onSelectionChange={(view) => setCursor(cursorBlock(view))}
+              onPaste={inline || !attachments ? undefined : handlePaste}
+              onKeyDown={handleKeyDown}
+              onFocus={() => setFocused(true)}
+              onBlur={() => {
+                setFocused(false);
+                // In a picker the draft is only the options' filter, so it
+                // must not stay behind as a message to send.
+                if (picking) {
+                  setPicking(null);
+                  onChange("");
+                }
+              }}
+              disabled={disabled || locked}
+              placeholder={placeholder}
+              paint={paint}
+              attributes={{
+                "aria-describedby": suggestion ? suggestionHintId : undefined,
+                role: menu || mention ? "combobox" : undefined,
+                "aria-autocomplete": menu || mention ? "list" : undefined,
+                "aria-controls": menu || mention ? listId : undefined,
+                "aria-expanded": menu || mention ? "true" : undefined,
+                "aria-activedescendant": slashActiveId,
+              }}
+              wrapperClassName={inline ? "min-w-0 flex-1" : undefined}
+              className={cn(
+                // The wheel must scroll a draft past the height cap, not the page (SKY-772).
+                // Codex's cap: the draft grows to a quarter of the window, in whole lines so the
+                // last line is never cut, plus the vertical padding.
+                "composer-scroll block w-full overflow-y-auto text-sm leading-[20px]",
+                "aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
+                inline
+                  ? "max-h-[calc(max(1lh,round(down,25dvh,1lh))_+_16px)] min-h-[44px] px-3 py-2 sm:min-h-9 [@media(hover:none)_and_(pointer:coarse)]:min-h-[44px]"
+                  : "max-h-[calc(max(1lh,round(down,25dvh,1lh))_+_22px)] min-h-[44px] px-4 py-[11px] sm:min-h-[42px] [@media(hover:none)_and_(pointer:coarse)]:min-h-[44px]",
               )}
-              <textarea
-                ref={textareaRef}
-                value={draft.text}
-                onScroll={(e) => {
-                  if (tokenLayerRef.current)
-                    tokenLayerRef.current.scrollTop = e.currentTarget.scrollTop;
-                }}
-                onCompositionStart={() => setComposing(true)}
-                onCompositionEnd={() => setComposing(false)}
-                onChange={(e) => {
-                  setSlashIndex(0);
-                  setSlashDismissed(null);
-                  setMentionIndex(0);
-                  setMentionDismissed(null);
-                  setCaret(e.target.selectionStart);
-                  onChange(joinPastes({ ...draft, text: e.target.value }));
-                  autoResizeTextarea(e.target);
-                }}
-                onPaste={inline || !attachments ? undefined : handlePaste}
-                onKeyDown={handleKeyDown}
-                onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-                onFocus={() => setFocused(true)}
-                onBlur={() => {
-                  setFocused(false);
-                  // In a picker the draft is only the options' filter, so it
-                  // must not stay behind as a message to send.
-                  if (picking) {
-                    setPicking(null);
-                    onChange("");
-                  }
-                }}
-                disabled={disabled || locked}
-                rows={1}
-                placeholder={suggestion ? undefined : placeholder}
-                aria-describedby={suggestion ? suggestionHintId : undefined}
-                role={menu || mention ? "combobox" : undefined}
-                aria-autocomplete={menu || mention ? "list" : undefined}
-                aria-controls={menu || mention ? listId : undefined}
-                aria-expanded={menu || mention ? true : undefined}
-                aria-activedescendant={slashActiveId}
-                className={cn(
-                  // The wheel must scroll a draft past the height cap, not the page (SKY-772).
-                  // No scrollbar, so the wrap matches the painted token layer.
-                  "relative bg-transparent text-sm leading-[20px] resize-none overflow-y-auto no-scrollbar",
-                  painted && "text-transparent caret-foreground",
-                  "max-h-[120px] outline-none ring-0 border-0 shadow-none",
-                  "focus:outline-none focus-visible:outline-none focus-visible:ring-0",
-                  "placeholder:text-muted-foreground/40",
-                  "disabled:opacity-50 disabled:cursor-not-allowed",
-                  inline
-                    ? "block h-[44px] w-full px-3 py-2 sm:h-9 [@media(hover:none)_and_(pointer:coarse)]:h-[44px]"
-                    : "block h-[44px] w-full px-4 py-[11px] sm:h-[42px] [@media(hover:none)_and_(pointer:coarse)]:h-[44px]",
-                )}
-              />
+            >
               {suggestion && (
                 <SuggestionGhost
                   key={suggestion}
@@ -1093,7 +1006,7 @@ export function Composer({
                   className={inline ? "px-3 py-2" : "px-4 py-[11px]"}
                 />
               )}
-            </MarkdownPreviewField>
+            </RichMarkdownEditor>
           ) : (
             <div
               className={cn(

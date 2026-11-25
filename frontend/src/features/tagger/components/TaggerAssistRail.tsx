@@ -2,7 +2,7 @@
 
 import { ProgressBar } from "@/shared/ui/progress-bar";
 import { useEffect, useMemo } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Check, CircleNotch, Sparkle } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { Badge } from "@/shared/ui/primitives/badge";

@@ -66,7 +66,7 @@
   "settings.code.dark_theme": "Thème de code sombre",
   "settings.code.font": "Police du code",
   "settings.code.font.description": "Choisissez une police à chasse fixe pour le code et les diffs.",
-  "settings.code.font.placeholder": "p. ex. JetBrains Mono",
+  "settings.code.font.default": "Par défaut",
   "settings.code.size": "Taille de police du code",
   "settings.code.size.description": "S’applique aux fichiers ouverts, aux diffs et aux blocs de code.",
   "settings.code.size.px": "px",

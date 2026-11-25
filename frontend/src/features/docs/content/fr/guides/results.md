@@ -51,7 +51,7 @@ Vous pouvez comparer une version avec une autre. L'onglet affiche aussi le **Ret
 
 ### Branches dans un nouveau dépôt
 
-Quand Skynet a créé le dépôt pour l'exécution, il pousse chaque candidat sur sa propre branche, `skynet/candidate-<version id>`. La branche `skynet/best` pointe toujours vers la meilleure version. Elle avance quand une meilleure version apparaît.
+Quand Skynet a créé le dépôt pour l'exécution sur GitHub, il pousse chaque candidat sur sa propre branche, `skynet/candidate-<version id>`. La branche `skynet/best` pointe toujours vers la meilleure version. Elle avance quand une meilleure version apparaît.
 
 ## Servir la meilleure version
 

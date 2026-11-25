@@ -17,7 +17,7 @@ export function TimestampSeparator({ at, now }: { at: number; now: number }) {
   const label = formatMsg(key, { date, time });
   const [before, after = ""] = formatMsg(key, { date: DATE_MARK, time }).split(DATE_MARK);
   return (
-    <div role="separator" aria-label={label} className="flex justify-center py-4">
+<div role="separator" aria-label={label} className="flex justify-center py-4">
       <time
         dir="auto"
         dateTime={new Date(at).toISOString()}

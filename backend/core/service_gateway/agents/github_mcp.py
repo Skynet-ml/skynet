@@ -130,6 +130,29 @@ def result_text(result: CallToolResult) -> str:
     return cap_result(text)
 
 
+def tool_from_mcp(session: ClientSession, spec: Tool) -> dspy.Tool:
+    """Build a DSPy tool from an MCP listing entry, with the listing's required args.
+
+    DSPy marks every arg without a ``default`` as required, and FastMCP drops
+    ``"default": null`` from optional args. The model then sees optional args
+    as required, and Pi rejects a call that leaves one out. A ``null`` default
+    on each arg the listing does not require keeps the listing's own list.
+
+    Args:
+        session: The turn's MCP session.
+        spec: The tool's listing entry.
+
+    Returns:
+        The tool.
+    """
+    tool = dspy.Tool.from_mcp_tool(session, spec)
+    required = set(spec.inputSchema.get("required") or [])
+    for name, schema in (tool.args or {}).items():
+        if name not in required:
+            schema.setdefault("default", None)
+    return tool
+
+
 def _repo_tool(session: ClientSession, spec: Tool) -> dspy.Tool:
     """Build one agent tool whose result is :func:`result_text`.
 
@@ -140,7 +163,7 @@ def _repo_tool(session: ClientSession, spec: Tool) -> dspy.Tool:
     Returns:
         The tool, with the schema DSPy reads from the listing.
     """
-    tool = dspy.Tool.from_mcp_tool(session, spec)
+    tool = tool_from_mcp(session, spec)
 
     async def func(**kwargs: Any) -> str:
         """Call the MCP tool and return its text.
