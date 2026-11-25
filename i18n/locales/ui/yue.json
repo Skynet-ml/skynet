@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "智能分數",
   "submit.modelpicker.col.fastest_help": "輸出速度",
   "submit.modelpicker.col.help_label": "呢個分數代表乜",
-  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis 智能指數 ÷ 每 100 萬 token 嘅價錢。",
+  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis 智能指數 ÷ 每 100 萬 token 嘅混合價錢（輸入 3 : 輸出 1）。",
   "submit.modelpicker.col.smartest_help_note": "Artificial Analysis 智能指數。",
   "submit.modelpicker.col.fastest_help_note": "每秒輸出 token 數。"
 }

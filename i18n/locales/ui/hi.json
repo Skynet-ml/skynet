@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "बुद्धिमत्ता स्कोर",
   "submit.modelpicker.col.fastest_help": "आउटपुट गति",
   "submit.modelpicker.col.help_label": "इस स्कोर का मतलब",
-  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis इंटेलिजेंस इंडेक्स ÷ 10 लाख टोकन की कीमत।",
+  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis इंटेलिजेंस इंडेक्स ÷ 10 लाख टोकन की मिश्रित कीमत (3 इनपुट : 1 आउटपुट)।",
   "submit.modelpicker.col.smartest_help_note": "Artificial Analysis इंटेलिजेंस इंडेक्स।",
   "submit.modelpicker.col.fastest_help_note": "प्रति सेकंड आउटपुट टोकन।"
 }

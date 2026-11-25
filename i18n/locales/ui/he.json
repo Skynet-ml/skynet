@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "ציון אינטליגנציה",
   "submit.modelpicker.col.fastest_help": "מהירות פלט",
   "submit.modelpicker.col.help_label": "מה הציון הזה אומר",
-  "submit.modelpicker.col.best_value_help_note": "מדד האינטליגנציה של Artificial Analysis ÷ מחיר למיליון טוקנים.",
+  "submit.modelpicker.col.best_value_help_note": "מדד האינטליגנציה של Artificial Analysis ÷ מחיר משוקלל למיליון טוקנים (3 קלט : 1 פלט).",
   "submit.modelpicker.col.smartest_help_note": "מדד האינטליגנציה של Artificial Analysis.",
   "submit.modelpicker.col.fastest_help_note": "טוקני פלט בשנייה."
 }

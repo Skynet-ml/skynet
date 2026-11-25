@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "درجة الذكاء",
   "submit.modelpicker.col.fastest_help": "سرعة الإخراج",
   "submit.modelpicker.col.help_label": "ماذا تعني هذه الدرجة",
-  "submit.modelpicker.col.best_value_help_note": "مؤشر الذكاء من Artificial Analysis ÷ سعر مليون رمز.",
+  "submit.modelpicker.col.best_value_help_note": "مؤشر الذكاء من Artificial Analysis ÷ السعر المرجّح لمليون رمز (3 إدخال : 1 إخراج).",
   "submit.modelpicker.col.smartest_help_note": "مؤشر الذكاء من Artificial Analysis.",
   "submit.modelpicker.col.fastest_help_note": "رموز الإخراج في الثانية."
 }

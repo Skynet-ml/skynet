@@ -111,16 +111,14 @@ def test_mono_icon_is_tagged_for_the_text_color() -> None:
     assert body.startswith(b'<svg data-tone="mono" fill="currentColor"')
 
 
-def test_thinking_machines_uses_the_local_mark_without_a_fetch() -> None:
-    """Draw Thinking Machines from its local one-color mark."""
+def test_lab_without_a_cdn_icon_is_404_so_the_frontend_draws_its_mark() -> None:
+    """Return 404 for Thinking Machines, which LobeHub lacks, so the page shows its bundled framed mark."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        """Fail the test on any fetch."""
-        raise AssertionError(f"unexpected fetch of {request.url}")
+        """Serve no icon, as LobeHub does for this lab."""
+        return httpx.Response(404)
 
-    body = _app(LabLogoCache(_client_factory(handler))).get("/models/logos/thinkingmachines").content
-    assert body.startswith(b'<svg data-tone="mono"')
-    assert b"<rect" in body
+    assert _app(LabLogoCache(_client_factory(handler))).get("/models/logos/thinkingmachines").status_code == 404
 
 
 @pytest.mark.parametrize("slug", ["Bad_Slug", "x" * 41, "not-a-catalog-lab"])

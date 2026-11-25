@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "امتیاز هوش",
   "submit.modelpicker.col.fastest_help": "سرعت خروجی",
   "submit.modelpicker.col.help_label": "این امتیاز چه معنایی دارد",
-  "submit.modelpicker.col.best_value_help_note": "شاخص هوش Artificial Analysis ÷ قیمت ۱ میلیون توکن.",
+  "submit.modelpicker.col.best_value_help_note": "شاخص هوش Artificial Analysis ÷ قیمت ترکیبی ۱ میلیون توکن (۳ ورودی : ۱ خروجی).",
   "submit.modelpicker.col.smartest_help_note": "شاخص هوش Artificial Analysis.",
   "submit.modelpicker.col.fastest_help_note": "توکن خروجی در ثانیه."
 }

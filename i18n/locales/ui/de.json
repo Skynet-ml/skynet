@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "Intelligenzwert",
   "submit.modelpicker.col.fastest_help": "Ausgabegeschwindigkeit",
   "submit.modelpicker.col.help_label": "Was dieser Wert bedeutet",
-  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis Intelligence Index ÷ Preis pro 1 Million Tokens.",
+  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis Intelligence Index ÷ gemischter Preis pro 1 Million Tokens (3 Eingabe : 1 Ausgabe).",
   "submit.modelpicker.col.smartest_help_note": "Artificial Analysis Intelligence Index.",
   "submit.modelpicker.col.fastest_help_note": "Ausgabe-Tokens pro Sekunde."
 }

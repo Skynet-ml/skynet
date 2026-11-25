@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "지능 점수",
   "submit.modelpicker.col.fastest_help": "출력 속도",
   "submit.modelpicker.col.help_label": "이 점수의 의미",
-  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis 지능 지수 ÷ 토큰 100만 개당 가격.",
+  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis 지능 지수 ÷ 토큰 100만 개당 혼합 가격(입력 3 : 출력 1).",
   "submit.modelpicker.col.smartest_help_note": "Artificial Analysis 지능 지수.",
   "submit.modelpicker.col.fastest_help_note": "초당 출력 토큰 수."
 }

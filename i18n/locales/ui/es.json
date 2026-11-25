@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "Puntuación de inteligencia",
   "submit.modelpicker.col.fastest_help": "Velocidad de salida",
   "submit.modelpicker.col.help_label": "Qué significa esta puntuación",
-  "submit.modelpicker.col.best_value_help_note": "Índice de Inteligencia de Artificial Analysis ÷ precio por 1M de tokens.",
+  "submit.modelpicker.col.best_value_help_note": "Índice de Inteligencia de Artificial Analysis ÷ precio combinado por 1M de tokens (3 de entrada : 1 de salida).",
   "submit.modelpicker.col.smartest_help_note": "Índice de Inteligencia de Artificial Analysis.",
   "submit.modelpicker.col.fastest_help_note": "Tokens de salida por segundo."
 }

@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "Оценка интеллекта",
   "submit.modelpicker.col.fastest_help": "Скорость вывода",
   "submit.modelpicker.col.help_label": "Что значит эта оценка",
-  "submit.modelpicker.col.best_value_help_note": "Индекс интеллекта Artificial Analysis ÷ цена за 1 млн токенов.",
+  "submit.modelpicker.col.best_value_help_note": "Индекс интеллекта Artificial Analysis ÷ смешанная цена за 1 млн токенов (3 входных : 1 выходной).",
   "submit.modelpicker.col.smartest_help_note": "Индекс интеллекта Artificial Analysis.",
   "submit.modelpicker.col.fastest_help_note": "Выходные токены в секунду."
 }

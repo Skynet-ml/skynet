@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "Zekâ puanı",
   "submit.modelpicker.col.fastest_help": "Çıktı hızı",
   "submit.modelpicker.col.help_label": "Bu puan ne anlama gelir",
-  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis Zekâ Endeksi ÷ 1M token fiyatı.",
+  "submit.modelpicker.col.best_value_help_note": "Artificial Analysis Zekâ Endeksi ÷ 1M token karma fiyatı (3 girdi : 1 çıktı).",
   "submit.modelpicker.col.smartest_help_note": "Artificial Analysis Zekâ Endeksi.",
   "submit.modelpicker.col.fastest_help_note": "Saniyedeki çıktı token sayısı."
 }

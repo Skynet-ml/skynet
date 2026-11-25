@@ -32,15 +32,6 @@ ICON_NAMES: dict[str, str] = {
     "gmi": "gmicloud",
 }
 
-# Labs that LobeHub lacks. Thinking Machines has no symbol logo; its favicon is
-# a plain rounded square, drawn here in one color.
-LOCAL_MARKS: dict[str, bytes] = {
-    "thinkingmachines": (
-        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">'
-        b'<rect x="3" y="3" width="18" height="18" rx="3.5"/></svg>'
-    ),
-}
-
 # OpenRouter vendor segments spelled differently from the brand slug. This
 # mirrors ``BRAND_SLUGS`` in ``frontend/src/shared/lib/model-provider.ts``.
 _BRAND_SLUGS: dict[str, str] = {
@@ -167,8 +158,6 @@ class LabLogoCache:
         """
         if not _SLUG.fullmatch(slug):
             return None
-        if slug in LOCAL_MARKS:
-            return LabLogo(content=LOCAL_MARKS[slug], mono=True)
         now = time.monotonic()
         with self._lock:
             entry = self._entries.get(slug)

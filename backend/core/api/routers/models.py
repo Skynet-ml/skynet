@@ -41,7 +41,7 @@ from ...service_gateway.optimization.blackbox.sandbox_runtime import COVERAGE_SL
 from ..artificial_analysis import with_artificial_analysis_links
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..interview_model import with_interview_default
-from ..lab_logos import LOCAL_MARKS, LOGO_TTL_SECONDS, LabLogoCache, lab_slug
+from ..lab_logos import LOGO_TTL_SECONDS, LabLogoCache, lab_slug
 from ..model_catalog import (
     CatalogModel,
     ModelCatalogResponse,
@@ -457,7 +457,7 @@ def create_models_router(
         # The route needs no sign-in, so it fetches only for labs the catalog
         # knows. Any other slug would cost a CDN call and a cache entry.
         catalog = get_catalog_cached()
-        known = {lab_slug(m.value) for m in catalog.models} | {p.slug for p in catalog.providers} | set(LOCAL_MARKS)
+        known = {lab_slug(m.value) for m in catalog.models} | {p.slug for p in catalog.providers}
         logo = logos.get(slug) if slug in known else None
         if logo is None:
             raise HTTPException(status_code=404, detail="No logo for this provider")

@@ -4594,7 +4594,7 @@
   "submit.modelpicker.col.smartest_help": "Оцінка інтелекту",
   "submit.modelpicker.col.fastest_help": "Швидкість виведення",
   "submit.modelpicker.col.help_label": "Що означає ця оцінка",
-  "submit.modelpicker.col.best_value_help_note": "Індекс інтелекту Artificial Analysis ÷ ціна за 1 млн токенів.",
+  "submit.modelpicker.col.best_value_help_note": "Індекс інтелекту Artificial Analysis ÷ змішана ціна за 1 млн токенів (3 вхідних : 1 вихідний).",
   "submit.modelpicker.col.smartest_help_note": "Індекс інтелекту Artificial Analysis.",
   "submit.modelpicker.col.fastest_help_note": "Вихідні токени за секунду."
 }
