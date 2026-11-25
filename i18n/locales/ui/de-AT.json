@@ -9,7 +9,7 @@
   "app.shell.search.kw.security": "Sicherheit Zwei-Faktor Authentifikator Wiederherstellungscodes Passkeys E-Mail-Codes Anmeldung security 2FA TOTP recovery passkey login",
   "app.shell.search.kw.tagging": "Tagging Labeling KI-gestützt automatisches Taggen Standard-Tagging-Modell tagging labels autotag model",
   "app.shell.search.kw.usage": "Nutzung Ausgaben Kosten Dollar ausgegeben Tokens Läufe nach Modell Aktivität usage spend cost tokens",
-  "app.shell.search.kw.wizard": "Optimierung Assistent Codegenerierung Datensatz Aufteilung Paketregister Modelle optimization wizard split package registry pip models",
+  "app.shell.search.kw.wizard": "Optimierung Assistent Codegenerierung Datensatz Aufteilung Modelle optimization wizard split pip models",
   "auto.features.agent.panel.components.generalistpanel.1": "Grüß Sie, wie kann ich helfen?",
   "common.empty": "—",
   "optimizations.duration.lt_0_1s": "<0.1s",

@@ -19,7 +19,7 @@
   "app.shell.search.kw.security": "segurança dois fatores autenticador códigos de recuperação chaves de acesso códigos por e-mail login security 2FA TOTP recovery passkey login",
   "app.shell.search.kw.tagging": "marcação rotulagem rótulos assistida por IA marcação automática modelo padrão tagging labels autotag model",
   "app.shell.search.kw.usage": "uso gastos custo dólares gastos tokens execuções por modelo atividade usage spend cost tokens",
-  "app.shell.search.kw.wizard": "otimização assistente geração de código conjunto de dados divisão registro de pacotes modelos optimization wizard split package registry pip models",
+  "app.shell.search.kw.wizard": "otimização assistente geração de código conjunto de dados divisão modelos optimization wizard split pip models",
   "auth.login.invalid_credentials": "Email ou senha incorretos",
   "auth.login.loading": "Iniciando sessão…",
   "auth.login.password": "Senha",
