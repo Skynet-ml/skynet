@@ -509,18 +509,14 @@ const COMPONENTS: Components = {
       {children}
     </TableBlock>
   ),
-  img: ({ node: _node, src, alt }) => {
-    if (typeof src !== "string") return <span>{alt}</span>;
-    // An inline image needs no request. Loading a remote image with no click would let an
-    // injected reply send chat data to any host in its URL, so a remote image is only a link.
-    if (isInlineImageSrc(src)) return <img src={src} alt={alt ?? ""} />;
-    if (!/^https:\/\//i.test(src)) return <span>{alt}</span>;
-    return (
-      <a href={src} target="_blank" rel="noreferrer noopener">
-        {alt || src}
-      </a>
-    );
-  },
+  img: ({ node: _node, src, alt }) =>
+    // A remote image would load with no click, so an injected reply could send chat data to
+    // any host in its URL. A link would skip `allowLink` and can nest inside a Markdown link.
+    typeof src === "string" && isInlineImageSrc(src) ? (
+      <img src={src} alt={alt ?? ""} />
+    ) : (
+      <span>{alt}</span>
+    ),
 };
 
 export interface MessageMarkdownProps {

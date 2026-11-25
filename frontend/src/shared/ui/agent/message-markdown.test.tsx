@@ -77,19 +77,21 @@ void describe("MessageMarkdown", () => {
     assert.ok(html.includes("font-size: var(--md-code-size, 0.875rem)"), html);
   });
 
-  void it("loads only inline raster images and links remote ones", () => {
+  void it("loads only inline raster images and shows remote ones as alt text", () => {
     const html = render(
       "![in](data:image/png;base64,AAAA) ![remote](https://a.b/i.png?d=x) ![bad](http://a.b/i.png)",
     );
     assert.ok(html.includes('<img src="data:image/png;base64,AAAA" alt="in"'), html);
     assert.ok(!html.includes('<img src="https://'), html);
-    assert.ok(
-      html.includes(
-        '<a href="https://a.b/i.png?d=x" target="_blank" rel="noreferrer noopener">remote</a>',
-      ),
-      html,
-    );
+    assert.ok(!html.includes('href="https://a.b/i.png'), html);
+    assert.ok(html.includes("<span>remote</span>"), html);
     assert.ok(html.includes("<span>bad</span>"), html);
+  });
+
+  void it("does not nest a link for a linked remote image", () => {
+    const html = render("[![i](https://a.b/i)](https://c.d)");
+    assert.equal(html.match(/<a /g)?.length ?? 0, 1, html);
+    assert.ok(!html.includes("https://a.b/i"), html);
   });
 
   void it("shows raw HTML as text but turns <br> into a line break", () => {
