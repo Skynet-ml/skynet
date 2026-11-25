@@ -388,6 +388,7 @@ class FakeUsage:
         """
         self.request = dict(request)
         self.calls: list[tuple[Any, ...]] = []
+        self.late_id: str | None = None
 
     def start(self, at: float, name: str) -> None:
         """Record the create start.
@@ -398,14 +399,16 @@ class FakeUsage:
         """
         self.calls.append(("start", at, name))
 
-    def created(self, at: float, timeout_seconds: int) -> None:
+    def created(self, at: float, timeout_seconds: int, *, sandbox_id: str | None = None) -> None:
         """Record the create return.
 
         Args:
             at: The clock time.
             timeout_seconds: The Novita timeout.
+            sandbox_id: The id of a box that the create returned late.
         """
         self.calls.append(("created", at, timeout_seconds))
+        self.late_id = sandbox_id
 
     def refused(self) -> None:
         """Record a refusal."""
@@ -769,6 +772,7 @@ async def test_create_timeout_stays_pending(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch: Shortens the create timeout.
     """
     monkeypatch.setattr(novita, "CREATE_TIMEOUT", 0.01)
+    monkeypatch.setattr(novita, "LATE_CREATE_WAIT", 0.01)
     FakeSandbox.create_gate = asyncio.Event()
     env, usages = _protected(FakeClock())
     with pytest.raises(StartTimeoutError):
@@ -797,7 +801,7 @@ async def test_exec_runs_in_the_cwd_and_reports_the_exit_code() -> None:
     assert seen == [("stdout", "out")]
     box = next(iter(FakeSandbox.live.values()))
     command, options = box.commands.runs[-1]
-    assert command == "cd '/my dir' && echo hi"
+    assert command == "cd '/my dir' && { echo hi\n}"
     assert options["user"] == "root"
     assert options["background"] is True
     failed = await env.exec("fail")
@@ -968,6 +972,7 @@ async def test_cancel_during_create_with_an_empty_list_stays_pending(
         monkeypatch: Shortens the wait for the create call.
     """
     monkeypatch.setattr(novita, "CREATE_TIMEOUT", 0.01)
+    monkeypatch.setattr(novita, "LATE_CREATE_WAIT", 0.01)
     FakeSandbox.create_gate = asyncio.Event()
     runtime = _runtime(database)
     env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
@@ -1014,15 +1019,23 @@ async def test_box_created_after_the_deadline_is_killed(monkeypatch: pytest.Monk
     """Wait for a create that ends after the deadline, then kill the box that it returns.
 
     Args:
-        monkeypatch: Shortens the create deadline below the fake create time.
+        monkeypatch: Shortens the create deadline.
     """
-    monkeypatch.setattr(novita, "CREATE_TIMEOUT", 0.05)
-    FakeSandbox.create_delay = 0.08
+    monkeypatch.setattr(novita, "CREATE_TIMEOUT", 0.01)
+    gate = FakeSandbox.create_gate = asyncio.Event()
     env, usages = _protected(FakeClock())
+    task = asyncio.ensure_future(env.start())
+    while env._starting is None or not env._starting.done():  # noqa: ASYNC110
+        await asyncio.sleep(0.001)
+    # The deadline has passed and the teardown waits for the create.
+    gate.set()
     with pytest.raises(StartTimeoutError):
-        await env.start()
+        await task
     assert FakeSandbox.live == {}
     (usage,) = usages
+    assert usage.late_id is not None
+    assert usage.late_id.startswith("sbx-")
+    assert ("created", 0.0, 601) in usage.calls
     assert ("stopped", 0.0, True, True) in usage.calls
 
 
@@ -1075,4 +1088,82 @@ async def test_exec_wraps_a_foreign_timeout_and_disconnects_after_a_kill(monkeyp
     result = await env.exec("hang", timeout_sec=0.01)
     assert result.timed_out is True
     assert handles[1].disconnected is True
+    await env.stop()
+
+
+async def test_refusal_after_a_cancelled_create_releases_the_hold(database: Engine) -> None:
+    """Release the hold when a create that a stop cancelled answers later with a refusal.
+
+    Args:
+        database: The funded ledger.
+    """
+    gate = FakeSandbox.create_gate = asyncio.Event()
+    FakeSandbox.create_error = SandboxException("404: unknown template")
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
+    starting = asyncio.ensure_future(env.start())
+    while not FakeSandbox.calls:  # noqa: ASYNC110
+        await asyncio.sleep(0.001)
+    stopping = asyncio.ensure_future(env.stop())
+    while not env._starting.done():  # noqa: ASYNC110
+        await asyncio.sleep(0.001)
+    gate.set()
+    await stopping
+    with pytest.raises(SandboxInfraError):
+        await starting
+    assert _state(database, runtime).state == "released"
+
+
+async def test_failed_info_read_is_an_infra_error(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wrap a failed read of the new box, then kill it and settle its runtime.
+
+    Args:
+        database: The funded ledger.
+        monkeypatch: Makes the info read fail.
+    """
+
+    async def broken_info(self: FakeSandbox) -> Any:
+        """Fail like a dropped connection.
+
+        Args:
+            self: The fake box.
+
+        Raises:
+            TimeoutError: Always.
+        """
+        raise TimeoutError
+
+    monkeypatch.setattr(FakeSandbox, "get_info", broken_info)
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert FakeSandbox.live == {}
+    assert _state(database, runtime).state == "settled"
+
+
+async def test_network_policy_errors_are_infra_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Map a failed ``set_network`` call to an infra error.
+
+    Args:
+        monkeypatch: Makes the network call fail.
+    """
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    box = next(iter(FakeSandbox.live.values()))
+
+    async def broken(**options: Any) -> None:
+        """Fail like an API error.
+
+        Args:
+            **options: The network options.
+
+        Raises:
+            SandboxException: Always.
+        """
+        raise SandboxException("500: down")
+
+    monkeypatch.setattr(box, "set_network", broken)
+    with pytest.raises(SandboxInfraError):
+        await env.set_network_policy(NetworkPolicy(disabled=True))
     await env.stop()

@@ -174,15 +174,19 @@ class NovitaUsageReservation:
         self.started_at = at
         self.box_name = name
 
-    def created(self, at: float, timeout_seconds: int) -> None:
+    def created(self, at: float, timeout_seconds: int, *, sandbox_id: str | None = None) -> None:
         """Record when the create returned, which bounds when Novita ends the box.
 
         Args:
             at: Monotonic time just after the create call returned.
             timeout_seconds: The Novita timeout sent with the create. Novita
                 starts it before the create returns and kills the box at its end.
+            sandbox_id: The box id of a create that returned after the start
+                ended, so no confirm binds it.
         """
         self.ends_by = at + timeout_seconds
+        if sandbox_id is not None:
+            self.sandbox_id = sandbox_id
 
     def refused(self) -> None:
         """Record that Novita refused the create with an answer that opens no box."""
@@ -296,10 +300,12 @@ class NovitaUsageReservation:
                 # Kill latency, or a box larger than its funding, can pass the
                 # hold; Skynet pays the difference, never the user.
                 logger.warning(
-                    "Novita sandbox %s ran past its hold: %s cents clamped to %s.",
+                    "Novita sandbox %s ran past its hold: total %s cents clamped to %s, wallet %s cents clamped to %s.",
                     self.sandbox_id or self.box_name,
                     charge.total,
-                    current.max_cents,
+                    total,
+                    charge.wallet,
+                    wallet,
                 )
             self.runtime.service.settle(
                 self.operation.id,

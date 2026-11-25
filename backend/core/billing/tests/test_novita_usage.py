@@ -189,12 +189,15 @@ def test_settle_clamps_to_the_hold_and_records_it(database: Engine, caplog: pyte
     assert "ran past its hold" in caplog.text
 
 
-def test_settle_flags_a_wallet_only_clamp(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Flag the clamp and record the unclamped wallet charge when only the wallet part is cut.
+def test_settle_flags_a_wallet_only_clamp(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Flag the clamp, record the unclamped wallet charge and log both values when only the wallet part is cut.
 
     Args:
         database: The funded ledger.
         monkeypatch: Lowers the wallet cap that settle reads.
+        caplog: Captures the clamp warning.
     """
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
     reservation.start(0.0, "skynet-box")
@@ -224,6 +227,7 @@ def test_settle_flags_a_wallet_only_clamp(database: Engine, monkeypatch: pytest.
     assert Decimal(settle["unclamped_cents"]) == Decimal("1.56")
     assert Decimal(settle["unclamped_wallet_cents"]) == Decimal("1.56")
     assert _operation(reservation).actual_cents == Decimal("1.56")
+    assert "total 1.560000000 cents clamped to 1.560000000, wallet 1.560000000 cents clamped to 1." in caplog.text
 
 
 def test_late_stop_is_billed_only_to_the_novita_timeout(database: Engine) -> None:

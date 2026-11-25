@@ -74,6 +74,9 @@ CREATE_REQUEST_TIMEOUT = 360.0
 # The deadline of the whole create call: the request plus the SDK's own calls
 # around it. The SDK request limit ends the call first.
 CREATE_TIMEOUT = CREATE_REQUEST_TIMEOUT + 30.0
+# How long a teardown waits for a create that passed its deadline or was
+# cancelled. The SDK request limit ends that call within this time.
+LATE_CREATE_WAIT = CREATE_TIMEOUT
 STOP_TIMEOUT = 60.0
 # The SDK create docs cap a box timeout at 24 hours on the Pro plan.
 NOVITA_MAX_LIFETIME = 24 * 3600
@@ -320,7 +323,10 @@ class NovitaEnvironment(SandboxEnvironment):
                 raise SandboxInfraError(f"Novita refused the create: {type(error).__name__}") from error
             raise SandboxInfraError(f"The Novita create failed: {type(error).__name__}") from error
         if usage is not None:
-            info = await self._box.get_info()
+            try:
+                info = await asyncio.wait_for(self._box.get_info(), STOP_TIMEOUT)
+            except Exception as error:
+                raise SandboxInfraError(f"Novita could not read the new box: {type(error).__name__}") from error
             await self._billing(usage.confirm, info)
 
     async def _reserve(self) -> Any | None:
@@ -441,20 +447,24 @@ class NovitaEnvironment(SandboxEnvironment):
         if creating is not None and not creating.done():
             # A create can still return a box after the deadline or a cancel.
             # Its own request limit ends it, so wait for it before the sweep.
-            await asyncio.wait({creating}, timeout=CREATE_TIMEOUT)
+            await asyncio.wait({creating}, timeout=LATE_CREATE_WAIT)
             if not creating.done():
                 creating.cancel()
                 await asyncio.wait({creating})
-        late_box = (
-            self._box is None
-            and creating is not None
-            and creating.done()
-            and not creating.cancelled()
-            and creating.exception() is None
-        )
-        if late_box:
+        answered = self._box is None and creating is not None and creating.done() and not creating.cancelled()
+        if answered and creating.exception() is None:
             self._box = creating.result()
             self._create_unknown = False
+            if self._usage is not None:
+                self._usage.created(
+                    self._clock.monotonic(), self._timeout(), sandbox_id=getattr(self._box, "sandbox_id", None)
+                )
+        elif answered and _is_refusal(creating.exception()):
+            # The create answered after a cancel or the deadline with a refusal,
+            # so it opened no box.
+            self._create_unknown = False
+            if self._usage is not None:
+                self._usage.refused()
         if self._billing_call is not None:
             await asyncio.wait({self._billing_call})
             call = self._billing_call
@@ -630,7 +640,9 @@ class NovitaEnvironment(SandboxEnvironment):
         # Harbor puts the cd in the command: the SDK cwd option fails with a
         # misleading error when the directory does not exist.
         if cwd:
-            command = f"cd {shlex.quote(cwd)} && {command}"
+            # The group keeps every part of a compound command behind the cd,
+            # and the newline ends a trailing comment before the brace.
+            command = f"cd {shlex.quote(cwd)} && {{ {command}\n}}"
         try:
             # timeout=0 keeps the connection open with no limit; exec applies
             # its own limit and kills the command.
@@ -721,7 +733,11 @@ class NovitaEnvironment(SandboxEnvironment):
             policy: The checked policy.
 
         Raises:
-            SandboxInfraError: The box is not running.
+            SandboxInfraError: The box is not running, or Novita did not apply the policy in time.
         """
         box = self._require_box()
-        await box.set_network(**_network_options(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts))
+        options = _network_options(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts)
+        try:
+            await asyncio.wait_for(box.set_network(**options), STOP_TIMEOUT)
+        except Exception as error:
+            raise SandboxInfraError(f"Novita could not set the network policy: {type(error).__name__}") from error
