@@ -98,6 +98,7 @@ class FakeHandle:
         """
         self.pid = pid
         self._outcome = outcome
+        self.disconnected = False
 
     async def wait(self) -> Any:
         """Return the command result.
@@ -106,6 +107,10 @@ class FakeHandle:
             An object with ``exit_code``.
         """
         return await self._outcome()
+
+    async def disconnect(self) -> None:
+        """Record that the caller stopped the output events."""
+        self.disconnected = True
 
 
 class FakeCommands:
@@ -140,6 +145,8 @@ class FakeCommands:
             """
             if "hang" in command:
                 await asyncio.Event().wait()
+            if "drop" in command:
+                raise TimeoutError
             options["on_stdout"]("out")
             if "fail" in command:
                 options["on_stderr"]("bad")
@@ -240,6 +247,7 @@ class FakeSandbox:
     create_error: ClassVar[BaseException | None] = None
     leak_on_error: ClassVar[bool] = False
     create_gate: ClassVar[asyncio.Event | None] = None
+    create_delay: ClassVar[float] = 0.0
     info_gate: ClassVar[asyncio.Event | None] = None
     info_entered: ClassVar[asyncio.Event | None] = None
     list_error: ClassVar[BaseException | None] = None
@@ -270,6 +278,7 @@ class FakeSandbox:
         cls.create_error = None
         cls.leak_on_error = False
         cls.create_gate = None
+        cls.create_delay = 0.0
         cls.info_gate = None
         cls.info_entered = None
         cls.list_error = None
@@ -292,6 +301,7 @@ class FakeSandbox:
         cls.calls.append(options)
         if cls.create_gate is not None:
             await cls.create_gate.wait()
+        await asyncio.sleep(cls.create_delay)
         if cls.create_error is not None:
             if cls.leak_on_error:
                 cls(options["metadata"])
@@ -615,7 +625,7 @@ async def test_create_sets_the_funded_lifetime_and_kill_on_timeout() -> None:
     assert options["resources"] == {"cpu": 2, "memory_gib": 2}
     (usage,) = usages
     assert usage.request == {
-        "lifetime_ms": (601 + 120) * 1000,
+        "lifetime_ms": (601 + 390) * 1000,
         "vcpus": 2,
         "memory_mb": 2048,
         "template": "base",
@@ -818,7 +828,7 @@ async def test_files_round_trip_and_missing_file_is_none() -> None:
 
 
 async def test_network_policy_uses_harbor_shapes() -> None:
-    """Send the deny-all, allowlist and open shapes to ``set_network``."""
+    """Send the deny-all, allowlist and open shapes to ``set_network``, with explicit lists that clear a deny-all."""
     env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
     await env.start()
     await env.set_network_policy(NetworkPolicy(disabled=True))
@@ -828,7 +838,7 @@ async def test_network_policy_uses_harbor_shapes() -> None:
     assert box.networks == [
         {"allow_out": [], "deny_out": [novita.ALL_TRAFFIC]},
         {"allow_out": ["api.example.com"], "deny_out": [novita.ALL_TRAFFIC]},
-        {"allow_out": None, "deny_out": None},
+        {"allow_out": [], "deny_out": []},
     ]
     await env.stop()
 
@@ -948,12 +958,16 @@ async def test_failed_kill_of_the_known_box_stays_pending(database: Engine) -> N
     assert _state(database, runtime).state == "pending"
 
 
-async def test_cancel_during_create_with_an_empty_list_stays_pending(database: Engine) -> None:
+async def test_cancel_during_create_with_an_empty_list_stays_pending(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Keep the hold pending when the caller cancels a create and no box is listed.
 
     Args:
         database: The funded ledger.
+        monkeypatch: Shortens the wait for the create call.
     """
+    monkeypatch.setattr(novita, "CREATE_TIMEOUT", 0.01)
     FakeSandbox.create_gate = asyncio.Event()
     runtime = _runtime(database)
     env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
@@ -983,4 +997,82 @@ async def test_legacy_domain_is_refused_before_the_reserve(monkeypatch: pytest.M
         await env.start()
     assert usages == []
     assert FakeSandbox.calls == []
+    await env.stop()
+
+
+def test_create_waits_for_the_sdk_resource_timeout() -> None:
+    """Give the create the SDK's six-minute resource limit, and fund the hold and the lifetime cap from it."""
+    assert novita.CREATE_REQUEST_TIMEOUT == 360.0
+    assert novita.CREATE_TIMEOUT > novita.CREATE_REQUEST_TIMEOUT
+    assert novita.MAX_PROTECTED_LIFETIME == novita.NOVITA_MAX_LIFETIME - novita.CREATE_TIMEOUT
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock())
+    assert env._create_options()["request_timeout"] == novita.CREATE_REQUEST_TIMEOUT
+    assert env._usage_request()["lifetime_ms"] == (env._timeout() + novita.CREATE_TIMEOUT) * 1000
+
+
+async def test_box_created_after_the_deadline_is_killed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wait for a create that ends after the deadline, then kill the box that it returns.
+
+    Args:
+        monkeypatch: Shortens the create deadline below the fake create time.
+    """
+    monkeypatch.setattr(novita, "CREATE_TIMEOUT", 0.05)
+    FakeSandbox.create_delay = 0.08
+    env, usages = _protected(FakeClock())
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    assert FakeSandbox.live == {}
+    (usage,) = usages
+    assert ("stopped", 0.0, True, True) in usage.calls
+
+
+async def test_foreign_timeout_in_create_is_an_infra_error(database: Engine) -> None:
+    """Wrap a TimeoutError that is not the create deadline, and keep the unknown outcome pending.
+
+    Args:
+        database: The funded ledger.
+    """
+    FakeSandbox.create_error = TimeoutError()
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert _state(database, runtime).state == "pending"
+
+
+async def test_exec_wraps_a_foreign_timeout_and_disconnects_after_a_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wrap a TimeoutError that is not the exec limit, and disconnect a command after its timeout kill.
+
+    Args:
+        monkeypatch: Records the handles that the fake box returns.
+    """
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    box = next(iter(FakeSandbox.live.values()))
+    handles: list[FakeHandle] = []
+    run = box.commands.run
+
+    async def recording_run(command: str, **options: Any) -> FakeHandle:
+        """Run the fake command and keep its handle.
+
+        Args:
+            command: The shell command.
+            **options: The SDK options.
+
+        Returns:
+            The fake handle.
+        """
+        handle = await run(command, **options)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(box.commands, "run", recording_run)
+    with pytest.raises(SandboxInfraError):
+        await env.exec("drop")
+    assert handles[0].disconnected is False
+    result = await env.exec("hang", timeout_sec=0.01)
+    assert result.timed_out is True
+    assert handles[1].disconnected is True
     await env.stop()

@@ -68,7 +68,12 @@ BOX_TAG = "skynet_box"
 # Novita ignores the timeout of a box whose metadata has this key set to "true".
 LONG_RUNNING_KEY = "long_running"
 ALL_TRAFFIC = "0.0.0.0/0"
-CREATE_TIMEOUT = 120.0
+# SDK 2.1.4 sends a create with ``resources`` to /sandboxes/custom and gives it
+# six minutes by default, because Novita can take that long to size a box.
+CREATE_REQUEST_TIMEOUT = 360.0
+# The deadline of the whole create call: the request plus the SDK's own calls
+# around it. The SDK request limit ends the call first.
+CREATE_TIMEOUT = CREATE_REQUEST_TIMEOUT + 30.0
 STOP_TIMEOUT = 60.0
 # The SDK create docs cap a box timeout at 24 hours on the Pro plan.
 NOVITA_MAX_LIFETIME = 24 * 3600
@@ -155,7 +160,9 @@ def _network_options(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> dict[
         return {"allow_out": [], "deny_out": [ALL_TRAFFIC]}
     if allowed_hosts:
         return {"allow_out": list(allowed_hosts), "deny_out": [ALL_TRAFFIC]}
-    return {"allow_out": None, "deny_out": None}
+    # SDK 2.1.4 leaves a None list out of the request body, and Novita does
+    # not document that an empty body clears an earlier deny-all.
+    return {"allow_out": [], "deny_out": []}
 
 
 class NovitaEnvironment(SandboxEnvironment):
@@ -217,6 +224,9 @@ class NovitaEnvironment(SandboxEnvironment):
         # never saw, so an empty sweep does not prove that no box runs.
         self._create_unknown = False
         self._starting: asyncio.Future[None] | None = None
+        # The SDK create call. A deadline or cancel does not end it, so the
+        # teardown can still see a box that it returns late.
+        self._creating: asyncio.Future[Any] | None = None
         self._stop_task: asyncio.Future[None] | None = None
 
     @classmethod
@@ -252,6 +262,8 @@ class NovitaEnvironment(SandboxEnvironment):
             SandboxFatalError: The SDK is not installed.
             StartTimeoutError: The create did not finish in time.
             SandboxInfraError: The create failed, or a ``stop()`` ended the start.
+            SandboxSpecError: The domain cannot size a box, Skynet cannot fund
+                the box, or the box is larger than its funding.
         """
         if self.sandbox_cls is None:
             raise SandboxFatalError("The novita-sandbox package is not installed: install the `novita` extra.")
@@ -286,17 +298,19 @@ class NovitaEnvironment(SandboxEnvironment):
         self._create_unknown = True
         if usage is not None:
             usage.start(self._clock.monotonic(), self.name)
+        self._creating = asyncio.ensure_future(self.sandbox_cls.create(**self._create_options()))
         try:
             async with asyncio.timeout(CREATE_TIMEOUT) as deadline:
-                self._box = await self.sandbox_cls.create(**self._create_options())
+                self._box = await asyncio.shield(self._creating)
             self._create_unknown = False
             if usage is not None:
                 # Novita starts the timeout before the create returns, so the
                 # box ends by this time plus the timeout.
                 usage.created(self._clock.monotonic(), self._timeout())
-        except TimeoutError:
+        except TimeoutError as error:
             if not deadline.expired():
-                raise
+                # Not our deadline: the outcome is unknown, so the hold stays pending.
+                raise SandboxInfraError(f"The Novita create failed: {type(error).__name__}") from error
             raise StartTimeoutError(CREATE_TIMEOUT) from None
         except Exception as error:
             if _is_refusal(error):
@@ -383,7 +397,7 @@ class NovitaEnvironment(SandboxEnvironment):
             "metadata": {**metadata, BOX_TAG: self.name},
             "envs": dict(spec.env),
             "allow_internet_access": not spec.network_disabled,
-            "request_timeout": CREATE_TIMEOUT,
+            "request_timeout": CREATE_REQUEST_TIMEOUT,
         }
         if spec.image:
             options["template"] = spec.image
@@ -423,6 +437,24 @@ class NovitaEnvironment(SandboxEnvironment):
             # asyncio.wait does not raise the start's own error or cancel, but
             # a cancel of this teardown still reaches it.
             await asyncio.wait({self._starting})
+        creating = self._creating
+        if creating is not None and not creating.done():
+            # A create can still return a box after the deadline or a cancel.
+            # Its own request limit ends it, so wait for it before the sweep.
+            await asyncio.wait({creating}, timeout=CREATE_TIMEOUT)
+            if not creating.done():
+                creating.cancel()
+                await asyncio.wait({creating})
+        late_box = (
+            self._box is None
+            and creating is not None
+            and creating.done()
+            and not creating.cancelled()
+            and creating.exception() is None
+        )
+        if late_box:
+            self._box = creating.result()
+            self._create_unknown = False
         if self._billing_call is not None:
             await asyncio.wait({self._billing_call})
             call = self._billing_call
@@ -616,11 +648,14 @@ class NovitaEnvironment(SandboxEnvironment):
         try:
             async with asyncio.timeout(timeout_sec) as deadline:
                 result = await handle.wait()
-        except TimeoutError:
+        except TimeoutError as error:
             if not deadline.expired():
-                raise
+                raise SandboxInfraError(f"The Novita command connection failed: {type(error).__name__}") from error
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(box.commands.kill(handle.pid), STOP_TIMEOUT)
+            # Stop the output callbacks of the killed command.
+            with contextlib.suppress(Exception):
+                await handle.disconnect()
             return ExecResult(TIMEOUT_EXIT_CODE, "".join(stdout), "".join(stderr), timed_out=True)
         except asyncio.CancelledError:
             # A background command outlives the connection, so a cancelled

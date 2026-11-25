@@ -189,6 +189,43 @@ def test_settle_clamps_to_the_hold_and_records_it(database: Engine, caplog: pyte
     assert "ran past its hold" in caplog.text
 
 
+def test_settle_flags_a_wallet_only_clamp(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flag the clamp and record the unclamped wallet charge when only the wallet part is cut.
+
+    Args:
+        database: The funded ledger.
+        monkeypatch: Lowers the wallet cap that settle reads.
+    """
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
+    reservation.start(0.0, "skynet-box")
+    USAGE.confirm(reservation, _info())
+    reservation.stopped(600.0, confirmed=True, box_seen=True)
+    service = reservation.runtime.service
+    real_get = service.get_operation
+
+    def low_wallet(*args: Any) -> SimpleNamespace:
+        """Return the operation with a wallet cap below the charge.
+
+        Args:
+            *args: The ``get_operation`` arguments.
+
+        Returns:
+            The operation fields that settle reads.
+        """
+        operation = real_get(*args)
+        return SimpleNamespace(state=operation.state, max_cents=operation.max_cents, max_wallet_cents=Decimal(1))
+
+    monkeypatch.setattr(service, "get_operation", low_wallet)
+    USAGE.settle(reservation)
+    monkeypatch.undo()
+    (settle,) = _evidence(reservation)
+    assert settle["clamped"] is True
+    # 600 seconds * 0.000026 USD = 1.56 cents, at cost.
+    assert Decimal(settle["unclamped_cents"]) == Decimal("1.56")
+    assert Decimal(settle["unclamped_wallet_cents"]) == Decimal("1.56")
+    assert _operation(reservation).actual_cents == Decimal("1.56")
+
+
 def test_late_stop_is_billed_only_to_the_novita_timeout(database: Engine) -> None:
     """Stop the bill where Novita's timeout ends the box, not at a late kill."""
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")

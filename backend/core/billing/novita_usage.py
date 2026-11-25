@@ -291,7 +291,7 @@ class NovitaUsageReservation:
             charge = vercel_charge_policy(snapshot).convert(usd)
             total = min(charge.total, current.max_cents)
             wallet = min(charge.wallet, current.max_wallet_cents, total)
-            clamped = charge.total > current.max_cents
+            clamped = total < charge.total or wallet < charge.wallet
             if clamped:
                 # Kill latency, or a box larger than its funding, can pass the
                 # hold; Skynet pays the difference, never the user.
@@ -318,6 +318,7 @@ class NovitaUsageReservation:
                     "provider_usd": str(usd),
                     "clamped": clamped,
                     "unclamped_cents": str(charge.total),
+                    "unclamped_wallet_cents": str(charge.wallet),
                 },
             )
             self.runtime.unpin(self.operation.id)
