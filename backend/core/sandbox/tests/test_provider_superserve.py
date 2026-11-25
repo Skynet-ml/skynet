@@ -531,6 +531,16 @@ async def _settle_loop() -> None:
         await asyncio.sleep(0)
 
 
+async def _background() -> None:
+    """Wait until every other task of the test's event loop ends.
+
+    A background kill settles in a thread, so a fixed number of loop turns
+    does not always reach the settle (SKY-969).
+    """
+    while others := asyncio.all_tasks() - {asyncio.current_task()}:
+        await asyncio.wait(others)
+
+
 class TestSuperserveEnvironmentContract(SandboxEnvironmentContract):
     """Run the provider contract against the Superserve provider and the fake SDK."""
 
@@ -944,7 +954,7 @@ async def test_create_that_ends_after_the_grace_is_killed_in_the_background(
         await start
     assert not sdk.boxes
     release.set()
-    await _settle_loop()
+    await _background()
     assert sdk.killed == ["sbx-1"]
     assert usage.names()[-2:] == ["stopped", "settle"]
 
@@ -1086,7 +1096,7 @@ async def test_own_cap_kills_and_settles_the_box_at_its_lifetime(
     assert 59 < slept[0] <= 60
     assert not sdk.killed
     fire.set()
-    await _settle_loop()
+    await _background()
     assert sdk.killed == ["sbx-1"]
     assert usage.names()[-2:] == ["stopped", "settle"]
     with pytest.raises(SandboxInfraError, match="not running"):
