@@ -126,8 +126,6 @@ _TMP_ON_DISK = "umount /tmp 2>/dev/null || umount -l /tmp"
 # Bumping this rebuilds every template the provider made.
 _TEMPLATE_VERSION = 1
 _DENY_ALL = "0.0.0.0/0"
-# SDK 0.14.1 SandboxStatus values (types.py lines 27-28) of a box that is not running.
-_GONE_STATUSES = frozenset({"failed", "deleted"})
 # The SDK sends the create POST once and never retries it, so these
 # statuses are definite answers that made no box.
 _REFUSED_STATUSES = frozenset({400, 401, 402, 403, 404, 409, 429})
@@ -282,8 +280,10 @@ async def _kill_and_settle(sandbox_id: str, usage: Any | None, handle: Any | Non
 async def _find_boxes(attempt: str | None) -> list[Any] | None:
     """Look up the boxes that a create attempt made.
 
-    A box in status ``failed`` or ``deleted`` never ran or is gone, so it
-    does not count: binding it would bill seconds that no box ran.
+    A box in status ``failed`` or ``deleted`` is not running or is gone, so
+    it does not count: it is never bound or settled. The SDK does not say
+    that Superserve deletes a failed box or stops billing its disk, so a
+    failed box gets a best-effort kill.
 
     Args:
         attempt: The attempt label of the create.
@@ -295,10 +295,17 @@ async def _find_boxes(attempt: str | None) -> list[Any] | None:
         return None
     try:
         boxes = await AsyncSandbox.list(metadata={_ATTEMPT_KEY: attempt})
-        return [box for box in boxes if getattr(box.status, "value", box.status) not in _GONE_STATUSES]
     except Exception:
         logger.exception("Could not look up a Superserve box after a failed create; its hold stays pending.")
         return None
+    live = []
+    for box in boxes:
+        status = getattr(box.status, "value", box.status)
+        if status == "failed":
+            await _bounded(AsyncSandbox.kill_by_id(box.id), "kill a failed box of a failed create")
+        elif status != "deleted":
+            live.append(box)
+    return live
 
 
 async def _fail_usage(usage: Any | None, refused: bool = False) -> None:

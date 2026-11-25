@@ -10,6 +10,7 @@ import asyncio
 import logging
 import shlex
 from collections.abc import Awaitable, Callable, Iterator
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,6 +35,17 @@ from core.sandbox.timeouts import PhaseTimeouts
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
 
 _SPEC = SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=2, memory_mb=4096))
+
+
+# The SDK declares ``class SandboxStatus(str, Enum)``; a StrEnum would change str() and hide a missing unwrap.
+class FakeStatus(str, Enum):  # noqa: UP042
+    """Act as the SDK's ``SandboxStatus`` and ``TemplateStatus``: a ``str`` enum hashed by name."""
+
+    ACTIVE = "active"
+    FAILED = "failed"
+    DELETED = "deleted"
+    BUILDING = "building"
+    READY = "ready"
 
 
 class FakeSDKError(Exception):
@@ -92,7 +104,7 @@ class FakeBox:
         self.id = f"sbx-{len(sdk.boxes) + 1}"
         self.kwargs = kwargs
         self.metadata: dict[str, str] = dict(kwargs.get("metadata") or {})
-        self.status = "active"
+        self.status = FakeStatus.ACTIVE
         self.data: dict[str, bytes] = {}
         self.run_calls: list[dict[str, Any]] = []
         self.updates: list[Any] = []
@@ -231,9 +243,9 @@ class FakeTemplate:
         self.latest_build_id = "build-1"
 
     @property
-    def status(self) -> str:
-        """Return the status of the latest build."""
-        return self.builds[self.latest_build_id]
+    def status(self) -> FakeStatus:
+        """Return the status of the latest build as an enum member, as the SDK does."""
+        return FakeStatus(self.builds[self.latest_build_id])
 
     @status.setter
     def status(self, value: str) -> None:
@@ -356,7 +368,7 @@ class FakeSuperserve:
         self.killed.append(sandbox_id)
         for box in self.boxes:
             if box.id == sandbox_id:
-                box.status = "deleted"
+                box.status = FakeStatus.DELETED
 
     async def _list_templates(self, *, name_prefix: str) -> list[FakeTemplate]:
         """List the templates whose name starts with a prefix.
@@ -747,23 +759,29 @@ async def test_unknown_create_keeps_the_hold_pending(sdk: FakeSuperserve, error:
     assert usage.calls[-1] == ("fail", False)
 
 
-@pytest.mark.parametrize("status", ["failed", "deleted"])
+@pytest.mark.parametrize("kill_fails", [False, True])
+@pytest.mark.parametrize("status", [FakeStatus.FAILED, FakeStatus.DELETED])
 @pytest.mark.parametrize(("status_code", "absent"), [(503, False), (409, True)])
 async def test_lookup_ignores_boxes_that_are_not_running(
-    sdk: FakeSuperserve, status: str, status_code: int, absent: bool
+    sdk: FakeSuperserve, status: FakeStatus, status_code: int, absent: bool, kill_fails: bool
 ) -> None:
-    """Treat a failed or deleted box like no box: bind and kill nothing, release only on a refusal.
+    """Treat a failed or deleted box like no box, and kill only a failed box, best effort.
+
+    The box is never bound or settled, and the hold is released only on a
+    refusal, also when the kill of a failed box fails.
 
     Args:
         sdk: The fake SDK.
         status: The status of the box that the lookup finds.
         status_code: The status of the create error.
         absent: Whether the hold is released as absent.
+        kill_fails: Whether the best-effort kill fails.
     """
     usage = FakeUsage()
     sdk.create_error = FakeSDKError("create", status_code)
     sdk.create_makes_box = True
     listing = sdk.AsyncSandbox.list
+    kills: list[str] = []
 
     async def list_after_the_box_ended(*, metadata: dict[str, str]) -> list[FakeBox]:
         """End the box, then list.
@@ -777,10 +795,20 @@ async def test_lookup_ignores_boxes_that_are_not_running(
         sdk.box().status = status
         return await listing(metadata=metadata)
 
+    async def record_kill() -> None:
+        """Record each kill attempt."""
+        kills.append("kill")
+
     sdk.AsyncSandbox.list = list_after_the_box_ended
+    sdk.kill_hook = record_kill
+    if kill_fails:
+        sdk.kill_error = FakeSDKError("down", 503)
     with pytest.raises(SandboxInfraError):
         await _protected(usage).start()
-    assert not sdk.killed
+    expected_kills = ["kill"] if status is FakeStatus.FAILED else []
+    assert kills == expected_kills
+    assert sdk.killed == ([] if kill_fails else ["sbx-1"] if expected_kills else [])
+    assert not sdk.handle_kills
     assert usage.names() == ["sent", "fail"]
     assert usage.calls[-1] == ("fail", absent)
 
@@ -1089,7 +1117,7 @@ async def test_stop_job_sandboxes_skips_deleted_boxes_and_survives_a_failure(sdk
     envs = [SuperserveEnvironment(SandboxSpec(**{**_SPEC.__dict__, "tags": {JOB_TAG: "job"}})) for _ in range(2)]
     for env in envs:
         await env.start()
-    sdk.boxes[0].status = "deleted"
+    sdk.boxes[0].status = FakeStatus.DELETED
     assert await SuperserveEnvironment.stop_job_sandboxes("job") == 1
     assert sdk.killed == ["sbx-2"]
     assert not sdk.handle_kills
