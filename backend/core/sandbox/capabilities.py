@@ -4,8 +4,10 @@ Adapted from Harbor (harbor-framework/harbor), Apache-2.0: the flag set comes
 from ``harbor/environments/capabilities.py`` and the checks from
 ``harbor/environments/resource_policies.py``. Changes: a frozen dataclass
 replaces the Pydantic models, the flags add Skynet's header injection,
-protection, billing and Vercel size limits, and ``validate_spec`` takes over
-the inline checks in the blackbox ``VercelSandboxRuntime.open``.
+protection, billing and Vercel size limits, the ``gpu_types`` flag, the Modal
+GPU names (``MODAL_GPU_TYPES``, ``modal_gpu_name``) and the GPU type check
+(SKY-804), and ``validate_spec`` takes over the inline checks in the blackbox
+``VercelSandboxRuntime.open``.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ class EnvironmentCapabilities:
     dynamic_network_policy: bool = False
     snapshots: bool = False
     gpus: bool = False
+    gpu_types: bool = False
     max_vcpus: int | None = None
     even_vcpus: bool = False
     memory_mb_per_vcpu: int | None = None
@@ -69,6 +72,44 @@ VERCEL_CAPABILITIES = EnvironmentCapabilities(
 )
 
 
+# The GPU names that Modal's ``gpu`` argument accepts (https://modal.com/docs/guide/gpu), plus the legacy
+# ``A10G`` name that Modal's own examples still use. The Modal client does not check names; its server does.
+# They live here, not in the Modal provider, so the warm box lease checks a GPU grant without loading the SDK.
+MODAL_GPU_TYPES = frozenset(
+    {
+        "T4",
+        "L4",
+        "A10",
+        "A10G",
+        "L40S",
+        "A100",
+        "A100-40GB",
+        "A100-80GB",
+        "RTX-PRO-6000",
+        "H100",
+        "H100!",
+        "H200",
+        "B200",
+        "B200+",
+        "B300",
+    }
+)
+
+
+def modal_gpu_name(gpu_type: object) -> str | None:
+    """Return a GPU type as the Modal name.
+
+    Args:
+        gpu_type: A GPU type such as ``a100``.
+
+    Returns:
+        The upper-case Modal name, or ``None`` when Modal has no GPU of that type.
+    """
+    # Modal reads the names without case.
+    name = gpu_type.strip().upper() if isinstance(gpu_type, str) else ""
+    return name if name in MODAL_GPU_TYPES else None
+
+
 def validate_spec(spec: SandboxSpec, caps: EnvironmentCapabilities) -> None:
     """Reject a spec that the provider with these capabilities cannot open.
 
@@ -77,14 +118,34 @@ def validate_spec(spec: SandboxSpec, caps: EnvironmentCapabilities) -> None:
         caps: The capabilities of the target provider.
 
     Raises:
-        SandboxSpecError: The spec breaks a lifetime, size or network rule.
+        SandboxSpecError: The spec breaks a lifetime, GPU type, size or network rule.
     """
     lifetime = spec.lifetime_seconds
     # bool is an int subclass, and a string makes math.isfinite raise TypeError.
     if isinstance(lifetime, bool) or not isinstance(lifetime, Real) or not math.isfinite(lifetime) or lifetime <= 0:
         raise SandboxSpecError("The sandbox lifetime must be a finite, positive number of seconds.")
+    _validate_gpu_type(spec.gpu_type, caps)
     _validate_resources(spec.resources, caps)
     _validate_network(spec, caps)
+
+
+def _validate_gpu_type(gpu_type: object, caps: EnvironmentCapabilities) -> None:
+    """Reject a GPU type that is empty, or that the provider cannot start.
+
+    Args:
+        gpu_type: The spec's GPU type; ``None`` asks for no GPU type.
+        caps: The capabilities of the target provider.
+
+    Raises:
+        SandboxSpecError: The type is not a non-empty name, or the provider has no GPU types.
+    """
+    if gpu_type is None:
+        return
+    if not isinstance(gpu_type, str) or not gpu_type.strip():
+        raise SandboxSpecError("The sandbox GPU type must be a non-empty name.")
+    if not caps.gpu_types:
+        # Refused, not ignored: a box without its GPU would run the step on the wrong hardware.
+        raise SandboxSpecError(f"The {caps.name} sandbox cannot start a box with GPU type {gpu_type.strip()!r}.")
 
 
 def resolve_resources(request: ResourceRequest, caps: EnvironmentCapabilities) -> ResourceRequest:

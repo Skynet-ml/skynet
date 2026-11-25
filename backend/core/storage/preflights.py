@@ -6,7 +6,7 @@ import math
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from ..billing.budgets import BudgetConflictError, BudgetNotFoundError, BudgetService
 from ..billing.operation_pricing import json_fingerprint
 from ..config import settings
+from ..models.blackbox import HOST_CLI_AUTO_KEY
 from .models import JSON_STORE, Base, BillingProviderKeyModel, ExecutionBudgetModel, ExecutionOperationModel
 
 _COSMETIC_FIELDS = {
@@ -35,6 +36,8 @@ _COSMETIC_FIELDS = {
     "max_cost_cents",
     "dataset_filename",
     "recipe",
+    # The setup chat names the run's origin, not an input it executes.
+    "conversation_id",
 }
 _EVALUATION_FIELDS = {
     "scorer",
@@ -89,6 +92,8 @@ class PreflightClaim:
     token: str | None
     generation: int
     attempt: int = 0
+    # The public document hides the row's result, so a new attempt reads its ``carry`` values here.
+    kept: dict[str, Any] = field(default_factory=dict)
 
 
 def _utc(value: datetime) -> datetime:
@@ -123,6 +128,14 @@ def verification_fingerprint(
         and not key.startswith("_")
         and (scope != "evaluation" or key in _EVALUATION_FIELDS)
     }
+    # The filled-in CLI mark only decides whether [proposer] entry applies. A
+    # request that names its own proposer never uses entry, so there a submit
+    # that sends the check's CLI back without the mark is the same run (SKY-753).
+    proposer = inputs.get("proposer")
+    if isinstance(proposer, dict) and (
+        "harness" in proposer or proposer.get("run_command") or proposer.get("install_command")
+    ):
+        inputs["proposer"] = {key: value for key, value in proposer.items() if key != HOST_CLI_AUTO_KEY}
     connections = session.execute(
         select(BillingProviderKeyModel.id, BillingProviderKeyModel.updated_at, BillingProviderKeyModel.status)
         .where(BillingProviderKeyModel.username == username)
@@ -181,6 +194,7 @@ def preflight_document(row: WizardPreflightModel) -> dict[str, Any]:
         **({"scorer_result": row.result["scorer_result"]} if "scorer_result" in row.result else {}),
         **({"workflow_result": row.result["workflow_result"]} if "workflow_result" in row.result else {}),
         **({"interaction_result": row.result["interaction_result"]} if "interaction_result" in row.result else {}),
+        **({"judge_result": row.result["judge_result"]} if "judge_result" in row.result else {}),
         **({"terminal": row.result["terminal"]} if isinstance(row.result.get("terminal"), dict) else {}),
         **({"environment": row.result["environment"]} if isinstance(row.result.get("environment"), dict) else {}),
     }
@@ -246,7 +260,7 @@ class PreflightStore:
 
     @staticmethod
     def _after_settlement(row: WizardPreflightModel) -> bool:
-        """Promote only fully performed successful checks after their usage settles.
+        """Promote checks that all succeeded or were skipped, after their usage settles.
 
         Args:
             row: Finished pending attempt with no outstanding paid operations.
@@ -260,7 +274,8 @@ class PreflightStore:
         performed = [check for check in checks if check.get("key") != "usage"]
         if not performed or any(check.get("status") == "failed" for check in performed):
             return False
-        if any(check.get("status") != "succeeded" for check in performed):
+        # A user-image role's setup is skipped, not failed, and does not block success (SKY-893).
+        if any(check.get("status") not in {"succeeded", "skipped"} for check in performed):
             return True
         row.status = "succeeded"
         result = {
@@ -288,6 +303,8 @@ class PreflightStore:
         payload: dict[str, Any],
         reuse_failed: bool = False,
         exclusive_scope: bool = False,
+        session_id: str | None = None,
+        carry: dict[str, Any] | None = None,
     ) -> PreflightClaim:
         """Reuse matching success or atomically claim a new verification attempt.
 
@@ -300,6 +317,9 @@ class PreflightStore:
             payload: Canonical verification inputs.
             reuse_failed: Preserve an explicit debug request's failed result on transport replay.
             exclusive_scope: Bind a debug request's idempotency scope to exactly one input fingerprint.
+            session_id: Judge session (SKY-696) whose attached budget pays for the attempt.
+            carry: Result keys, with their defaults, that a new attempt keeps from the
+                previous attempt, also after a crash; ``None`` starts every attempt empty.
 
         Returns:
             Public evidence, private owner token when claimed, and authoritative generation.
@@ -308,7 +328,9 @@ class PreflightStore:
             self.budgets.get(budget_id, username, session=session)
             budget = session.get(ExecutionBudgetModel, budget_id)
             assert budget is not None
-            if budget.revision != revision or budget.job_id is not None or budget.state != "open":
+            # A judge session pays each call from the budget attached to its own run row.
+            judged = session_id is not None and budget.job_id == session_id and budget.state == "attached"
+            if budget.revision != revision or not (judged or (budget.job_id is None and budget.state == "open")):
                 raise BudgetConflictError("The setup budget changed or is already attached to a run.")
             now = datetime.now(UTC)
             running = list(
@@ -369,7 +391,7 @@ class PreflightStore:
                     fingerprint=fingerprint,
                     status="pending",
                     attempt=0,
-                    result={},
+                    result=dict(carry or {}),
                     started_at=datetime.now(UTC),
                 )
                 session.add(row)
@@ -400,17 +422,20 @@ class PreflightStore:
                 if self._after_settlement(row):
                     session.flush()
                     return PreflightClaim(preflight_document(row), None, budget.generation)
-                if reuse_failed and ("scorer_result" in row.result or "workflow_result" in row.result):
+                if reuse_failed and any(
+                    key in row.result for key in ("scorer_result", "workflow_result", "judge_error")
+                ):
                     row.status = "failed"
                     session.flush()
                     return PreflightClaim(preflight_document(row), None, budget.generation)
+            kept = {key: row.result.get(key, default) for key, default in (carry or {}).items()}
             row.attempt += 1
-            row.status, row.result = "running", {}
+            row.status, row.result = "running", dict(kept)
             row.started_at, row.finished_at = now, None
             row.claim_token, row.execution_generation = str(uuid4()), budget.generation
             row.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
             session.flush()
-            return PreflightClaim(preflight_document(row), row.claim_token, budget.generation, row.attempt)
+            return PreflightClaim(preflight_document(row), row.claim_token, budget.generation, row.attempt, kept)
 
     def renew(self, identity: str, *, claim_token: str) -> bool:
         """Extend only a live owner whose shared budget generation is still current.
@@ -513,10 +538,14 @@ class PreflightStore:
             ):
                 raise BudgetConflictError("The setup attempt is no longer owned.")
             checks = result.get("checks")
+            # A role with a user image is checked by the run itself, so its skipped checks still pass (SKY-893).
             if status == "succeeded" and (
                 not isinstance(checks, list)
                 or not checks
-                or any(not isinstance(check, dict) or check.get("status") != "succeeded" for check in checks)
+                or any(
+                    not isinstance(check, dict) or check.get("status") not in {"succeeded", "skipped"}
+                    for check in checks
+                )
             ):
                 raise BudgetConflictError("Setup success requires completed verification evidence.")
             if budget.pending_operations:

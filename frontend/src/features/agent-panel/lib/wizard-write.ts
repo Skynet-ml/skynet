@@ -7,13 +7,37 @@
 import { diffStats, lineDiff } from "@/shared/lib/line-diff";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 
+import type { WizardState } from "./types";
+
 export const WIZARD_WRITE_TOOL = "update_wizard_state";
 /** The agent's column-role tool; its roles land on the Inputs roles card. */
 export const ROLES_WRITE_TOOL = "set_column_roles_datasets_column_roles_post";
 
-/** Whether a tool call writes wizard fields, so it shows as a write card. */
+/** Whether a tool call writes wizard fields, so its row shows their old and new values. */
 export function isWizardWrite(tool: string): boolean {
   return tool === WIZARD_WRITE_TOOL || tool === ROLES_WRITE_TOOL;
+}
+
+/**
+ * Whether a wizard write sits in its turn as a step row rather than a card.
+ *
+ * A write stays a step at its place in its group, running or finished, so it
+ * never jumps when it ends (SKY-743). Only a finished write that changed
+ * nothing is a card: its card renders nothing, and an empty card takes no
+ * space, so no group counts a row it never shows.
+ *
+ * Args:
+ *   call: The wizard write's tool call.
+ *   liveBefore: The form's own values when the write landed, as the card reads them.
+ *
+ * Returns:
+ *   False only for a finished write with no change to show.
+ */
+export function isWizardWriteStep(
+  call: AgentToolCall,
+  liveBefore?: Readonly<Record<string, unknown>>,
+): boolean {
+  return call.status !== "done" || wizardWriteChanges(call, liveBefore).length > 0;
 }
 
 // The tool argument names the budget in dollars; the form holds it in cents
@@ -44,7 +68,7 @@ export function rolesFields(
 export const CODE_FIELD_FILES: Readonly<Record<string, string>> = {
   run_code: "run.py",
   metric_code: "metric.py",
-  optimize_toml: "optimize.toml",
+  ascent_toml: "ascent.toml",
 };
 
 // Notes for later screens are the agent's own memory, not a setup answer.
@@ -165,6 +189,25 @@ export function listChange(
     ...[...next].map((item) => ({ item, state: old.has(item) ? ("same" as const) : ("add" as const) })),
     ...[...old].filter((item) => !next.has(item)).map((item) => ({ item, state: "del" as const })),
   ];
+}
+
+/**
+ * Merge a patch's `workspace_files` over the files the state holds: a file
+ * tool's patch carries only the file it wrote.
+ *
+ * Args:
+ *   state: The wizard state the patch lands on.
+ *   patch: A wizard patch from a tool result.
+ *
+ * Returns:
+ *   The patch, with the whole file map when it writes files.
+ */
+export function mergedPatch(
+  state: Readonly<Partial<WizardState>>,
+  patch: Partial<WizardState>,
+): Partial<WizardState> {
+  if (!patch.workspace_files) return patch;
+  return { ...patch, workspace_files: { ...state.workspace_files, ...patch.workspace_files } };
 }
 
 /**

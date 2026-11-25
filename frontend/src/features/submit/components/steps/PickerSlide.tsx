@@ -13,17 +13,6 @@ export function BannerFrame({ children }: { children: ReactNode }) {
     // Sized only by container queries — mixing in a `sm:` height would leave
     // two utilities competing for `height` from different variant groups.
     <div className="relative h-36 shrink-0 border-b border-border/50 bg-muted/50 @xl:h-44 @3xl:h-auto @3xl:w-[45%] @3xl:border-b-0 @3xl:border-e">
-      {/* The dot grid is CSS rather than an SVG pattern so it covers the whole
-          banner — the schematic letterboxes inside the viewBox, a pattern fill
-          would letterbox with it and leave bare bands at the sides. */}
-      <div
-        aria-hidden
-        className="absolute inset-0"
-        style={{
-          backgroundImage: "radial-gradient(circle, color-mix(in srgb, var(--foreground) 7%, transparent) 1px, transparent 1px)",
-          backgroundSize: "12px 12px",
-        }}
-      />
       <svg
         viewBox="0 0 240 88"
         preserveAspectRatio="xMidYMid meet"

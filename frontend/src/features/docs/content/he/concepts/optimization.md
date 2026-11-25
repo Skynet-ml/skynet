@@ -2,26 +2,29 @@ Skynet הוא Optimize Anything: כל ריצה מייעלת מאגר קוד. מ�
 
 ## החוזה המשותף
 
-לכל ריצה יש מאגר קוד ופונקציית ניקוד. פונקציית הניקוד היא פונקציית Python שמקבלת את הנתיב של גרסה אחת של המאגר ומקרה אחד.
+לכל ריצה יש מאגר קוד, קובץ `ascent.toml` עם `entry` ב-`[run]` או שלב `[target.<name>]`, ופונקציית ניקוד. ה-`entry` של `[run]` מריץ גרסה אחת של המאגר על מקרה אחד. פונקציית הניקוד היא פונקציית Python שמקבלת את הפלט של ה-`entry` ואת המקרה.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path` היא התיקייה של גרסה אחת של המאגר, אחרי שפקודת ההתקנה רצה.
-- `case` הוא dict. ‏`case["input"]` מכיל את שדות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את הערך הצפוי, או `None` כשאין למקרה ערך כזה.
-- `score` מחזיר זוג: מספר, ו-dict עם מחרוזת `"feedback"`.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-בתיקיית השורש של המאגר יש קובץ `serve.py` עם `def serve(input)`. פונקציית הניקוד יכולה לקרוא לו, ו-Skynet משתמש בו כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
+- `output` הוא מה שה-`entry` של `[run]` החזיר עבור המקרה.
+- `case` הוא dict. ‏`case["input"]` מכיל את שדות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את הערך הצפוי, או `None` כשאין למקרה ערך כזה.
+- `repo_path` היא תיקייה שמכילה רק את קובצי המדד שלך.
+- הפונקציה `score` מחזירה אובייקט אחד: מספר תחת `"score"`, ומחרוזת `"feedback"` אופציונלית.
+
+בתיקיית השורש של המאגר יש קובץ `serve.py` עם `def serve(input)`. ה-`entry` של `[run]` קורא לו בתיבת sandbox משלו.‏ Skynet משתמש בו כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
+
+פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך ואין קוד של גרסה, ולכן פונקציית הניקוד לא יכולה לייבא את `serve.py`. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from openascent import call`. בלי `entry` ב-`[run]` או שלב `[target.<name>]`, ‏Skynet דוחה את הקובץ `ascent.toml`.
 
 > [!NOTE]
 > סוכן הקוד שכותב את הגרסאות לא רואה את קוד המקור של פונקציית הניקוד, את הערכים הצפויים או את סודות הריצה.
@@ -34,9 +37,9 @@ def score(repo_path, case):
 
 | משתנה                | מה הוא מכיל                                                   |
 | -------------------- | ------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | הכתובת של השער. ‏`APP_GATEWAY_URL` מכיל את אותו ערך.          |
-| `APP_API_KEY`        | טוקן לריצה הזו בלבד. זה לא מפתח של ספק.                       |
-| `APP_MODEL`          | שם המודל לשליחה. זה מודל הניקוד של הריצה.                     |
+| `OPENAI_BASE_URL`    | הכתובת של השער. ‏`ASCENT_MODEL_URL` מכיל את אותו ערך.         |
+| `ASCENT_MODEL_KEY`   | טוקן לריצה הזו בלבד. זה לא מפתח של ספק.                       |
+| `ASCENT_MODEL`       | שם המודל לשליחה. זה מודל הניקוד של הריצה.                     |
 | `ANTHROPIC_BASE_URL` | הכתובת של השער עבור SDK של Anthropic.                         |
 
 ```python tab="pipeline.py"
@@ -44,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
@@ -58,7 +61,7 @@ def label(message):
 - קריאות על המפתחות של Skynet נמדדות מול תקציב הריצה.
 - עם מפתח משלך (BYOK), הקריאה הולכת למפתח של הספק שלך. ‏Skynet לא גובה עמלת מודל.
 - השער דוחה בקשות לכל מודל אחר.
-- סודות הריצה מגיעים לקוד שלך ולפונקציית הניקוד שלך כמשתני סביבה. שם המשתנה הוא שם הסוד. ‏Skynet מסתיר את ערכי הסודות בפלט.
+- הקוד שלך ופונקציית הניקוד שלך לא מקבלים את סודות הריצה כמשתני סביבה. סוד מגיע לתפקיד רק דרך טבלת `[services.<name>]` שהתפקיד מפרט ב-`[run] services` או ב-`[metric] services`, או דרך שרת בקובץ ה-`mcp` של התפקיד. כתוב/י את הסוד ב-`headers` של הטבלה בצורה `${NAME}`. ‏Skynet מוסיף את הסוד מחוץ ל-sandbox ומסתיר את ערכי הסודות בפלט.
 
 אין ל-sandbox גישה אחרת לרשת.
 

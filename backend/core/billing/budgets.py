@@ -13,7 +13,7 @@ import json
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -29,6 +29,7 @@ from ..storage.models import (
     ExecutionBudgetModel,
     ExecutionOperationModel,
     ExecutionUsageEvidenceModel,
+    JobModel,
     WalletLedgerModel,
 )
 from .budget_amounts import (
@@ -39,13 +40,21 @@ from .budget_amounts import (
     cent_units,
     cents_from_units,
 )
-from .service import StripeBillingService, account_committed_cents, free_grant_cents, local_customer_id
+from .service import StripeBillingService, account_committed_cents, grant_cents, local_customer_id
 
 _ACTIVE_STATES = ("reserved", "dispatched", "pending")
 _DISPATCHED_STATES = ("dispatched", "pending")
+# Admission that a user's cancel or pause closed. Only the user's own resume
+# reopens it; a recovery sweep that races the cancel never does (SKY-814).
+USER_STOP_REASONS = frozenset({"user_cancelled", "user_paused"})
 # One lease row lock covers every slice insert, so a bound keeps a single
 # transaction short.
 MAX_LEASE_SLICES = 256
+# One lease is one ledger hold. A dollar keeps the ledger calls few, and a stopped run gives back what it held.
+CHUNK_CENTS = 100
+# The cost kind of a worker agent's lease slice (core/worker/actors.py). No provider reconciler reads it back, so
+# only the worker or a fence settles it (SKY-829).
+AGENT_LEASE_COST_KIND = "agent_lease"
 # A context variable, not a service field: concurrent calls on one service each see only their own settles.
 _SETTLED_CENTS: ContextVar[dict[str, Decimal] | None] = ContextVar("settled_cents", default=None)
 
@@ -87,7 +96,7 @@ class BudgetTotalConflictError(BudgetConflictError):
         Args:
             message: Internal diagnostic for logs and focused tests.
             current_total_cents: Last total accepted by the ledger.
-            minimum_total_cents: Lowest total that covers settled and reserved work.
+            minimum_total_cents: Lowest total that covers the run's settled and reserved work.
         """
         super().__init__(message)
         self.current_total_cents = current_total_cents
@@ -109,17 +118,23 @@ class AccountFundsError(BudgetInsufficientError):
 class BudgetInFlightError(BudgetError):
     """Wait for already-covered work before deciding whether funding is exhausted."""
 
-    def __init__(self, message: str, *, scope_units: int | None = None, room_units: int | None = None) -> None:
-        """Keep the limit arithmetic so a caller can tell whether waiting could help.
+    def __init__(
+        self, message: str, *, scope_units: int | None = None, room_units: int | None = None, funds: bool = False
+    ) -> None:
+        """Keep the admission arithmetic so a caller can tell whether waiting could help.
 
         Args:
             message: Internal diagnostic for logs and focused tests.
-            scope_units: Coverage the refused operation needs.
-            room_units: The limit's unspent units, reserved work included.
+            scope_units: Coverage the refused operation needs: scope units
+                for the limit, or wallet units when ``funds`` is set.
+            room_units: The unspent units of the limit, or of the account's
+                funds when ``funds`` is set, this budget's reserved work included.
+            funds: Whether the account's funds, not the limit, refused the operation.
         """
         super().__init__(message)
         self.scope_units = scope_units
         self.room_units = room_units
+        self.funds = funds
 
 
 class BudgetUnreconciledError(BudgetInFlightError):
@@ -158,6 +173,28 @@ class BudgetSnapshot:
     pending_operations: int
     blocked_reason: str | None
     uncapped: bool = False
+    setup_in_total: bool = False
+
+    @property
+    def limit_spent_cents(self) -> Decimal:
+        """Return the settled spend that counts against the limit.
+
+        Returns:
+            Run spend, plus setup spend for a ``setup_in_total`` budget
+            (continuous-plan cycles, or accounts that turn off wallet setup
+            billing).
+        """
+        return self.run_spent_cents + self.setup_spent_cents if self.setup_in_total else self.run_spent_cents
+
+    def limit_view(self) -> dict[str, Any]:
+        """Return the fields with ``run_spent_cents`` as the spend against the limit.
+
+        Returns:
+            Every field, where ``run_spent_cents`` is ``limit_spent_cents``.
+            The budget card, the job status and the run notice read it as the
+            spend against the limit (SKY-925).
+        """
+        return {**asdict(self), "run_spent_cents": self.limit_spent_cents}
 
 
 @dataclass(frozen=True)
@@ -224,6 +261,53 @@ def usd_text(cents: int) -> str:
     return f"${cents / 100:,.2f}"
 
 
+def _setup_units(session: Session, budget: ExecutionBudgetModel) -> int:
+    """Sum the settled setup scope units that the budget's limit leaves out.
+
+    Setup is billed to the wallet only and never counts against the run's limit (SKY-925), so
+    readers of the limit subtract this from the budget's settled units. A ``setup_in_total`` budget
+    (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps the older policy,
+    so its limit leaves out nothing. Call it while the budget lock is held.
+
+    Args:
+        session: Transaction holding the budget lock.
+        budget: Locked budget whose setup spend to read.
+
+    Returns:
+        Settled setup scope units the limit leaves out, as counted in the
+        budget's settled units.
+    """
+    if budget.setup_in_total:
+        return 0
+    return int(
+        session.scalar(
+            select(func.coalesce(func.sum(ExecutionOperationModel.actual_units), 0)).where(
+                ExecutionOperationModel.budget_id == budget.id, ExecutionOperationModel.phase == "setup"
+            )
+        )
+    )
+
+
+def _run_reserved_units(budget: ExecutionBudgetModel) -> int:
+    """Return the reserved scope units that count against the run's limit.
+
+    Reserve takes setup work only before attach and run work only after it,
+    and attach refuses while setup work is active. So before attach every
+    reservation is setup work, and after it every reservation is run work.
+    A budget detached from a deleted job (``close_for_deleted_jobs``) keeps its dispatched run
+    holds, but it is closed, so they no longer count against a limit. A ``setup_in_total`` budget
+    (continuous-plan cycles, or accounts that turn off wallet setup billing) counts its setup holds
+    against the limit too.
+
+    Args:
+        budget: Locked budget.
+
+    Returns:
+        Reserved units that count against the limit.
+    """
+    return int(budget.reserved_units) if budget.job_id is not None or budget.setup_in_total else 0
+
+
 def _admit(
     session: Session,
     wallet: BillingCustomerModel,
@@ -231,8 +315,16 @@ def _admit(
     username: str,
     scope: int,
     charge: int,
+    phase: str,
+    keep_units: int = 0,
+    keep_funds: bool = True,
 ) -> None:
     """Check that new coverage fits the budget's limit and the account's funds.
+
+    Setup coverage is bounded only by the account's funds; the limit is the
+    run's own, and setup spend does not count against it (SKY-925). A ``setup_in_total`` budget
+    (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps the older policy:
+    its limit also bounds setup.
 
     Args:
         session: Transaction holding the account and budget locks.
@@ -241,21 +333,27 @@ def _admit(
         username: Authenticated owner.
         scope: Combined scope units the new coverage adds.
         charge: Wallet units the new coverage adds.
+        phase: Setup or run attribution of the coverage.
+        keep_units: Units of a capped limit, and of the account's funds, that
+            the coverage must leave free.
+        keep_funds: Whether ``keep_units`` also applies to the account's funds.
 
     Raises:
         BudgetInsufficientError: When the coverage cannot fit without a budget or funding change.
         BudgetInFlightError: When settling covered work may make the coverage fit.
     """
-    if not budget.uncapped:
-        remaining = budget.total_cents * CENT_SCALE - budget.settled_units
-        if scope > remaining:
+    if (phase == "run" or budget.setup_in_total) and not budget.uncapped:
+        remaining = budget.total_cents * CENT_SCALE - (budget.settled_units - _setup_units(session, budget))
+        # The room to keep counts as part of what the operation needs, so the refusal keeps its known text.
+        needed = scope + keep_units
+        if needed > remaining:
             raise BudgetInsufficientError(
-                f"The next operation needs up to {usd_text(ceil_cents(scope))}, but only "
+                f"The next operation needs up to {usd_text(ceil_cents(needed))}, but only "
                 f"{usd_text(max(remaining, 0) // CENT_SCALE)} of the {usd_text(budget.total_cents)} limit remain."
             )
-        if scope > remaining - budget.reserved_units:
+        if needed > remaining - budget.reserved_units:
             raise BudgetInFlightError(
-                "Covered work must settle before this operation can fit.", scope_units=scope, room_units=remaining
+                "Covered work must settle before this operation can fit.", scope_units=needed, room_units=remaining
             )
     held = account_committed_cents(session, username)
     wallet_balance = int(wallet.balance_cents) + int(wallet.grant_remaining or 0)
@@ -264,10 +362,21 @@ def _admit(
         - budget.billed_cents
         - budget_wallet_hold(budget)
     )
-    if hold_delta > wallet_balance - held:
+    # Submit also needs one lease of the balance, also for an uncapped run, so the check keeps that room of the
+    # funds too (SKY-923).
+    kept_funds = ceil_cents(keep_units) if keep_funds else 0
+    if hold_delta + kept_funds > wallet_balance - held:
         after_release = ceil_cents(budget.wallet_settled_units + charge) - budget.billed_cents
-        if after_release <= wallet_balance:
-            raise BudgetInFlightError("Other covered work currently holds the required wallet funds.")
+        if after_release + kept_funds <= wallet_balance:
+            # Other budgets' holds may settle, so the room counts them as free; then a setup check can tell
+            # when only its own boxes block it.
+            room = (wallet_balance + budget.billed_cents) * CENT_SCALE - budget.wallet_settled_units
+            raise BudgetInFlightError(
+                "Other covered work currently holds the required wallet funds.",
+                scope_units=charge + kept_funds * CENT_SCALE,
+                room_units=room,
+                funds=True,
+            )
         raise AccountFundsError("The account cannot fund the next operation.")
 
 
@@ -386,7 +495,7 @@ class BudgetService:
             Locked wallet with its legacy grant resolved.
         """
         wallet = session.get(BillingCustomerModel, username, with_for_update=True)
-        if wallet is None and free_grant_cents() > 0:
+        if wallet is None and grant_cents() > 0:
             # A new account's grant is only shown until a mutation creates its
             # row; create that row here so the grant can also fund a budget.
             # Two first submissions race to create it, so the loser keeps the
@@ -498,7 +607,12 @@ class BudgetService:
             Decimal(account_available)
             if budget.uncapped
             else cents_from_units(
-                max(0, budget.total_cents * CENT_SCALE - budget.settled_units - budget.reserved_units)
+                max(
+                    0,
+                    budget.total_cents * CENT_SCALE
+                    - (budget.settled_units - (0 if budget.setup_in_total else setup))
+                    - _run_reserved_units(budget),
+                )
             )
         )
         return BudgetSnapshot(
@@ -522,6 +636,7 @@ class BudgetService:
             pending_operations=int(pending or 0),
             blocked_reason=budget.blocked_reason,
             uncapped=bool(budget.uncapped),
+            setup_in_total=bool(budget.setup_in_total),
         )
 
     def _operation_snapshot(
@@ -565,7 +680,13 @@ class BudgetService:
         )
 
     def create(
-        self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool = False
+        self,
+        username: str,
+        total_cents: int,
+        *,
+        idempotency_key: str,
+        uncapped: bool = False,
+        setup_in_total: bool = False,
     ) -> BudgetSnapshot:
         """Create or recover a budget envelope without holding its unspent total.
 
@@ -574,14 +695,19 @@ class BudgetService:
             total_cents: Authorized combined scope limit.
             idempotency_key: Stable creation identity across browser retries.
             uncapped: Let the run draw on the account instead of stopping at the total.
+            setup_in_total: Count setup spend against the total and let the
+                total cap setup, as before SKY-925 (continuous-plan cycles, or accounts that turn
+                off wallet setup billing).
 
         Returns:
             Current authoritative budget; paid work still requires a reservation.
         """
         total = _total(total_cents)
         key = _identifier(idempotency_key)
-        # Only an uncapped request widens the fingerprint so earlier replays keep matching.
-        fingerprint = _fingerprint({"total": total, "uncapped": True} if uncapped else {"total": total})
+        # Only a set flag widens the fingerprint so earlier replays keep matching.
+        # ``setup_in_total`` stays out: it follows an account setting that may
+        # change between retries, and a replay keeps the stored flag.
+        fingerprint = _fingerprint({"total": total} | ({"uncapped": True} if uncapped else {}))
         with self._transaction() as session:
             wallet = self._wallet(session, username)
             budget = session.scalar(
@@ -603,6 +729,7 @@ class BudgetService:
                 creation_fingerprint=fingerprint,
                 total_cents=total,
                 uncapped=uncapped,
+                setup_in_total=setup_in_total,
                 created_at=now,
                 updated_at=now,
             )
@@ -735,7 +862,7 @@ class BudgetService:
         total = _total(total_cents)
         with self._transaction() as session:
             wallet, budget = self._locked(session, budget_id, username)
-            minimum = ceil_cents(budget.settled_units + budget.reserved_units)
+            minimum = ceil_cents(budget.settled_units - _setup_units(session, budget) + _run_reserved_units(budget))
             if budget.revision != expected_revision:
                 raise BudgetTotalConflictError(
                     "The budget changed; refresh its current revision.",
@@ -821,6 +948,8 @@ class BudgetService:
         attempt: int = 0,
         role: str | None = None,
         session: Session | None = None,
+        keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Admit one physical attempt under its verified scope and wallet bounds.
 
@@ -838,6 +967,11 @@ class BudgetService:
             attempt: Physical retry number; a new billable retry needs a new attempt.
             role: Optional task, judge, proposer or runtime attribution.
             session: Optional caller transaction for atomic lifecycle publication.
+            keep_cents: Cents of a capped limit, and of the account's funds,
+                that the coverage must leave free. Only the check of a ``setup_in_total`` budget
+                (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps them,
+                for the run's first lease (SKY-923).
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The reserved operation or its existing identical attempt.
@@ -891,7 +1025,7 @@ class BudgetService:
             )
             if unresolved is not None:
                 raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
-            _admit(session, wallet, budget, username, scope, charge)
+            _admit(session, wallet, budget, username, scope, charge, phase, keep_cents * CENT_SCALE, keep_funds)
             now = datetime.now(UTC)
             operation = ExecutionOperationModel(
                 id=str(uuid4()),
@@ -1021,7 +1155,7 @@ class BudgetService:
             )
             if unresolved is not None:
                 raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
-            _admit(session, wallet, budget, username, scope * slices, charge * slices)
+            _admit(session, wallet, budget, username, scope * slices, charge * slices, phase)
             now = datetime.now(UTC)
             operations = [
                 ExecutionOperationModel(
@@ -1074,7 +1208,10 @@ class BudgetService:
                 _identifier(provider_request_id, maximum=255)
                 if operation.provider_request_id not in {None, provider_request_id}:
                     raise BudgetConflictError("The operation already has a different provider request identity.")
+                identified = operation.provider_request_id is None
                 operation.provider_request_id = provider_request_id
+            else:
+                identified = False
             if operation.state == "reserved":
                 if budget.state == "blocked":
                     raise BudgetConflictError("This budget is quarantined pending usage reconciliation.")
@@ -1087,7 +1224,10 @@ class BudgetService:
                 claimed = True
             else:
                 claimed = False
-            operation.updated_at = datetime.now(UTC)
+            # A replay that changes nothing must not move the last change: the
+            # 404 release counts its window from the return (SKY-923).
+            if claimed or identified:
+                operation.updated_at = datetime.now(UTC)
             return replace(self._operation_snapshot(session, operation, budget, wallet), dispatch_claimed=claimed)
 
     def mark_pending(
@@ -1143,8 +1283,11 @@ class BudgetService:
                             created_at=datetime.now(UTC),
                         )
                     )
-            operation.state = "pending"
-            operation.updated_at = datetime.now(UTC)
+            # Only the return moves the last change; a repeated call keeps the
+            # 404 release window that counts from it (SKY-923).
+            if operation.state != "pending":
+                operation.state = "pending"
+                operation.updated_at = datetime.now(UTC)
             return self._operation_snapshot(session, operation, budget, wallet)
 
     def release(self, operation_id: str, username: str) -> OperationSnapshot:
@@ -1281,6 +1424,85 @@ class BudgetService:
             operation.updated_at = budget.updated_at = now
             return self._operation_snapshot(session, operation, budget, wallet)
 
+    def release_unconfirmed(
+        self,
+        operation_id: str,
+        username: str,
+        *,
+        dispatched_before: datetime,
+        reason: str,
+        returned_before: datetime | None = None,
+    ) -> OperationSnapshot:
+        """Release, at no further charge, the hold of started work whose final bill never came.
+
+        A provider can answer without usage and then never confirm the bill.
+        Without this release the full ceiling stays held forever and blocks the
+        account (SKY-784). Usage already settled stays billed; only the rest of
+        the hold is released, and Skynet absorbs the unknown cost.
+
+        Args:
+            operation_id: Pending attempt that returned and still waits for its final usage.
+            username: Authenticated owner.
+            dispatched_before: Only work dispatched before this time is released.
+            reason: Why the final usage is still unknown; recorded as evidence.
+            returned_before: Also require the operation's last change before
+                this time; ``None`` for no such check. A pending operation's
+                last change is its return or later.
+
+        Returns:
+            The released operation, or the unchanged one when it is not
+            unconfirmed pending work older than ``dispatched_before`` and
+            ``returned_before``.
+        """
+        with self._transaction() as session:
+            wallet, budget, operation = self._operation(session, operation_id, username)
+            started = operation.dispatched_at or operation.created_at
+            # SQLite returns naive datetimes; every stored time is UTC.
+            started = started if started.tzinfo else started.replace(tzinfo=UTC)
+            changed = operation.updated_at
+            changed = changed if changed.tzinfo else changed.replace(tzinfo=UTC)
+            # A known bill held for a funding or bound problem is not unconfirmed.
+            quarantined = session.scalar(
+                select(ExecutionUsageEvidenceModel.id)
+                .where(
+                    ExecutionUsageEvidenceModel.operation_id == operation_id,
+                    ExecutionUsageEvidenceModel.issue.is_not(None),
+                    ExecutionUsageEvidenceModel.issue != "usage_pending",
+                )
+                .limit(1)
+            )
+            # Only "pending" work has returned; "dispatched" work may still be a
+            # live stream or batch that outlasts the release window.
+            if (
+                operation.state != "pending"
+                or started >= dispatched_before
+                or (returned_before is not None and changed >= returned_before)
+                or quarantined is not None
+            ):
+                return self._operation_snapshot(session, operation, budget, wallet)
+            now = datetime.now(UTC)
+            document = {"reason": reason[:500], "dispatched_at": started.isoformat()}
+            session.add(
+                ExecutionUsageEvidenceModel(
+                    id=str(uuid4()),
+                    operation_id=operation_id,
+                    evidence_key=_identifier(f"unconfirmed:{operation_id}"),
+                    fingerprint=_fingerprint({"unconfirmed": document}),
+                    actual_units=operation.actual_units,
+                    actual_wallet_units=operation.actual_wallet_units,
+                    billed_cents=0,
+                    final=True,
+                    issue="unconfirmed",
+                    evidence=document,
+                    created_at=now,
+                )
+            )
+            budget.reserved_units -= operation.max_units - operation.actual_units
+            budget.wallet_reserved_units -= operation.max_wallet_units - operation.actual_wallet_units
+            operation.state = "released"
+            operation.updated_at = budget.updated_at = now
+            return self._operation_snapshot(session, operation, budget, wallet)
+
     def extend_coverage(
         self,
         operation_id: str,
@@ -1290,6 +1512,8 @@ class BudgetService:
         max_cents: Decimal | str | int | float,
         max_wallet_cents: Decimal | str | int | float,
         evidence: Mapping[str, Any],
+        keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Grow a running sandbox's coverage before the provider is asked to keep it alive longer.
 
@@ -1305,6 +1529,11 @@ class BudgetService:
             max_cents: Combined scope coverage the operation holds after the extension.
             max_wallet_cents: Wallet coverage the operation holds after the extension.
             evidence: The extended request bound, recorded for audit.
+            keep_cents: Cents of a capped limit, and of the account's funds,
+                that the coverage must leave free. Only the check of a ``setup_in_total`` budget
+                (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps them,
+                for the run's first lease (SKY-923).
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The operation with its grown coverage and the budget totals.
@@ -1349,6 +1578,9 @@ class BudgetService:
                 username,
                 scope - operation.max_units,
                 charge - operation.max_wallet_units,
+                operation.phase,
+                keep_cents * CENT_SCALE,
+                keep_funds,
             )
             now = datetime.now(UTC)
             session.add(
@@ -1376,7 +1608,7 @@ class BudgetService:
     def fence_generation(
         self, budget_id: str, username: str, *, expected_generation: int, session: Session | None = None
     ) -> BudgetSnapshot:
-        """Revoke old admission and release only its provably undispatched reservations.
+        """Revoke old admission, release undispatched reservations and end the old lease slices.
 
         Args:
             budget_id: Envelope whose old worker is being fenced.
@@ -1385,7 +1617,8 @@ class BudgetService:
             session: Optional recovery transaction, retaining account-before-budget locking.
 
         Returns:
-            New epoch, retaining all old dispatched coverage until reconciliation.
+            New epoch. Each old dispatched agent lease slice without a refused settle is settled at its last
+            settle; all other old dispatched coverage stays until reconciliation.
         """
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
@@ -1400,6 +1633,26 @@ class BudgetService:
                 budget.reserved_units -= operation.max_units
                 budget.wallet_reserved_units -= operation.max_wallet_units
                 operation.state = "released"
+                operation.updated_at = datetime.now(UTC)
+            # A dead worker's lease slice has no provider record to reconcile, so recovery would wait for it
+            # forever. Its last settle holds all the work that the worker can still prove; the fence ends the
+            # slice there, and the old worker can settle it no more. A slice with a refused settle stays for review.
+            refused = (
+                select(ExecutionUsageEvidenceModel.operation_id)
+                .join(ExecutionOperationModel, ExecutionOperationModel.id == ExecutionUsageEvidenceModel.operation_id)
+                .where(ExecutionOperationModel.budget_id == budget_id, ExecutionUsageEvidenceModel.issue.is_not(None))
+            )
+            for operation in session.scalars(
+                select(ExecutionOperationModel).where(
+                    ExecutionOperationModel.budget_id == budget_id,
+                    ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND,
+                    ExecutionOperationModel.state.in_(_DISPATCHED_STATES),
+                    ExecutionOperationModel.id.not_in(refused),
+                )
+            ):
+                budget.reserved_units -= operation.max_units - operation.actual_units
+                budget.wallet_reserved_units -= operation.max_wallet_units - operation.actual_wallet_units
+                operation.state = "settled"
                 operation.updated_at = datetime.now(UTC)
             budget.updated_at = datetime.now(UTC)
             return self._snapshot(session, budget, wallet)
@@ -1437,11 +1690,14 @@ class BudgetService:
                 return self._snapshot(session, budget, wallet)
             # Setup work ran before the budget joined the run, and no resume
             # repeats it, so only run work can be lost.
-            lost_operations = select(ExecutionOperationModel.id).where(
+            interrupted = (
                 ExecutionOperationModel.budget_id == budget_id,
                 ExecutionOperationModel.generation == generation,
                 ExecutionOperationModel.phase == "run",
                 ExecutionOperationModel.state == "settled",
+            )
+            lost_operations = select(ExecutionOperationModel.id).where(
+                *interrupted, ExecutionOperationModel.cost_kind != AGENT_LEASE_COST_KIND
             )
             if settled_after is not None:
                 lost_operations = lost_operations.where(ExecutionOperationModel.updated_at > settled_after)
@@ -1450,6 +1706,31 @@ class BudgetService:
                 func.coalesce(func.sum(ExecutionOperationModel.actual_wallet_units), 0),
             ).where(ExecutionOperationModel.id.in_(lost_operations))
             scope, charge = (int(value) for value in session.execute(lost).one())
+            # One lease slice pays for many steps, and its last settle can come after the steps that the resume
+            # keeps. So only a lease's usage that settled after the bound is lost: each settle is cumulative.
+            leases = select(ExecutionOperationModel.id).where(
+                *interrupted, ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND
+            )
+            lost_evidence = ExecutionUsageEvidenceModel.operation_id.in_(leases)
+            if settled_after is not None:
+                lost_evidence = lost_evidence & (ExecutionUsageEvidenceModel.created_at > settled_after)
+            for lease in session.scalars(select(ExecutionOperationModel).where(ExecutionOperationModel.id.in_(leases))):
+                kept = None
+                if settled_after is not None:
+                    kept = session.execute(
+                        select(
+                            ExecutionUsageEvidenceModel.actual_units, ExecutionUsageEvidenceModel.actual_wallet_units
+                        )
+                        .where(
+                            ExecutionUsageEvidenceModel.operation_id == lease.id,
+                            ExecutionUsageEvidenceModel.created_at <= settled_after,
+                            ExecutionUsageEvidenceModel.issue.is_(None),
+                        )
+                        .order_by(ExecutionUsageEvidenceModel.actual_units.desc())
+                        .limit(1)
+                    ).first()
+                scope += lease.actual_units - (kept.actual_units if kept else 0)
+                charge += lease.actual_wallet_units - (kept.actual_wallet_units if kept else 0)
             if not scope:
                 return self._snapshot(session, budget, wallet)
             budget.settled_units -= scope
@@ -1459,7 +1740,7 @@ class BudgetService:
             budget.updated_at = datetime.now(UTC)
             to_grant = 0
             if refund:
-                # Free-grant cents go back to the grant, so a waiver never turns
+                # Grant cents go back to the grant, so a waiver never turns
                 # them into paid balance. Only the grant the lost charges drew
                 # returns; the kept work stays paid as it was.
                 run_rows = (WalletLedgerModel.budget_id == budget_id, WalletLedgerModel.kind == "run")
@@ -1468,7 +1749,7 @@ class BudgetService:
                     WalletLedgerModel.delta_cents < 0,
                     WalletLedgerModel.settlement_key.in_(
                         select(ExecutionUsageEvidenceModel.id).where(
-                            ExecutionUsageEvidenceModel.operation_id.in_(lost_operations)
+                            ExecutionUsageEvidenceModel.operation_id.in_(lost_operations) | lost_evidence
                         )
                     ),
                 )
@@ -1518,11 +1799,21 @@ class BudgetService:
             session: Optional caller transaction for atomic lifecycle publication.
 
         Returns:
-            Closed authority with pending usage and holds retained.
+            Closed authority with pending usage and holds retained. A user's
+            cancel or pause keeps its reason against any later non-user reason.
         """
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             if budget.state == "blocked":
+                return self._snapshot(session, budget, wallet)
+            # A later budget_reached from a stale worker, or a sweep's job_failed,
+            # must not hide the user's stop: an automatic resume would then reopen
+            # it (SKY-814).
+            if (
+                budget.state == "closed"
+                and budget.blocked_reason in USER_STOP_REASONS
+                and reason not in USER_STOP_REASONS
+            ):
                 return self._snapshot(session, budget, wallet)
             budget.state = "closed"
             budget.blocked_reason = _identifier(reason)
@@ -1564,7 +1855,58 @@ class BudgetService:
             budget.updated_at = now
         return len(owned)
 
-    def close_for_failed_job(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
+    def close_for_deleted_account(self, username: str, *, session: Session) -> int:
+        """Close every budget of an account being deleted and release all of its open holds.
+
+        The same delete closes the wallet, so no usage of the account can settle
+        after it. Dispatched and pending work is released too: left open, the
+        reconciliation sweep selects it on every pass and fails on the missing
+        wallet. The budgets, operations and evidence rows stay as the record.
+
+        Args:
+            username: Account being deleted in ``session``.
+            session: The caller's delete transaction, so holds and wallet close together.
+
+        Returns:
+            Number of operations released.
+        """
+        # Wallet before budget, the same lock order as every other mutation.
+        session.execute(
+            select(BillingCustomerModel.username).where(BillingCustomerModel.username == username).with_for_update()
+        )
+        budgets = session.scalars(
+            select(ExecutionBudgetModel)
+            .where(ExecutionBudgetModel.username == username)
+            .order_by(ExecutionBudgetModel.id)
+            .with_for_update()
+        ).all()
+        now = datetime.now(UTC)
+        released = 0
+        for budget in budgets:
+            operations = session.scalars(
+                select(ExecutionOperationModel)
+                .where(
+                    ExecutionOperationModel.budget_id == budget.id,
+                    ExecutionOperationModel.state.in_(_ACTIVE_STATES),
+                )
+                .with_for_update()
+            ).all()
+            for operation in operations:
+                # A partial settle already moved the actual units out of the hold.
+                budget.reserved_units -= operation.max_units - operation.actual_units
+                budget.wallet_reserved_units -= operation.max_wallet_units - operation.actual_wallet_units
+                operation.state = "released"
+                operation.updated_at = now
+            released += len(operations)
+            if budget.state != "blocked":
+                budget.state = "closed"
+                budget.blocked_reason = "account_deleted"
+            budget.updated_at = now
+        return released
+
+    def close_for_failed_job(
+        self, budget_id: str, username: str, *, expected_generation: int, session: Session | None = None
+    ) -> BudgetSnapshot:
         """Close a failed job's envelope and return the holds of work that never started.
 
         Settled usage stays billed. Dispatched and pending work keeps its
@@ -1575,12 +1917,13 @@ class BudgetService:
             budget_id: Envelope of the job that reached a terminal failure.
             username: Authenticated owner.
             expected_generation: Epoch of the worker that saw the failure.
+            session: Optional caller transaction that already holds the job row.
 
         Returns:
             Closed budget with only the coverage of started work still held,
             or the unchanged budget when a resume already fenced that epoch.
         """
-        with self._transaction() as session:
+        with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             # A manual resume can fence a new epoch between the failed status
             # write and this close. The new epoch's holds and admission are
@@ -1595,7 +1938,43 @@ class BudgetService:
             budget.updated_at = now
             return self._snapshot(session, budget, wallet)
 
-    def resume_admission(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
+    def close_for_cancelled_job(self, budget_id: str, username: str, *, job_id: str, expected_generation: int) -> bool:
+        """Close a cancelled run's admission and free its unstarted holds while the run is still cancelled.
+
+        A resume can follow the cancel's status write and reopen the budget. The
+        close must then leave that budget alone (SKY-800). The job row lock comes
+        before the budget lock, in the order that ``requeue_for_resume`` takes
+        them, so a resume cannot change the row between the check and the close.
+
+        Args:
+            budget_id: Envelope of the cancelled run.
+            username: Authenticated owner.
+            job_id: The cancelled run.
+            expected_generation: Budget generation on the row that the cancel read after its write.
+
+        Returns:
+            ``True`` when the budget closed; ``False`` when the run is no longer
+            cancelled at that generation, because a newer action owns it.
+        """
+        with self._transaction() as session:
+            still_cancelled = session.scalar(
+                select(JobModel.optimization_id)
+                .where(
+                    JobModel.optimization_id == job_id,
+                    JobModel.status == "cancelled",
+                    func.coalesce(JobModel.execution_budget_generation, 0) == expected_generation,
+                )
+                .with_for_update()
+            )
+            if still_cancelled is None:
+                return False
+            self.stop_admission(budget_id, username, reason="user_cancelled", session=session)
+            self.close_for_failed_job(budget_id, username, expected_generation=expected_generation, session=session)
+            return True
+
+    def resume_admission(
+        self, budget_id: str, username: str, *, expected_generation: int, automatic: bool = False
+    ) -> BudgetSnapshot:
         """Reopen an explicitly resumed attached job after obligations are reconciled.
 
         The lifecycle coordinator must first verify the same job's checkpoint
@@ -1605,9 +1984,11 @@ class BudgetService:
             budget_id: Closed execution envelope bound to the resumed root job.
             username: Authenticated owner.
             expected_generation: Epoch authorized by the recovery coordinator.
+            automatic: Whether the orphan sweep, not the user, resumes the job.
 
         Returns:
-            Attached authority ready for new per-operation admission.
+            Attached authority ready for new per-operation admission, or the
+            unchanged closed budget when ``automatic`` and a user action closed it.
 
         Raises:
             BudgetUnreconciledError: When prior work still owns a reservation.
@@ -1617,6 +1998,10 @@ class BudgetService:
             wallet, budget = self._locked(session, budget_id, username)
             if budget.generation != expected_generation:
                 raise BudgetFencedError("The execution generation is obsolete.")
+            # The budget row lock orders this check with the cancel's stop_admission,
+            # so a user's cancel or pause that lands first always wins over a sweep.
+            if automatic and budget.state == "closed" and budget.blocked_reason in USER_STOP_REASONS:
+                return self._snapshot(session, budget, wallet)
             if budget.job_id is None or budget.state not in {"closed", "attached"}:
                 raise BudgetConflictError("Only an attached, reconciled job can resume admission.")
             active = session.scalar(
@@ -1628,7 +2013,10 @@ class BudgetService:
             )
             if active is not None:
                 raise BudgetUnreconciledError("Previous paid work must reconcile before admission resumes.")
-            if not budget.uncapped and budget.settled_units >= budget.total_cents * CENT_SCALE:
+            if (
+                not budget.uncapped
+                and budget.settled_units - _setup_units(session, budget) >= budget.total_cents * CENT_SCALE
+            ):
                 raise BudgetInsufficientError("The total budget has no remaining allowance.")
             budget.state = "attached"
             budget.blocked_reason = None
@@ -1661,7 +2049,8 @@ class BudgetService:
             Updated attempt and authoritative budget snapshot.
 
         Raises:
-            BudgetBoundExceededError: After preserving evidence and blocking the faulty priced path.
+            BudgetBoundExceededError: After preserving evidence and blocking the faulty priced path. For a fenced
+                lease's late settle, it keeps only the evidence and blocks nothing.
             BudgetFundingLostError: After preserving evidence when an external adjustment removed funding.
         """
         key = _identifier(evidence_key)
@@ -1687,13 +2076,37 @@ class BudgetService:
                     )
                 issue = prior.issue
             else:
-                if operation.state not in _DISPATCHED_STATES:
+                # The fence settles a lease slice while its old worker can still be alive. That worker's
+                # in-flight call can still report usage, but recovery already settled and waived the slice, and
+                # the step log drops the old generation's step, so the resume repeats and bills that call again.
+                # So a late settle keeps only its evidence, and Skynet takes its cost (SKY-719: for an unknown
+                # bill, charge nothing). This also frees a step that flushed between its commit and its settle.
+                fenced = (
+                    operation.state == "settled"
+                    and operation.cost_kind == AGENT_LEASE_COST_KIND
+                    and operation.generation < budget.generation
+                )
+                if operation.state not in _DISPATCHED_STATES and not fenced:
                     raise BudgetConflictError("Usage may only settle a dispatched attempt.")
-                if scope < operation.actual_units or charge < operation.actual_wallet_units:
+                floor_units, floor_wallet = operation.actual_units, operation.actual_wallet_units
+                if fenced:
+                    # A late settle never moves the operation's totals, so the last late settle is the floor.
+                    late_units, late_wallet = session.execute(
+                        select(
+                            func.max(ExecutionUsageEvidenceModel.actual_units),
+                            func.max(ExecutionUsageEvidenceModel.actual_wallet_units),
+                        ).where(
+                            ExecutionUsageEvidenceModel.operation_id == operation_id,
+                            ExecutionUsageEvidenceModel.issue.is_(None),
+                        )
+                    ).one()
+                    floor_units = max(floor_units, late_units or 0)
+                    floor_wallet = max(floor_wallet, late_wallet or 0)
+                if scope < floor_units or charge < floor_wallet:
                     raise BudgetConflictError("Cumulative usage cannot decrease.")
                 scope_delta = scope - operation.actual_units
                 wallet_delta = charge - operation.actual_wallet_units
-                billed = ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
+                billed = 0 if fenced else ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
                 if scope > operation.max_units or charge > operation.max_wallet_units:
                     issue = "bound_exceeded"
                 elif billed > int(wallet.balance_cents) + int(wallet.grant_remaining or 0):
@@ -1714,11 +2127,11 @@ class BudgetService:
                         created_at=datetime.now(UTC),
                     )
                 )
-                if issue:
+                if issue and not fenced:
                     budget.state = "blocked"
                     budget.blocked_reason = issue
                     operation.state = "pending"
-                else:
+                elif not fenced:
                     budget.settled_units += scope_delta
                     budget.wallet_settled_units += wallet_delta
                     budget.reserved_units -= scope_delta

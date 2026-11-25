@@ -2,26 +2,29 @@ Skynet هو Optimize Anything: كل تشغيل يحسّن مستودعًا. يق
 
 ## العقد المشترك
 
-لكل تشغيل مستودع ومُقيِّم. المُقيِّم دالة Python تتلقى مسار نسخة واحدة من المستودع وحالة واحدة.
+لكل تشغيل مستودع، وملف `ascent.toml` فيه `entry` في `[run]` أو مرحلة `[target.<name>]`، ومُقيِّم. يشغّل `entry` في `[run]` نسخة واحدة من المستودع على حالة واحدة. المُقيِّم دالة Python تتلقى مخرجات `entry` والحالة.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path` هو مجلد نسخة واحدة من المستودع، بعد تشغيل أمر الإعداد.
-- `case` قاموس (dict). يحتوي `case["input"]` على حقول الإدخال لحالة واحدة. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` إذا لم تكن للحالة قيمة متوقعة.
-- تُرجع `score` زوجًا: رقمًا، وقاموسًا فيه سلسلة نصية `"feedback"`.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-في جذر المستودع ملف `serve.py` فيه `def serve(input)`. يمكن للمُقيِّم أن يستدعيه، ويستخدمه Skynet لتقديم أفضل نسخة بعد التشغيل.
+- `output` هو ما أرجعه `entry` في `[run]` للحالة.
+- `case` قاموس (dict). يحتوي `case["input"]` على حقول الإدخال لحالة واحدة. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` إذا لم تكن للحالة قيمة متوقعة.
+- `repo_path` مجلد يحتوي ملفات المقياس فقط.
+- تُرجع `score` كائنًا واحدًا: رقمًا تحت `"score"`، وسلسلة نصية `"feedback"` اختيارية.
+
+في جذر المستودع ملف `serve.py` فيه `def serve(input)`. يستدعيه `entry` في `[run]` في صندوق معزول خاص به. ويستخدمه Skynet لتقديم أفضل نسخة بعد التشغيل.
+
+يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس، ولا يحتوي كود النسخة، لذلك لا يستطيع المُقيِّم استيراد `serve.py`. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from openascent import call`. إذا لم يوجد `entry` في `[run]` ولا مرحلة `[target.<name>]`، يرفض Skynet ملف `ascent.toml`.
 
 > [!NOTE]
 > لا يستطيع وكيل البرمجة الذي يكتب النسخ رؤية مصدر المُقيِّم ولا القيم المتوقعة ولا أسرار التشغيل.
@@ -34,9 +37,9 @@ def score(repo_path, case):
 
 | المتغير              | ما يحتويه                                                  |
 | -------------------- | ---------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | عنوان URL للبوابة. يحتوي `APP_GATEWAY_URL` على القيمة نفسها. |
-| `APP_API_KEY`        | رمز (token) لهذا التشغيل فقط. وهو ليس مفتاح مزوّد.          |
-| `APP_MODEL`          | اسم النموذج الذي ترسله. وهو نموذج المُقيِّم في التشغيل.      |
+| `OPENAI_BASE_URL`    | عنوان URL للبوابة. يحتوي `ASCENT_MODEL_URL` على القيمة نفسها. |
+| `ASCENT_MODEL_KEY`   | رمز (token) لهذا التشغيل فقط. وهو ليس مفتاح مزوّد.          |
+| `ASCENT_MODEL`       | اسم النموذج الذي ترسله. وهو نموذج المُقيِّم في التشغيل.      |
 | `ANTHROPIC_BASE_URL` | عنوان URL للبوابة لحزم SDK من Anthropic.                    |
 
 ```python tab="pipeline.py"
@@ -44,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
@@ -58,7 +61,7 @@ def label(message):
 - تُقاس الاستدعاءات بمفاتيح Skynet على ميزانية التشغيل.
 - بمفتاحك الخاص (BYOK)، يذهب الاستدعاء إلى مفتاح مزوّدك. لا تفرض Skynet رسومًا على النموذج.
 - ترفض البوابة الطلبات لأي نموذج آخر.
-- تصل أسرار التشغيل إلى كودك وإلى مُقيِّمك كمتغيرات بيئة. اسم المتغير هو اسم السر. يُخفي Skynet قيم الأسرار في المخرجات.
+- لا يتلقى كودك ومُقيِّمك أسرار التشغيل كمتغيرات بيئة. يصل السر إلى دور ما فقط عبر جدول `[services.<name>]` يذكره الدور في `[run] services` أو `[metric] services`، أو عبر خادم في ملف `mcp` الخاص بالدور. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يضيف Skynet السر خارج البيئة المعزولة، ويُخفي قيم الأسرار في المخرجات.
 
 لا يوجد للبيئة المعزولة أي وصول آخر إلى الشبكة.
 

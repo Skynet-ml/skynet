@@ -6,8 +6,9 @@ provider, so no test opens a network connection or starts a box.
 
 from __future__ import annotations
 
+import contextlib
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import patch
@@ -26,7 +27,7 @@ from core.storage.models import JobModel
 from core.worker import engine
 
 from .conftest import FakeJobStore
-from .mocks import make_mp_context, make_result_event
+from .mocks import make_mp_context, make_result_event, repo_staging_patches
 from .test_engine_sandbox_sweep import SweepSandbox
 from .test_protected_dspy_execution import _payload
 
@@ -42,6 +43,14 @@ class _Budget:
     reserved_cents: int
     settled_cents: int
     account_available_cents: int = 0
+
+    def limit_view(self) -> dict[str, Any]:
+        """Return the fields the worker stores, as the real budget snapshot does.
+
+        Returns:
+            Every field of the row.
+        """
+        return asdict(self)
 
 
 class _Ledger:
@@ -141,6 +150,13 @@ class _Gateway:
         """
         return payload
 
+    def allow_guest_hosts(self, hosts: tuple[str, ...]) -> None:
+        """Accept the proposer hosts that staging grants.
+
+        Args:
+            hosts: Hosts the staged repository allows, unused.
+        """
+
     def detach_sandbox(self) -> _Broker | None:
         """Take the broker out, as the real gateway does.
 
@@ -221,7 +237,10 @@ def _run_job(store: FakeJobStore, monkeypatch: pytest.MonkeyPatch, *, exitcode: 
         patch("core.worker.engine.mp.get_context", return_value=context),
         patch("core.worker.engine.validate_blackbox_payload"),
         patch.object(worker, "_schedule_embedding_indexing"),
+        contextlib.ExitStack() as stack,
     ):
+        for patcher in repo_staging_patches():
+            stack.enter_context(patcher)
         worker._process_job(JOB, 0)
     return worker
 

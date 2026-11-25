@@ -32,11 +32,26 @@ export interface SlashCommand {
   /** Shown before the name in the menu. */
   icon?: ComponentType<{ className?: string }>;
   /**
+   * The chat opens a picker it already has for this command (the model
+   * menu), so a pick from the menu runs the command with no argument.
+   */
+  picker?: boolean;
+  /**
+   * The command needs typed text (a chat name), so a pick from the menu
+   * fills the draft with "/name " instead of running it.
+   */
+  needsText?: boolean;
+  /**
    * Left out of the menu because the chat cannot run it now (a model without
    * effort levels, a chat not saved yet). A typed call still matches, so the
    * composer shows an error and does not send it to the agent as text.
    */
   hidden?: boolean;
+  /**
+   * The option values are ids the rows do not show (message indexes), so the
+   * menu filter and typed text match only labels. A menu pick sends the value.
+   */
+  labelsOnly?: boolean;
 }
 
 /** What the slash menu lists for a draft. */
@@ -66,6 +81,19 @@ export function parseSlashCommand(
 }
 
 /**
+ * How many characters at the start of a draft the composer marks as a
+ * command: "/name" when the draft runs as an offered command, else 0. Text
+ * before the slash (a space, say) gets no mark, so the mark always lines up
+ * with the typed text.
+ */
+export function slashTokenLength(text: string, commands: readonly SlashCommand[]): number {
+  // A hidden command still matches, but it only shows an error, so it gets no mark.
+  const parsed = text.startsWith("/") ? parseSlashCommand(text, commands) : null;
+  if (!parsed || parsed.command.hidden) return 0;
+  return /^\/\S+/.exec(text)![0].length;
+}
+
+/**
  * The menu for a one-line draft that starts with a slash: the commands whose
  * name starts with what was typed, or, after a command with options and a
  * space, the options that contain the typed argument. The option the
@@ -82,42 +110,86 @@ export function slashMenu(text: string, commands: readonly SlashCommand[]): Slas
   }
   const command = commands.find((c) => c.name === text.slice(1, space).toLowerCase());
   if (!command?.options?.length || command.hidden) return null;
-  const typed = text.slice(space).trim().toLowerCase();
-  const items = command.options.filter(
-    (o) => o.value.toLowerCase().includes(typed) || o.label.toLowerCase().includes(typed),
-  );
-  const exact = resolveSlashOption(typed, items);
+  const menu = optionsMenu(command, text.slice(space));
+  // An empty labelsOnly menu stays open, so its no-match line shows that the
+  // typed text names no row, and Enter does not send it.
+  return menu.items.length || command.labelsOnly ? menu : null;
+}
+
+/**
+ * The options of `command` that contain `typed`, for the menu after
+ * "/name " or for the picker a menu pick opens. The option that `typed`
+ * names exactly comes first, so Enter picks what resolveSlashOption would.
+ * With `labelsOnly` the values stay hidden, so only labels match and rank.
+ * The list can be empty.
+ */
+export function optionsMenu(command: SlashCommand, typed: string): SlashMenu {
+  const query = squash(typed);
+  const items = (command.options ?? []).filter((o) => optionMatches(o, query, command.labelsOnly));
+  const exact = command.labelsOnly
+    ? items.find((o) => o.label.toLowerCase() === query)?.value
+    : resolveSlashOption(query, items);
   const first = items.findIndex((o) => o.value === exact);
   if (first > 0) items.unshift(...items.splice(first, 1));
-  return items.length ? { kind: "options", command, items } : null;
+  return { kind: "options", command, items };
+}
+
+/** Typed text as labels hold it: lower case, with runs of whitespace as one space (fork labels collapse them). */
+function squash(text: string): string {
+  return text.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function optionMatches(option: SlashOption, typed: string, labelsOnly = false): boolean {
+  return (
+    (!labelsOnly && option.value.toLowerCase().includes(typed)) ||
+    option.label.toLowerCase().includes(typed)
+  );
 }
 
 /**
  * The option an argument names: an exact value, else an exact label, else
  * the only option that contains it. Case does not matter. `null` when it
- * names none or more than one.
+ * names none or more than one. With `labelsOnly`, only labels match: the user
+ * never sees the values, so a typed digit must not pick a hidden one.
  */
-export function resolveSlashOption(arg: string, options: readonly SlashOption[]): string | null {
-  const typed = arg.trim().toLowerCase();
+export function resolveSlashOption(
+  arg: string,
+  options: readonly SlashOption[],
+  labelsOnly = false,
+): string | null {
+  const typed = squash(arg);
   if (!typed) return null;
   const exact =
-    options.find((o) => o.value.toLowerCase() === typed) ??
+    (labelsOnly ? undefined : options.find((o) => o.value.toLowerCase() === typed)) ??
     options.find((o) => o.label.toLowerCase() === typed);
   if (exact) return exact.value;
-  const partial = options.filter(
-    (o) => o.value.toLowerCase().includes(typed) || o.label.toLowerCase().includes(typed),
-  );
+  const partial = options.filter((o) => optionMatches(o, typed, labelsOnly));
   return partial.length === 1 ? partial[0]!.value : null;
 }
 
 /**
- * Whether Enter on a menu row runs it: an option, or a command whose full
- * name is typed. Enter on a partial name only completes it, as Tab does, so
- * "/n" never runs /new by accident.
+ * The value a labelsOnly command runs with, or null when typed text names no
+ * row. A menu pick sends its row's value, because two rows can share a label
+ * (two "hi" messages). Typed text matches labels only: the values are hidden.
  */
-export function enterRunsSlash(menu: SlashMenu, index: number, text: string): boolean {
-  if (menu.kind === "options") return true;
-  return menu.items[index]?.name === text.trim().slice(1).toLowerCase();
+export function labelsOnlyValue(
+  command: SlashCommand,
+  arg: string,
+  fromMenu: boolean,
+): string | null {
+  return fromMenu ? arg : resolveSlashOption(arg, command.options ?? [], true);
+}
+
+/**
+ * What Enter or a click on a menu row does: run the command (or the picked
+ * option), open the command's options in the menu, or fill the draft for a
+ * command that needs typed text.
+ */
+export function slashPickAction(menu: SlashMenu, index: number): "run" | "options" | "fill" {
+  if (menu.kind === "options") return "run";
+  const command = menu.items[index];
+  if (command?.options?.length && !command.picker) return "options";
+  return command?.needsText ? "fill" : "run";
 }
 
 /** The menu row a key moves the highlight to, wrapping at both ends; `undefined` for other keys. */
@@ -157,6 +229,10 @@ export function slashEfforts(model: string | null, models: readonly CatalogModel
  * rule: a local CLI model keeps it when it supports fast mode, and an
  * OpenRouter model keeps it until the menu's fast-mode check refuses it.
  */
-export function slashKeepsFast(model: string, row: CatalogModel | undefined, cliRow: boolean): boolean {
+export function slashKeepsFast(
+  model: string,
+  row: CatalogModel | undefined,
+  cliRow: boolean,
+): boolean {
   return row && cliRow ? !!row.supports_fast : model.startsWith("openrouter/");
 }

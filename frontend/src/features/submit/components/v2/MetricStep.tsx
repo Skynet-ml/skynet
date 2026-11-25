@@ -8,17 +8,28 @@ import {
   useWizardStateOptional,
 } from "@/features/agent-panel";
 import { githubRepoFile, githubRepoTree, type RepoHost } from "@/shared/lib/api";
-import { AgenticIde, type OpenRequest } from "../../agentic-ide/AgenticIde";
+import { msg } from "@/shared/lib/messages";
+import { AgenticIde } from "../../agentic-ide/AgenticIde";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { useHardening } from "../../hooks/use-hardening";
 import { IdeWorkspace } from "../../ide/IdeWorkspace";
 import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-files";
 import { workspaceTexts } from "../../lib/ide-workspace";
+import { metricCommandText } from "../../lib/repo-run";
 import { withScorerImports } from "../../lib/scorer-dependencies";
 import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
 import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
+
+// The ascent.toml setting that names the metric; code, so never translated.
+const METRIC_ENTRY = "[metric] entry";
+
+const HOST_ORIGIN: Record<RepoHost, string> = {
+  github: "https://github.com",
+  gitlab: "https://gitlab.com",
+  bitbucket: "https://bitbucket.org",
+};
 
 /**
  * The repository's checkout for the IDE's explorer, read from its host at the
@@ -62,7 +73,7 @@ function repoSource(repository: string, ref: string, host: RepoHost): RepoSource
  * the overview, which holds Run, so the run button never covers the editors.
  */
 export function MetricStep({ page, onBack }: { page: number; onBack: () => void }) {
-  const { state, patchWorkspace, setWorkspaceFile, guided } = useWizardV2();
+  const { state, patchWorkspace, setWorkspaceFile, guided, metricCommand } = useWizardV2();
   const { task, workspace } = state;
 
   const repoDraft = !repoIssue(task.repo) ? task.repo : null;
@@ -92,8 +103,9 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     onStep && (agent?.agentBusy ?? false),
     agent?.agentWritingFields ?? [],
   );
-  // One job for the hardening screen and the overview's line about it.
-  const hardening = useHardening(onStep && page >= 1);
+  // One job for the hardening screen and the overview's line about it. Hardening
+  // attacks a Python metric, so a command metric has none (SKY-770).
+  const hardening = useHardening(onStep && page >= 1 && !metricCommand);
 
   // The sandbox still injects `llm` for old scorers; making the import
   // explicit as the user leaves the code keeps it honest about what it calls.
@@ -104,14 +116,17 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     if (code !== metricCode) setMetricCode(code);
   }, [page, metricCode, setMetricCode]);
 
+  // The section name is code: isolated LTR, so RTL text does not flip its brackets.
+  const [commandBefore, commandAfter = ""] = msg("submit.v2.metric.command").split("{entry}");
+
   // A repository run's setup is the agentic IDE: the chat beside its changes,
-  // with the workbench one click away for direct edits.
+  // which the user edits in place.
   const agentic = isGeneralistAgentEnabled();
   const draftTexts = React.useMemo(
     () => workspaceTexts(workspace.runCode, workspace.metricCode, workspace.files),
     [workspace.runCode, workspace.metricCode, workspace.files],
   );
-  const ideWorkspace = (sidePanel: React.ReactNode, openRequest: OpenRequest | null) => (
+  const ideWorkspace = (sidePanel: React.ReactNode) => (
     <IdeWorkspace
       runCode={workspace.runCode}
       metricCode={workspace.metricCode}
@@ -122,44 +137,63 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
       lockedFiles={lockedFiles}
       guided={guided}
       sidePanel={sidePanel}
-      openRequest={openRequest}
     />
   );
-  const renderEditor = (request: OpenRequest | null) => ideWorkspace(null, request);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Clip, not hide: a hidden box still scrolls when the editor takes focus. */}
       <WizardScreen active={page === 0} className="flex flex-col overflow-clip">
-        {agentic ? (
-          <AgenticIde
-            chat={onScreen ? <AgentPanelDock className="absolute inset-0" /> : null}
-            texts={draftTexts}
-            repo={repoFiles}
-            busy={agent?.agentBusy ?? false}
-            onWrite={setWorkspaceFile}
-            renderEditor={renderEditor}
-          />
-        ) : (
-          ideWorkspace(
-            onScreen && isGeneralistAgentEnabled() ? (
-              <AgentPanelDock className="absolute inset-0" />
-            ) : null,
-            null,
-          )
+        {/* A contract that names a metric command needs no metric.py (SKY-770). */}
+        {metricCommand && (
+          <div className="shrink-0 border-b border-border/60 px-4 py-2 text-sm text-muted-foreground">
+            <p>
+              {commandBefore}
+              <bdi className="font-mono text-foreground" dir="ltr">
+                {METRIC_ENTRY}
+              </bdi>
+              {commandAfter}{" "}
+              <bdi className="break-all font-mono text-foreground" dir="ltr">
+                {metricCommandText(metricCommand)}
+              </bdi>
+            </p>
+            {workspace.metricCode.trim() && <p>{msg("submit.v2.metric.command_ignores_code")}</p>}
+          </div>
         )}
+        <div className="flex min-h-0 flex-1 flex-col">
+          {agentic ? (
+            <AgenticIde
+              chat={onScreen ? <AgentPanelDock className="absolute inset-0" /> : null}
+              texts={draftTexts}
+              repo={repoFiles}
+              busy={agent?.agentBusy ?? false}
+              onWrite={setWorkspaceFile}
+              host={repoName ? { provider: repoHost, url: `${HOST_ORIGIN[repoHost]}/${repoName}` } : null}
+            />
+          ) : (
+            ideWorkspace(
+              onScreen && isGeneralistAgentEnabled() ? (
+                <AgentPanelDock className="absolute inset-0" />
+              ) : null,
+            )
+          )}
+        </div>
       </WizardScreen>
       <WizardScreen active={page === 1} className="overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
-        <HardenMetricScreen
-          active={onStep && page === 1}
-          guided={guided}
-          onBack={onBack}
-          hardening={hardening}
-          reflectionModel={state.optimizer.reflectionModel ?? null}
-        />
+        {metricCommand ? (
+          <p className="text-sm text-muted-foreground">{msg("submit.v2.metric.command_no_hardening")}</p>
+        ) : (
+          <HardenMetricScreen
+            active={onStep && page === 1}
+            guided={guided}
+            onBack={onBack}
+            hardening={hardening}
+            reflectionModel={state.optimizer.reflectionModel ?? null}
+          />
+        )}
       </WizardScreen>
       <WizardScreen active={page === 2} className="flex flex-col overflow-hidden">
-        <RunOverview state={state} guided={guided} hardening={hardening.job} />
+        <RunOverview state={state} guided={guided} hardening={metricCommand ? null : hardening.job} />
       </WizardScreen>
     </div>
   );

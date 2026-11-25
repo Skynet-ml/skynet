@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { Kbd } from "@/shared/ui/kbd";
+
 import {
   Tooltip,
   TooltipContent,
@@ -75,6 +77,29 @@ export function TooltipBody({
     >
       <span className="font-semibold">{title}</span>
       {detail ? <span className="font-normal text-muted-foreground">{detail}</span> : null}
+    </span>
+  );
+}
+
+/** The platform's command key: ⌘ on Apple devices, Ctrl elsewhere. */
+export function commandKey(): string {
+  return typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+}
+
+/** A tooltip body that names each action with its keys, one action a row. */
+export function TooltipShortcuts({ rows }: { rows: Array<{ label: React.ReactNode; keys: string[] }> }) {
+  return (
+    <span className="flex flex-col gap-1">
+      {rows.map(({ label, keys }, i) => (
+        <span key={i} className="flex items-center justify-between gap-3">
+          <span>{label}</span>
+          <span dir="ltr" className="flex shrink-0 items-center gap-0.5" aria-hidden>
+            {keys.map((key) => (
+              <Kbd key={key}>{key}</Kbd>
+            ))}
+          </span>
+        </span>
+      ))}
     </span>
   );
 }

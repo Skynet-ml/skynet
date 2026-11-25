@@ -3,44 +3,55 @@
 ## Контракт
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Аргумент    | Что содержит                                                                     |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | Папка одной версии репозитория после выполнения команды настройки               |
+| `repo_path` | Папка, в которой есть только ваши файлы метрики. В ней нет других файлов репозитория и кода версии |
 | `case`      | dict. `case["input"]` содержит входные поля. `case["expected"]` содержит ожидаемое значение или `None` |
+| `output`    | Что точка входа `[run]` вернула для примера, или `None`, если в файле нет `[run]` |
 
-Если ваша функция принимает только один аргумент, Skynet вызывает `score(repo_path)`. Используйте эту форму, когда оценщик запускает свои тесты и примеры ему не нужны.
+Файл `ascent.toml` репозитория должен содержать секцию `[run]` или этап `[target.<name>]`. Точка входа `[run]` (`entry`) запускает одну версию на одном примере в своей отдельной песочнице. Skynet отклоняет файл, в котором нет ни того, ни другого, потому что все версии получили бы одинаковую оценку.
 
-Оценщик работает в песочнице, в папке версии. Он может импортировать код из репозитория, выполнить команду или вызвать `serve()` из `serve.py`. Прочитайте [Как работает оптимизация](/docs/concepts/optimization).
+- Точка входа-функция, например `entry = "serve.py:serve"`, получает `case["input"]` как аргумент. `output` — это значение, которое она возвращает.
+- Точка входа-команда, например `entry = ["python", "run_tests.py"]`, читает `{"input": ...}` из JSON-файла по пути из `ASCENT_INPUT`. Она записывает `{"output": ...}` по пути из `ASCENT_OUTPUT`. `output` — это значение под ключом `"output"`. То, что команда печатает, попадает только в логи.
+
+Оценщик работает в отдельной песочнице. В ней есть только ваши файлы метрики. Оценщик не может импортировать или запускать код версии. Он видит версию только через `output` или через `call()` к этапу `[target.<name>]`. Импортируйте `call` так: `from openascent import call`. Прочитайте [Как работает оптимизация](/docs/concepts/optimization).
 
 ## Возвращаемое значение
 
-`score` должна вернуть оценку с обратной связью. Допустимы такие формы:
+`score` возвращает один объект:
 
-1. Пара: число и строка обратной связи или dict с ключом `"feedback"`.
-2. dict с числом в `"score"` и строкой в `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Обратная связь должна быть непустой строкой.
+- `"score"` обязателен. Это конечное число. Только эта оценка упорядочивает версии.
+- `"feedback"` — необязательный текст. Его рекомендуется давать, потому что GEPA и Auto учатся на нём. Без обратной связи движки видят только оценки, и журнал запуска сообщает об этом один раз.
+- `"scores"` необязателен. Он сопоставляет имена с именованными оценками. Каждая именованная оценка — это объект со своим `"score"` и необязательным `"feedback"`. Каждый движок использует каждую именованную оценку как отдельную цель.
 
-Дополнительные сведения также могут содержать ключ `"scores"`. Он сопоставляет имена с именованными оценками. У каждой именованной оценки есть своя оценка и своя обратная связь, например `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Любая другая форма или ключ — ошибка. Проверка показывает неверную часть и допустимую форму.
 
-Дополнительные сведения также могут содержать ключ `"cases"` той же формы. Каждая запись — результат одного примера. Каждый движок использует каждый пример как отдельную цель.
-
-Если возвращаемое значение имеет другую форму, проверка не проходит и показывает причину.
-
-| Возвращаемое значение                                                           | Допустимо                              |
-| ------------------------------------------------------------------------------- | -------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Да                                     |
-| `(0.8, "Close. Missing the date.")`                                             | Да                                     |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Да                          |
-| `0.8`                                                                           | Нет. Нет обратной связи.               |
-| `(0.8, {})`                                                                     | Нет. Нет строки обратной связи.        |
-| `("0.8", {"feedback": "OK"})`                                                   | Нет. Оценка — это строка.              |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Нет. Именованная оценка — не число.   |
+| Возвращаемое значение | Допустимо |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Да |
+| `{"score": 0.8}` | Да. Обратной связи нет. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Да |
+| `0.8` | Нет. Значение — не объект. |
+| `(0.8, "Close. Missing the date.")` | Нет. Значение — не объект. |
+| `{"score": "0.8"}` | Нет. Оценка — это строка. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Нет. Именованная оценка должна быть объектом. |
+| `{"score": 0.8, "feedbak": "OK"}` | Нет. Ключ `feedbak` неизвестен. |
 
 ## Полезная обратная связь
 
@@ -58,67 +69,86 @@ GEPA и Auto читают текст обратной связи, чтобы н�
 
 ### Точное совпадение
 
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    if output == want:
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` — это dict, ключ которого — имя вашего столбца «Выход». Прочитайте [Наборы данных и разбиение](/docs/concepts/datasets).
 
 ### Запуск тестов репозитория
 
-```python tab="scorer.py"
+Точка входа `[run]` запускает тесты. `pytest` завершается с ненулевым кодом выхода, когда тест не проходит, а ненулевой код выхода — это сбой случая. Поэтому обёртка `run_tests.py` записывает результат в `ASCENT_OUTPUT` и завершается с кодом 0. Оценщик читает этот результат.
+
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = ["python", "run_tests.py"]
+timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
 import subprocess
 
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["passed"]:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["log"]}
+```
+
+Когда точка входа `[run]` завершается сбоем на случае, у этого случая нет оценки. Если точка входа не запускается, превышает тайм-аут или её останавливает сигнал, или если точка входа-функция выбрасывает исключение или завершается до возврата значения, обратная связь — `Run failed: …`, и Skynet не вызывает оценщик. Точка входа-команда также завершается сбоем, когда она выходит с ненулевым кодом или не записывает корректный файл вывода. У версии с таким случаем нет оценки. Она не может быть лучшей версией, не достигает ни одного `[outcome] target` и не открывает pull request. Если сбой должен считаться числом, перехватите сбой в своей программе, запишите вывод и дайте оценщику оценить его. Прочитайте [правила репозитория](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Модель как судья
 
-Оценщик может вызывать модель. Импортируйте `llm` из вспомогательного модуля `skynet`. Вызов идёт через шлюз моделей Skynet к модели оценщика этого запуска.
+Оценщик может вызывать модель. Импортируйте `llm` из вспомогательного модуля `openascent`. Вызов идёт через шлюз моделей Skynet к модели оценщика этого запуска.
+
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-from skynet import llm
+from openascent import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-Оценщик также может использовать любой OpenAI-совместимый клиент с переменными окружения `OPENAI_BASE_URL`, `APP_API_KEY` и `APP_MODEL`. Шлюз принимает только модель оценщика этого запуска.
+Оценщик также может использовать любой OpenAI-совместимый клиент с переменными окружения `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` и `ASCENT_MODEL`. Шлюз принимает только модель оценщика этого запуска.
 
 ## Вызовы моделей и секреты
 
 - Вызовы на ключах Skynet учитываются в бюджете запуска. С вашим собственным ключом (BYOK) вызов идёт на ключ вашего провайдера, без платы Skynet за модель. Прочитайте [Бюджеты и оплата](/docs/concepts/billing).
-- Секреты запуска попадают в оценщик как переменные окружения. Имя переменной совпадает с именем секрета, например `os.environ["SEARCH_API_KEY"]`.
+- Оценщик не получает секреты запуска как переменные окружения. Секрет попадает в оценщик только через таблицу `[services.<name>]`, которую перечисляет `[metric] services`, или через сервер из файла `[metric] mcp`. Запишите секрет в `headers` таблицы как `${NAME}`. Оценщик отправляет запросы по URL из `ASCENT_SERVICE_<NAME>_URL`. Skynet добавляет секрет вне песочницы.
 - Skynet скрывает значения секретов в выводе оценщика и в логах.
 
 ## Ограничения

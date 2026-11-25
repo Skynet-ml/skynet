@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 שדות חשובים:
 
 - ‏`target.repo.repository` הוא מאגר GitHub בצורה `owner/name`. קודם חבר/י את GitHub ב-**הגדרות → חיבורים**.
 - ‏`target.repo.editable_paths` מפרט את הקבצים והתיקיות שהאופטימייזר רשאי לשנות. ‏`"."` פירושו כל המאגר.
 - ‏`target.repo.commit` הוא אופציונלי. זה SHA באורך 40 תווים. בלעדיו, Skynet משתמש בקומיט האחרון בענף.
-- ‏`target.repo.secrets` הוא אופציונלי. לכל סוד יש `name` ו-`value`. הסוד מגיע לקוד שלך ולפונקציית הניקוד שלך כמשתנה סביבה.
-- ‏`scorer.metric_code` מגדיר `score(repo_path, case)`. ‏`scorer.model` הוא המודל שהקוד שלך ופונקציית הניקוד שלך יכולים לקרוא לו דרך שער המודלים.
+- ‏`target.repo.secrets` הוא אופציונלי. לכל סוד יש `name` ו-`value`. הסוד מגיע לקוד שלך או לפונקציית הניקוד שלך רק דרך כותרת של `[services.<name>]` או דרך שרת בקובץ ה-`mcp` של התפקיד, אף פעם לא כמשתנה סביבה.
+- ‏`scorer.metric_code` מגדיר `score(repo_path, case, output=None)`. ‏`output` הוא מה שה-`entry` של `[run]` החזיר עבור המקרה. הלשונית `ascent.toml` מציגה את ה-`entry` של `[run]` במאגר של הדוגמה. ‏`scorer.model` הוא המודל שהקוד שלך ופונקציית הניקוד שלך יכולים לקרוא לו דרך שער המודלים.
 - ‏`strategy.mode` הוא `auto` (ברירת המחדל) או `single`. עם `single`, הגדר/י את `strategy.engine` לשם של מנוע אחד מ-`GET /blackbox/engines`.
 - `max_cost_cents` היא תקרת ההוצאה של הריצה הזו, בסנטים אמריקאיים.
 - `is_private` הוא `false` כברירת מחדל. הגדר/י אותו ל-`true` כדי לשמור על הריצה פרטית.

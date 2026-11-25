@@ -155,7 +155,7 @@ TASKS: list[Task] = [
         category="bbserve",
         difficulty="easy",
         prompt=(
-            "I'm about to launch a long black-box prompt optimization and I'm worried it might "
+            "I'm about to launch a long black-box optimization run and I'm worried it might "
             "get interrupted before it finishes. If that happens I want to resume from the last "
             "checkpoint rather than restart from scratch. Which single black-box engine should I "
             "choose for that?"
@@ -241,7 +241,7 @@ TASKS: list[Task] = [
         category="bbserve",
         difficulty="hard",
         prompt=(
-            "Here's the scorer I want for a black-box prompt optimization:\n\n"
+            "Here's the scorer I want for a black-box optimization run:\n\n"
             f"{_T5_SCORER}\n"
             "Can you run a quick check on it, and if it's good, go ahead and start the run? "
             "My objective is to write a punchy product tagline."

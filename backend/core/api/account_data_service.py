@@ -14,12 +14,33 @@ Two deliberate exceptions to "hard delete everything":
   and audit basis, so the identity link is severed to a PII-free tombstone
   token, unique to each deletion, while the rows themselves survive.
   The wallet (``billing_customers``) is also *closed*: its spendable balance
-  and free grant go to zero, and a ``closure`` ledger row records the
+  and grant go to zero, and a ``closure`` ledger row records the
   forfeited balance.
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-Nothing here makes a live call to Stripe, OpenRouter, or any other provider;
+The registry call deletes the account's whole repository from the user image
+registry. It runs after every main-database statement and before the step log
+shard purge, because neither has a rollback and images can be rebuilt. With a registry,
+the deletion refuses while a run of the account is not finished, or while a
+worker still holds a live lease on it (SKY-891). The Vercel copies of the
+account's images go next, with one delete of the account's Vercel registry
+repository (SKY-895). Known gap: each worker keeps its in-memory copy cache
+until it restarts. A cached copy names a source digest that only a rebuild of
+the same bytes can make again, and its box then fails to start, so the cache
+cannot leak an image. An expired lease does not prove that the run's CodeBuild
+image build ended, so the deletion also stops each build that still has a
+stored CodeBuild id, and refuses until CodeBuild reports each one complete
+(SKY-896). Known gap: a worker killed between the build start and the id's
+commit leaves a build with no id. So does a failed id commit whose best-effort
+StopBuild also fails. Known gap: the active-run check covers only the runs
+that exist when the deletion reads them. A run that the user submits during the
+deletion is not locked out, so its image build can push after the repository
+delete and make the repository again.
+
+The tree purge here only locks, marks and plans the account's step log packs;
+the router deletes the unused packs from the tree bucket after the commit
+(SKY-733). Nothing here calls Stripe, OpenRouter, or any other provider;
 severing the local link is the whole of the operation. Deprovisioning the
 upstream Stripe customer or OpenRouter runtime key is left to a follow-up.
 """
@@ -29,25 +50,33 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
 from sqlalchemy import case, delete, select, update
 from sqlalchemy.orm import Session
 
+from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
+from ..sandbox.image_build import codebuild_client, stop_unfinished_builds
+from ..sandbox.image_registry import ImageRegistry, image_owner, image_registry
+from ..sandbox.vcr_copy import delete_copies
+from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
     AgentEnginePreferenceModel,
+    AgentFeedbackReportModel,
     AgentMessageModel,
     AgentStagedDatasetModel,
     ApiTokenModel,
     BillingCustomerModel,
     BillingOpenRouterKeyModel,
     BillingProviderKeyModel,
+    ChatMediaModel,
     ConversationEmbeddingModel,
     DatasetBlobModel,
     DatasetModel,
@@ -56,10 +85,9 @@ from ..storage.models import (
     DesktopLinkCodeModel,
     DesktopLinkModel,
     DesktopTokenModel,
-    GepaCheckpointModel,
+    ImageBuildModel,
     JobEmbeddingModel,
     JobModel,
-    LogEntryModel,
     McpAuthCodeModel,
     McpGrantModel,
     McpTokenModel,
@@ -69,8 +97,8 @@ from ..storage.models import (
     OptimizationShareGrantModel,
     OptimizationShareLinkModel,
     PackageRegistryPreferenceModel,
-    ProgressEventModel,
     PushSubscriptionModel,
+    SetupBillingPreferenceModel,
     SetupDraftModel,
     SlackConnectionModel,
     TaggingSessionModel,
@@ -88,8 +116,13 @@ from ..storage.models import (
     WebAuthnChallengeModel,
     WebAuthnCredentialModel,
 )
+from .routers.constants import TERMINAL_STATUSES
 
 EXPORT_FORMAT = "skynet-account-export/v2"
+# CodeBuild ends every build within its hard limits: 36 hours of build time and
+# 8 hours in the queue. An older stored build id is complete, so the deletion
+# does not read it, also when CodeBuild no longer lets the API read it (SKY-896).
+BUILD_ID_MAX_AGE = timedelta(hours=48)
 
 
 @dataclass
@@ -100,10 +133,13 @@ class AccountDeletionSummary:
         deleted_rows: Rows hard-deleted across every table the account owned.
         anonymized_rows: Retained rows whose identity link was severed
             (financial, audit, and telemetry records).
+        trees: The tree purge, whose unused packs
+            :func:`tree_purge.delete_unused_packs` deletes after the commit.
     """
 
     deleted_rows: int
     anonymized_rows: int
+    trees: tree_purge.TreePurgeSummary
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -191,6 +227,7 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
 
     registry_row = session.get(PackageRegistryPreferenceModel, username)
     privacy_row = session.get(ModelPrivacyPreferenceModel, username)
+    setup_billing_row = session.get(SetupBillingPreferenceModel, username)
     engine_row = session.get(AgentEnginePreferenceModel, username)
     notification_row = session.get(NotificationPreferenceModel, username)
     notification_settings = settings_from_row(notification_row)
@@ -267,6 +304,11 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
             .where(AgentMessageModel.conversation_id == conversation.id)
             .order_by(AgentMessageModel.created_at)
         ).all()
+        reports = session.scalars(
+            select(AgentFeedbackReportModel)
+            .where(AgentFeedbackReportModel.conversation_id == conversation.id)
+            .order_by(AgentFeedbackReportModel.created_at)
+        ).all()
         conversations_out.append(
             {
                 "id": conversation.id,
@@ -281,6 +323,15 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
                         "created_at": _iso(message.created_at),
                     }
                     for message in messages
+                ],
+                "feedback_reports": [
+                    {
+                        "tool_name": report.tool_name,
+                        "user_quote": report.user_quote,
+                        "summary": report.summary,
+                        "created_at": _iso(report.created_at),
+                    }
+                    for report in reports
                 ],
             }
         )
@@ -450,6 +501,23 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         }
     )
 
+    # Metadata only: the export is JSON-shaped, and the user can fetch each
+    # file's bytes through the media route while the account exists.
+    media_rows = session.scalars(
+        select(ChatMediaModel).where(ChatMediaModel.username == username).order_by(ChatMediaModel.created_at)
+    ).all()
+    chat_media = [
+        {
+            "id": media.id,
+            "filename": media.filename,
+            "kind": media.kind,
+            "mime_type": media.mime_type,
+            "byte_size": media.byte_size,
+            "created_at": _iso(media.created_at),
+        }
+        for media in media_rows
+    ]
+
     return {
         "export_format": EXPORT_FORMAT,
         "exported_at": _iso(datetime.now(UTC)),
@@ -460,6 +528,7 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         "tagging_sessions": tagging_out,
         "agent_conversations": conversations_out,
         "setup_draft": setup_draft,
+        "chat_media": chat_media,
         "billing": billing,
         "api_token": api_token,
         "desktop_links": desktop_links,
@@ -472,12 +541,27 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         "slack": slack,
         "notification_preferences": notification_preferences,
         "model_privacy": {"data_policy": privacy_row.data_policy if privacy_row is not None else "deny"},
+        "setup_billing": {"from_wallet": setup_billing_row.from_wallet if setup_billing_row is not None else True},
         "agent_engine": {"engine": engine_row.engine if engine_row is not None else None},
         "package_registry": {"index_url": registry_row.index_url if registry_row else "https://pypi.org/simple"},
     }
 
 
-def delete_account(session: Session, username: str) -> AccountDeletionSummary:
+class AccountRunsActiveError(Exception):
+    """Refuse an account deletion while one of the account's runs is not finished (SKY-891).
+
+    A run in progress can still push to the user image registry after the
+    repository delete. The registry then makes the repository again, and the
+    pushed layers outlive the account with no row that names them. A cancelled
+    run counts as in progress while its worker holds a live lease, because the
+    worker stops its image build only later. A CodeBuild image build that is not
+    complete also counts, because its worker can be dead (SKY-896).
+    """
+
+
+def delete_account(
+    session: Session, username: str, *, registry_for: Callable[[], ImageRegistry | None] | None = None
+) -> AccountDeletionSummary:
     """Purge everything owned by ``username`` within the given session.
 
     Runs entirely inside the caller's transaction (the caller commits), so a
@@ -485,12 +569,41 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     are hard-deleted; financial, audit, and telemetry rows are anonymized in
     place. See the module docstring for why those three survive.
 
+    Lock order: the jobs in key order, their run rows, the wallet and the
+    budgets, the tree packs, then the user row. A run delete and a resume lock
+    the job before the wallet, so the jobs come first. No writer locks the
+    user row and then a wallet or budget, so the wallet can come before the
+    user row; a writer that does would deadlock with this delete (SKY-733).
+
     Args:
         session: An open session on the store's engine; the caller commits.
         username: The caller's lowercased-email identity.
+        registry_for: Return the user image registry, or ``None`` when this
+            deployment has none. ``None`` reads the deployment's settings, which
+            need only the repository prefix, since deletes use no pull role.
+            It is called once, before any row is deleted.
 
     Returns:
-        Counts of hard-deleted and anonymized rows.
+        Counts of hard-deleted and anonymized rows. The summary also holds the
+        tree purge, whose unused packs the caller deletes after the commit.
+
+    Raises:
+        AccountRunsActiveError: The deployment has a user image registry and
+            one of the account's runs is not in a terminal status, or a worker
+            still holds a live lease on it, or CodeBuild does not report one of
+            the account's image builds as complete; nothing is deleted.
+        ImageBuildError: A CodeBuild read or stop failed; nothing is deleted.
+        ImageRegistryError: The user image registry or Vercel's registry
+            refused to delete the account's repository, or the registry
+            settings are set but not usable; nothing in the main database or
+            the step log shards is deleted.
+        TreePurgeError: When the account has tree packs to delete and
+            ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
+            built (for example, boto3 is missing or no region is set). Also
+            when the compactor keeps moving the account's packs for
+            ``PACK_LOCK_TRIES`` tries; a retry can succeed. Also when a step
+            log shard fails, or a run records a shard that the map does not
+            have; the message names the shard, and a retry can succeed.
     """
     deleted = 0
     anonymized = 0
@@ -515,15 +628,53 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         result = session.execute(statement, execution_options={"synchronize_session": False})
         anonymized += result.rowcount or 0
 
+    registry = (registry_for or (lambda: image_registry(pull=False)))()
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
+    # The job locks, then the run rows and budgets, in the same order as a run delete and a resume;
+    # another order deadlocks with a concurrent delete or resume of one of these runs (SKY-733).
+    deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
+    # Read after the job locks, so a worker that changes a status commits first. Nothing
+    # cancels the runs here: a running build could push again after the repository delete.
+    # A cancel marks the run first and its worker stops the build later, so a run whose worker
+    # still holds a live lease also blocks. An expired lease only means that the worker stopped
+    # renewing it: a hard-killed worker can leave its CodeBuild build running (SKY-896).
+    if registry is not None and job_ids:
+        active = session.scalar(
+            select(JobModel.optimization_id)
+            .where(JobModel.optimization_id.in_(job_ids))
+            .where(
+                JobModel.status.not_in([status.value for status in TERMINAL_STATUSES])
+                | (JobModel.claimed_by.is_not(None) & (JobModel.lease_expires_at > datetime.now(UTC)))
+            )
+            .limit(1)
+        )
+        if active is not None:
+            raise AccountRunsActiveError
+    if registry is not None:
+        build_ids = list(
+            session.scalars(
+                select(ImageBuildModel.codebuild_id).where(
+                    ImageBuildModel.username == username,
+                    ImageBuildModel.codebuild_id.is_not(None),
+                    ImageBuildModel.created_at > datetime.now(UTC) - BUILD_ID_MAX_AGE,
+                )
+            )
+        )
+        # The stops are not rolled back with a refused deletion; a stopped build is what the user wants.
+        if build_ids:
+            # The ImageRegistry protocol has no Region; the ECR registry has one, the same as the builds'.
+            codebuild = codebuild_client(getattr(registry, "region", None))
+            if not stop_unfinished_builds(codebuild, build_ids):
+                raise AccountRunsActiveError
     if job_ids:
-        _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
-        _run_delete(delete(LogEntryModel).where(LogEntryModel.optimization_id.in_(job_ids)))
-        _run_delete(delete(GepaCheckpointModel).where(GepaCheckpointModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
+    # Before the jobs go: their cascade would delete the steps without their pack keys.
+    # The pack objects go after the commit (delete_unused_packs): a rollback must keep the packs its rows point at.
+    trees = tree_purge.purge_user(session, username, job_ids)
+    deleted += trees.deleted_rows
+    if job_ids:
         _run_delete(delete(JobModel).where(JobModel.optimization_id.in_(job_ids)))
-    _run_delete(delete(JobEmbeddingModel).where(JobEmbeddingModel.user_id == username))
     _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.created_by == username))
     _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.grantee_username == username))
     _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.created_by == username))
@@ -555,6 +706,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         session.scalars(select(AgentConversationModel.id).where(AgentConversationModel.username == username))
     )
     if conversation_ids:
+        _run_delete(
+            delete(AgentFeedbackReportModel).where(AgentFeedbackReportModel.conversation_id.in_(conversation_ids))
+        )
         _run_delete(delete(AgentMessageModel).where(AgentMessageModel.conversation_id.in_(conversation_ids)))
     _run_delete(delete(ConversationEmbeddingModel).where(ConversationEmbeddingModel.username == username))
     _run_delete(delete(AgentConversationModel).where(AgentConversationModel.username == username))
@@ -607,6 +761,8 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(UserQuotaOverrideModel).where(UserQuotaOverrideModel.username == username))
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
+    _run_delete(delete(ChatMediaModel).where(ChatMediaModel.username == username))
+    _run_delete(delete(ImageBuildModel).where(ImageBuildModel.username == username))
     _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
     _run_delete(delete(NotificationModel).where(NotificationModel.username == username))
@@ -614,6 +770,7 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(SlackConnectionModel).where(SlackConnectionModel.username == username))
     _run_delete(delete(UserConnectorModel).where(UserConnectorModel.username == username))
     _run_delete(delete(ModelPrivacyPreferenceModel).where(ModelPrivacyPreferenceModel.username == username))
+    _run_delete(delete(SetupBillingPreferenceModel).where(SetupBillingPreferenceModel.username == username))
     _run_delete(delete(AgentEnginePreferenceModel).where(AgentEnginePreferenceModel.username == username))
 
     _run_delete(delete(PackageRegistryPreferenceModel).where(PackageRegistryPreferenceModel.username == username))
@@ -627,6 +784,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     forfeited = session.scalar(
         select(BillingCustomerModel.balance_cents).where(BillingCustomerModel.username == username).with_for_update()
     )
+    # The closed wallet can never settle a hold, so a hold left open stays in
+    # the reconciliation sweep for ever.
+    BudgetService(engine=session.get_bind()).close_for_deleted_account(username, session=session)
     if forfeited:
         session.add(
             WalletLedgerModel(
@@ -666,4 +826,21 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     _run_delete(delete(UserModel).where(UserModel.email == username))
 
-    return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized)
+    # The registry has no rollback, so its delete runs after every main-database statement. It runs
+    # before the shard purge: a refused delete then rolls the main database back and leaves every
+    # shard row, so the account loses nothing that a rebuild cannot restore. The whole repository goes
+    # with every image and tag, the build cache included, because its layers hold the user's source; a
+    # build can push and then stop before it records a row. A deployment with no registry makes no
+    # call (SKY-891).
+    # The Vercel copies come only from this registry, so a deployment with no registry has none (SKY-895).
+    if registry is not None:
+        registry.delete_repository(image_owner(username))
+        delete_copies(image_owner(username))
+
+    # The other step log shards commit here, as the last step before the caller's main commit, so every
+    # main-database statement above already ran when they commit. The databases have no two-phase commit:
+    # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
+    # deletes it. purge_user and the registry delete ran every other check that can fail the deletion.
+    deleted += tree_purge.purge_user_shards(trees)
+
+    return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)

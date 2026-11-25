@@ -68,7 +68,6 @@ Un agente di programmazione legge il feedback del tuo scorer e applica patch all
 | Impostazione                  | Predefinito | Intervallo                                                          |
 | ----------------------------- | ----------- | ------------------------------------------------------------------- |
 | Esecuzioni dello scorer max   | 200         | Da 1 a 100000                                      |
-| Fermati al punteggio          | Disattivato | 0 o più                                                             |
 | Iterazioni max                | Disattivato | Da 1 a 1000. Solo Meta-Harness, AutoSaddler e ShinkaEvolve.         |
 
 Un'esecuzione dello scorer è una chiamata del tuo scorer su un caso. Il ricalcolo finale del punteggio della versione iniziale e del vincitore non viene conteggiato in **Esecuzioni dello scorer max**.

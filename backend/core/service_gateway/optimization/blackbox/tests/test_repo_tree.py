@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import subprocess
 import tarfile
 import unicodedata
@@ -20,6 +21,8 @@ from ..repo_tree import (
     archive_chunks,
     case_insensitive,
     drop_paths,
+    forget_file_stats,
+    link_edits,
     linked_hidden_paths,
     patch_paths,
     patch_violations,
@@ -159,6 +162,492 @@ def test_submodule_changes_are_refused() -> None:
     assert any("Submodules are read-only" in problem for problem in patch_violations(patch, ["."]))
 
 
+_SYMLINK = "Symlinks are not allowed; the change adds a symlink, turns a file into one, or retargets one."
+
+
+def _with_base_link(tmp_path: Path) -> Path:
+    """Make a checkout whose shipped tree already holds the link ``src/link -> ../x``.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The checkout.
+    """
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n", "secret.txt": "s\n"})
+    (checkout / "src/link").symlink_to("../x")
+    subprocess.run([*_GIT, "add", "--all"], cwd=checkout, check=True)
+    subprocess.run([*_GIT, "commit", "--quiet", "-m", "link"], cwd=checkout, check=True)
+    subprocess.run([*_GIT, "update-ref", repo_tree.BASE_REF, "HEAD"], cwd=checkout, check=True)
+    return checkout
+
+
+def _git_apply(checkout: Path, patch: str) -> None:
+    """Apply a patch with plain ``git apply``, as a box with no Skynet check does.
+
+    Args:
+        checkout: The checkout.
+        patch: The patch.
+    """
+    subprocess.run([*_GIT, "apply", "--binary", "-"], cwd=checkout, input=patch, text=True, check=True)
+
+
+_RETARGET = (
+    "diff --git a/src/link b/src/link\n--- a/src/link\n+++ b/src/link\n@@ -1 +1 @@\n-../x\n"
+    "\\ No newline at end of file\n+../secret.txt\n\\ No newline at end of file\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("patch", "left"),
+    [
+        (_RETARGET, "src/link"),
+        ("diff --git a/src/link b/l3\nsimilarity index 100%\nrename from src/link\nrename to l3\n", "l3"),
+        ("diff --git a/src/link b/l3\nsimilarity index 100%\ncopy from src/link\ncopy to l3\n", "l3"),
+    ],
+    ids=["retarget", "rename", "copy"],
+)
+def test_a_patch_with_no_mode_cannot_retarget_or_move_a_shipped_link(tmp_path: Path, patch: str, left: str) -> None:
+    """Refuse at apply time a link that git keeps from the checkout because the patch names no mode (SKY-906).
+
+    Args:
+        tmp_path: Scratch folder.
+        patch: A hunk, rename or copy of ``src/link`` with no mode line.
+        left: The path where ``git apply`` leaves a link.
+    """
+    checkout = _with_base_link(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Symlinks are not allowed"):
+        apply_patch(checkout, patch)
+    assert not (checkout / left).is_symlink()
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        _RETARGET,
+        "diff --git a/src/link b/l3\nsimilarity index 100%\nrename from src/link\nrename to l3\n",
+        "diff --git a/src/link b/l3\nsimilarity index 100%\ncopy from src/link\ncopy to l3\n",
+    ],
+    ids=["retarget", "rename", "copy"],
+)
+def test_link_edits_finds_a_shipped_link_that_a_patch_keeps_as_a_link(patch: str) -> None:
+    """List ``src/link`` for a hunk, rename or copy with no mode, which ``git apply`` keeps a link (SKY-906).
+
+    Args:
+        patch: A hunk, rename or copy of ``src/link`` with no mode line.
+    """
+    edit = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+    assert link_edits(edit + patch, ["src/link"]) == ["src/link"]
+
+
+def test_link_edits_allows_a_link_that_git_turns_into_a_file(tmp_path: Path) -> None:
+    """Allow git's own output for a shipped link that becomes a file: a deletion and a new file."""
+    checkout = _with_base_link(tmp_path)
+    (checkout / "src/link").unlink()
+    (checkout / "src/link").write_text("x\n")
+    patch = version_patch(checkout)
+
+    assert "deleted file mode 120000" in patch
+    assert "new file mode 100644" in patch
+    assert patch_violations(patch, ["src"]) == []
+    assert link_edits(patch, ["src/link"]) == []
+
+
+def test_apply_patch_refuses_a_quoted_name_that_git_cannot_decode(tmp_path: Path) -> None:
+    """Refuse a header name with an escape git does not know as a ``RuntimeError``, as callers expect."""
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n"})
+    patch = 'diff --git "a/src/\\q" "b/src/\\q"\n--- "a/src/\\q"\n+++ "b/src/\\q"\n@@ -1 +1 @@\n-a\n+b\n'
+
+    with pytest.raises(RuntimeError, match="cannot read"):
+        apply_patch(checkout, patch)
+
+
+@pytest.mark.parametrize("name", ["src/l\\377", "src/x\\000y", "src/\u00e9"], ids=["not-utf8", "nul", "raw-non-ascii"])
+def test_a_name_that_git_reads_another_way_is_refused(tmp_path: Path, name: str) -> None:
+    """Refuse a quoted name that git writes another way than Skynet checks it (SKY-906).
+
+    Skynet reads a byte that is not UTF-8 as U+FFFD, git ends a name at a
+    NUL, so git would write ``src/x`` for ``src/x\\000y``, and git reads raw
+    bytes between the quotes as they are.
+
+    Args:
+        tmp_path: Scratch folder.
+        name: The quoted path, without the ``a/`` or ``b/`` prefix.
+    """
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n"})
+    patch = (
+        f'diff --git "a/{name}" "b/{name}"\nnew file mode 100644\n--- /dev/null\n+++ "b/{name}"\n@@ -0,0 +1 @@\n+b\n'
+    )
+
+    assert any("cannot read" in problem for problem in patch_violations(patch, ["src"]))
+    with pytest.raises(RuntimeError, match="cannot read"):
+        apply_patch(checkout, patch)
+    assert not (checkout / "src" / "x").exists()
+
+
+def test_a_plain_unified_diff_applies(tmp_path: Path) -> None:
+    """Apply a plain ``---``/``+++`` diff, as a hardening fix can be (SKY-906).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n"})
+
+    apply_patch(checkout, "--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\n")
+
+    assert (checkout / "src" / "a.py").read_text() == "b\n"
+
+
+def test_a_plain_diff_cut_after_its_header_pair_is_refused(tmp_path: Path) -> None:
+    """Refuse a plain header pair with no line after it as unreadable, not with an ``IndexError``.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n"})
+
+    with pytest.raises(RuntimeError, match="cannot read"):
+        apply_patch(checkout, "--- a/src/a.py\n+++ b/src/a.py")
+
+
+def test_link_edits_allows_deleting_a_shipped_link() -> None:
+    """Allow a section that deletes the link, and an edit of a file that is not a link."""
+    patch = (
+        "diff --git a/src/link b/src/link\ndeleted file mode 120000\n--- a/src/link\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-../x\n\\ No newline at end of file\n"
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+
+    assert link_edits(patch, ["src/link"]) == []
+
+
+def test_a_new_symlink_is_refused_even_in_an_editable_folder(tmp_path: Path) -> None:
+    """Refuse ``src/link -> ../secret.txt``, which would let a version read outside its folder (SKY-906)."""
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n", "secret.txt": "s\n"})
+    (checkout / "src/link").symlink_to("../secret.txt")
+    patch = version_patch(checkout)
+
+    assert "new file mode 120000" in patch
+    assert patch_violations(patch, ["src"]) == [_SYMLINK]
+    reset_tree(checkout)
+    with pytest.raises(RuntimeError, match="Symlinks are not allowed"):
+        apply_patch(checkout, patch)
+    assert not (checkout / "src/link").is_symlink()
+
+
+def test_a_plain_new_file_in_an_editable_folder_is_allowed(tmp_path: Path) -> None:
+    """Allow a plain new file, so the symlink check refuses only links (SKY-906)."""
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n"})
+    (checkout / "src/b.py").write_text("b\n")
+
+    assert patch_violations(version_patch(checkout), ["src"]) == []
+
+
+def test_a_file_turned_into_a_symlink_is_refused(tmp_path: Path) -> None:
+    """Refuse a file replaced by a link, as git writes it and as a hand-written mode change (SKY-906).
+
+    ``git apply`` also rejects the hand-written ``old mode``/``new mode`` form.
+    The checker also refuses it, because the new mode is 120000.
+    """
+    checkout = _unpacked(tmp_path, {"src/a.py": "a\n", "secret.txt": "s\n"})
+    (checkout / "src/a.py").unlink()
+    (checkout / "src/a.py").symlink_to("../secret.txt")
+    typechange = version_patch(checkout)
+    reset_tree(checkout)
+    mode_change = (
+        "diff --git a/src/a.py b/src/a.py\nold mode 100644\nnew mode 120000\n--- a/src/a.py\n+++ b/src/a.py\n"
+        "@@ -1 +1 @@\n-a\n+../secret.txt\n\\ No newline at end of file\n"
+    )
+    with pytest.raises(RuntimeError, match="does not match old mode"):
+        apply_patch(checkout, mode_change)
+
+    assert patch_violations(typechange, ["src"]) == [_SYMLINK]
+    assert patch_violations(mode_change, ["src"]) == [_SYMLINK]
+
+
+def test_a_new_target_for_an_existing_symlink_is_refused(tmp_path: Path) -> None:
+    """Refuse a retarget, which git marks with mode 120000 on the ``index`` line (SKY-906)."""
+    checkout = _with_base_link(tmp_path)
+    (checkout / "src/link").unlink()
+    (checkout / "src/link").symlink_to("../secret.txt")
+    patch = version_patch(checkout)
+
+    assert "new file mode" not in patch
+    assert patch_violations(patch, ["src"]) == [_SYMLINK]
+
+
+def test_deleting_a_symlink_is_allowed(tmp_path: Path) -> None:
+    """Allow removing a link, because a removed link cannot point anywhere (SKY-906)."""
+    checkout = _with_base_link(tmp_path)
+    (checkout / "src/link").unlink()
+    patch = version_patch(checkout)
+
+    assert "deleted file mode 120000" in patch
+    assert patch_violations(patch, ["src"]) == []
+    reset_tree(checkout)
+    apply_patch(checkout, patch)
+    assert not (checkout / "src/link").is_symlink()
+
+
+def test_a_moved_symlink_is_refused(tmp_path: Path) -> None:
+    """Refuse a moved link, which can point outside the tree from its new folder (SKY-906)."""
+    checkout = _with_base_link(tmp_path)
+    (checkout / "src/link").rename(checkout / "link")
+    patch = version_patch(checkout)
+
+    assert "rename from" not in patch
+    assert "new file mode 120000" in patch
+    assert patch_violations(patch, ["src", "link"]) == [_SYMLINK]
+
+
+def test_a_symlink_turned_into_a_file_is_allowed() -> None:
+    """Allow ``old mode 120000`` to ``new mode 100644``, because a plain file points nowhere (SKY-906).
+
+    Git itself refuses this form, so this checks only the checker. Git writes
+    the change as a deletion and a new file, which the link tests cover.
+    """
+    patch = (
+        "diff --git a/src/l b/src/l\nold mode 120000\nnew mode 100644\n--- a/src/l\n+++ b/src/l\n"
+        "@@ -1 +1 @@\n-../x\n\\ No newline at end of file\n+x\n"
+    )
+
+    assert patch_violations(patch, ["src"]) == []
+
+
+def test_a_symlink_replaced_by_a_plain_file_is_allowed(tmp_path: Path) -> None:
+    """Allow the delete and new-file form that git writes for a link turned into a file (SKY-906)."""
+    checkout = _with_base_link(tmp_path)
+    (checkout / "src/link").unlink()
+    (checkout / "src/link").write_text("plain\n")
+    patch = version_patch(checkout)
+
+    assert "deleted file mode 120000" in patch
+    assert "new file mode 100644" in patch
+    assert patch_violations(patch, ["src"]) == []
+
+
+def test_a_link_kept_by_a_lone_old_mode_line_is_refused(tmp_path: Path) -> None:
+    """Refuse ``old mode 120000`` with no ``new mode``, which keeps the link and retargets it (SKY-906)."""
+    checkout = _with_base_link(tmp_path)
+    retarget = (
+        "diff --git a/src/link b/src/link\nold mode 120000\n--- a/src/link\n+++ b/src/link\n@@ -1 +1 @@\n"
+        "-../x\n\\ No newline at end of file\n+../secret.txt\n\\ No newline at end of file\n"
+    )
+    move = "diff --git a/src/link b/l3\nold mode 120000\nsimilarity index 100%\nrename from src/link\nrename to l3\n"
+    with pytest.raises(RuntimeError, match="Symlinks are not allowed"):
+        apply_patch(checkout, retarget)
+
+    assert patch_violations(retarget, ["src"]) == [_SYMLINK]
+    assert patch_violations(move, ["src", "l3"]) == [_SYMLINK]
+
+
+_UNREADABLE = "The change has a file header Skynet cannot read, so it cannot check the files it touches."
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("0120000", [_UNREADABLE]),
+        (" 120000", [_UNREADABLE]),
+        ("+120000", [_UNREADABLE]),
+        ("120644", [_UNREADABLE]),
+        ("120000\tx", [_UNREADABLE]),
+        ("120000 ", [_SYMLINK]),
+        ("120000\r", [_SYMLINK]),
+    ],
+)
+def test_a_loosely_written_link_mode_is_refused(mode: str, expected: list[str]) -> None:
+    """Refuse mode text that ``git apply`` still reads as a link, such as ``0120000`` or ``120644`` (SKY-906)."""
+    patch = (
+        f"diff --git a/src/l b/src/l\nnew file mode {mode}\nindex 0000000..1a2b3c4\n--- /dev/null\n+++ b/src/l\n"
+        "@@ -0,0 +1 @@\n+../x\n\\ No newline at end of file\n"
+    )
+
+    assert patch_violations(patch, ["src"]) == expected
+
+
+def test_a_loosely_written_index_mode_is_refused() -> None:
+    """Refuse a retarget whose ``index`` line writes the link mode as ``0120000`` (SKY-906)."""
+    patch = (
+        "diff --git a/src/l b/src/l\nindex 1a2b3c4..5d6e7f8 0120000\n--- a/src/l\n+++ b/src/l\n"
+        "@@ -1 +1 @@\n-../x\n+../y\n"
+    )
+
+    assert patch_violations(patch, ["src"]) == [_UNREADABLE]
+
+
+@pytest.mark.parametrize("prefix", ["rename from", "rename old", "copy from"])
+@pytest.mark.parametrize("name", ["secret.txt\r", '"secret.txt" x', "secret\x01.txt"])
+def test_a_rename_path_that_git_reads_another_way_is_refused(prefix: str, name: str) -> None:
+    """Refuse a rename or copy line whose path git cuts short, so a protected file cannot move unseen (SKY-906).
+
+    Args:
+        prefix: The source line's prefix.
+        name: The source path as written in the patch.
+    """
+    target = prefix.replace("from", "to").replace("old", "new")
+    patch = f"diff --git a/secret.txt b/src/y\nsimilarity index 100%\n{prefix} {name}\n{target} src/y\n"
+
+    assert _UNREADABLE in patch_violations(patch, ["."], protected_paths=["secret.txt"])
+
+
+def test_an_edit_to_a_name_with_outer_spaces_is_allowed(tmp_path: Path) -> None:
+    """Git keeps outer spaces in a bare name, so an edit to ``src/foo `` stays in its editable folder."""
+    checkout = _unpacked(tmp_path, {"src/foo ": "x = 1\n", "src/ bar": "y = 1\n"})
+    (checkout / "src/foo ").write_text("x = 2\n")
+    (checkout / "src/ bar").write_text("y = 2\n")
+
+    patch = version_patch(checkout)
+
+    assert patch_paths(patch) == ["src/ bar", "src/foo "]
+    assert patch_violations(patch, ["src"]) == []
+
+
+def test_a_carriage_return_rename_moves_the_file_that_git_reads(tmp_path: Path) -> None:
+    """``git apply`` moves ``secret.txt`` for ``rename from secret.txt\\r``, which is why the checker refuses it."""
+    checkout = _unpacked(tmp_path, {"secret.txt": "s\n"})
+    _git_apply(
+        checkout, "diff --git a/secret.txt b/src/y\nsimilarity index 100%\nrename from secret.txt\r\nrename to src/y\n"
+    )
+
+    assert (checkout / "src/y").read_text() == "s\n"
+
+
+def test_a_quoted_rename_path_is_allowed() -> None:
+    """Allow a rename whose paths git quotes in full, as it does for a name with a non-ASCII letter."""
+    patch = (
+        'diff --git "a/src/caf\\303\\251.py" "b/src/th\\303\\251.py"\nsimilarity index 100%\n'
+        'rename from "src/caf\\303\\251.py"\nrename to "src/th\\303\\251.py"\n'
+    )
+
+    assert patch_violations(patch, ["src"]) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ['"src/a.py\\"', '"src/\\x.py"', '"\\x73rc/b.py"', '"src/\\\'b.py"', '"src/\\1.py"'],
+    ids=["trailing-backslash", "bad-hex", "python-hex", "python-quote", "short-octal"],
+)
+def test_a_quoted_name_with_a_bad_escape_is_refused(name: str) -> None:
+    """Refuse, and do not crash on, a quoted name that git cannot read.
+
+    Args:
+        name: The quoted rename source.
+    """
+    patch = f"diff --git a/src/a.py b/src/b.py\nsimilarity index 100%\nrename from {name}\nrename to src/b.py\n"
+
+    assert patch_violations(patch, ["src"]) == [_UNREADABLE]
+
+
+def test_a_new_file_with_a_python_escape_is_refused() -> None:
+    """Refuse a ``+++`` name with ``\\x73``, which git writes as raw text outside ``src``."""
+    patch = 'diff --git a/src/y b/src/y\nnew file mode 100644\n--- /dev/null\n+++ "b/\\x73rc/y"\n@@ -0,0 +1 @@\n+x\n'
+
+    assert patch_violations(patch, ["src"]) == [_UNREADABLE]
+
+
+def test_a_carriage_return_file_line_is_refused() -> None:
+    """Refuse ``--- a/secret.txt\\r``, which git reads as the protected ``secret.txt``."""
+    patch = "diff --git a/src/a.py b/src/a.py\n--- a/secret.txt\r\n+++ b/secret.txt\r\n@@ -1 +1 @@\n-s\n+pwned\n"
+
+    assert patch_violations(patch, ["."], protected_paths=["secret.txt"]) == [_UNREADABLE]
+
+
+def test_a_carriage_return_file_line_changes_the_file_that_git_reads(tmp_path: Path) -> None:
+    """``git apply`` changes ``secret.txt`` for ``--- a/secret.txt\\r``, which is why the checker refuses it.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    checkout = _unpacked(tmp_path, {"secret.txt": "s\n", "src/a.py": "a\n"})
+    _git_apply(
+        checkout, "diff --git a/src/a.py b/src/a.py\n--- a/secret.txt\r\n+++ b/secret.txt\r\n@@ -1 +1 @@\n-s\n+pwned\n"
+    )
+
+    assert (checkout / "secret.txt").read_text() == "pwned\n"
+
+
+_DATED = (
+    "diff --git a/src/a.py b/src/a.py\nx\n"
+    "--- a/secret.txt 2020-01-01 00:00:00.000000000 +0000\n"
+    "+++ b/secret.txt 2020-01-01 00:00:00.000000000 +0000\n"
+    "@@ -1 +1 @@\n-s\n+pwned\n"
+)
+
+
+def test_an_unknown_header_line_is_refused() -> None:
+    """Refuse a header line git does not know, after which git reads a dated ``secret.txt``."""
+    assert patch_violations(_DATED, ["."], protected_paths=["secret.txt"]) == [_UNREADABLE]
+
+
+def test_an_unknown_header_line_changes_the_file_that_git_reads(tmp_path: Path) -> None:
+    """``git apply`` cuts the date and changes ``secret.txt``, which is why the checker refuses it.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    checkout = _unpacked(tmp_path, {"secret.txt": "s\n", "src/a.py": "a\n"})
+    _git_apply(checkout, _DATED)
+
+    assert (checkout / "secret.txt").read_text() == "pwned\n"
+
+
+def test_apply_patch_refuses_an_unknown_header_line_before_git_reads_it(tmp_path: Path) -> None:
+    """Refuse the patch before ``git apply``, so a caller with no path check cannot retarget a shipped link."""
+    checkout = _with_base_link(tmp_path)
+    patch = _DATED.replace("secret.txt", "src/link").replace("-s\n+pwned\n", _RETARGET.split("@@ -1 +1 @@\n", 1)[1])
+
+    with pytest.raises(RuntimeError, match="cannot read"):
+        apply_patch(checkout, patch)
+    assert str((checkout / "src/link").readlink()) == "../x"
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["@@ -x", "@@ -1 +1 @", "Binary files a/src/a.py and b/src/a.py differ"],
+)
+def test_a_header_line_that_ends_the_git_header_is_refused(line: str) -> None:
+    """Refuse a broken hunk line or a ``Binary files`` line before a ``secret.txt`` pair.
+
+    Args:
+        line: A line that git takes as the end of the header.
+    """
+    assert patch_violations(_DATED.replace("\nx\n", f"\n{line}\n"), ["."], protected_paths=["secret.txt"]) == [
+        _UNREADABLE
+    ]
+
+
+@pytest.mark.parametrize("line", ["@@ -x", "Binary files a/src/a.py and b/src/a.py differ"])
+def test_a_header_line_that_ends_the_git_header_changes_the_file_that_git_reads(tmp_path: Path, line: str) -> None:
+    """``git apply`` changes ``secret.txt`` after these lines, which is why the checker refuses them.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        line: A line that git takes as the end of the header.
+    """
+    checkout = _unpacked(tmp_path, {"secret.txt": "s\n", "src/a.py": "a\n"})
+    _git_apply(checkout, _DATED.replace("\nx\n", f"\n{line}\n"))
+
+    assert (checkout / "secret.txt").read_text() == "pwned\n"
+
+
+def test_a_patch_that_ends_in_a_header_is_allowed() -> None:
+    """Allow git's own output for an empty new file, a header with no hunk at the end."""
+    patch = "diff --git a/src/empty.py b/src/empty.py\nnew file mode 100644\nindex 0000000..e69de29\n"
+
+    assert patch_violations(patch, ["src"]) == []
+
+
+def test_drop_paths_drops_a_section_with_a_name_git_cannot_decode() -> None:
+    """Drop, and do not crash on, a section whose quoted name git reads as raw text."""
+    kept = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+    odd = 'diff --git a/src/y b/src/y\nnew file mode 100644\n--- /dev/null\n+++ "b/\\x73rc/y"\n@@ -0,0 +1 @@\n+x\n'
+
+    assert drop_paths(kept + odd, ["metric"]) == kept
+
+
 def _reserved(path: str) -> str:
     """Write the reason the guard gives for a write to the exploit suite.
 
@@ -194,7 +683,8 @@ def test_a_file_at_a_parent_of_the_suite_is_refused(mode: str) -> None:
         "--- /dev/null\n+++ b/.optimize\n@@ -0,0 +1 @@\n+src\n\\ No newline at end of file\n"
     )
 
-    assert patch_violations(patch, ["."]) == [_reserved(".optimize")]
+    expected = [_SYMLINK] if mode == "120000" else []
+    assert patch_violations(patch, ["."]) == [*expected, _reserved(".optimize")]
 
 
 @pytest.mark.parametrize(
@@ -208,6 +698,16 @@ def test_a_file_at_a_parent_of_the_suite_is_refused(mode: str) -> None:
         (
             "diff --git a/notes/a.diff b/.optimize/exploits/a.diff\nsimilarity index 100%\n"
             "rename from notes/a.diff\nrename to .optimize/exploits/a.diff\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/notes/a.diff b/notes/a.diff\nsimilarity index 100%\n"
+            "rename old notes/a.diff\nrename new .optimize/exploits/a.diff\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/.optimize/exploits/a.diff b/notes/a.diff\nsimilarity index 100%\n"
+            "rename old .optimize/exploits/a.diff\nrename new notes/a.diff\n",
             ".optimize/exploits/a.diff",
         ),
         (
@@ -230,7 +730,7 @@ def test_a_file_at_a_parent_of_the_suite_is_refused(mode: str) -> None:
             ".optimize/exploits/caf\u00e9.diff",
         ),
     ],
-    ids=["rename-out", "rename-in", "delete", "mode-change", "binary", "quoted"],
+    ids=["rename-out", "rename-in", "rename-new", "rename-old", "delete", "mode-change", "binary", "quoted"],
 )
 def test_every_kind_of_suite_change_is_refused(patch: str, path: str) -> None:
     """Refuse renames, deletes, mode changes, binary files and quoted paths in the suite."""
@@ -447,6 +947,18 @@ def test_drop_paths_removes_the_sections_that_touch_a_hidden_path() -> None:
     assert drop_paths("", ["eval"]) == ""
 
 
+def test_drop_paths_drops_the_whole_patch_when_it_deletes_a_hidden_file(tmp_path: Path) -> None:
+    """A moved metric file is a delete plus a new visible file, so nothing of the patch survives (SKY-906)."""
+    checkout = _unpacked(tmp_path, {"src/a.py": "x = 1\n", "eval/scorer.py": "secret\n"})
+    (checkout / "eval/scorer.py").rename(checkout / "copied.py")
+    (checkout / "src/a.py").write_text("x = 2\n")
+
+    patch = version_patch(checkout)
+
+    assert patch_paths(patch) == ["copied.py", "eval/scorer.py", "src/a.py"]
+    assert drop_paths(patch, ["eval"]) == ""
+
+
 @pytest.mark.parametrize(
     ("setting", "value"),
     [("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true"), ("diff.srcPrefix", "z/")],
@@ -505,3 +1017,64 @@ def test_a_line_break_python_knows_but_git_does_not_stays_inside_its_hunk_line(b
 
     assert patch_paths(patch) == ["src/a.py"]
     assert patch_violations(patch, ["src"]) == []
+
+
+def test_apply_patch_runs_no_filter_from_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tree folder shaped as a bare repository gives ``git apply`` no config (SKY-812).
+
+    Without ``SAFE_GIT`` the same call runs the planted filter, so the plant is live.
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, marker = planted_bare_repo
+    patch = "diff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+hi\n"
+    repo_tree.apply_patch(repo, patch)
+    assert (repo / "y").read_text() == "hi\n"
+    assert not marker.exists()
+
+    (repo / "y").unlink()
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    repo_tree.apply_patch(repo, patch)
+    assert marker.exists()
+
+
+def test_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``repo_tree._git`` does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        repo_tree._git(["rev-parse", "--git-dir"], repo)
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert repo_tree._git(["rev-parse", "--git-dir"], repo).strip() == "."
+
+
+def test_forget_file_stats_shows_a_same_size_edit_that_keeps_its_mtime(tmp_path: Path) -> None:
+    """Show an edit that git's cached stat hides once the index is reloaded (SKY-843).
+
+    On Linux the scorer's checkout reuses the inode and the second of the ctime, so
+    the cached stat matches. Telling git to ignore inode and ctime does the same on
+    every OS.
+    """
+    checkout = _unpacked(tmp_path, {"src/app.py": "value = 1\n"})
+    for key, value in (("core.checkStat", "minimal"), ("core.trustctime", "false")):
+        subprocess.run([*_GIT, "-C", str(checkout), "config", key, value], check=True)
+    target = checkout / "src" / "app.py"
+    # An mtime older than the index keeps git from rehashing a "racily clean" file.
+    os.utime(target, (1_000_000_000, 1_000_000_000))
+    subprocess.run([*_GIT, "-C", str(checkout), "update-index", "--refresh"], check=True)
+    target.write_text("value = 2\n")
+    os.utime(target, (1_000_000_000, 1_000_000_000))
+
+    assert version_patch(checkout) == ""
+    forget_file_stats(checkout)
+    assert patch_paths(version_patch(checkout)) == ["src/app.py"]

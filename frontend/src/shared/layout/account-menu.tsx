@@ -6,7 +6,7 @@ import {
   BookOpen,
   Code,
   Desktop,
-  DotsThree,
+  DownloadSimple,
   FileText,
   Gear,
   ShieldCheck,
@@ -30,6 +30,7 @@ import { docsLinkProps } from "@/shared/lib/docs-link";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { useSettingsModal } from "@/features/settings";
+import { DownloadsDialog } from "@/features/downloads";
 import {
   type LinkedAccount,
   startHostedSignIn,
@@ -148,6 +149,7 @@ export function AccountMenu({
   const tooltipSide = isRtl ? "left" : "right";
   const { setOpen: setSettingsOpen } = useSettingsModal();
   const [open, setOpen] = React.useState(false);
+  const [downloadsOpen, setDownloadsOpen] = React.useState(false);
   // Read the link again on each open: the sign-in finishes in the browser.
   const [reads, setReads] = React.useState(0);
   const onOpenChange = (next: boolean) => {
@@ -210,10 +212,6 @@ export function AccountMenu({
           </span>
         )}
       </span>
-      <DotsThree
-        className="size-4 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-muted-foreground"
-        aria-hidden="true"
-      />
     </button>
   );
 
@@ -290,6 +288,25 @@ export function AccountMenu({
           {msg("app.shell.account.docs")}
         </Link>
 
+        {local ? (
+          <button
+            type="button"
+            onClick={() => {
+              close();
+              setDownloadsOpen(true);
+            }}
+            className={COMPACT_POPOVER_ITEM_CLASS}
+          >
+            <DownloadSimple className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+            {msg("downloads.title")}
+          </button>
+        ) : (
+          <Link href="/download" onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
+            <DownloadSimple className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+            {msg("downloads.title")}
+          </Link>
+        )}
+
         <div role="separator" className="my-1 h-px bg-border/60" />
 
         <Link href={LEGAL_LINKS.terms} onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
@@ -347,6 +364,7 @@ export function AccountMenu({
         )}
       </PopoverContent>
       {/* Outside PopoverContent, so the dialog stays mounted after the menu closes. */}
+      {local && <DownloadsDialog open={downloadsOpen} onOpenChange={setDownloadsOpen} />}
     </Popover>
   );
 }

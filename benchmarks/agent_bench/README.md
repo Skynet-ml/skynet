@@ -110,37 +110,6 @@ Reading the table:
 - **Codex is the slowest and most token-hungry** at about 10 model calls per
   task against 3 to 4 elsewhere.
 
-### Text-mode prompt layout (2026-09-21)
-
-`dspy-reactv2-fixed` needs native tool calling, which the platform keeps off by
-default because not every model a user picks supports it. `dspy-reactv2-stable`
-is the fix for the text protocol: it changes only where the tool roster sits.
-Both runs below are 36 tasks × 2 trials, the two variants back to back.
-
-| run | harness | pass | median time | cached input | list cost / 1k tasks |
-|---|---|---|---|---|---|
-| `results/text_stable_pinned` (`--pin-language`) | dspy-reactv2 | 71/72 | 18s | 16% | $9.93 |
-| | dspy-reactv2-stable | 71/72 | 12s | 73% | $3.45 |
-| `results/text_stable` (no pin) | dspy-reactv2 | 71/72 | 26s | 36% | $8.14 |
-| | dspy-reactv2-stable | 63/72 | 20s | 54% | $5.73 |
-
-- **With the reply language pinned the two are identical on quality** (the same
-  single failure, the dry-run task every loop struggles with) and the stable
-  layout costs about a third as much and answers faster.
-- **Without the pin the stable layout passed 8 fewer attempts.** Both variants
-  drifted to Hebrew equally often (17/59 and 14/60 English prompts), but the
-  stable run drifted on tasks whose checks look for English phrases: 6 of its 9
-  failures are correct answers in Hebrew, against 1 for the stock layout. Read
-  it as one more reason to pin the reply language, which every platform agent
-  does, and as a caution that an unpinned loop may be more exposed.
-
-One grader fix was applied after the run: the `insight-failed-count` check
-rejected "3 of your 16 runs have failed". Its answer-only regex was corrected
-and the three affected attempts were regraded from their stored answers.
-
-The billed column in the report is biased by OpenRouter peak-hour pricing and
-by billing-counter lag between batches; the list cost is computed from tokens.
-
 ## Limits
 
 Tasks are single-turn (earlier turns are given as a transcript, except to

@@ -17,22 +17,32 @@ import {
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
 import { EvolutionMorph } from "@/shared/ui/evolution-morph";
 
-// 1.8 s in all: the morph lands on the human at 1.5 s, the figure and letters
-// fade out over 0.2 s, then the backdrop over 0.1 s.
-const MORPH_MS = 1500;
-const CONTENT_FADE_MS = 200;
-const BACKDROP_FADE_MS = 100;
-// The letters' variant cross-fade takes 300 ms, so they stop morphing that long
-// before the fade and read cleanly when it starts.
-const LETTERS_SETTLE_MS = MORPH_MS - 300;
-const EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
+// 3 s in all: the journey takes 2.56 s, long enough to see each animal swim or
+// walk and the human run and slow to a stand. The human stands for 0.14 s, the
+// figure and letters fade out over 0.12 s, then the backdrop over 0.18 s. The
+// backdrop fades at an even rate: a steep curve shows an empty screen, then
+// the page all at once.
+const JOURNEY_MS = 2560;
+const REST_MS = 140;
+const MORPH_MS = JOURNEY_MS + REST_MS;
+const CONTENT_FADE_MS = 120;
+const BACKDROP_FADE_MS = 180;
+// The letters morph only while the first fish swims, then they stand still: when
+// the fish starts to change, the animal is the one thing that moves. The letters
+// need about 150 ms more to settle after this time.
+const LETTERS_SETTLE_MS = 240;
+// With reduced motion the still human stands this long before the fades. With no
+// hold the splash is on screen for a few frames only, and that reads as a flash.
+const REDUCED_HOLD_MS = 800;
 
 /**
  * App-load splash: the wordmark letters morphing at the centre of the screen, with
- * the evolution morph playing just above them, held until the figure lands on
- * the human. The content fades before the backdrop so the page's own title
- * never shows through next to the splash letters. Reduced motion shows the
- * still human and letters and skips the hold.
+ * the evolution journey playing just above them: a fish swims in the sea, climbs
+ * the beach as its legs form, and walks on over the land until it runs as the
+ * human, who slows down and stands. The splash holds until the human stands. The content fades before the
+ * backdrop so the page's own title never shows through next to the splash
+ * letters. Reduced motion shows the still human on the land and the letters
+ * for a short hold, and keeps the two short fades.
  *
  * On a first login the splash is also the setup's entrance: once the figure
  * lands and a setup waits, it hands the screen over with no fade, and the
@@ -72,7 +82,7 @@ export function SplashScreen() {
       return;
     }
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const timer = setTimeout(() => setPhase("landed"), reduceMotion ? 0 : MORPH_MS);
+    const timer = setTimeout(() => setPhase("landed"), reduceMotion ? REDUCED_HOLD_MS : MORPH_MS);
     return () => clearTimeout(timer);
   }, [skip]);
 
@@ -88,14 +98,14 @@ export function SplashScreen() {
 
   useEffect(() => {
     if (phase !== "fading" && phase !== "revealing") return;
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const next = phase === "fading" ? "revealing" : "done";
+    // The two fades also play with reduced motion: a splash that cuts out reads as a flash.
     const timer = setTimeout(
       () => {
         if (next === "done") endSplash("gone");
         setPhase(next);
       },
-      reduceMotion ? 0 : phase === "fading" ? CONTENT_FADE_MS : BACKDROP_FADE_MS,
+      phase === "fading" ? CONTENT_FADE_MS : BACKDROP_FADE_MS,
     );
     return () => clearTimeout(timer);
   }, [phase]);
@@ -112,7 +122,7 @@ export function SplashScreen() {
         ...(phase === "revealing"
           ? {
               opacity: 0,
-              transition: `opacity ${BACKDROP_FADE_MS}ms ${EASE}`,
+              transition: `opacity ${BACKDROP_FADE_MS}ms linear`,
               pointerEvents: "none" as const,
             }
           : {}),
@@ -125,21 +135,20 @@ export function SplashScreen() {
         style={
           phase === "active" || phase === "landed"
             ? undefined
-            : { opacity: 0, transition: `opacity ${CONTENT_FADE_MS}ms ${EASE}` }
+            : { opacity: 0, transition: `opacity ${CONTENT_FADE_MS}ms ease-out` }
         }
       >
-        <EvolutionMorph
-          durationMs={MORPH_MS}
-          width={300}
-          className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2 motion-reduce:hidden"
-        />
-        {/* The server can't know the motion preference, so the still human is
-            swapped in by CSS; otherwise the fish shows until hydration. */}
-        <EvolutionMorph
-          still
-          width={300}
-          className="absolute bottom-full left-1/2 mb-2 hidden -translate-x-1/2 motion-reduce:block"
-        />
+        <div className="absolute bottom-full left-1/2 mb-3 flex w-max -translate-x-1/2 flex-col items-center">
+          <EvolutionMorph
+            scene
+            durationMs={JOURNEY_MS}
+            width={300}
+            className="motion-reduce:hidden"
+          />
+          {/* The server can't know the motion preference, so the still human is
+              swapped in by CSS; otherwise the fish shows until hydration. */}
+          <EvolutionMorph scene still width={300} className="hidden motion-reduce:block" />
+        </div>
         {/* 72px-tall letters, narrowed on phones so the six-letter name never
             touches the screen edges. */}
         <div className="w-[min(86vw,372px)]">

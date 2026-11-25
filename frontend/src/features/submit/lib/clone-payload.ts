@@ -110,8 +110,15 @@ const modelConfigs = (value: unknown): ModelConfig[] =>
 function engineKnobs(source: Record<string, unknown>): Partial<OptimizerSlice> {
   const knobs: Partial<OptimizerSlice> = {};
   if (isRecord(source.budget)) knobs.budget = source.budget as unknown as OptimizerSlice["budget"];
-  if (isRecord(source.proposer))
-    knobs.proposer = source.proposer as unknown as OptimizerSlice["proposer"];
+  // A stored proposer keeps no harness the user did not pick, so a clone
+  // still lets the repository's [proposer] entry apply (SKY-753). A host CLI
+  // the server filled in is not a pick either: the clone drops it with its
+  // mark, so a CLI the user picks later is not sent as filled in.
+  if (isRecord(source.proposer)) {
+    const { host_cli_auto: hostCliAuto, ...proposer } = source.proposer;
+    if (hostCliAuto === true) delete proposer.host_cli;
+    knobs.proposer = proposer as unknown as OptimizerSlice["proposer"];
+  }
   if (isRecord(source.shinka)) knobs.shinka = source.shinka as unknown as OptimizerSlice["shinka"];
   return knobs;
 }
@@ -135,6 +142,15 @@ function legacyRepo(target: unknown): RepoDraft | null {
   };
 }
 
+/** The setup draft's repository files a run wrote over its commit, or null when it had none. */
+function repoDraftFiles(target: unknown): Record<string, string> | null {
+  if (!isRecord(target) || !isRecord(target.repo) || !isRecord(target.repo.draft_files)) return null;
+  const files = Object.entries(target.repo.draft_files).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string",
+  );
+  return files.length > 0 ? Object.fromEntries(files) : null;
+}
+
 /** A `/blackbox/run` payload is a repository run, scored one case at a time. */
 function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   const task: Partial<TaskSlice> = {
@@ -156,6 +172,16 @@ function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   if (typeof scorer.metric_code === "string") workspace.metricCode = scorer.metric_code;
   if (typeof scorer.timeout_seconds === "number")
     workspace.metricTimeoutSeconds = scorer.timeout_seconds;
+  // Without them the clone would run on the bare commit, not the tree its source ran on.
+  const files = repo ? repoDraftFiles(payload.target) : null;
+  if (files) workspace.files = files;
+  // The base pin travels with the files, so a clone of a run that never pinned its
+  // commit is still refused when the branch moves under the drafts.
+  const base =
+    files && isRecord(payload.target) && isRecord(payload.target.repo)
+      ? text(payload.target.repo.draft_base)
+      : undefined;
+  if (base) workspace.filesBase = base;
   return {
     task,
     inputs: { mode: "single" },

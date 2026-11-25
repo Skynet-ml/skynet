@@ -81,7 +81,6 @@ El asistente solo muestra los optimizadores que encajan con tu tarea y tus entra
 Fija cuánto tiempo puede seguir intentándolo la ejecución, y cuánto puede gastar:
 
 - **Máximo de ejecuciones del evaluador** (Guiado: **Intentos máx.**): el número máximo de candidatos que puntúa Skynet. Algunos optimizadores necesitan un número mínimo.
-- **Detener al llegar a la puntuación** (Guiado: **Detener antes cuando la puntuación llegue a**): la ejecución se detiene cuando una versión alcanza esta puntuación.
 - **Iteraciones máx.** (Guiado: **Rondas máx.**): aparece para los optimizadores que lo admiten.
 - **Límite de gasto**: lo máximo que puede gastar la ejecución. El valor predeterminado es 5 $, o el importe **Necesario para empezar** si es mayor. También puedes seleccionar **Sin límite**.
 
@@ -91,13 +90,13 @@ El asistente no te deja continuar si el límite o tu saldo es inferior al import
 
 ### Evaluador
 
-Escribe `scorer.py`. Define `score(repo_path, case)` y devuelve una puntuación con comentarios. El asistente de IA puede escribirlo por ti. Lee [Métricas y evaluadores](/docs/concepts/scorers).
+Escribe `scorer.py`. Define `score(repo_path, case, output=None)` y devuelve una puntuación con comentarios. El evaluador lee `output`, lo que la entrada `[run]` devolvió para el caso. No se ejecuta en la carpeta de la versión ni importa código del repositorio. El asistente de IA puede escribirlo por ti. Lee [Métricas y evaluadores](/docs/concepts/scorers).
 
 El repositorio puede tener un archivo `serve.py` con `def serve(input)`. Skynet lo usa para servir la mejor versión después de la ejecución. Lee [Leer los resultados](/docs/guides/results).
 
 ### Secretos
 
-Añade secretos, como las claves de API que necesita tu código. Cada secreto llega a tu código y a tu evaluador como una variable de entorno con el mismo nombre. El agente de código no puede verlos. Skynet oculta sus valores en los registros.
+Añade secretos, como las claves de API que necesita tu código. Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`, o a través de un servidor del archivo `mcp` del rol. Escribe el secreto en los `headers` de la tabla como `${NAME}`. El agente de código no puede verlos. Skynet oculta sus valores en los registros.
 
 ### Comprobación
 

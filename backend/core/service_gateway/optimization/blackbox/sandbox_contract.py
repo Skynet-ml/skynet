@@ -30,6 +30,20 @@ _NAME_SUFFIX_CHARS = 8
 
 
 @dataclass(frozen=True)
+class UserImage:
+    """A user box image and the access that a box start needs to pull it (SKY-891)."""
+
+    reference: str
+    # The owner's repository in Skynet's image registry; ``None`` for an image
+    # outside it, such as a public image or a local Docker build.
+    repository: str | None = None
+    # Each box start calls this, because a registry token ends after one hour.
+    # It returns the (username, password) that reads only ``repository``. The
+    # field is out of the repr, so a log of the spec never shows the secret.
+    credentials: Callable[[], tuple[str, str]] | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class SandboxSpec:
     """What a session needs to open a sandbox."""
 
@@ -39,9 +53,10 @@ class SandboxSpec:
     tags: Mapping[str, str] = field(default_factory=dict)
     # Container image; the runtime's default when unset.
     image: str | None = None
-    # Host → headers the network edge adds to the box's requests to that host, so a
-    # secret reaches a service without ever entering the box.
-    inject_headers: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    # Host → path prefix → headers the network edge adds to the box's requests to that host
+    # under that prefix ("/" is the whole host), so a secret reaches a service without ever
+    # entering the box.
+    inject_headers: Mapping[str, Mapping[str, Mapping[str, str]]] = field(default_factory=dict)
     network_disabled: bool = False
     # When set, the box reaches only these hosts; every other destination is denied.
     allowed_hosts: tuple[str, ...] = ()
@@ -61,6 +76,12 @@ class SandboxSpec:
     # ``docker commit``). Runtimes ignore it: the opener unpacks the archive
     # and checks its digest, because the broker rebuilds the spec (SKY-398).
     snapshot_archive: str | None = None
+    # The box's GPU type, such as ``a100``, from a ``gpu:<type>`` grant. Only the Modal
+    # provider starts such a box; every other runtime refuses the spec (SKY-804).
+    gpu: str | None = None
+    # The user image of this box (SKY-891). A runtime that cannot start it
+    # refuses the spec, so a box never runs Skynet's image in its place.
+    user_image: UserImage | None = None
 
 
 @dataclass(frozen=True)

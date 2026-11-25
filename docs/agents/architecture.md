@@ -5,8 +5,9 @@ Reference facts for coding agents. The always-on rules are in `AGENTS.md`.
 ## Tech stack
 
 - **Backend**: Python 3.11+, FastAPI, Pydantic, SQLAlchemy, Alembic, DSPy,
-  pinned GEPA, LiteLLM/OpenRouter, Vercel Sandbox, PostgreSQL/pgvector, optional
-  Redis, and Stripe.
+  pinned GEPA, LiteLLM/OpenRouter, the sandbox component (Vercel Sandbox is
+  its most mature provider; others plug in through `SandboxEnvironment`),
+  PostgreSQL/pgvector, optional Redis, and Stripe.
 - **Frontend**: Node 22, Next.js 16 App Router, React 19, TypeScript,
   Tailwind CSS 4, Radix/shadcn primitives, Framer Motion, and NextAuth.
 - **Dependency management**: `uv` is authoritative for backend development and
@@ -56,7 +57,7 @@ Reference facts for coding agents. The always-on rules are in `AGENTS.md`.
 │   │   ├── storage/             ORM, migrations, job/checkpoint/dataset stores
 │   │   ├── telemetry/           Server-side telemetry events
 │   │   └── worker/              Job orchestration, preflight, recovery,
-│   │                            scoped relay, and Vercel sandbox dispatch
+│   │                            scoped relay, and sandbox dispatch
 │   └── tests/                   Integration, load, and release-gate tests
 │
 ├── frontend/

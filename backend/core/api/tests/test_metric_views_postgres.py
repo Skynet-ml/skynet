@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from core.api.routers.telemetry import METRIC_VIEW_DDL, read_north_star
 from core.config import app_env
-from core.storage.models import Base, JobModel, TelemetryEventModel, UserModel
+from core.storage.models import AgentConversationModel, Base, JobModel, TelemetryEventModel, UserModel
 
 TEST_DB_URL = app_env("APP_BUDGET_TEST_DB_URL")
 pytestmark = pytest.mark.skipif(
@@ -53,7 +53,13 @@ def database() -> Iterator[Engine]:
     engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema}"})
     try:
         Base.metadata.create_all(
-            engine, tables=[UserModel.__table__, JobModel.__table__, TelemetryEventModel.__table__]
+            engine,
+            tables=[
+                UserModel.__table__,
+                AgentConversationModel.__table__,
+                JobModel.__table__,
+                TelemetryEventModel.__table__,
+            ],
         )
         yield engine
     finally:

@@ -4,7 +4,7 @@ The SKY-355 core holds the state logic. This module gives it a real
 repository. It stages the tree the same way a run does, runs the full
 preflight gate (SKY-352) before any sandbox opens, and gives the attacker only
 the stripped tree (SKY-353). It reads ``[metric] exploits`` and ``[metric]
-reference`` from the base commit's ``optimize.toml`` (SKY-351). A cloud job
+reference`` from the base commit's ``ascent.toml`` (SKY-351). A cloud job
 holds rounds × cap before paid work (D46); a local job holds nothing. Every
 sandbox closes before the job returns at a wait state, so a job that waits for
 the user holds no sandbox.
@@ -22,7 +22,12 @@ from typing import Any, Protocol
 
 from ..models.hardening import HardeningJob
 from ..service_gateway.optimization.blackbox.hardening import HardeningRunner, run_until_wait
-from ..service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, MetricSpec, read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    MINIMIZE,
+    ConstraintsError,
+    MetricSpec,
+    read_constraints,
+)
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from .repo_gate import GateFailure, Place, RepoGateError, check_repository, sandbox_place
 from .repo_staging import StagedRepository, stage_repository
@@ -52,17 +57,22 @@ class HardeningWorkspace:
     commit: str | None
     applied_fixes: tuple[str, ...]
     secrets: dict[str, str] = field(repr=False)
+    # The staging's rule for an ascent.toml with no version; the runner reads the tree with it too.
+    require_version: bool = True
+    # ``[metric] direction = "minimize"``: the fix checks then treat a lower score as better (SKY-750).
+    minimize: bool = False
 
 
 RunnerFactory = Callable[[HardeningWorkspace, HardeningJob], AbstractContextManager[HardeningRunner]]
 Reserve = Callable[[HardeningJob, float], None]
+OnStaged = Callable[[HardeningJob], None]
 
 
 class Stage(Protocol):
     """Fetches and strips a repository tree, as :func:`stage_repository` does."""
 
     def __call__(
-        self, payload: dict[str, Any], *, username: str, binding_id: str, engine: Any
+        self, payload: dict[str, Any], *, username: str, binding_id: str, engine: Any, started: bool
     ) -> tuple[dict[str, Any], StagedRepository]:
         """Stage the payload's repository.
 
@@ -71,6 +81,7 @@ class Stage(Protocol):
             username: The job's owner.
             binding_id: The budget the vaulted secrets are bound to.
             engine: SQLAlchemy engine for the vaults.
+            started: Whether an earlier pass of the job passed its preflight.
 
         Returns:
             The staged payload and the staged repository.
@@ -80,13 +91,16 @@ class Stage(Protocol):
 class Gate(Protocol):
     """The preflight gate, as :func:`check_repository` is."""
 
-    def __call__(self, archive: Path, secret_names: Collection[str], *, place: Place) -> list[GateFailure]:
+    def __call__(
+        self, archive: Path, secret_names: Collection[str], *, place: Place, require_version: bool
+    ) -> list[GateFailure]:
         """Check a full tree before any sandbox opens.
 
         Args:
             archive: The full base-commit tree.
             secret_names: The run's secret names; never values.
             place: Where the sandboxes run.
+            require_version: Whether an ``ascent.toml`` with no version fails.
 
         Returns:
             One failure for each failed check.
@@ -117,6 +131,7 @@ def run_hardening_job(
     reserve: Reserve,
     stage: Stage = stage_repository,
     gate: Gate = check_repository,
+    on_staged: OnStaged = lambda staged_job: None,
 ) -> HardeningJob:
     """Advance a hardening job on its repository until it waits for the user or ends.
 
@@ -135,6 +150,8 @@ def run_hardening_job(
             budget holds once per job, however many passes run.
         stage: Fetches and strips the tree; :func:`stage_repository` by default.
         gate: The preflight gate; :func:`check_repository` by default.
+        on_staged: Called with the job and its metric direction before any
+            sandbox opens, so the caller can save the direction (SKY-867).
 
     Returns:
         The job in a waiting or final state. A job that is not in preflight or
@@ -149,7 +166,11 @@ def run_hardening_job(
         except Exception as exc:
             return _end(job, "failed", error=str(exc) or type(exc).__name__)
     try:
-        staged_payload, staged = stage(payload, username=username, binding_id=binding_id, engine=engine)
+        # Only a pass after a passed preflight stores "running" (SKY-690): that job
+        # may predate the required version key. A new or retried preflight stays strict.
+        staged_payload, staged = stage(
+            payload, username=username, binding_id=binding_id, engine=engine, started=job.status == "running"
+        )
     except RepoGateError as exc:
         return _preflight_failed(job, [failure.reason for failure in exc.failures])
     except ConstraintsError as exc:
@@ -159,13 +180,26 @@ def run_hardening_job(
     try:
         result: HardeningJob | None = None
         try:
-            failures = gate(staged.snapshot.archive, frozenset(staged.secrets), place=sandbox_place(local_mode))
+            failures = gate(
+                staged.snapshot.archive,
+                frozenset(staged.secrets),
+                place=sandbox_place(local_mode),
+                require_version=staged.require_version,
+            )
             if failures:
                 return _preflight_failed(job, [failure.reason for failure in failures])
             workspace = _workspace(staged, staged_payload, job)
+            job = job.model_copy(update={"minimize": workspace.minimize})
+            # The page polls the stored row during the round, before the pass
+            # result is written, so the direction must reach the row now.
+            on_staged(job)
             with runner_factory(workspace, job) as runner:
                 result = run_until_wait(
-                    job, runner=runner, exploits_path=workspace.exploits_path, reference=workspace.reference
+                    job,
+                    runner=runner,
+                    exploits_path=workspace.exploits_path,
+                    reference=workspace.reference,
+                    minimize=workspace.minimize,
                 )
             return result
         except ConstraintsError as exc:
@@ -202,7 +236,9 @@ def _workspace(staged: StagedRepository, staged_payload: dict[str, Any], job: Ha
     # the tree; the caller ends the job as failed when it refuses.
     with tarfile.open(archive) as tree:
         tree.extractall(trusted_root, filter="data")
-    constraints = read_constraints(archive)
+    constraints = read_constraints(
+        archive, require_version=staged.require_version, legacy_forms=not staged.require_version
+    )
     metric = constraints.metric if constraints is not None else MetricSpec()
     exploits_path = trusted_root / metric.exploits
     fixed = [r for r in job.rounds_detail if r.status == "fixed"]
@@ -219,6 +255,8 @@ def _workspace(staged: StagedRepository, staged_payload: dict[str, Any], job: Ha
         commit=staged_payload.get("target", {}).get("repo", {}).get("commit"),
         applied_fixes=tuple(r.fix.diff for r in fixed if r.fix is not None),
         secrets=staged.secrets,
+        require_version=staged.require_version,
+        minimize=metric.direction == MINIMIZE,
     )
 
 

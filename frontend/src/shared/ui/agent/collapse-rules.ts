@@ -3,11 +3,40 @@
  * the component so the tests pin them without a DOM.
  */
 
-/** Rendered lines a collapsed message keeps visible (Codex shows 18). */
-export const COLLAPSED_LINES = 18;
+/** Rendered lines a collapsed message fills (Codex uses 20). Longer messages fold. */
+export const COLLAPSED_LINES = 20;
 
-/** Height animation length for Show more / Show less, in milliseconds. */
-export const COLLAPSE_ANIMATION_MS = 220;
+// As in Codex, the last of those lines is a "…" line, so the text keeps one line less.
+const VISIBLE_LINES = COLLAPSED_LINES - 1;
+
+/** The shortest height animation for Show more / Show less, in milliseconds. */
+export const COLLAPSE_ANIMATION_MS = 240;
+
+/** The longest height animation, so a very long message still opens quickly. */
+const COLLAPSE_ANIMATION_MAX_MS = 480;
+
+/**
+ * A soft ease-out (expo-like): fast at the start, a long gentle settle. A
+ * plain `ease-out` stops abruptly at the end of a tall height change.
+ */
+export const COLLAPSE_EASING = "cubic-bezier(0.16, 1, 0.3, 1)";
+
+/**
+ * The height animation length for a given height change.
+ *
+ * One fixed length makes a tall message move much faster than a short one;
+ * a length that grows with the distance keeps the speed even.
+ *
+ * Args:
+ *   distancePx: The height change between collapsed and expanded.
+ *
+ * Returns:
+ *   Milliseconds, from {@link COLLAPSE_ANIMATION_MS} to 480.
+ */
+export function collapseDurationMs(distancePx: number): number {
+  const ms = COLLAPSE_ANIMATION_MS + Math.max(0, distancePx) * 0.3;
+  return Math.round(Math.min(COLLAPSE_ANIMATION_MAX_MS, ms));
+}
 
 // Sub-pixel rounding can leave scrollHeight a fraction above an exact fit, which
 // would put a toggle under a message that has nothing hidden.
@@ -49,7 +78,8 @@ export function shouldCollapse(scrollHeight: number, clampPx: number | null): bo
  * The CSS max-height of the message body.
  *
  * Expanded uses the measured full height rather than "none" so the height
- * transition has two lengths to animate between.
+ * transition has two lengths to animate between. Collapsed keeps one line less
+ * than the clamp: the "…" line below the text fills it.
  *
  * Args:
  *   expanded: Whether the user expanded the message.
@@ -65,8 +95,8 @@ export function bodyMaxHeight(
   clampPx: number | null,
 ): string {
   if (expanded) return `${Math.ceil(scrollHeight)}px`;
-  if (clampPx === null) return `${COLLAPSED_LINES}lh`;
-  return `${clampPx}px`;
+  if (clampPx === null) return `${VISIBLE_LINES}lh`;
+  return `${(clampPx * VISIBLE_LINES) / COLLAPSED_LINES}px`;
 }
 
 /**

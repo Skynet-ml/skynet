@@ -17,6 +17,7 @@ extraction rules.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import os
@@ -92,19 +93,20 @@ from .observability import (
 )
 from .rate_limit import build_login_throttle
 from .remote_mcp import mount_remote_mcp
-from .remote_mcp_repo import register_repo_tools
+from .remote_mcp_repo import drain_judge_scores, register_repo_tools
 from .remote_mcp_routes import register_route_tools
 from .routers.account_data import create_account_data_router
 from .routers.account_security import create_account_security_router
 from .routers.accounts import create_accounts_router
 from .routers.admin import create_admin_router
 from .routers.admin_dashboard import create_admin_dashboard_router
-from .routers.agent_attachments import create_agent_attachments_router
 from .routers.agent_history import create_agent_history_router
+from .routers.agent_ide_completion import create_agent_ide_completion_router
 from .routers.agent_settings import create_agent_settings_router
 from .routers.analytics import create_analytics_router
 from .routers.api_tokens import create_api_tokens_router
 from .routers.billing import create_billing_router
+from .routers.chat_media import create_chat_media_router
 from .routers.code_agent import create_code_agent_router
 from .routers.code_validation import create_code_validation_router
 from .routers.connectors import create_connectors_router
@@ -141,6 +143,7 @@ from .routers.registry import create_registry_router
 from .routers.saved_secrets import create_saved_secrets_router
 from .routers.scorer_dependencies import create_scorer_dependencies_router
 from .routers.serve import create_serve_router
+from .routers.setup_billing import create_setup_billing_router
 from .routers.setup_draft import create_setup_draft_router
 from .routers.share import create_share_router
 from .routers.shared_with_me import create_shared_with_me_router
@@ -149,6 +152,7 @@ from .routers.tagger_assist import create_tagger_assist_router
 from .routers.tagging_session_share import create_tagging_session_share_router
 from .routers.tagging_sessions import create_tagging_session_router
 from .routers.telemetry import create_telemetry_router
+from .routers.transcription import close_http_client as close_transcription_http_client
 from .routers.transcription import create_transcription_router
 from .routers.usage import create_usage_router
 from .routers.user_preferences import create_user_preferences_router
@@ -602,9 +606,6 @@ def _cache_control_for(path: str, query_string: bytes) -> str | None:
         return "private, max-age=5"
     if path == "/optimizations" and b"status" not in query_string:
         return "private, max-age=2, stale-while-revalidate=10"
-    # A revoked share link must stop working at once, so no cache may keep a copy.
-    if path.startswith("/agent/shared-conversations/"):
-        return "no-store"
     return None
 
 
@@ -883,6 +884,8 @@ def create_app(
         finally:
             if can_register_signal and original_handler is not None:
                 signal.signal(signal.SIGTERM, original_handler)
+            # A background judge score needs the app's database to store its outcome, so it ends first.
+            await asyncio.to_thread(drain_judge_scores)
             if worker:
                 worker.stop()
                 logger.info("Background worker stopped")
@@ -906,6 +909,7 @@ def create_app(
                 continuous_sweeper.stop()
             if loop_lag_monitor:
                 loop_lag_monitor.stop()
+            await close_transcription_http_client()
 
     app = FastAPI(
         title=APP_NAME,
@@ -1343,10 +1347,11 @@ def create_app(
     app.include_router(create_mcp_probe_router(), tags=["Code Validation"])
     app.include_router(create_transcription_router(job_store=job_store), tags=["Transcription"])
     app.include_router(create_docs_agent_router(), tags=["Docs"])
-    app.include_router(create_agent_attachments_router(), tags=["Optimizations"])
+    app.include_router(create_chat_media_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_code_agent_router(job_store=job_store), tags=["Code Validation"])
     app.include_router(create_generalist_agent_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_agent_history_router(job_store=job_store), tags=["Optimizations"])
+    app.include_router(create_agent_ide_completion_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_api_tokens_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_desktop_link_router(job_store=job_store), tags=["Desktop link"])
     app.include_router(create_mcp_oauth_router(job_store=job_store), tags=["MCP connection"])
@@ -1369,6 +1374,7 @@ def create_app(
     app.include_router(create_notifications_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_experience_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_model_privacy_router(job_store=job_store), tags=["Settings"])
+    app.include_router(create_setup_billing_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_package_registry_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_scorer_dependencies_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_datasets_router(job_store=job_store), tags=["Datasets"])

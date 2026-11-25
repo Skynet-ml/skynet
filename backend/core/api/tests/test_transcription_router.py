@@ -97,6 +97,7 @@ def test_openrouter_leg_returns_transcript(monkeypatch: pytest.MonkeyPatch) -> N
     seen: dict[str, str] = {}
 
     async def _fake_openrouter(_client, _audio, _filename, key) -> tuple[str, float]:
+        """Record the key and return a Hebrew transcript."""
         seen["key"] = key
         return "מהיר מאוד", 0.0001
 
@@ -112,6 +113,7 @@ def test_provider_failure_returns_502(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "transcription_api_key", SecretStr("sk-or-test"))
 
     async def _boom(_client, _audio, _filename, _key) -> tuple[str, float]:
+        """Fail like an upstream error."""
         raise RuntimeError("openrouter transcribe: 500")
 
     monkeypatch.setattr(transcription, "_openrouter_transcribe", _boom)
@@ -135,11 +137,42 @@ def _count_openrouter_calls(monkeypatch: pytest.MonkeyPatch, cost: float = 0.000
     calls: list[int] = []
 
     async def _fake_openrouter(_client, _audio, _filename, _key) -> tuple[str, float]:
+        """Count each call and return a fixed transcript."""
         calls.append(1)
         return "hi", cost
 
     monkeypatch.setattr(transcription, "_openrouter_transcribe", _fake_openrouter)
     return calls
+
+
+def test_router_reuses_one_http_client_across_clips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each clip goes out on the same client, so the OpenRouter connection stays open."""
+    monkeypatch.setattr(settings, "transcription_api_key", SecretStr("sk-or-test"))
+    seen: list[httpx.AsyncClient] = []
+
+    async def _fake_openrouter(client, _audio, _filename, _key) -> tuple[str, float]:
+        """Record the client the route passed in."""
+        seen.append(client)
+        return "hi", 0.0
+
+    monkeypatch.setattr(transcription, "_openrouter_transcribe", _fake_openrouter)
+    client = _client()
+    assert [_post_audio(client).status_code for _ in range(2)] == [200, 200]
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+
+
+def test_shutdown_closes_the_shared_client_and_the_next_clip_opens_a_new_one() -> None:
+    """The lifespan close shuts the client and forgets it, so a restart does not reuse a dead client."""
+    first = transcription._http()
+    asyncio.run(transcription.close_http_client())
+    assert first.is_closed
+    assert transcription._http_client is None
+    second = transcription._http()
+    assert second is not first
+    assert not second.is_closed
+    asyncio.run(transcription.close_http_client())
+    asyncio.run(transcription.close_http_client())
 
 
 def test_clip_cost_uses_reported_cost_then_falls_back_to_seconds() -> None:
@@ -169,6 +202,7 @@ def test_openrouter_request_and_response_contract() -> None:
     seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Record the request and answer with a transcript."""
         seen["url"] = str(request.url)
         seen["auth"] = request.headers["authorization"]
         seen["content_type"] = request.headers["content-type"]
@@ -192,6 +226,7 @@ def test_openrouter_error_status_raises() -> None:
     """A non-OK OpenRouter answer raises, which the route maps to a typed 502."""
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """Answer like an out-of-credit upstream."""
         return httpx.Response(402, json={"error": {"code": 402, "message": "Insufficient credits"}})
 
     with pytest.raises(RuntimeError, match="openrouter transcribe: 402"):
@@ -256,6 +291,7 @@ def _seen_keys(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     keys: list[str] = []
 
     async def _fake_openrouter(_client, _audio, _filename, key) -> tuple[str, float]:
+        """Record the key and return a fixed transcript."""
         keys.append(key)
         return "hi", 0.0001
 

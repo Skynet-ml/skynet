@@ -43,12 +43,3 @@ export function hostedAppUrl(path: string): string | null {
   const url = new URL(path, base);
   return LOOPBACK_HOSTS.has(url.hostname) ? null : url.toString();
 }
-
-/**
- * Public URL of a shared agent chat, on the hosted app's own origin. The link
- * opens the chat in Skynet, so it needs the hosted backend; the Mac app does
- * not share chats and gets null.
- */
-export function sharedChatUrl(token: string): string | null {
-  return shareLinkUrl(`/share/chat/${encodeURIComponent(token)}`);
-}

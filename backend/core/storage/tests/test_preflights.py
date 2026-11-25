@@ -243,6 +243,33 @@ def test_confirmed_usage_unblocks_only_genuine_completed_evidence(store: Preflig
     assert all(check["status"] == "succeeded" for check in reused.document["checks"])
 
 
+def test_settled_usage_promotes_a_check_with_skipped_user_image_setup(store: PreflightStore) -> None:
+    """Promote a pending check whose setup and sample score are skipped for user images (SKY-893).
+
+    Args:
+        store: Private setup fixture.
+    """
+    budget_id = _budget(store)
+    claim = _claim(store, budget_id)
+    operation = _reserve(store, budget_id, claim.generation)
+    store.budgets.mark_dispatched(operation.id, "alice")
+    checks = [
+        {"key": "setup", "status": "skipped"},
+        {"key": "scorer", "status": "skipped"},
+        {"key": "usage", "status": "pending"},
+    ]
+    store.finish(claim.document["id"], claim_token=claim.token, status="pending", result={"checks": checks})
+    store.budgets.settle(operation.id, "alice", evidence_key="final", actual_cents="0.3", evidence={"actual": True})
+    reused = _claim(store, budget_id)
+    assert reused.token is None
+    assert (reused.document["status"], reused.document["may_advance"]) == ("succeeded", True)
+    assert [(check["key"], check["status"]) for check in reused.document["checks"]] == [
+        ("setup", "skipped"),
+        ("scorer", "skipped"),
+        ("usage", "succeeded"),
+    ]
+
+
 @pytest.mark.parametrize(
     "checks",
     [
@@ -380,3 +407,92 @@ def test_evaluation_pass_is_not_reused_after_the_limit_changes(store: PreflightS
 
     lowered = store.budgets.update_total(budget_id, "alice", 10, expected_revision=1)
     assert claim(lowered.revision).token is not None
+
+
+def test_a_judge_session_claims_on_its_attached_budget_and_replays_its_result(store: PreflightStore) -> None:
+    """A judge call claims under its session's attached budget, and a retry gets the stored score (SKY-696).
+
+    Args:
+        store: Private setup fixture.
+    """
+    budget_id = _budget(store)
+    attached = store.budgets.attach_to_job(budget_id, "alice", "session", expected_revision=1)
+
+    def claim(session_id: str | None) -> PreflightClaim:
+        """Claim one judge call under the attached budget.
+
+        Args:
+            session_id: Judge session the caller names.
+
+        Returns:
+            Current evidence and token, if admitted.
+        """
+        return store.claim(
+            username="alice",
+            budget_id=budget_id,
+            revision=attached.revision,
+            workflow="anything",
+            scope="judge",
+            payload={"draft": "d", "patch_sha256": "p", "seed": 1},
+            session_id=session_id,
+        )
+
+    with pytest.raises(BudgetConflictError):
+        claim(None)
+    with pytest.raises(BudgetConflictError):
+        claim("another-session")
+    first = claim("session")
+    assert first.token is not None
+    result = {
+        "checks": [{"key": "judge", "status": "succeeded"}],
+        "judge_result": {"score": 0.5},
+        "_patch": "private diff",
+    }
+    document = store.finish(first.document["id"], claim_token=first.token, status="succeeded", result=result)
+    assert document["judge_result"] == {"score": 0.5}
+    assert "_patch" not in document
+    replay = claim("session")
+    assert replay.token is None
+    assert replay.document["judge_result"] == {"score": 0.5}
+
+
+def test_a_new_row_that_waits_on_old_work_keeps_its_carry_defaults(store: PreflightStore) -> None:
+    """Store the carry defaults on a new row that waits on old-generation work, and none without carry (SKY-696).
+
+    Args:
+        store: Private setup fixture.
+    """
+    budget_id = _budget(store)
+    first = _claim(store, budget_id)
+    operation = _reserve(store, budget_id, first.generation)
+    store.budgets.mark_dispatched(operation.id, "alice", "provider-request")
+    _expire(store, first.document["id"])
+
+    def waiting(payload: dict[str, Any], carry: dict[str, Any] | None) -> dict[str, Any]:
+        """Claim new inputs while the old work is unresolved, and read the new row's stored result.
+
+        Args:
+            payload: Inputs that no row holds yet.
+            carry: The claim's carry defaults.
+
+        Returns:
+            The new row's stored result.
+        """
+        claim = store.claim(
+            username="alice",
+            budget_id=budget_id,
+            revision=1,
+            workflow="anything",
+            scope="execution",
+            payload=payload,
+            carry=carry,
+        )
+        assert claim.token is None
+        assert claim.document["status"] == "pending"
+        with Session(store.engine) as session:
+            return dict(session.get(WizardPreflightModel, claim.document["id"]).result)
+
+    kept = waiting({**PAYLOAD, "seed_candidate": "carried"}, {"ended_by": "stop_run", "temporary_failures": 0})
+    assert (kept["ended_by"], kept["temporary_failures"]) == ("stop_run", 0)
+    plain = waiting({**PAYLOAD, "seed_candidate": "plain"}, None)
+    assert set(plain) == {"_retry_after_usage", "pending_reason", "checks"}

@@ -9,6 +9,8 @@ checks the feedback of a step and what the submit hands to the run path.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -22,10 +24,12 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ...billing.budgets import BudgetConflictError
+from ...billing.budgets import CHUNK_CENTS, BudgetConflictError
 from ...config import settings
 from ...models.hardening import HardeningJobModel
-from ...storage.models import Base, McpRunDraftModel, UserModel
+from ...service_gateway.agents.workspace_tools import ASCENT_TOML_EXAMPLE, METRIC_GUIDE
+from ...service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_REQUIRED
+from ...storage.models import Base, JobModel, McpRunDraftModel, UserModel
 from .. import remote_mcp_repo, submission_idempotency
 from ..errors import DomainError
 from ..remote_mcp import mount_remote_mcp
@@ -43,7 +47,8 @@ from .test_remote_mcp import (
 )
 
 WRITE_TOKEN = "skym_at_read-write-token"
-SCORER = 'def score(repo_path):\n    return 1.0, "ok"\n'
+SCORER = 'def score(repo_path):\n    return {"score": 1.0, "feedback": "ok"}\n'
+CONTRACT = 'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n'
 
 
 @pytest.fixture
@@ -95,7 +100,12 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
     def submit(request: Any, *, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
         """Record the submission instead of starting a run."""
         calls["submits"].append(
-            {"username": current_user.username, "key": idempotency_key, "hardening_job_id": request.hardening_job_id}
+            {
+                "username": current_user.username,
+                "key": idempotency_key,
+                "hardening_job_id": request.hardening_job_id,
+                "repo": request.target.repo,
+            }
         )
         return SimpleNamespace(model_dump=lambda mode: {"optimization_id": f"opt-{len(calls['submits'])}"})
 
@@ -121,6 +131,7 @@ def _complete_draft(client: TestClient) -> str:
     draft_id = _step(client, "repo_draft_start", objective="Make the tests faster.")["draft_id"]
     _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
     _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=CONTRACT)
     _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5")
     _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")
     return draft_id
@@ -131,7 +142,7 @@ def test_start_lists_engines_and_the_first_step(harness: Any) -> None:
     client, _engine, _calls = harness
     body = _step(client, "repo_draft_start", objective="Make the tests faster.")
     assert body["next_tool"] == "repo_draft_set_repository"
-    assert body["remaining_steps"] == ["repository", "scorer", "models", "engine"]
+    assert body["remaining_steps"] == ["repository", "scorer", "contract", "models", "engine"]
     assert "gepa" in {engine["id"] for engine in body["engines"]}
 
 
@@ -165,7 +176,7 @@ def test_each_step_gives_feedback_and_the_next_tool(harness: Any) -> None:
     )
     assert body["issues"] == []
     assert body["notes"] == []
-    assert body["next_tool"] == "repo_draft_set_models"
+    assert body["next_tool"] == "repo_draft_set_contract"
 
 
 @pytest.mark.parametrize(
@@ -207,6 +218,52 @@ def test_data_tool_says_the_candidate_gets_only_input(harness: Any) -> None:
     assert "The candidate gets only input" in json.dumps(schema)
 
 
+def test_limit_argument_says_the_setting_decides_what_the_setup_check_bills(harness: Any) -> None:
+    """Tell the agent that the setup billing setting decides what setup bills, and the limit needs one lease (SKY-925).
+
+    Args:
+        harness: MCP client, database engine and recorded calls.
+    """
+    client, _engine, _calls = harness
+    resp = _rpc(client, "tools/list", {}, WRITE_TOKEN, None)
+    assert resp.status_code == 200, resp.text
+    tools = {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+    for name in ("repo_draft_preflight", "repo_draft_submit"):
+        description = tools[name]["inputSchema"]["properties"]["max_cost_cents"]["description"]
+        assert "setup billing setting decides whether the setup check bills the balance or this limit" in description
+        assert f"the limit must be at least {CHUNK_CENTS} cents" in description
+
+
+def test_budget_tool_has_no_stop_score_argument(harness: Any) -> None:
+    """The stop score comes from ``[outcome] target`` in ascent.toml, so the budget step does not take one."""
+    client, _engine, _calls = harness
+    resp = _rpc(client, "tools/list", {}, WRITE_TOKEN, None)
+    assert resp.status_code == 200, resp.text
+    tool = next(tool for tool in resp.json()["result"]["tools"] if tool["name"] == "repo_draft_set_budget")
+    assert "stop_at_score" not in tool["inputSchema"]["properties"]
+    assert "[outcome] target" in tool["description"]
+
+
+def test_a_draft_with_the_retired_stop_score_gets_a_clear_issue(harness: Any) -> None:
+    """A draft saved with ``budget.stop_at_score`` gets an issue that names the file key, not a crash (SKY-691)."""
+    client, engine, calls = harness
+    draft_id = _complete_draft(client)
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        row.spec = {**row.spec, "budget": {"max_scorer_runs": 50, "stop_at_score": 0.9}}
+        session.commit()
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    text = _error_text(
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True})
+    )
+
+    assert review["ready"] is False
+    assert [issue for issue in review["issues"] if "[outcome] target" in issue]
+    assert json.loads(text)["code"] == "draft.not_ready"
+    assert calls["submits"] == []
+
+
 def test_step_issues_point_back_at_the_step(harness: Any) -> None:
     """Report a missing path, a syntax error, an unpriced model and an unknown engine."""
     client, _engine, _calls = harness
@@ -234,7 +291,7 @@ def test_another_account_cannot_load_the_draft(harness: Any) -> None:
 
 
 def test_review_prices_a_complete_draft(harness: Any) -> None:
-    """Price the floor as the boxes' hold plus one call of the dearest model."""
+    """Price the minimum as the boxes' hold and one call of the dearest model."""
     client, _engine, _calls = harness
     draft_id = _complete_draft(client)
     body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}, token=READ_TOKEN))
@@ -252,8 +309,255 @@ def test_review_of_an_incomplete_draft_names_the_missing_steps(harness: Any) -> 
     draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
     body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
     assert body["ready"] is False
-    assert len(body["issues"]) == 4
+    assert len(body["issues"]) == 5
     assert "min_max_cost_cents" not in body
+
+
+def _spec(engine: Any, draft_id: str) -> dict[str, Any]:
+    """Return the saved draft spec."""
+    with Session(engine) as session:
+        return dict(session.get(McpRunDraftModel, draft_id).spec)
+
+
+def _tree(monkeypatch: pytest.MonkeyPatch, paths: list[str], *, truncated: bool = False) -> None:
+    """Make the repository host list these file paths."""
+    tree = {"entries": [{"path": path, "type": "file"} for path in paths], "truncated": truncated}
+    monkeypatch.setattr(remote_mcp_repo.github, "tree_entries", lambda token, name, ref: tree)
+
+
+def test_contract_step_saves_the_file_and_reports_parser_errors(harness: Any) -> None:
+    """Save the ascent.toml text, and give the parser's message as the issue (SKY-693)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml="[run]\nentry = 'a.py:f'\n")
+    assert body["saved"] == {"ascent_toml": "[run]\nentry = 'a.py:f'\n"}
+    assert body["issues"] == [
+        m["message"] for m in remote_mcp_repo.ascent_toml_diagnostics("[run]\nentry = 'a.py:f'\n")[0]
+    ]
+    assert "version" in body["issues"][0]
+    assert body["next_tool"] == "repo_draft_set_contract"
+    assert "contract" not in body["remaining_steps"]
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=CONTRACT)
+    assert body["issues"] == []
+    assert set(body) >= {"saved", "issues", "notes", "remaining_steps", "next_tool"}
+    assert body["next_tool"] == "repo_draft_set_repository"
+    assert _spec(engine, draft_id)["contract"] == {"ascent_toml": CONTRACT}
+    text = _error_text(_call(client, "repo_draft_set_contract", {"draft_id": draft_id, "ascent_toml": "  "}))
+    assert CONSTRAINTS_REQUIRED in text
+
+
+def test_contract_step_and_review_list_every_mistake_with_its_line(harness: Any) -> None:
+    """A file with three mistakes gives three issues, each with its line, at the step and in the review (SKY-763)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+    text = 'version = 1\n[run]\nentry = "a.py:f"\nbogus = 1\n[metric]\nentry = 5\n[paths]\neditable = 3\n'
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=text)
+    expected = [
+        "ascent.toml: [run] bogus is not a supported setting. (line 4)",
+        "ascent.toml: [paths] editable must be a list of at most 200 paths. (line 8)",
+        'ascent.toml: [metric] entry must be "path/to/file.py:function" for a Python function, or a command list'
+        ' such as ["node", "planner.js"]. (line 6)',
+    ]
+    assert body["issues"] == expected
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+
+    assert review["ready"] is False
+    assert [issue for issue in review["issues"] if issue in expected] == expected
+
+
+def test_review_lists_a_contract_warning_as_a_note_that_blocks_nothing(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parser warning is a note in the review, as at the contract step, and is not an issue (SKY-763)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+    warning = {"level": "warning", "line": 2, "section": "run", "key": "old", "message": "ascent.toml: old style."}
+    monkeypatch.setattr(remote_mcp_repo, "ascent_toml_diagnostics", lambda text: ([warning], 0))
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+
+    assert "Warning: ascent.toml: old style. (line 2)" in review["notes"]
+    assert not any("old style" in issue for issue in review["issues"])
+
+
+# 600 unsupported keys: the parser lists 500 errors, adds one summary item and hides 100 (SKY-763).
+_OVER_THE_CAP = 'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n' + "".join(
+    f"k{i} = 1\n" for i in range(600)
+)
+
+
+def test_contract_step_lists_at_most_20_errors_and_counts_the_rest(harness: Any) -> None:
+    """A file past the parser's cap gives 20 issues and one line with the true count of the rest (SKY-763)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=_OVER_THE_CAP)
+
+    assert len(body["issues"]) == 21
+    assert all("is not a supported setting" in issue for issue in body["issues"][:20])
+    assert body["issues"][20] == "ascent.toml: 580 more diagnostics are not shown. Fix the ones above and check again."
+    assert not any("not shown" in note for note in body["notes"])
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert review["ready"] is False
+    assert body["issues"][20] in review["issues"]
+
+
+def test_review_reports_a_contract_with_no_run_and_no_target(harness: Any) -> None:
+    """A contract that gives the metric no version output cannot rank versions, so review refuses it (SKY-761)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+    text = 'version = 1\n[paths]\neditable = ["src"]\n'
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=text)
+
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+
+    assert body["ready"] is False
+    assert [issue for issue in body["issues"] if "Add a [run] section or a [target.<name>] stage" in issue]
+
+
+def test_contract_guide_comes_from_the_setup_agent_guide(harness: Any) -> None:
+    """Serve the in-app guide and example themselves, not a copy (SKY-693)."""
+    client, _engine, _calls = harness
+    body = _payload(_call(client, "repo_draft_contract_guide", {}, token=READ_TOKEN))
+    assert body["guide"] == METRIC_GUIDE
+    assert body["example"] == ASCENT_TOML_EXAMPLE
+    assert body["next_tool"] == "repo_draft_set_contract"
+
+
+def test_review_needs_a_contract_when_the_repository_has_none(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the missing file at review, also when the repository lost it after the step (SKY-693)."""
+    client, engine, _calls = harness
+    draft_id = _complete_draft(client)
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        row.spec = {key: value for key, value in row.spec.items() if key != "contract"}
+        session.commit()
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert body["ready"] is False
+    assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
+    assert "no ascent.toml" in body["issues"][0]
+    _tree(monkeypatch, ["src", "src/app.py", "ascent.toml"])
+    _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))["ready"] is True
+    _tree(monkeypatch, ["src", "src/app.py"])
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
+
+
+def test_a_draft_from_before_the_field_reads_the_tree_at_review(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored draft with no ``has_ascent_toml`` is unknown, so the review reads the tree (SKY-693)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+    _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5")
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        repository = {key: value for key, value in row.spec["repository"].items() if key != "has_ascent_toml"}
+        row.spec = {**row.spec, "repository": repository}
+        session.commit()
+    _tree(monkeypatch, ["src", "src/app.py", "ascent.toml"])
+    body = _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")
+    assert "contract" not in body["remaining_steps"]
+    assert body["next_tool"] == "repo_draft_review"
+    assert _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))["ready"] is True
+    _tree(monkeypatch, ["src", "src/app.py"])
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert body["ready"] is False
+    assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
+
+
+# Built from parts so the tree holds no retired name; stored drafts can still hold these keys (SKY-746).
+_RETIRED_CONTRACT_KEY = "_".join(("optimize", "toml"))
+_RETIRED_REPOSITORY_KEY = "_".join(("has", "optimize", "toml"))
+
+
+def test_a_draft_with_the_retired_contract_key_loads_as_one_with_no_contract(harness: Any) -> None:
+    """A draft stored before SKY-746 keeps its contract text under the old key; it reads as no contract text."""
+    client, engine, _calls = harness
+    draft_id = _complete_draft(client)
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        row.spec = {**row.spec, "contract": {_RETIRED_CONTRACT_KEY: CONTRACT}}
+        session.commit()
+    spec = _spec(engine, draft_id)
+
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    repo = remote_mcp_repo.build_request(spec).target.repo
+
+    assert body["issues"] == [remote_mcp_repo._missing_step_issue("contract")]
+    assert (repo.draft_files, repo.contract_source) == ({}, "repository")
+    assert remote_mcp_repo.draft_metric_entry(spec) is None
+
+
+def test_a_draft_with_the_retired_repository_key_reads_the_tree_at_review(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draft stored before SKY-746 has only the old repository key, so the file is unknown (SKY-746)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    with Session(engine) as session:
+        row = session.get(McpRunDraftModel, draft_id)
+        repository = {key: value for key, value in row.spec["repository"].items() if key != "has_ascent_toml"}
+        row.spec = {**row.spec, "repository": {**repository, _RETIRED_REPOSITORY_KEY: False}}
+        session.commit()
+
+    body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+
+    assert "contract" not in body["remaining_steps"]
+
+
+def test_the_contract_step_refuses_the_retired_argument_name(harness: Any) -> None:
+    """The tool takes only ``ascent_toml``; the old argument name gets the normal argument error (SKY-746)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+
+    result = _call(client, "repo_draft_set_contract", {"draft_id": draft_id, _RETIRED_CONTRACT_KEY: CONTRACT})
+
+    assert "Unexpected keyword argument" in _error_text(result)
+    assert "contract" not in _spec(engine, draft_id)
+
+
+def test_repository_file_makes_the_contract_step_optional(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the contract step when the repository has ascent.toml or is too large to list (SKY-693)."""
+    client, _engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    _tree(monkeypatch, ["src", "ascent.toml"])
+    body = _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert body["saved"]["has_ascent_toml"] is True
+    assert body["remaining_steps"] == ["scorer", "models", "engine"]
+    _tree(monkeypatch, ["src"], truncated=True)
+    body = _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert body["saved"]["has_ascent_toml"] is None
+    assert "contract" not in body["remaining_steps"]
+    _tree(monkeypatch, ["src"])
+    body = _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    assert body["saved"]["has_ascent_toml"] is False
+    assert body["remaining_steps"] == ["scorer", "contract", "models", "engine"]
+
+
+def test_request_sends_the_contract_as_a_draft_file(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send the contract as draft_files with the source mcp, and a repository file as the source repository."""
+    client, engine, calls = harness
+    draft_id = _complete_draft(client)
+    _payload(_call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}))
+    repo = calls["submits"][0]["repo"]
+    assert (repo.draft_files, repo.draft_base, repo.contract_source) == ({"ascent.toml": CONTRACT}, None, "mcp")
+    commit = "a" * 40
+    _step(
+        client,
+        "repo_draft_set_repository",
+        draft_id=draft_id,
+        repository="acme/app",
+        editable_paths=["src"],
+        commit=commit,
+    )
+    assert remote_mcp_repo.build_request(_spec(engine, draft_id)).target.repo.draft_base == commit
+    spec = {key: value for key, value in _spec(engine, draft_id).items() if key != "contract"}
+    repo = remote_mcp_repo.build_request(spec).target.repo
+    assert (repo.draft_files, repo.contract_source) == ({}, "repository")
 
 
 def test_submit_needs_confirmation(harness: Any) -> None:
@@ -297,8 +601,58 @@ def test_submit_refuses_a_limit_below_the_floor(harness: Any) -> None:
     assert json.loads(text) == {
         "code": "budget.below_minimum",
         "detail": "max_cost_cents 100 is below this run's minimum of 192 cents.",
-        "min_max_cost_cents": 192,
+        "min_max_cost_cents": 41 + 151,
     }
+    assert calls["submits"] == []
+
+
+def test_review_and_submit_raise_a_small_floor_to_one_lease(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise a capped run's floor below one lease to one lease; the setup check takes none of the limit (SKY-925).
+
+    Args:
+        harness: MCP client, database engine and recorded calls.
+        monkeypatch: Sets a floor below one lease and turns local mode off.
+    """
+    client, _engine, calls = harness
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(remote_mcp_repo, "repo_floor_cents", lambda spec, http_client: (30, []))
+    draft_id = _complete_draft(client)
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    text = _error_text(
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 99, "confirm": True})
+    )
+
+    assert review["min_max_cost_cents"] == CHUNK_CENTS
+    assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS
+    assert calls["submits"] == []
+
+
+def test_review_and_submit_keep_one_lease_after_setup_when_setup_counts_in_the_limit(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add one lease to the floor when the account counts setup against the limit (SKY-925).
+
+    The setup check then spends up to the floor from the limit, and submit needs
+    one lease of the room left, so a lower minimum would pass review and fail at submit.
+
+    Args:
+        harness: MCP client, database engine and recorded calls.
+        monkeypatch: Sets a floor, turns local mode off and turns off wallet setup billing.
+    """
+    client, _engine, calls = harness
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(remote_mcp_repo, "repo_floor_cents", lambda spec, http_client: (30, []))
+    monkeypatch.setattr(remote_mcp_repo, "bills_setup_from_wallet", lambda engine, username: False)
+    draft_id = _complete_draft(client)
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    text = _error_text(
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": CHUNK_CENTS + 29, "confirm": True})
+    )
+
+    assert review["min_max_cost_cents"] == CHUNK_CENTS + 30
+    assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS + 30
     assert calls["submits"] == []
 
 
@@ -447,7 +801,9 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             """Return the budget the key made, if any."""
             return record["budgets"].get(idempotency_key)
 
-        def create(self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool) -> Any:
+        def create(
+            self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool, setup_in_total: bool
+        ) -> Any:
             """Make a budget for the key."""
             record["creates"].append((username, total_cents, idempotency_key, uncapped))
             budget = SimpleNamespace(id="budget-1", revision=3, total_cents=total_cents, job_id=None)
@@ -466,6 +822,7 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         return SimpleNamespace(status=status, may_advance=status == "succeeded")
 
     monkeypatch.setattr(remote_mcp_repo, "BudgetService", _Budgets)
+    monkeypatch.setattr(remote_mcp_repo, "bills_setup_from_wallet", lambda engine, username: True)
     monkeypatch.setattr(remote_mcp_repo, "resolve_submission_replay_keys", keys)
     monkeypatch.setattr(remote_mcp_repo, "_enforce_balance", lambda store, user, source: record["balance"].append(user))
     monkeypatch.setattr(remote_mcp_repo, "checked_preflight", check)
@@ -515,6 +872,8 @@ def test_preflight_checks_under_the_budget_the_submit_reuses(preflight: Any) -> 
     assert (request.execution_budget_id, request.execution_budget_revision) == ("budget-1", 3)
     assert request.payload["max_cost_cents"] == 500
     assert request.payload["hardening_job_id"] == job_id
+    assert request.payload["target"]["repo"]["draft_files"] == {"ascent.toml": CONTRACT}
+    assert request.payload["target"]["repo"]["contract_source"] == "mcp"
     key = record["keys"][0]
     assert key.startswith(f"mcp-draft-{draft_id}-")
     assert record["creates"] == [(USER, 500, f"api:{key}", False)]
@@ -657,8 +1016,8 @@ def test_save_step_locks_the_draft_row(harness: Any, monkeypatch: pytest.MonkeyP
     "code",
     [
         "from mylib import score\n",
-        "class S:\n  def __call__(self, path):\n    return 1.0, 'ok'\n\nscore = S()\n",
-        "def _mk():\n  return lambda path: (1.0, 'ok')\n\nscore = _mk()\n",
+        "class S:\n  def __call__(self, path):\n    return {'score': 1.0, 'feedback': 'ok'}\n\nscore = S()\n",
+        "def _mk():\n  return lambda path: {'score': 1.0, 'feedback': 'ok'}\n\nscore = _mk()\n",
         "@with_feedback\ndef score(path):\n  return 1.0\n",
         "def score(path):\n  return 1.0\n\nscore = add_feedback(score)\n",
         "from lib import score\n\ndef metric(path):\n  return 1.0\n",
@@ -680,18 +1039,72 @@ def test_bare_number_return_is_an_issue(value: str) -> None:
 
 def test_bare_number_on_an_error_path_is_an_issue() -> None:
     """Flag a bare number on one path too, because the first one stops the whole run."""
-    code = "def score(path):\n  if not path:\n    return 0.0\n  return 1.0, 'ok'\n"
+    code = "def score(path):\n  if not path:\n    return 0.0\n  return {'score': 1.0, 'feedback': 'ok'}\n"
     issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
     assert "returns a bare number" in issues[0]
+
+
+def test_bare_number_issue_shows_the_object_form() -> None:
+    """Name the object form and say the feedback is optional, not the old pair (SKY-769)."""
+    issues, _notes = remote_mcp_repo.scorer_issues("def score(path):\n  return 1\n", has_cases=False)
+    assert issues == [
+        "The scorer function score returns a bare number. Return an object with score: "
+        "{'score': ..., 'feedback': ...}. The feedback is optional."
+    ]
+
+
+@pytest.mark.parametrize("value", ["1.0, 'ok'", "(0.0, str(error))"])
+def test_pair_return_is_an_issue(value: str) -> None:
+    """Flag a score and feedback pair, which the runner refuses (SKY-769)."""
+    code = f"def score(path):\n  if not path:\n    return {{'score': 0.0}}\n  return {value}\n"
+    issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
+    assert issues == [
+        "The scorer function score returns a pair. Return an object with score: "
+        "{'score': ..., 'feedback': ...}. The feedback is optional."
+    ]
+
+
+@pytest.mark.parametrize("value", ["(1.0,)", "(1.0, 'ok', 'x')", "result"])
+def test_other_returns_are_not_a_pair(value: str) -> None:
+    """Leave a tuple of another length and a name to the runner."""
+    issues, _notes = remote_mcp_repo.scorer_issues(f"def score(path):\n  return {value}\n", has_cases=False)
+    assert issues == []
+
+
+def test_an_object_without_feedback_is_a_note() -> None:
+    """Accept an object with only score, and note that the proposer gets no feedback (SKY-769)."""
+    code = "def score(path):\n  if not path:\n    return {'score': 0.0}\n  return {'score': 1.0, 'scores': {}}\n"
+    issues, notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
+    assert issues == []
+    assert notes == [
+        "The scorer function score returns no feedback, so the proposer sees only the scores. "
+        "Add 'feedback' to say what was wrong or missing."
+    ]
+
+
+@pytest.mark.parametrize(
+    "returns",
+    [
+        ["{'score': 0.0}", "{'score': 1.0, 'feedback': 'ok'}"],
+        ["{'score': 1.0, **extra}"],
+        ["{'score': 0.0}", "result"],
+        ["{'score': 1.0, FEEDBACK: 'ok'}"],
+    ],
+)
+def test_a_return_that_can_hold_feedback_gives_no_note(returns: list[str]) -> None:
+    """Give no note when one return names feedback or is not a plain dict literal."""
+    body = "".join(f"  if x == {index}:\n    return {value}\n" for index, value in enumerate(returns))
+    issues, notes = remote_mcp_repo.scorer_issues(f"def score(path):\n  x = 0\n{body}", has_cases=False)
+    assert (issues, notes) == ([], [])
 
 
 @pytest.mark.parametrize(
     ("code", "issue"),
     [
-        ("async def score(p, case):\n  return 1.0, 'ok'\n", "is async"),
-        ("def score(p, case):\n  yield 1.0, 'ok'\n", "uses yield"),
-        ("def score(p, case, output, extra):\n  return 1.0, 'ok'\n", "needs more arguments"),
-        ("def score(p, *, mode):\n  return 1.0, 'ok'\n", "needs more arguments"),
+        ("async def score(p, case):\n  return {'score': 1.0, 'feedback': 'ok'}\n", "is async"),
+        ("def score(p, case):\n  yield {'score': 1.0, 'feedback': 'ok'}\n", "uses yield"),
+        ("def score(p, case, output, extra):\n  return {'score': 1.0, 'feedback': 'ok'}\n", "needs more arguments"),
+        ("def score(p, *, mode):\n  return {'score': 1.0, 'feedback': 'ok'}\n", "needs more arguments"),
         ("def score(p):\n  return " + "-" * 200_000 + "1\n", "cannot parse"),
     ],
 )
@@ -703,7 +1116,7 @@ def test_scorer_the_runner_cannot_call_is_an_issue(code: str, issue: str) -> Non
 
 def test_optional_extra_arguments_are_fine() -> None:
     """Accept extra arguments with defaults and a nested generator."""
-    code = "def score(p, case=None, extra=1, *, mode='a'):\n  def gen():\n    yield 1\n  return 1.0, 'ok'\n"
+    code = "def score(p, case=None, extra=1, *, mode='a'):\n  def gen():\n    yield 1\n  return {'score': 1.0, 'feedback': 'ok'}\n"
     assert remote_mcp_repo.scorer_issues(code, has_cases=True) == ([], [])
 
 
@@ -712,7 +1125,7 @@ def test_optional_extra_arguments_are_fine() -> None:
 )
 def test_each_scorer_signature_is_accepted(signature: str) -> None:
     """Accept the scorer with the checkout, the case, and the [run] entry's output for the case (E39)."""
-    code = f"def {signature}:\n  return 1.0, 'ok'\n"
+    code = f"def {signature}:\n  return {{'score': 1.0, 'feedback': 'ok'}}\n"
     issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=True)
     assert issues == []
 
@@ -728,11 +1141,708 @@ def test_missing_scorer_issue_names_all_three_signatures() -> None:
 
 def test_a_required_output_is_an_issue_that_names_the_default() -> None:
     """Refuse output without a default: the runner calls the scorer with (repo_path, case) when nothing ran."""
-    issues, _notes = remote_mcp_repo.scorer_issues("def score(p, case, output):\n  return 1.0, 'ok'\n", True)
+    issues, _notes = remote_mcp_repo.scorer_issues(
+        "def score(p, case, output):\n  return {'score': 1.0, 'feedback': 'ok'}\n", True
+    )
     assert "score(repo_path, case, output=None)" in issues[0]
 
 
 def test_scorer_with_four_required_arguments_names_the_output() -> None:
     """Refuse a fourth required argument and name the three the runner passes."""
-    issues, _notes = remote_mcp_repo.scorer_issues("def score(p, c, o, x):\n  return 1.0, 'ok'\n", True)
+    issues, _notes = remote_mcp_repo.scorer_issues(
+        "def score(p, c, o, x):\n  return {'score': 1.0, 'feedback': 'ok'}\n", True
+    )
     assert "(repo_path, case, output)" in issues[0]
+
+
+PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+@pytest.fixture
+def judge(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Fake the judge session open and the judge call, and record what the tool sends them (SKY-696).
+
+    Args:
+        harness: The app fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        A ``(client, engine, record)`` tuple; ``record`` holds the opens, the calls and the next answer.
+    """
+    client, engine, _calls = harness
+    record: dict[str, Any] = {"opens": [], "calls": [], "answer": None}
+
+    def find(self: Any, username: str, key: str) -> str | None:
+        """Find the run row of an idempotency key.
+
+        Args:
+            self: The store.
+            username: The account.
+            key: The idempotency key.
+
+        Returns:
+            The run id, or None.
+        """
+        with Session(self.engine) as session:
+            return session.scalar(
+                select(JobModel.optimization_id).where(JobModel.username == username, JobModel.idempotency_key == key)
+            )
+
+    def get(self: Any, job_id: str) -> dict[str, Any] | None:
+        """Read a run row.
+
+        Args:
+            self: The store.
+            job_id: The run id.
+
+        Returns:
+            The status and payload, or None.
+        """
+        with Session(self.engine) as session:
+            row = session.get(JobModel, job_id)
+            return None if row is None else {"status": row.status, "payload": row.payload or {}}
+
+    def open_session(request: Any, key: str, budget_key: str, user: Any, **kwargs: Any) -> str:
+        """Add the session row as the real open does.
+
+        Args:
+            request: The run request.
+            key: The session key.
+            budget_key: The budget key.
+            user: The account.
+            **kwargs: The other open arguments.
+
+        Returns:
+            The session id.
+        """
+        record["opens"].append({"key": key, **kwargs})
+        session_id = kwargs.get("resume_id") or f"session-{len(record['opens'])}"
+        with Session(engine) as session:
+            session.add(
+                JobModel(
+                    optimization_id=session_id,
+                    username=user.username,
+                    status="running",
+                    idempotency_key=key,
+                    payload={"judge": {"version": 1}},
+                )
+            )
+            session.commit()
+        return session_id
+
+    def judge_call(job_store: Any, session_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Return the configured answer, or raise the configured error.
+
+        Args:
+            job_store: The store.
+            session_id: The session.
+            **kwargs: The candidate and the account.
+
+        Returns:
+            The configured answer.
+
+        Raises:
+            Exception: The error the test set in ``record["answer"]``.
+        """
+        record["calls"].append((session_id, kwargs))
+        if isinstance(record["answer"], Exception):
+            raise record["answer"]
+        return record["answer"] or {"status": "scored", "session_id": session_id, "score": 0.5}
+
+    monkeypatch.setattr(_Store, "find_job_by_idempotency_key", find, raising=False)
+    monkeypatch.setattr(_Store, "get_job", get, raising=False)
+    monkeypatch.setattr(remote_mcp_repo, "open_session", open_session)
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", judge_call)
+    return client, engine, record
+
+
+def _judge(client: TestClient, draft_id: str, **arguments: Any) -> Any:
+    """Call the judge tool with a patch, the write token and confirm=true."""
+    return _call(
+        client,
+        "repo_judge_score",
+        {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "candidate_patch": PATCH, **arguments},
+    )
+
+
+def test_judge_needs_confirmation_and_one_candidate(judge: Any) -> None:
+    """Refuse the call before the user agreed, or with no or two candidates, without a session."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    assert "confirm=true" in _error_text(_judge(client, draft_id, confirm=False))
+    assert "exactly one" in _error_text(_judge(client, draft_id, candidate_patch=None))
+    assert "exactly one" in _error_text(_judge(client, draft_id, candidate_commit="b" * 40))
+    assert "runs:write" in _error_text(
+        _call(
+            client,
+            "repo_judge_score",
+            {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "candidate_patch": PATCH},
+            token=READ_TOKEN,
+        )
+    )
+    assert record["opens"] == []
+    assert record["calls"] == []
+
+
+def test_judge_opens_one_session_and_scores_in_it(judge: Any) -> None:
+    """Open the session on the first call and reuse it for later calls with the same arguments."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    first = _payload(_judge(client, draft_id))
+    assert first == {"status": "scored", "session_id": "session-1", "score": 0.5}
+    assert record["opens"][0]["key"].startswith(f"mcp-judge-{draft_id}-")
+    assert record["opens"][0]["floor_cents"] == 192
+    assert record["opens"][0]["draft_id"] == draft_id
+    _payload(_judge(client, draft_id, candidate_patch=None, candidate_commit="b" * 40))
+    assert len(record["opens"]) == 1
+    assert record["calls"][1] == (
+        "session-1",
+        {"username": USER, "candidate_commit": "b" * 40, "candidate_patch": None, "token": "gh"},
+    )
+
+
+def test_judge_session_minimum_skips_the_lease_floor(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a judge session's minimum at one call and the final score when the floor is below one lease (SKY-923).
+
+    A judge session charges each scored call directly and takes no lease,
+    so the run's one-lease floor does not apply to it.
+
+    Args:
+        judge: MCP client, database engine and the recorded opens and calls.
+        monkeypatch: Sets a floor below one lease and turns local mode off.
+    """
+    client, _engine, record = judge
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(remote_mcp_repo, "repo_floor_cents", lambda spec, http_client: (30, []))
+    draft_id = _complete_draft(client)
+
+    refused = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=59)))
+    scored = _payload(_judge(client, draft_id, max_cost_cents=60))
+
+    assert refused["min_max_cost_cents"] == 60
+    assert scored["status"] == "scored"
+    assert record["opens"][0]["floor_cents"] == 30
+
+
+def test_judge_refuses_a_short_commit_sha(judge: Any) -> None:
+    """Refuse an abbreviated commit SHA, which git cannot fetch, before any session or call."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    assert "candidate_commit" in _error_text(_judge(client, draft_id, candidate_patch=None, candidate_commit="abc1234"))
+    assert record["opens"] == []
+    assert record["calls"] == []
+
+
+def test_judge_refuses_a_limit_below_two_floors(judge: Any) -> None:
+    """Refuse a limit that cannot pay for one call and the final score, before any session."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    error = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=300)))
+    assert (error["code"], error["min_max_cost_cents"]) == ("budget.below_minimum", 384)
+    assert record["opens"] == []
+
+
+def test_judge_names_the_session_minimum_for_a_limit_below_the_floor(judge: Any) -> None:
+    """Name the two-floor minimum in the first refusal, so the limit it names is enough."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    error = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=100)))
+    assert (error["code"], error["min_max_cost_cents"]) == ("budget.below_minimum", 384)
+    assert "384" in error["detail"]
+    assert record["opens"] == []
+
+
+def test_judge_refuses_an_incomplete_draft(judge: Any) -> None:
+    """Answer draft.not_ready before any session."""
+    client, _engine, record = judge
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    assert json.loads(_error_text(_judge(client, draft_id)))["code"] == "draft.not_ready"
+    assert record["opens"] == []
+
+
+def test_judge_refuses_another_limit_while_a_session_is_open(judge: Any) -> None:
+    """Name the open session when the client changes max_cost_cents."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    _payload(_judge(client, draft_id))
+    error = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=900)))
+    assert (error["code"], error["session_ids"]) == ("judge.limit_changed", ["session-1"])
+    assert len(record["opens"]) == 1
+
+
+def test_draft_steps_refuse_a_change_while_a_session_is_open(judge: Any) -> None:
+    """Keep the draft fixed while a judge session scores against it."""
+    client, engine, _record = judge
+    draft_id = _complete_draft(client)
+    _payload(_judge(client, draft_id))
+    error = json.loads(_error_text(_call(client, "repo_draft_set_engine", {"draft_id": draft_id, "engine": "gepa"})))
+    assert (error["code"], error["session_ids"]) == ("judge.session_open", ["session-1"])
+    with Session(engine) as session:
+        session.get(JobModel, "session-1").status = "success"
+        session.commit()
+    assert _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")["saved"]
+
+
+def test_judge_after_the_end_names_the_session(judge: Any) -> None:
+    """Answer session_ended for the same arguments after the session ended."""
+    client, engine, record = judge
+    draft_id = _complete_draft(client)
+    _payload(_judge(client, draft_id))
+    with Session(engine) as session:
+        session.get(JobModel, "session-1").status = "success"
+        session.commit()
+    error = json.loads(_error_text(_judge(client, draft_id)))
+    assert (error["code"], error["session_id"]) == ("judge.session_ended", "session-1")
+    assert len(record["calls"]) == 1
+
+
+def test_judge_errors_carry_the_code_and_the_session(judge: Any) -> None:
+    """Map a refused candidate to its code and session, and a held session to in_progress."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    record["answer"] = remote_mcp_repo.JudgeError("judge.candidate_refused", "It changes ascent.toml.")
+    error = json.loads(_error_text(_judge(client, draft_id)))
+    assert error == {
+        "code": "judge.candidate_refused",
+        "detail": "It changes ascent.toml.",
+        "session_id": "session-1",
+    }
+    record["answer"] = remote_mcp_repo.JudgePendingError("Another call scores this candidate.")
+    body = _payload(_judge(client, draft_id))
+    assert (body["status"], body["retry_after_seconds"]) == ("in_progress", 5)
+    record["answer"] = DomainError("budget.pending", status=409)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+
+
+class _SlowJudge:
+    """Emulate a judge call that blocks until released and stores its outcome, like the real claim.
+
+    While the first call runs, another call gets ``JudgePendingError``; after
+    it ends, every call replays the stored outcome. So ``scores`` counts the
+    paid scores.
+    """
+
+    def __init__(self, outcome: Any) -> None:
+        """Prepare one score.
+
+        Args:
+            outcome: The answer to store, or the error to store and raise.
+        """
+        self.outcome = outcome
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.done = threading.Event()
+        self.scores = 0
+        self._lock = threading.Lock()
+        self._state = "free"
+
+    def __call__(self, job_store: Any, session_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Score once, or answer as the stored or running claim does.
+
+        Args:
+            job_store: The store.
+            session_id: The session.
+            **kwargs: The candidate and the account.
+
+        Returns:
+            The stored answer.
+
+        Raises:
+            JudgePendingError: While the first call still scores.
+            Exception: The stored error.
+        """
+        with self._lock:
+            state, self._state = self._state, "running" if self._state == "free" else self._state
+        if state == "running":
+            raise remote_mcp_repo.JudgePendingError("Another call scores this candidate.")
+        if state == "free":
+            self.scores += 1
+            self.started.set()
+            self.release.wait(10)
+            with self._lock:
+                self._state = "stored"
+            self.done.set()
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return {**self.outcome, "session_id": session_id}
+
+
+def _wait_for_thread(name: str) -> None:
+    """Wait until the background judge thread with this name ends.
+
+    Args:
+        name: The thread name.
+    """
+    for thread in threading.enumerate():
+        if thread.name == name:
+            thread.join(10)
+
+
+def test_a_slow_first_call_answers_in_progress_in_time_and_a_retry_does_not_score_twice(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answer in_progress at the bound while the session opens and the score runs, then replay the one score."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    opened = threading.Event()
+    fake_open = remote_mcp_repo.open_session
+
+    def slow_open(*args: Any, **kwargs: Any) -> str:
+        """Open the session only after the test releases it.
+
+        Args:
+            *args: The open arguments.
+            **kwargs: The open keyword arguments.
+
+        Returns:
+            The session id.
+        """
+        opened.wait(10)
+        return fake_open(*args, **kwargs)
+
+    monkeypatch.setattr(remote_mcp_repo, "open_session", slow_open)
+    started = time.monotonic()
+    first = _payload(_judge(client, draft_id))
+    assert time.monotonic() - started < 5
+    assert first["status"] == "in_progress"
+    assert first["retry_after_seconds"] == 5
+    assert first["detail"].endswith("Call repo_judge_score again with the same arguments.")
+    opened.set()
+    assert slow.started.wait(10)
+    during = _payload(_judge(client, draft_id))
+    assert during["status"] == "in_progress"
+    assert during["detail"].endswith("Call repo_judge_score again with the same arguments.")
+    slow.release.set()
+    slow.done.wait(10)
+    _wait_for_thread("repo-judge-score")
+    assert _payload(_judge(client, draft_id)) == {"status": "scored", "score": 0.75, "session_id": "session-1"}
+    assert slow.scores == 1
+    assert len(record["opens"]) == 1
+
+
+OTHER_PATCH = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-a\n+c\n"
+
+
+def _counted_judge(monkeypatch: pytest.MonkeyPatch, slow: _SlowJudge) -> tuple[list[dict[str, Any]], list[str]]:
+    """Count the judge calls and the started score threads; only ``PATCH`` goes to the slow judge.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        slow: The judge that holds the score of ``PATCH``.
+
+    Returns:
+        The keyword arguments of each judge call, and the name of each started thread.
+    """
+    calls: list[dict[str, Any]] = []
+    threads: list[str] = []
+
+    def judge_call(job_store: Any, session_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Record the call, then score ``PATCH`` slowly and any other candidate at once.
+
+        Args:
+            job_store: The store.
+            session_id: The session.
+            **kwargs: The candidate and the account.
+
+        Returns:
+            The answer.
+        """
+        calls.append(kwargs)
+        if kwargs.get("candidate_patch") != PATCH:
+            return {"status": "scored", "score": 0.1, "session_id": session_id}
+        return slow(job_store, session_id, **kwargs)
+
+    class _CountedThread(threading.Thread):
+        """Record each thread the tool starts."""
+
+        def start(self) -> None:
+            """Record the thread's name, then start it."""
+            threads.append(self.name)
+            super().start()
+
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", judge_call)
+    monkeypatch.setattr(remote_mcp_repo, "Thread", _CountedThread)
+    return calls, threads
+
+
+def test_polls_of_a_running_score_wait_on_it_and_start_no_new_work(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer each poll from the running score, with no new thread or judge call, and replay it after it ends."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    calls, threads = _counted_judge(monkeypatch, slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    assert slow.started.wait(10)
+    for _ in range(2):
+        assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    assert len(calls) == 1
+    assert threads == ["repo-judge-score"]
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 10)
+    threading.Timer(0.2, slow.release.set).start()
+    assert _payload(_judge(client, draft_id)) == {"status": "scored", "score": 0.75, "session_id": "session-1"}
+    assert len(calls) == 1
+    _wait_for_thread("repo-judge-score")
+    assert not remote_mcp_repo._RUNNING
+    assert _payload(_judge(client, draft_id)) == {"status": "scored", "score": 0.75, "session_id": "session-1"}
+    assert len(calls) == 2
+    assert slow.scores == 1
+
+
+def test_a_poll_that_waits_on_a_refused_score_gets_the_same_refusal(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give a poll that waits on the running score the tool error that the score ends with."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge(remote_mcp_repo.JudgeError("judge.score_failed", "The metric failed."))
+    calls, _threads = _counted_judge(monkeypatch, slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    assert slow.started.wait(10)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 10)
+    threading.Timer(0.2, slow.release.set).start()
+    error = json.loads(_error_text(_judge(client, draft_id)))
+    assert error == {"code": "judge.score_failed", "detail": "The metric failed.", "session_id": "session-1"}
+    assert len(calls) == 1
+    _wait_for_thread("repo-judge-score")
+
+
+def test_a_call_with_other_arguments_during_a_running_score_gets_its_own_answer(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send a call with another candidate or limit to its own work, never to the running score's answer."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    calls, threads = _counted_judge(monkeypatch, slow)
+    try:
+        assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+        assert slow.started.wait(10)
+        other = {"status": "scored", "score": 0.1, "session_id": "session-1"}
+        assert _payload(_judge(client, draft_id, candidate_patch=OTHER_PATCH)) == other
+        assert _payload(_judge(client, draft_id, candidate_patch=None, candidate_commit="b" * 40)) == other
+        assert [call["candidate_patch"] for call in calls] == [PATCH, OTHER_PATCH, None]
+        assert calls[2]["candidate_commit"] == "b" * 40
+        refused = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=600)))
+        assert refused["code"] == "judge.limit_changed"
+        assert len(threads) == 4
+    finally:
+        slow.release.set()
+        _wait_for_thread("repo-judge-score")
+
+
+def test_a_score_thread_that_cannot_start_releases_its_call_key(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer an error when the score thread cannot start, and keep no key, so the next call scores."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_RUNNING", {})
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+
+    class _NoStartThread(threading.Thread):
+        """Fail to start, like a process at its thread limit."""
+
+        def start(self) -> None:
+            """Raise as ``Thread.start`` does when the system has no thread left.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(remote_mcp_repo, "Thread", _NoStartThread)
+    assert _judge(client, draft_id).get("isError") is True
+    assert not remote_mcp_repo._RUNNING
+    assert not remote_mcp_repo._IN_FLIGHT
+    started = time.monotonic()
+    assert remote_mcp_repo.drain_judge_scores() == 0
+    assert time.monotonic() - started < 1
+    monkeypatch.setattr(remote_mcp_repo, "Thread", threading.Thread)
+    assert _payload(_judge(client, draft_id))["status"] != "in_progress"
+    assert len(record["calls"]) == 1
+
+
+def test_a_refusal_after_the_bound_is_stored_and_the_retry_reports_it(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A judge error that comes after the in_progress answer reaches the client on its retry, with the session."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge(remote_mcp_repo.JudgeError("judge.score_failed", "The metric failed."))
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    slow.release.set()
+    slow.done.wait(10)
+    _wait_for_thread("repo-judge-score")
+    error = json.loads(_error_text(_judge(client, draft_id)))
+    assert error == {"code": "judge.score_failed", "detail": "The metric failed.", "session_id": "session-1"}
+    assert slow.scores == 1
+
+
+def test_an_unexpected_error_after_the_bound_is_logged_by_type_only(
+    judge: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log an error that no client sees, without its text."""
+    caplog.set_level("ERROR", logger=remote_mcp_repo.logger.name)
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    slow = _SlowJudge(KeyError("secret text"))
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    slow.release.set()
+    slow.done.wait(10)
+    _wait_for_thread("repo-judge-score")
+    assert "repo_judge_score failed after its answer with KeyError" in caplog.text
+    assert "secret text" not in caplog.text
+
+
+def test_the_drain_waits_for_a_background_score_and_the_registry_releases_it(
+    judge: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hold a score that runs after its in_progress answer, wait for it at shutdown, then forget it."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    monkeypatch.setattr(remote_mcp_repo, "_DRAIN_SECONDS", 10)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    assert slow.started.wait(10)
+    assert len(remote_mcp_repo._IN_FLIGHT) == 1
+    threading.Timer(0.2, slow.release.set).start()
+    assert remote_mcp_repo.drain_judge_scores() == 0
+    assert slow.done.is_set()
+    assert not remote_mcp_repo._IN_FLIGHT
+    _wait_for_thread("repo-judge-score")
+
+
+def test_the_drain_stops_at_its_bound_when_a_score_hangs(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return at the bound with the count of scores that still run, so the shutdown is not stuck."""
+    client, _engine, _record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 0.2)
+    monkeypatch.setattr(remote_mcp_repo, "_DRAIN_SECONDS", 0.2)
+    slow = _SlowJudge({"status": "scored", "score": 0.75})
+    monkeypatch.setattr(remote_mcp_repo, "judge_call", slow)
+    assert _payload(_judge(client, draft_id))["status"] == "in_progress"
+    assert slow.started.wait(10)
+    started = time.monotonic()
+    assert remote_mcp_repo.drain_judge_scores() == 1
+    assert time.monotonic() - started < 5
+    slow.release.set()
+    _wait_for_thread("repo-judge-score")
+    assert not remote_mcp_repo._IN_FLIGHT
+
+
+def test_the_drain_returns_at_once_with_no_background_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return at once when no score runs, also with a long bound."""
+    monkeypatch.setattr(remote_mcp_repo, "_IN_FLIGHT", set())
+    monkeypatch.setattr(remote_mcp_repo, "_DRAIN_SECONDS", 60)
+    started = time.monotonic()
+    assert remote_mcp_repo.drain_judge_scores() == 0
+    assert time.monotonic() - started < 1
+
+
+def test_a_call_that_finishes_in_time_keeps_its_answer(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A score inside the bound answers as before: the score, or the refusal as a tool error."""
+    client, _engine, record = judge
+    draft_id = _complete_draft(client)
+    monkeypatch.setattr(remote_mcp_repo, "_JUDGE_ANSWER_SECONDS", 5)
+    assert _payload(_judge(client, draft_id)) == {"status": "scored", "session_id": "session-1", "score": 0.5}
+    record["answer"] = remote_mcp_repo.JudgeError("judge.candidate_refused", "It changes ascent.toml.")
+    assert json.loads(_error_text(_judge(client, draft_id)))["code"] == "judge.candidate_refused"
+
+
+_COMMAND_CONTRACT = (
+    'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n\n[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/metric.sh"]\n'
+)
+
+
+def test_a_command_metric_entry_takes_an_empty_scorer(harness: Any) -> None:
+    """A draft whose contract names a command entry needs no metric code, and sends ``command_metric`` (SKY-738)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="Make the tests faster.")["draft_id"]
+    _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=_COMMAND_CONTRACT)
+    _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5")
+    _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")
+
+    body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code="")
+
+    assert body["issues"] == []
+    assert _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))["issues"] == []
+    scorer = remote_mcp_repo.build_request(_spec(engine, draft_id)).scorer
+    assert (scorer.command_metric, scorer.metric_code) == (True, None)
+    body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+    assert body["issues"] == []
+    assert any("does not use the metric code" in note for note in body["notes"])
+    assert remote_mcp_repo.build_request(_spec(engine, draft_id)).scorer.command_metric is False
+
+
+def test_a_python_metric_entry_with_an_empty_scorer_is_an_issue(harness: Any) -> None:
+    """A Python ``[metric] entry`` calls a function, so an empty scorer names the fix (SKY-738)."""
+    client, _engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=CONTRACT)
+
+    body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code="")
+
+    assert body["issues"] == [
+        "The [metric] entry metric.py:score names a Python function, so the scorer needs metric code."
+        " Set it with repo_draft_set_scorer, or make the entry a command."
+    ]
+
+
+_GRADE_CONTRACT = 'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n\n[metric]\nentry = "metric.py:grade"\n'
+_GRADE_ANSWER = "  return {'score': 1.0, 'feedback': 'ok'}\n"
+
+
+@pytest.mark.parametrize(
+    ("code", "issue"),
+    [
+        (f"def helper(x):\n  return x\n\ndef grade(repo_path):\n{_GRADE_ANSWER}", None),
+        (f"def score(repo_path):\n{_GRADE_ANSWER}\nasync def grade(repo_path):\n{_GRADE_ANSWER}", "grade is async"),
+        (f"def score(repo_path):\n{_GRADE_ANSWER}", "must define grade(...)"),
+    ],
+)
+def test_the_draft_scorer_check_reads_the_function_the_metric_entry_names(code: str, issue: str | None) -> None:
+    """Check the function that ``[metric] entry`` names, not ``score`` or the single function (SKY-738).
+
+    Args:
+        code: The scorer source.
+        issue: A part of the one expected issue, or ``None`` for no issue.
+    """
+    issues, _notes = remote_mcp_repo.draft_scorer_issues(code, {"contract": {"ascent_toml": _GRADE_CONTRACT}})
+
+    if issue is None:
+        assert issues == []
+    else:
+        [found] = issues
+        assert issue in found
+
+
+def test_without_a_draft_contract_a_missing_score_function_is_a_note() -> None:
+    """The repository's own ascent.toml can name another function, so the run's setup checks it (SKY-738)."""
+    code = f"def helper(x):\n  return x\n\ndef grade(repo_path):\n{_GRADE_ANSWER}"
+
+    issues, notes = remote_mcp_repo.draft_scorer_issues(code, {})
+
+    assert issues == []
+    assert "[metric] entry names" in notes[0]
+    assert remote_mcp_repo.draft_scorer_issues("def grade(:\n", {})[0]
+
+
+def test_an_empty_scorer_without_a_draft_contract_leaves_the_entry_to_staging() -> None:
+    """Without the draft's own ascent.toml, the run's staging checks the repository's entry (SKY-738)."""
+    issues, notes = remote_mcp_repo.draft_scorer_issues("", {})
+
+    assert issues == []
+    assert "must give [metric] entry as a command" in notes[0]

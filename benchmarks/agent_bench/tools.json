@@ -1749,16 +1749,6 @@
           "type": "null"
          }
         ]
-       },
-       "stop_at_score": {
-        "anyOf": [
-         {
-          "type": "number"
-         },
-         {
-          "type": "null"
-         }
-        ]
        }
       },
       "type": "object"

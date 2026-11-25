@@ -40,6 +40,8 @@ export interface IntakeAnswers {
    */
   privacy: ModelDataPolicy | null;
   trust: IntakeTrustMode | null;
+  /** Whether setup checks bill the balance only; null keeps the account setting. */
+  setup_from_wallet: boolean | null;
 }
 
 /*
@@ -59,6 +61,7 @@ export function emptyIntake(): IntakeAnswers {
     spending_limit_cents: DEFAULT_SPENDING_LIMIT_CENTS,
     privacy: null,
     trust: null,
+    setup_from_wallet: null,
   };
 }
 
@@ -95,6 +98,7 @@ export function parseIntakeAnswers(value: unknown): IntakeAnswers | null {
           : base.spending_limit_cents,
     privacy: oneOf(PRIVACY_POLICIES, raw.privacy),
     trust: oneOf(TRUST_MODES, raw.trust),
+    setup_from_wallet: typeof raw.setup_from_wallet === "boolean" ? raw.setup_from_wallet : null,
   };
 }
 
@@ -178,6 +182,7 @@ export function profileSoFar(
     if (answers.billing === "byok" && answers.byok_provider) {
       profile.byok_provider = answers.byok_provider;
     }
+    if (answers.setup_from_wallet !== null) profile.setup_from_wallet = answers.setup_from_wallet;
   }
   // The stored policy says `deny`; the interviewer's vocabulary is `no_training`.
   if (has("privacy") && answers.privacy) {

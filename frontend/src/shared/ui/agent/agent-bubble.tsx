@@ -26,8 +26,7 @@ interface AgentBubbleProps {
   msg: AgentMessage;
   /**
    * Earlier replies of the same work block, oldest first. With a turn
-   * history they fold into it under one header, and ``msg`` is the reply
-   * that stays shown.
+   * history they show inside it, before ``msg``, under one header.
    */
   earlier?: readonly AgentMessage[];
   thinking?: AgentThinking;
@@ -35,15 +34,10 @@ interface AgentBubbleProps {
   streaming?: boolean;
   renderToolCall?: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   /**
-   * Calls that render as plain one-line steps in the turn's foldable
-   * history; every other call keeps its rich card there.
+   * Calls that render as plain one-line steps in the turn's history; every
+   * other call keeps its rich card there.
    */
   isStepCall?: (call: AgentToolCall) => boolean;
-  /**
-   * Cards that stay shown when the turn's history folds, such as one the
-   * user must answer. Without it, every card stays shown.
-   */
-  isPinnedCall?: (call: AgentToolCall) => boolean;
   /** What kind of step a call is, for the summary line over the turn's steps. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
   onRunCode?: (code: string, language: string) => void;
@@ -91,7 +85,6 @@ export function AgentBubble({
   streaming,
   renderToolCall,
   isStepCall,
-  isPinnedCall,
   stepKind,
   onRunCode,
   allowLink,
@@ -152,21 +145,20 @@ export function AgentBubble({
       steps: visibleCalls(m.toolCalls).map((v) => ({
         ...v,
         card: !isStepCall?.(v.call),
-        pinned: isPinnedCall?.(v.call),
       })),
       plan: m.plan?.trim() || undefined,
       answer: m.content.trim() ? renderAnswer(m.content) : null,
       durationMs: m.stats?.durationMs,
     }));
-    if (!turnStreaming && !hasText && !hasActivity && !plan && !earlierTurns.length) return null;
+    const hasTurn = turnStreaming || hasActivity || Boolean(plan) || earlierTurns.length > 0;
+    if (!hasTurn && !hasText && !afterContent) return null;
     return (
       <div className={cn("flex w-full min-w-0 flex-col gap-3", className)}>
-        <TurnActivity
+        {(hasTurn || hasText) && <TurnActivity
           thinking={allThinking}
           steps={visibleToolCalls.map((v) => ({
             ...v,
             card: !isStepCall?.(v.call),
-            pinned: isPinnedCall?.(v.call),
           }))}
           streaming={turnStreaming}
           answering={hasText}
@@ -176,7 +168,7 @@ export function AgentBubble({
           durationMs={msg.stats?.durationMs}
           startedAt={turnStart(allThinking, [])}
           earlier={earlierTurns}
-        />
+        />}
         {answer}
         {afterContent}
       </div>

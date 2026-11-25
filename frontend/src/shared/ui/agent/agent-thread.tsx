@@ -4,9 +4,9 @@ import * as React from "react";
 
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
-import { ArrowDown, CircleNotch } from "@/shared/ui/icons";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
+import { ArrowDown } from "@/shared/ui/icons";
 
+import { ReplyLoop } from "./reply-loop";
 import { isNearBottom } from "./scroll-position";
 
 interface AgentThreadProps {
@@ -14,9 +14,11 @@ interface AgentThreadProps {
   scrollDeps?: readonly unknown[];
   emptyState?: React.ReactNode;
   isEmpty?: boolean;
-  /** The agent is writing a reply; the jump-to-latest button shows it. */
+  /** The agent is writing a reply; the jump-to-latest button plays the reply loop. */
   streaming?: boolean;
   className?: string;
+  /** What floats over the thread, such as the user message rail; given the scroll box. */
+  overlay?: (scrollBox: HTMLDivElement | null) => React.ReactNode;
 }
 
 export function AgentThread({
@@ -26,8 +28,15 @@ export function AgentThread({
   isEmpty,
   streaming = false,
   className,
+  overlay,
 }: AgentThreadProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  // The overlay gets the scroll box as state, as render code must not read a ref.
+  const [scrollBox, setScrollBox] = React.useState<HTMLDivElement | null>(null);
+  const setScrollRef = React.useCallback((el: HTMLDivElement | null) => {
+    scrollRef.current = el;
+    setScrollBox(el);
+  }, []);
   // Follow the stream only while the user is at the bottom. Once they scroll
   // up to read history their position persists — new tokens and re-renders
   // must not yank them back down. Scrolling back to the bottom re-engages
@@ -73,8 +82,6 @@ export function AgentThread({
     el.scrollTo({ top: el.scrollHeight, behavior: reduceMotion ? "auto" : "smooth" });
   }, []);
 
-  const jumpLabel = msg(streaming ? "agent.jump_latest.streaming" : "agent.jump_latest.label");
-
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       {/* Containment is per-surface: overlay panels pass `overscroll-contain`
@@ -82,41 +89,39 @@ export function AgentThread({
           embedded surfaces keep the default fall-through so a short thread is
           not a dead zone for page scrolling. */}
       <div
-        ref={scrollRef}
+        ref={setScrollRef}
         onScroll={handleScroll}
         className={cn("flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5", className)}
       >
         {isEmpty && emptyState}
         {children}
       </div>
+      {overlay?.(scrollBox)}
       {!atBottom && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={jumpToLatest}
-                aria-label={jumpLabel}
-                className={cn(
-                  "pointer-events-auto relative grid size-8 place-items-center rounded-full border bg-background shadow-sm",
-                  "text-muted-foreground transition-colors hover:text-foreground",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  streaming ? "border-primary/40 text-primary" : "border-border",
-                )}
-              >
-                {streaming && (
-                  // Under reduced motion the arc stays still and still marks
-                  // the reply in progress.
-                  <CircleNotch
-                    aria-hidden
-                    className="absolute inset-0 size-full p-0.5 motion-safe:animate-spin"
-                  />
-                )}
-                <ArrowDown aria-hidden className="size-3.5" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="top">{jumpLabel}</TooltipContent>
-          </Tooltip>
+          <button
+            type="button"
+            onClick={jumpToLatest}
+            aria-label={msg("agent.jump_latest.label")}
+            className={cn(
+              "group pointer-events-auto relative grid size-8 place-items-center rounded-full border bg-background shadow-sm",
+              "text-muted-foreground transition-colors hover:text-foreground",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              streaming ? "border-primary/40 text-primary" : "border-border",
+            )}
+          >
+            {streaming && (
+              // Hover and keyboard focus swap the reply loop for the arrow the click acts on.
+              <ReplyLoop className="absolute inset-0.5 transition-opacity duration-150 group-hover:opacity-0 group-focus-visible:opacity-0" />
+            )}
+            <ArrowDown
+              aria-hidden
+              className={cn(
+                "size-3.5 transition-opacity duration-150",
+                streaming && "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
+              )}
+            />
+          </button>
         </div>
       )}
     </div>

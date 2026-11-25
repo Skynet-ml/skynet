@@ -221,7 +221,7 @@ def _qwen_code_launch(
         # such a name would drop out of the allow list and its tools with it.
         raise ServiceError(
             "The Qwen Code harness cannot load a [proposer] mcp server whose name has a comma "
-            "or starts or ends with a space. Rename the server in optimize.toml."
+            "or starts or ends with a space. Rename the server in ascent.toml."
         )
     mcp_flags = (
         f"--allowed-mcp-server-names {shlex.quote(','.join(mcp_servers))}"

@@ -357,6 +357,9 @@ interface ScorerDependencyLock {
 export interface BlackboxScorer {
   kind: "python" | "remote";
   metric_code?: string | null;
+  // True when ascent.toml's [metric] entry is a command: the metric box runs
+  // it, so the request carries no metric_code (SKY-738, SKY-770).
+  command_metric?: boolean;
   url?: string | null;
   secret?: string | null;
   timeout_seconds?: number;
@@ -372,7 +375,6 @@ export interface BlackboxScorer {
 export interface BlackboxBudget {
   max_scorer_runs: number;
   max_iterations?: number | null;
-  stop_at_score?: number | null;
 }
 
 /** One environment variable the repository scorer receives: typed in, or saved on the account. */
@@ -394,6 +396,15 @@ interface BlackboxRepoSource {
   secrets?: BlackboxRepoSecret[];
   /** True when Skynet created the repository for this run. */
   created_by_skynet?: boolean;
+  /** Setup draft files by repository path; the server writes them over the checkout before the run. */
+  draft_files?: Record<string, string>;
+  /** The commit the setup agent read the draft files at; the run refuses them on another commit. */
+  draft_base?: string;
+  /**
+   * What the server recorded from ascent.toml; `outcome.target` is the score that stops the search,
+   * and `proposer_entry` is the `[proposer] entry` command when the run uses it.
+   */
+  environment?: { outcome?: { target?: number | null }; proposer_entry?: string[] } | null;
 }
 
 export interface BlackboxTarget {
@@ -415,7 +426,9 @@ export interface BlackboxStrategy {
 
 /** The coding agent that drives a harness-based engine's optimization loop. */
 export interface BlackboxProposer {
-  harness: BlackboxHarness;
+  // Sent only when the user picked one (SKY-753): without it, a repository's
+  // [proposer] entry applies, else the server runs its default harness.
+  harness?: BlackboxHarness;
   install_command?: string | null;
   run_command?: string | null;
   max_candidates_per_iter?: number | null;
@@ -427,6 +440,9 @@ export interface BlackboxProposer {
   // Local desktop build only: run the proposer as this signed-in CLI on the
   // host, confined to the run workspace unless the user grants full access.
   host_cli?: "codex" | "claude" | null;
+  // True when the server filled in host_cli, so a repository's [proposer]
+  // entry still applies. A picked host_cli replaces it.
+  host_cli_auto?: boolean;
   host_permission?: "workspace_only" | "full_access";
 }
 
@@ -473,6 +489,8 @@ export interface BlackboxRunRequest {
   preflight_fingerprint?: string;
   // The setup's finished hardening job; the run's PR ships its exploit suite.
   hardening_job_id?: string | null;
+  // The setup chat that created the run; sharing the run also shares it.
+  conversation_id?: string | null;
 
   name?: string;
   description?: string;
@@ -585,7 +603,10 @@ export interface BlackboxRunResult {
   baseline_score?: number | null;
   /** Fresh final-run score of the winner. */
   best_score?: number | null;
+  /** Positive when the run got better, also for a `minimize` run. */
   metric_improvement?: number | null;
+  /** Which way the score improves (`[metric] direction`); absent on older runs means `maximize`. */
+  direction?: "maximize" | "minimize";
   /** The final run's top-level feedback; null when there are cases (see `case_results`). */
   baseline_feedback?: string | null;
   best_feedback?: string | null;
@@ -767,6 +788,12 @@ export interface CatalogModel {
   lab_tier?: number;
   available: boolean;
   max_input_tokens?: number | null;
+  // Most tokens one reply may hold, and the provider's recommended
+  // temperature; null/absent when the provider does not say.
+  max_output_tokens?: number | null;
+  default_temperature?: number | null;
+  // Whether the model accepts a temperature; null/absent when the listing does not say.
+  takes_temperature?: boolean | null;
   // Provider per-token costs (USD) from LiteLLM; null/absent when unpriced, so
   // the estimate falls back to a default rate rather than treating it as free.
   input_cost_per_token?: number | null;
@@ -792,6 +819,11 @@ export type ModelDataPolicy = "allow" | "deny" | "zdr";
 
 export interface ModelPrivacySettings {
   data_policy: ModelDataPolicy;
+}
+
+/** Whether new runs bill their setup checks to the balance, outside the spending limit. */
+export interface SetupBillingSettings {
+  from_wallet: boolean;
 }
 
 export interface CatalogProvider {

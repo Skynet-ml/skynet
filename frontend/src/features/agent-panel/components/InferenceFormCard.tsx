@@ -134,7 +134,7 @@ export function InferenceFormCard({ call, disabled }: InferenceFormCardProps) {
 
   return (
     <div className="w-full">
-      <div className="rounded-2xl border border-primary-fill/40 bg-card overflow-hidden">
+      <div className="rounded-md border border-primary-fill/40 bg-card overflow-hidden">
         <div className="px-4 pt-3.5 pb-2.5 border-b border-primary-fill/25 bg-white/40 dark:bg-white/5">
           <div className="flex items-start gap-2.5">
             <span className="shrink-0 size-7 rounded-full inline-flex items-center justify-center bg-primary-fill text-primary-foreground">

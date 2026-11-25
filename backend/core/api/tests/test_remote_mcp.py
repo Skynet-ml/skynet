@@ -302,32 +302,30 @@ def test_run_tools_refuse_dspy_program_runs(harness: Any, tool: str, arguments: 
     assert "repositories" in error["detail"]
 
 
-def test_declared_task_model_normalizes_with_task_source() -> None:
-    """A scorer naming the task model must not conflict with the task's billing source."""
-    spec = BlackboxRunRequest.model_validate(
-        {
-            "objective": "optimize",
-            "task_model_config": {"name": "openai/task", "token_source": "byok", "byok_provider": "openai"},
-            "reflection_model_config": {"name": "openai/reflection", "token_source": "managed"},
-            "target": {"kind": "agent", "harness": "custom", "model": "openai/task", "run_command": "run-agent"},
-            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='openai/task')"},
-        }
+def _spec(fields: dict[str, Any]) -> BlackboxRunRequest:
+    """Validate a new repository run request.
+
+    Args:
+        fields: Request fields without a target.
+
+    Returns:
+        The validated request.
+    """
+    return BlackboxRunRequest.model_validate(
+        {"target": {"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}}, **fields}
     )
-    _, sources = normalize_model_token_sources(spec)
-    assert sources["openai/task"] == "byok"
-    assert spec.scorer.model == spec.task_model_settings
 
 
 def test_declared_extra_reflection_model_normalizes_with_its_source() -> None:
     """A scorer naming an extra reflection model uses that role's source."""
-    spec = BlackboxRunRequest.model_validate(
+    spec = _spec(
         {
             "objective": "optimize",
             "reflection_model_config": {"name": "openai/gpt-4o-mini", "token_source": "managed"},
             "extra_reflection_model_configs": [
                 {"name": "anthropic/claude-x", "token_source": "byok", "byok_provider": "anthropic"}
             ],
-            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='anthropic/claude-x')"},
+            "scorer": {"kind": "python", "metric_code": "from openascent import llm\nllm(model='anthropic/claude-x')"},
         }
     )
     _, sources = normalize_model_token_sources(spec)
@@ -337,7 +335,7 @@ def test_declared_extra_reflection_model_normalizes_with_its_source() -> None:
 
 def test_repo_submission_rejects_conflicting_stored_scorer_model() -> None:
     """Reject a legacy repository scorer model that conflicts with its code."""
-    spec = BlackboxRunRequest.model_validate(
+    spec = _spec(
         {
             "objective": "optimize",
             "reflection_model_config": {"name": "openai/reflection"},
@@ -359,7 +357,7 @@ def test_repo_submission_rejects_conflicting_stored_scorer_model() -> None:
 )
 def test_blackbox_submission_derives_scorer_model(code: str, expected: str) -> None:
     """Resolve an unconfigured scorer before billing."""
-    spec = BlackboxRunRequest.model_validate(
+    spec = _spec(
         {
             "objective": "optimize",
             "reflection_model_config": {"name": "openai/reflection"},
@@ -373,11 +371,11 @@ def test_blackbox_submission_derives_scorer_model(code: str, expected: str) -> N
 
 @pytest.mark.parametrize(
     ("name", "provider"),
-    [("openai/reflection", "openrouter"), ("openai/task", "custom"), ("openai/judge", "openrouter")],
+    [("openai/reflection", "openrouter"), ("openai/judge", "openrouter")],
 )
 def test_blackbox_submission_uses_byok_role_connection(name: str, provider: str) -> None:
     """Derive the scorer connection from the matching or compatible role."""
-    spec = BlackboxRunRequest.model_validate(
+    spec = _spec(
         {
             "objective": "optimize",
             "reflection_model_config": {
@@ -385,8 +383,6 @@ def test_blackbox_submission_uses_byok_role_connection(name: str, provider: str)
                 "token_source": "byok",
                 "byok_provider": "openrouter",
             },
-            "task_model_config": {"name": "openai/task", "token_source": "byok", "byok_provider": "custom"},
-            "target": {"kind": "agent", "harness": "custom", "model": "openai/task", "run_command": "run-agent"},
             "scorer": {"kind": "python", "metric_code": f"llm(model='{name}')"},
         }
     )
@@ -397,7 +393,7 @@ def test_blackbox_submission_uses_byok_role_connection(name: str, provider: str)
 
 def test_blackbox_submission_rejects_unsafe_scorer_without_stored_model() -> None:
     """Reject ambiguous scorer declarations before billing."""
-    spec = BlackboxRunRequest.model_validate(
+    spec = _spec(
         {
             "objective": "optimize",
             "reflection_model_config": {"name": "openai/reflection"},
@@ -411,7 +407,7 @@ def test_blackbox_submission_rejects_unsafe_scorer_without_stored_model() -> Non
 
 def test_blackbox_submission_rejects_mixed_model_declarations() -> None:
     """Report ambiguous model use as a declaration error."""
-    spec = BlackboxRunRequest.model_validate(
+    spec = _spec(
         {
             "objective": "optimize",
             "reflection_model_config": {"name": "openai/reflection"},
@@ -426,7 +422,7 @@ def test_blackbox_submission_rejects_mixed_model_declarations() -> None:
 def test_unmatched_metric_model_is_managed_in_subscription_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject a managed scorer model in local mode rather than assigning it a CLI plan."""
     monkeypatch.setattr(settings, "local_mode", True)
-    spec = BlackboxRunRequest.model_validate(
+    spec = _spec(
         {
             "objective": "optimize",
             "token_source": "subscription",
@@ -435,7 +431,7 @@ def test_unmatched_metric_model_is_managed_in_subscription_local_mode(monkeypatc
                 "token_source": "subscription",
                 "cli_provider": "codex",
             },
-            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='openai/judge')"},
+            "scorer": {"kind": "python", "metric_code": "from openascent import llm\nllm(model='openai/judge')"},
         }
     )
     configs, _ = normalize_model_token_sources(spec)
@@ -467,6 +463,41 @@ def test_get_run_is_owner_scoped(harness: Any, monkeypatch: pytest.MonkeyPatch) 
     assert body["terminal"] is True
     assert body["result"] == {"best": 1}
     assert body["execution_budget"] == {"limit_cents": 500}
+
+
+def test_get_run_returns_the_run_record_as_stored(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record of a contract run reaches the caller with every field unchanged (SKY-694, SKY-764)."""
+    client, _store, _calls = harness
+    record = {
+        "record_version": 1,
+        "base_commit": "c" * 40,
+        "change_sha256": "4" * 64,
+        "baseline_score": 0.1 + 0.2,
+        "final_score": 0.9,
+        "contract_sha256": "1" * 64,
+        "metric_sha256": "2" * 64,
+        "metric_source": "repository",
+        "cases_sha256": None,
+        "cases_source": None,
+        "seed": 7,
+        "split": None,
+        "image": "registry.example/sandbox@sha256:" + "a" * 64,
+        "target_reached": True,
+        "contract_met": True,
+    }
+    stored = {"best_score": 0.9, "details": {"outcome": {"target": 0.8, "target_reached": True}, "record": record}}
+    job = {"optimization_id": "opt-1", "payload": {"username": USER}, "result": stored}
+    monkeypatch.setattr(remote_mcp, "load_job_for_user", lambda store, oid, user: job)
+    monkeypatch.setattr(
+        remote_mcp,
+        "build_summary",
+        lambda job: SimpleNamespace(status="success", model_dump=lambda mode: {"status": "success"}),
+    )
+    monkeypatch.setattr(remote_mcp, "execution_budget_view", lambda store, job: None)
+
+    body = _payload(_call(client, "get_run", {"optimization_id": "opt-1"}, token=READ_TOKEN))
+
+    assert body["result"] == stored
 
 
 def test_list_runs_lists_only_the_callers_runs(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:

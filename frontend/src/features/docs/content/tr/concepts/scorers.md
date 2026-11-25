@@ -3,44 +3,55 @@ Puanlayıcı, Skynet'e deponuzun bir sürümünün ne kadar iyi olduğunu söyle
 ## Sözleşme
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argüman     | İçeriği                                                                      |
 | ----------- | ---------------------------------------------------------------------------- |
-| `repo_path` | Kurulum komutu çalıştıktan sonra deponun bir sürümünün klasörü               |
+| `repo_path` | Yalnızca metrik dosyalarınızı tutan bir klasör. Başka bir depo dosyası veya sürüm kodu tutmaz |
 | `case`      | Bir dict. `case["input"]` girdi alanlarını tutar. `case["expected"]` beklenen değeri veya `None` tutar |
+| `output`    | `[run]` giriş noktasının vaka için döndürdüğü değer veya dosyada `[run]` yoksa `None` |
 
-Fonksiyonunuz yalnızca bir argüman alıyorsa Skynet `score(repo_path)` çağırır. Puanlayıcı kendi testlerini çalıştırıyorsa ve vakalara ihtiyacı yoksa bu biçimi kullanın.
+Deponun `ascent.toml` dosyasında bir `[run]` bölümü veya bir `[target.<name>]` aşaması olmalıdır. `[run]` giriş noktası (`entry`), bir sürümü bir vaka üzerinde kendi sandbox'ında çalıştırır. Skynet ikisi de olmayan bir dosyayı reddeder, çünkü her sürüm aynı puanı alırdı.
 
-Puanlayıcı sandbox içinde, sürümün klasöründe çalışır. Depodan kod içe aktarabilir, bir komut çalıştırabilir veya `serve.py` içindeki `serve()` fonksiyonunu çağırabilir. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
+- Bir fonksiyon giriş noktası, örneğin `entry = "serve.py:serve"`, `case["input"]` değerini argüman olarak alır. `output`, onun döndürdüğü değerdir.
+- Bir komut giriş noktası, örneğin `entry = ["python", "run_tests.py"]`, `ASCENT_INPUT` içindeki yoldaki JSON dosyasından `{"input": ...}` değerini okur. `{"output": ...}` değerini `ASCENT_OUTPUT` içindeki yola yazar. `output`, `"output"` altındaki değerdir. Komutun yazdırdıkları yalnızca günlüklere gider.
+
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar. Puanlayıcı sürümün kodunu içe aktaramaz veya çalıştıramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from openascent import call` ile içe aktarın. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
 
 ## Dönüş değeri
 
-`score`, geri bildirimli bir puan döndürmelidir. Şu biçimler geçerlidir:
+`score` tek bir nesne döndürür:
 
-1. Bir çift: bir sayı ve bir geri bildirim string'i ya da `"feedback"` anahtarı olan bir dict.
-2. `"score"` altında bir sayı ve `"feedback"` altında bir string olan bir dict.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Geri bildirim boş olmayan bir string olmalıdır.
+- `"score"` zorunludur. Sonlu bir sayıdır. Sürümleri yalnızca bu puan sıralar.
+- `"feedback"` isteğe bağlı bir metindir. Önerilir, çünkü GEPA ve Auto ondan öğrenir. Geri bildirim yoksa motorlar yalnızca puanları görür ve çalıştırma günlüğü bunu bir kez söyler.
+- `"scores"` isteğe bağlıdır. Adları adlandırılmış puanlara eşler. Her adlandırılmış puan, kendi `"score"` değeri ve isteğe bağlı bir `"feedback"` içeren bir nesnedir. Her motor her adlandırılmış puanı ayrı bir hedef olarak kullanır.
 
-Yan bilgide bir `"scores"` anahtarı da olabilir. Bu anahtar adları adlandırılmış puanlara eşler. Her adlandırılmış puanın kendi puanı ve geri bildirimi vardır, örneğin `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Başka her biçim veya anahtar bir hatadır. Kontrol yanlış kısmı ve geçerli biçimi gösterir.
 
-Yan bilgide aynı biçimde bir `"cases"` anahtarı da olabilir. Her girdi bir vakanın sonucudur. Her motor her vakayı ayrı bir hedef olarak kullanır.
-
-Dönüş değerinin biçimi farklıysa kontrol başarısız olur ve nedenini gösterir.
-
-| Dönüş değeri                                                                    | Geçerli mi                                |
-| ------------------------------------------------------------------------------- | ----------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Evet                                      |
-| `(0.8, "Close. Missing the date.")`                                             | Evet                                      |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Evet                           |
-| `0.8`                                                                           | Hayır. Geri bildirim yok.                 |
-| `(0.8, {})`                                                                     | Hayır. Geri bildirim string'i yok.        |
-| `("0.8", {"feedback": "OK"})`                                                   | Hayır. Puan bir string.                   |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Hayır. Adlandırılmış bir puan sayı değil. |
+| Dönüş değeri | Geçerli mi |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Evet |
+| `{"score": 0.8}` | Evet. Geri bildirim yok. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Evet |
+| `0.8` | Hayır. Değer bir nesne değil. |
+| `(0.8, "Close. Missing the date.")` | Hayır. Değer bir nesne değil. |
+| `{"score": "0.8"}` | Hayır. Puan bir string. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Hayır. Adlandırılmış bir puan bir nesne olmalıdır. |
+| `{"score": 0.8, "feedbak": "OK"}` | Hayır. `feedbak` anahtarı bilinmiyor. |
 
 ## Faydalı geri bildirim yazın
 
@@ -58,67 +69,86 @@ GEPA ve Auto, bir sonraki sürümü yazmak için geri bildirim metnini okur. Ney
 
 ### Tam eşleşme
 
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    if output == want:
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]`, Çıktı sütununuzun adıyla anahtarlanmış bir dict'tir. [Veri kümeleri ve bölmeler](/docs/concepts/datasets) sayfasını okuyun.
 
 ### Deponun testlerini çalıştırın
 
-```python tab="scorer.py"
+`[run]` giriş noktası testleri çalıştırır. Bir test başarısız olduğunda `pytest` sıfır olmayan bir çıkış koduyla çıkar ve sıfır olmayan bir çıkış kodu durumu başarısız yapar. Bu yüzden `run_tests.py` sarmalayıcısı sonucu `ASCENT_OUTPUT` dosyasına yazar ve 0 ile çıkar. Puanlayıcı bu sonucu okur.
+
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = ["python", "run_tests.py"]
+timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
 import subprocess
 
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["passed"]:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["log"]}
+```
+
+`[run]` giriş noktası bir durumda başarısız olursa o durumun puanı olmaz. Giriş noktası başlayamazsa, zaman aşımına uğrarsa veya bir sinyal onu durdurursa ya da bir fonksiyon giriş noktası değer döndürmeden önce hata fırlatır veya çıkarsa geri bildirim `Run failed: …` olur ve Skynet puanlayıcıyı çağırmaz. Bir komut giriş noktası, sıfır olmayan bir kodla çıktığında veya geçerli bir çıktı dosyası yazmadığında da başarısız olur. Böyle bir durumu olan sürümün puanı olmaz. O sürüm en iyi sürüm olamaz, hiçbir `[outcome] target` değerine ulaşmaz ve pull request açmaz. Bir başarısızlığın sayı olarak sayılması gerekiyorsa başarısızlığı programınızda yakalayın, bir çıktı yazın ve puanlayıcının onu puanlamasına izin verin. [Depo kuralları](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) sayfasını okuyun.
 
 ### Hakem olarak model
 
-Puanlayıcı bir model çağırabilir. `skynet` yardımcı modülünden `llm` içe aktarın. Çağrı, Skynet'in model ağ geçidi üzerinden çalıştırmanın puanlayıcı modeline gider.
+Puanlayıcı bir model çağırabilir. `openascent` yardımcı modülünden `llm` içe aktarın. Çağrı, Skynet'in model ağ geçidi üzerinden çalıştırmanın puanlayıcı modeline gider.
+
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-from skynet import llm
+from openascent import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenleriyle herhangi bir OpenAI uyumlu istemciyi de kullanabilir. Ağ geçidi yalnızca çalıştırmanın puanlayıcı modelini kabul eder.
+Puanlayıcı, `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` ve `ASCENT_MODEL` ortam değişkenleriyle herhangi bir OpenAI uyumlu istemciyi de kullanabilir. Ağ geçidi yalnızca çalıştırmanın puanlayıcı modelini kabul eder.
 
 ## Model çağrıları ve gizli anahtarlar
 
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür. Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider ve Skynet model ücreti alınmaz. [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
-- Çalıştırma gizli anahtarları puanlayıcıya ortam değişkenleri olarak ulaşır. Değişken adı, gizli anahtarın adıdır, örneğin `os.environ["SEARCH_API_KEY"]`.
+- Puanlayıcı, çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar puanlayıcıya yalnızca `[metric] services` listesindeki bir `[services.<name>]` tablosu veya `[metric] mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Puanlayıcı isteklerini `ASCENT_SERVICE_<NAME>_URL` içindeki URL'ye gönderir. Skynet gizli anahtarı sandbox'ın dışında ekler.
 - Skynet gizli değerleri puanlayıcı çıktısında ve günlüklerde gizler.
 
 ## Limitler

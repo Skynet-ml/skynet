@@ -68,7 +68,6 @@ Ein Coding-Agent liest das Feedback Ihres Scorers und patcht die Version. Skynet
 | Einstellung             | Standard | Bereich                                                        |
 | ----------------------- | -------- | -------------------------------------------------------------- |
 | Max. Bewertungsläufe    | 200      | 1 bis 100000                              |
-| Stoppen bei Bewertung   | Aus      | 0 oder mehr                                                    |
 | Max. Iterationen        | Aus      | 1 bis 1000. Nur Meta-Harness, AutoSaddler und ShinkaEvolve.    |
 
 Ein Bewertungslauf ist ein Aufruf Ihres Scorers auf einem Fall. Die abschließende Neubewertung der Ausgangsversion und des Gewinners zählt nicht gegen **Max. Bewertungsläufe**.

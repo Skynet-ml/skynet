@@ -19,8 +19,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, Text, cast, exists, func, literal, select
+from sqlalchemy import Engine, Text, cast, delete, exists, func, literal, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.selectable import ScalarSelect
 
 from ..config import settings
 from ..constants import PAYLOAD_OVERVIEW_NAME
@@ -30,6 +31,7 @@ from .models import (
     AgentMessageModel,
     AgentStagedDatasetModel,
     BlackboxAgentRunModel,
+    ChatMediaModel,
     ConversationEmbeddingModel,
     DatasetModel,
     GepaCheckpointModel,
@@ -40,7 +42,9 @@ from .models import (
     RunCallModel,
     SetupDraftModel,
     TaggingSessionModel,
+    TreeObjectModel,
 )
+from .shard_map import MAIN, ShardMap
 
 logger = logging.getLogger(__name__)
 
@@ -205,18 +209,54 @@ def _tagging_session_bytes(dialect_name: str):
     )
 
 
-def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
+# A chat file that a stored chat sent lives until that chat is deleted. A file
+# that no chat sent (removed, abandoned or never stored) goes after this time.
+UNSENT_MEDIA_RETENTION = timedelta(days=1)
+
+
+def sweep_unsent_chat_media(engine: Engine, username: str) -> None:
+    """Delete the user's chat files that no chat sent within the retention time.
+
+    Every storage measure runs this first, so a stale unsent file never
+    counts in the meter or blocks an upload with the quota.
+
+    Args:
+        engine: The shared SQLAlchemy engine.
+        username: The owner, already normalized.
+    """
+    with Session(engine) as session:
+        session.execute(
+            delete(ChatMediaModel).where(
+                ChatMediaModel.username == username,
+                ChatMediaModel.conversation_id.is_(None),
+                ChatMediaModel.created_at < datetime.now(UTC) - UNSENT_MEDIA_RETENTION,
+            )
+        )
+        session.commit()
+
+
+def compute_user_storage(engine: Engine, username: str, shards: ShardMap | None = None) -> StorageUsage:
     """Sum every byte the user owns across the database into one budget figure.
 
     Args:
         engine: The shared SQLAlchemy engine all storage tables live on.
         username: The owner whose footprint is measured; matched
             case-insensitively against the lowercased owner columns.
+        shards: The step log shard map over ``engine``, whose shards hold
+            the tree objects; ``None`` means the main database only.
 
     Returns:
         A :class:`StorageUsage` with the per-category breakdown and total. An
         empty/blank username yields an all-zero usage rather than scanning.
+
+    Raises:
+        ValueError: When ``shards`` is ``None`` but ``STEP_LOG_SHARDS`` names shards.
     """
+    if shards is None:
+        # The main database alone would leave out the trees on the other shards.
+        if settings.step_log_shards:
+            raise ValueError("pass the step log shard map: STEP_LOG_SHARDS names shards")
+        shards = ShardMap(engine)
     normalized = (username or "").strip().lower()
     empty = StorageUsage(
         total=0,
@@ -226,6 +266,7 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
     if not normalized:
         return empty
 
+    sweep_unsent_chat_media(engine, normalized)
     dialect = engine.dialect.name
     with Session(engine) as session:
         user_job_ids = select(JobModel.optimization_id).where(JobModel.username == normalized)
@@ -266,6 +307,23 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                 RunCallModel.optimization_id.in_(user_job_ids)
             )
         )
+        # Workspace trees belong to the account, not to one run, so they count by owner (SKY-710), on every shard.
+        trees_sum = select(func.coalesce(func.sum(TreeObjectModel.byte_size), 0)).where(
+            TreeObjectModel.username == normalized
+        )
+        trees = scalar(trees_sum)
+        for name in shards.names():
+            if name == MAIN:
+                continue
+            # Fail open: the storage quota is a soft limit, and one down shard must not fail every user's
+            # quota check and usage page. The count misses that shard's trees until it answers again.
+            try:
+                with Session(shards.engine(name)) as shard_session:
+                    trees += int(shard_session.execute(trees_sum).scalar() or 0)
+            except Exception:
+                logger.warning(
+                    "step log shard %s did not answer the storage count; it is left out", name, exc_info=True
+                )
         agent_chats = scalar(
             select(
                 func.coalesce(
@@ -276,6 +334,11 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                     0,
                 )
             ).where(AgentMessageModel.conversation_id.in_(user_conversation_ids))
+        )
+        # A sent file folds into its chat's cleanup item. A file no chat sent
+        # has no item; the upload sweep removes it after a day.
+        chat_media = scalar(
+            select(func.coalesce(func.sum(ChatMediaModel.byte_size), 0)).where(ChatMediaModel.username == normalized)
         )
         staged_uploads = scalar(
             select(func.coalesce(func.sum(_byte_size(AgentStagedDatasetModel.rows, dialect)), 0)).where(
@@ -337,10 +400,11 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
         + checkpoints
         + agent_runs
         + run_calls
+        + trees
         + optimization_embeddings,
         "datasets": datasets,
         "tagging_sessions": tagging_sessions,
-        "agent_chats": agent_chats + chat_embeddings,
+        "agent_chats": agent_chats + chat_embeddings + chat_media,
         "staged_uploads": staged_uploads + setup_draft,
     }
     return StorageUsage(total=sum(breakdown.values()), breakdown=breakdown, counts=counts)
@@ -440,12 +504,13 @@ def compute_user_storage_items(engine: Engine, username: str, limit: int = 20) -
         chat_bytes = func.sum(
             _byte_size(AgentMessageModel.content, dialect) + _byte_size(AgentMessageModel.tool_calls, dialect)
         )
+        chat_size = func.coalesce(chat_bytes, 0) + _chat_media_bytes()
         conversation_rows = session.execute(
-            select(AgentConversationModel.id, AgentConversationModel.title, chat_bytes.label("chat_size"))
+            select(AgentConversationModel.id, AgentConversationModel.title, chat_size.label("chat_size"))
             .join(AgentMessageModel, AgentMessageModel.conversation_id == AgentConversationModel.id)
             .where(AgentConversationModel.username == normalized)
             .group_by(AgentConversationModel.id, AgentConversationModel.title)
-            .order_by(func.coalesce(chat_bytes, 0).desc())
+            .order_by(chat_size.desc())
             .limit(limit)
         ).all()
         for conversation_id, title, chat_size in conversation_rows:
@@ -456,6 +521,19 @@ def compute_user_storage_items(engine: Engine, username: str, limit: int = 20) -
 
     items.sort(key=lambda item: item.bytes, reverse=True)
     return items[:limit]
+
+
+def _chat_media_bytes() -> ScalarSelect[int]:
+    """Build the bytes of the files a conversation sent, for a per-chat query.
+
+    Returns:
+        A scalar subquery correlated on ``AgentConversationModel.id``.
+    """
+    return (
+        select(func.coalesce(func.sum(ChatMediaModel.byte_size), 0))
+        .where(ChatMediaModel.conversation_id == AgentConversationModel.id)
+        .scalar_subquery()
+    )
 
 
 def _tagging_session_items(session: Session, username: str, dialect_name: str, limit: int) -> list[StorageItem]:
@@ -594,7 +672,7 @@ def compute_user_storage_category_items(
                 if settings.embeddings_enabled
                 else literal(0)
             )
-            footprint = (func.coalesce(chat_bytes, 0) + embedding_bytes).label("chat_size")
+            footprint = (func.coalesce(chat_bytes, 0) + embedding_bytes + _chat_media_bytes()).label("chat_size")
             conversation_rows = session.execute(
                 select(AgentConversationModel.id, AgentConversationModel.title, footprint)
                 .join(AgentMessageModel, AgentMessageModel.conversation_id == AgentConversationModel.id)

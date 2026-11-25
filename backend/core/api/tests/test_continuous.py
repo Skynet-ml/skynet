@@ -30,10 +30,11 @@ from core.api import preflight_execution
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.errors import DomainError
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
-from core.api.routers import submissions
+from core.api.routers import execution_budgets, submissions
 from core.api.routers._helpers import automated_run_ids
 from core.api.routers.continuous import _HISTORY_LIMIT, create_continuous_router
 from core.api.tests.test_protected_submissions import _Gateway, _Harness, _SQLiteJobStore
+from core.billing import budgets
 from core.billing.budget_amounts import CENT_SCALE, budget_wallet_hold
 from core.billing.budgets import BudgetService
 from core.storage.models import (
@@ -42,6 +43,7 @@ from core.storage.models import (
     ContinuousPlanModel,
     ExecutionBudgetModel,
     JobModel,
+    SetupBillingPreferenceModel,
 )
 from core.worker import continuous
 
@@ -210,7 +212,11 @@ def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict
     """
     payload["target"]["repo"]["environment"] = {}
     return payload, SimpleNamespace(
-        snapshot=SimpleNamespace(archive=None), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+        snapshot=SimpleNamespace(archive=None),
+        secrets={},
+        box_sources={},
+        close_scorers=lambda: None,
+        cleanup=lambda: None,
     )
 
 
@@ -309,8 +315,21 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
         )
         session.commit()
 
-    def verify(gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str) -> dict:
-        """Run the measured fixture preflight instead of a sandbox."""
+    def verify(
+        gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...]
+    ) -> dict:
+        """Run the measured fixture preflight instead of a sandbox.
+
+        Args:
+            gateway: The fixture gateway with the measured runtime.
+            payload: The run request to check.
+            scope: The scope of the check, not used.
+            identity: The identity of the check.
+            unchecked: The roles with a user image, not used.
+
+        Returns:
+            The fixture check result.
+        """
         return fixture.verify(gateway.runtime, payload, identity)
 
     monkeypatch.setattr(preflight_execution, "ModelGateway", _Gateway)
@@ -323,6 +342,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
     monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
     monkeypatch.setattr(submissions, "validate_blackbox_payload", lambda payload: None)
     monkeypatch.setattr(submissions.settings, "usage_markup", 1.0)
+    # These fixtures size budgets in cents to test holds, so the one-lease floor of a run limit stays out of the way.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
     monkeypatch.setattr(submissions.settings, "worker_enabled", False)
     monkeypatch.setattr(submissions.settings, "submissions_paused", False)
     monkeypatch.setattr(submissions.settings, "max_concurrent_jobs_per_user", 0)
@@ -551,6 +572,59 @@ def test_a_run_without_a_repository_cannot_enable_a_plan(env: _Env) -> None:
     assert (refused.status_code, refused.json()["code"]) == (409, "continuous.not_eligible")
 
 
+@pytest.mark.parametrize(("cycle_budget", "status"), [(budgets.CHUNK_CENTS - 1, 409), (budgets.CHUNK_CENTS, 201)])
+def test_a_plan_with_a_run_budget_below_one_lease_is_refused(
+    env: _Env, monkeypatch: pytest.MonkeyPatch, cycle_budget: int, status: int
+) -> None:
+    """Submit refuses a run limit below one lease, so a plan with one would fail every check (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease.
+        cycle_budget: The plan's run budget.
+        status: The expected status.
+    """
+    optimization_id = _incumbent(env)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+
+    response = env.client.post(
+        f"/optimizations/{optimization_id}/continuous",
+        json={"schedule": WEEKLY, "permitted": {"reflection_model": True}, "cycle_budget_cents": cycle_budget},
+    )
+
+    assert response.status_code == status, response.text
+    if status == 409:
+        assert response.json()["code"] == "budget.below_minimum"
+        assert response.json()["params"] == {"minimum_total_cents": budgets.CHUNK_CENTS}
+        assert env.client.get(f"/optimizations/{optimization_id}/continuous").json()["plan"] is None
+    else:
+        assert response.json()["cycle_budget_cents"] == budgets.CHUNK_CENTS
+
+
+def test_a_local_plan_with_a_run_budget_below_one_lease_is_accepted(env: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local check's run gets an uncapped budget, so its plan has no lease floor (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease and turns local mode on.
+    """
+    optimization_id = _incumbent(env)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(submissions.settings, "local_mode", True)
+
+    enabled = env.client.post(
+        f"/optimizations/{optimization_id}/continuous",
+        json={
+            "schedule": WEEKLY,
+            "permitted": {"reflection_model": True},
+            "cycle_budget_cents": budgets.CHUNK_CENTS - 1,
+        },
+    )
+
+    assert enabled.status_code == 201, enabled.text
+    assert enabled.json()["cycle_budget_cents"] == budgets.CHUNK_CENTS - 1
+
+
 def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env) -> None:
     """A better model starts one funded run: the incumbent's request and cases, with only the models swapped."""
     source_id, _, cycle = _started(env)
@@ -570,6 +644,29 @@ def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env
     assert BudgetService(engine=env.store.engine).get(job["execution_budget_id"], "alice").total_cents == CYCLE_BUDGET
     assert cycle.execution_budget_id == job["execution_budget_id"]
     assert env.count(JobModel) == 2
+
+
+def test_an_incumbent_with_the_retired_stop_score_still_starts_a_cycle(env: _Env) -> None:
+    """A run stored with ``budget.stop_at_score`` still starts a check; the new request drops the key (SKY-691)."""
+    source_id = _incumbent(env)
+    stored = env.payload(source_id)
+    env.store.update_job(source_id, payload={**stored, "budget": {**stored["budget"], "stop_at_score": 0.9}})
+    _enable(env, source_id)
+    env.better()
+    env.sweep(_due(env))
+
+    cycle = env.cycles()[-1]
+    assert cycle.status == "optimizing", cycle.detail_code
+    assert "stop_at_score" not in env.payload(cycle.optimization_id)["budget"]
+
+
+@pytest.mark.parametrize("value", [0.9, None])
+def test_a_new_run_with_the_retired_stop_score_is_refused(env: _Env, value: float | None) -> None:
+    """``/blackbox/run`` refuses ``budget.stop_at_score``, also as null, and names ``[outcome] target`` (SKY-691)."""
+    response = env.client.post("/blackbox/run", json={**_incumbent_payload(), "budget": {"stop_at_score": value}})
+
+    assert response.status_code == 422
+    assert "[outcome] target" in response.text
 
 
 @pytest.mark.parametrize(
@@ -1473,6 +1570,47 @@ def test_the_sidebar_flags_every_run_of_a_plan(env: _Env) -> None:
     }
 
 
+def test_a_plan_cycle_budget_counts_its_setup_in_the_total(env: _Env) -> None:
+    """A plan cycle keeps the policy from before SKY-925, while the source run's budget does not."""
+    source_id = _incumbent(env)
+    _, _, cycle = _started(env)
+    service = BudgetService(engine=env.store.engine)
+
+    assert service.get(cycle.execution_budget_id, "alice").setup_in_total
+    assert not service.get(env.store.get_job(source_id)["execution_budget_id"], "alice").setup_in_total
+
+
+def _choose_setup_billing(env: _Env, *, from_wallet: bool) -> None:
+    """Store alice's setup billing setting.
+
+    Args:
+        env: Test environment.
+        from_wallet: Whether setup bills the wallet only.
+    """
+    with Session(env.store.engine) as session:
+        session.add(SetupBillingPreferenceModel(username="alice", from_wallet=from_wallet))
+        session.commit()
+
+
+def test_a_run_budget_counts_setup_in_its_total_when_the_owner_turns_wallet_billing_off(env: _Env) -> None:
+    """The setting off makes a new run's budget count setup against its limit."""
+    _choose_setup_billing(env, from_wallet=False)
+    source_id = _incumbent(env)
+    budget_id = env.store.get_job(source_id)["execution_budget_id"]
+    assert BudgetService(engine=env.store.engine).get(budget_id, "alice").setup_in_total
+
+
+def test_a_plan_cycle_counts_setup_in_its_total_whatever_the_owner_chose(env: _Env) -> None:
+    """A plan cycle ignores the setting: with wallet billing on, it still counts setup."""
+    _choose_setup_billing(env, from_wallet=True)
+    source_id = _incumbent(env)
+    _, _, cycle = _started(env)
+    service = BudgetService(engine=env.store.engine)
+
+    assert service.get(cycle.execution_budget_id, "alice").setup_in_total
+    assert not service.get(env.store.get_job(source_id)["execution_budget_id"], "alice").setup_in_total
+
+
 def test_a_plan_without_amounts_reuses_the_run_budget_and_has_no_monthly_limit(env: _Env) -> None:
     """With no amounts, each run gets the source run's budget and only the wallet gates it."""
     source_id = _incumbent(env)
@@ -1739,6 +1877,35 @@ def test_failing_checks_in_a_row_pause_the_plan_until_resumed(env: _Env) -> None
     assert resumed["next_check_at"] is not None
 
 
+def test_an_old_plan_with_a_run_budget_below_one_lease_stops_after_a_streak(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan enabled before the lease floor fails each check for free, then pauses as failing (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease size after the plan is enabled, as for a plan made before the floor.
+    """
+    source_id = _incumbent(env)
+    _enable(env, source_id, schedule=DAILY)
+    assert CYCLE_BUDGET < budgets.CHUNK_CENTS
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    env.better()
+    jobs, run_budgets = env.count(JobModel), env.count(ExecutionBudgetModel)
+    for _ in range(continuous.FAILURE_STREAK):
+        env.sweep(_due(env))
+
+    current = env.plan()
+    cycles = env.cycles()
+    assert (current.status, current.pause_reason, current.next_check_at) == ("paused", "failing", None)
+    assert [(c.status, c.detail_code) for c in cycles] == [
+        ("failed", "continuous.run_rejected")
+    ] * continuous.FAILURE_STREAK
+    assert all("below the minimum" in c.detail_params["reason"] for c in cycles)
+    assert (env.count(JobModel), env.count(ExecutionBudgetModel)) == (jobs, run_budgets)
+    assert env.sweep(datetime.now(UTC) + timedelta(days=30)) == []
+
+
 def test_a_waiting_check_is_reported_as_busy(env: _Env) -> None:
     """A check behind another check still running says it is busy, not waiting for a review."""
     source_id = _incumbent(env)
@@ -1967,3 +2134,23 @@ def test_a_repository_fingerprint_changes_with_the_commit_or_the_scorer(env: _En
     assert base is not None
     assert continuous.held_out_fingerprint(other_commit) != base
     assert continuous.held_out_fingerprint(other_scorer) != base
+
+
+@pytest.mark.parametrize(
+    ("best", "status", "code"),
+    [
+        (0.6, "awaiting_review", "continuous.review_ready"),
+        (0.695, "regressed", "continuous.review_within_margin"),
+        (INCUMBENT_SCORE, "regressed", "continuous.review_regressed"),
+        (0.8, "regressed", "continuous.review_regressed"),
+    ],
+)
+def test_a_minimize_review_wins_only_with_a_lower_score(env: _Env, best: float, status: str, code: str) -> None:
+    """For ``[metric] direction = "minimize"`` the candidate must score lower than the incumbent by the margin (SKY-750)."""
+    _source_id, _plan, cycle = _started(env)
+    _finish(env, cycle.optimization_id, result={**_result(0.9, best), "direction": "minimize"})
+
+    continuous.review_cycle(env.store, cycle.id)
+
+    [cycle] = env.cycles()
+    assert (cycle.status, cycle.detail_code) == (status, code)

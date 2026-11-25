@@ -9,15 +9,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import itertools
 import json
 import shlex
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 import pytest
 
+from core.billing.sbx_usage import BILLING_GRACE_MS
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -80,6 +84,7 @@ class FakeCloud:
     list_hides: int = 0
     hidden: set[str] = field(default_factory=set)
     delete_answers: list[int] = field(default_factory=list)
+    deleting_until: float = 0.0
     process_create_hangs: bool = False
     exec_hangs: bool = False
     credential_token: str = "runtime-token"
@@ -293,6 +298,8 @@ async def _management(request: httpx.Request) -> httpx.Response:
         return _not_found()
     if request.method == "GET":
         if box.status == "deleting":
+            if asyncio.get_running_loop().time() < CLOUD.deleting_until:
+                return _json(200, _sandbox(box))
             del CLOUD.boxes[box.id]
             return _not_found()
         if box.id in CLOUD.hidden:
@@ -579,7 +586,7 @@ async def test_cancelled_create_deletes_the_sandbox_it_made() -> None:
     assert len(CLOUD.calls("DELETE", "")) == 1
 
 
-@pytest.mark.parametrize("status", [400, 409, 422, 429])
+@pytest.mark.parametrize("status", [400, 402, 405, 409, 413, 415, 422, 429])
 async def test_definite_4xx_create_looks_for_no_sandbox(status: int) -> None:
     """Send no list and no delete after a 4xx create answer."""
     CLOUD.failures[("POST", "/v1/sandboxes")] = (status, "someCode")
@@ -591,8 +598,14 @@ async def test_definite_4xx_create_looks_for_no_sandbox(status: int) -> None:
     assert CLOUD.calls("DELETE", "") == []
 
 
-async def test_lost_create_with_no_sandbox_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+async def test_lost_create_with_no_sandbox_logs_a_warning(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Stop polling after ORPHAN_WAIT and log that the sandbox may leak."""
+    # The fixture's 1 s STOP_TIMEOUT also bounds the orphan poll. A loop that
+    # stalls past both deadlines runs both timeout callbacks in one pass, and
+    # the outer one then wins. Keep the production gap, so only ORPHAN_WAIT can end the poll.
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
     CLOUD.failures[("POST", "/v1/sandboxes")] = (503, "unavailable")
     with pytest.raises(SandboxTransientError):
         await SbxEnvironment(_spec()).start()
@@ -970,3 +983,868 @@ def test_factory_registers_sbx_for_development_only(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(factory.settings, "app_environment", "production")
     with pytest.raises(factory.ProductionNotAllowedError, match="sbx"):
         factory.load_provider("sbx")
+
+
+class FakeUsage:
+    """Record the calls a protected sbx box makes on its usage reservation."""
+
+    def __init__(self, budget: object, request: dict[str, Any], *, operation_key: str) -> None:
+        """Record what the box reserved.
+
+        Args:
+            budget: The budget that funds the box.
+            request: The usage request of the box.
+            operation_key: The ledger key of the box.
+        """
+        self.budget = budget
+        self.request = request
+        self.operation_key = operation_key
+        self.calls: list[str] = []
+        RESERVED.append(self)
+
+    def start_clock(self) -> None:
+        """Record the start of the create call."""
+        self.calls.append("start")
+
+    def confirm_created(self, uid: str, body: dict[str, Any]) -> None:
+        """Record the confirmed sandbox.
+
+        Args:
+            uid: The sandbox uid.
+            body: The create body.
+        """
+        self.calls.append("confirm")
+
+    def stop_clock(self) -> None:
+        """Record the confirmed delete."""
+        self.calls.append("stop")
+
+    def settle(self) -> None:
+        """Record a settlement."""
+        self.calls.append("settle")
+
+    def release(self) -> None:
+        """Record a release."""
+        self.calls.append("release")
+
+    def pending(self) -> None:
+        """Record a hold kept pending."""
+        self.calls.append("pending")
+
+
+RESERVED: list[FakeUsage] = []
+
+
+def _protected(**spec_fields: Any) -> SbxEnvironment:
+    """Return a protected box that reserves through ``FakeUsage``.
+
+    Args:
+        **spec_fields: Spec fields to replace.
+
+    Returns:
+        The box.
+    """
+    RESERVED.clear()
+    return SbxEnvironment(
+        _spec(operation_key="box-1", **spec_fields),
+        budget=object(),
+        usage_factory=FakeUsage,
+        **({"timeouts": PhaseTimeouts(start=0.2, setup=30, run=30, score=30)} if CLOUD.create_hangs else {}),
+    )
+
+
+def test_sbx_is_billable() -> None:
+    """Let the protected runtime pass sbx a budget."""
+    assert sbx.SBX_CAPABILITIES.billable is True
+
+
+def test_protected_box_needs_an_operation_key() -> None:
+    """Refuse a budget without a ledger key for the box."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        SbxEnvironment(_spec(), budget=object())
+
+
+async def test_deleted_box_settles_at_the_measured_runtime() -> None:
+    """Reserve the funded shape before the create, then settle after the confirmed delete."""
+    env = _protected()
+    await env.start()
+    await env.stop()
+    (usage,) = RESERVED
+    assert usage.request == {"cpus": 1, "memory_mib": 2048, "lifetime_ms": 300_000}
+    assert usage.operation_key == "box-1"
+    assert usage.calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_failed_delete_settles_at_the_whole_lifetime() -> None:
+    """Settle without a stop time when sbx refuses the delete, so the whole hold is charged."""
+    env = _protected()
+    await env.start()
+    CLOUD.failures[("DELETE", "")] = (500, "internal")
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_slow_accepted_delete_settles_at_the_measured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wait past STOP_TIMEOUT for an accepted delete, and settle at the measured runtime when the box goes."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.3
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_accepted_delete_that_never_ends_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle without a stop time when an accepted delete outlasts DELETE_WAIT too."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "DELETE_WAIT", 0.2)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = float("inf")
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_delete_in_flight_at_stop_timeout_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait for the box when STOP_TIMEOUT cuts a DELETE that sbx took, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+
+    async def slow_delete_answer(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and hold each DELETE answer past STOP_TIMEOUT.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        response = await _handle(request)
+        if request.method == "DELETE":
+            await asyncio.sleep(5)
+        return response
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(slow_delete_answer))
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.3
+    await env.stop()
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+def test_protected_box_must_run_within_half_the_billing_grace() -> None:
+    """Cap the start limit of a protected box at half the billing grace, and keep a smaller one."""
+    half = BILLING_GRACE_MS / 2000
+    assert SbxEnvironment(_spec(operation_key="box-1"), budget=object())._start_limit == half
+    long_start = PhaseTimeouts(start=half * 4, setup=30, run=30, score=30)
+    assert SbxEnvironment(_spec(operation_key="box-1"), timeouts=long_start, budget=object())._start_limit == half
+    short_start = PhaseTimeouts(start=5, setup=30, run=30, score=30)
+    assert SbxEnvironment(_spec(operation_key="box-1"), timeouts=short_start, budget=object())._start_limit == 5
+    assert SbxEnvironment(_spec())._start_limit is None
+
+
+async def test_uncancellable_raises_the_cancel_when_the_call_fails_after_it() -> None:
+    """Raise the cancel, not the call's own error, when the thread fails after a cancel."""
+    release = threading.Event()
+
+    def failing_call() -> None:
+        """Fail once the test lets the thread go on.
+
+        Raises:
+            ValueError: Always.
+        """
+        release.wait(5)
+        raise ValueError("late failure")
+
+    task = asyncio.ensure_future(sbx._uncancellable(asyncio.ensure_future(asyncio.to_thread(failing_call))))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_stop_waits_for_a_lagging_list_before_it_counts_a_box_deleted() -> None:
+    """Delete, then settle at the measured runtime, a box that the list shows only after a lag."""
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    CLOUD.hidden.add(box.id)
+    CLOUD.list_hides = 3
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_box_that_never_shows_for_the_delete_settles_the_whole_lifetime() -> None:
+    """Settle without a stop time when no DELETE went out because the box never showed."""
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    CLOUD.hidden.add(box.id)
+    CLOUD.list_hides = 10**6
+    await env.stop()
+    assert CLOUD.calls("DELETE", "") == []
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+def _hide_boxes() -> None:
+    """Hide every box from the read and the list, as list lag does."""
+    for box in CLOUD.boxes.values():
+        box.status = "running"
+        CLOUD.hidden.add(box.id)
+    CLOUD.list_hides = 10**6
+
+
+def _hide_after_delete(monkeypatch: pytest.MonkeyPatch, answer: Callable[[], httpx.Response] | None) -> None:
+    """Hide the box from the read and the list after its first DELETE answer.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        answer: Makes the DELETE answer or raises, or ``None`` to let the
+            fake answer.
+    """
+
+    async def hiding(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and hide every box after a DELETE.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method != "DELETE":
+            return await _handle(request)
+        if answer is None:
+            response = await _handle(request)
+            _hide_boxes()
+            return response
+        CLOUD.requests.append(request)
+        # Hide first, so an answer that raises still leaves the box hidden.
+        _hide_boxes()
+        return answer()
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(hiding))
+
+
+async def test_box_missing_after_a_412_delete_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle without a stop time when the box goes missing after sbx refused the DELETE with a 412."""
+    _hide_after_delete(monkeypatch, None)
+    env = _protected()
+    await env.start()
+    CLOUD.delete_answers = [412]
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_box_missing_after_a_404_delete_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle without a stop time when the DELETE answers 404 and the box then goes missing."""
+    _hide_after_delete(monkeypatch, _not_found)
+    env = _protected()
+    await env.start()
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_box_missing_after_a_5xx_delete_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle without a stop time when the DELETE answers 500 and the box then goes missing."""
+    _hide_after_delete(monkeypatch, lambda: _json(500, {"code": "internal"}))
+    env = _protected()
+    await env.start()
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_box_missing_after_a_delete_transport_error_settles_the_whole_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settle without a stop time when the DELETE fails in transport and the box then goes missing."""
+
+    def broken() -> httpx.Response:
+        """Fail the DELETE in transport.
+
+        Raises:
+            httpx.ReadError: Always.
+        """
+        raise httpx.ReadError("connection reset")
+
+    _hide_after_delete(monkeypatch, broken)
+    env = _protected()
+    await env.start()
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_box_missing_after_a_delete_cut_in_flight_settles_the_whole_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settle without a stop time when STOP_TIMEOUT cuts a DELETE and the box never shows again."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+
+    async def hanging_delete(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and hide the box while each DELETE hangs.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method != "DELETE":
+            return await _handle(request)
+        CLOUD.requests.append(request)
+        _hide_boxes()
+        await asyncio.sleep(5)
+        return _json(202, {})
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(hanging_delete))
+    env = _protected()
+    await env.start()
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+def test_delete_wait_fits_in_the_delete_half_of_the_grace() -> None:
+    """Keep the longest delete wait within the half of the billing grace left for the delete."""
+    assert sbx.STOP_TIMEOUT + sbx.DELETE_WAIT <= BILLING_GRACE_MS / 2000
+
+
+async def test_box_deleting_from_another_delete_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send no DELETE for a box that another delete already removes, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    box.status = "deleting"
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.1
+    await env.stop()
+    assert CLOUD.calls("DELETE", "") == []
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_slow_delete_by_another_caller_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait past STOP_TIMEOUT for a box that another delete removes, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    box.status = "deleting"
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.3
+    await env.stop()
+    assert CLOUD.calls("DELETE", "") == []
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_accepted_delete_with_a_late_running_read_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep polling when sbx shows the box as running after a 202 DELETE, then settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    # Two reads: the old code ended the delete on the first one and the
+    # follow-up wait on the second.
+    running_reads = [2]
+
+    async def lagging_status(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and show the box as running for two reads after the DELETE.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        response = await _handle(request)
+        if request.method == "DELETE":
+            for box in CLOUD.boxes.values():
+                box.status = "running"
+        elif request.method == "GET" and CLOUD.calls("DELETE", "") and running_reads[0] > 0:
+            running_reads[0] -= 1
+            if running_reads[0] == 0:
+                for box in CLOUD.boxes.values():
+                    box.status = "deleting"
+        return response
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(lagging_status))
+    env = _protected()
+    await env.start()
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_running_box_after_a_delete_cut_in_flight_settles_the_whole_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Poll a running box for DELETE_WAIT after STOP_TIMEOUT cuts the DELETE, then settle the whole lifetime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "DELETE_WAIT", 0.3)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+
+    async def hanging_delete(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and hang each DELETE with the box left running.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method != "DELETE":
+            return await _handle(request)
+        CLOUD.requests.append(request)
+        await asyncio.sleep(5)
+        return _json(202, {})
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(hanging_delete))
+    env = _protected()
+    await env.start()
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await env.stop()
+    elapsed = loop.time() - began
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+    # The old code gave up on the first running read; the stop must use the
+    # DELETE_WAIT and still end within its budget.
+    assert elapsed >= sbx.DELETE_WAIT
+    assert elapsed < sbx.STOP_TIMEOUT + sbx.DELETE_WAIT + 0.5
+
+
+async def test_failed_reads_during_a_slow_delete_settle_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep polling through failed reads after a 202 DELETE, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    # Two reads: the first ends the delete, the second is in the follow-up wait.
+    failing_reads = [2]
+
+    async def flaky_reads(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and fail two reads after the DELETE.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method == "GET" and CLOUD.calls("DELETE", "") and failing_reads[0] > 0:
+            failing_reads[0] -= 1
+            CLOUD.requests.append(request)
+            return _json(500, {"code": "internal"})
+        return await _handle(request)
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(flaky_reads))
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.1
+    await env.stop()
+    assert failing_reads == [0]
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_not_found_delete_of_a_listed_box_is_sent_at_most_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send the DELETE once more after a notFound 404, not on every poll, and settle the whole lifetime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    CLOUD.failures[("DELETE", "")] = (404, "notFound")
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 2
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
+async def test_delete_sets_no_sent_flag_for_a_box_another_delete_removes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave ``sent`` clear, and mark the delete on its way, for a box that is already deleting."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = SbxEnvironment(_spec())
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    box.status = "deleting"
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.1
+    state = sbx._DeleteState()
+    management, path = env._management, env._path
+    assert management is not None
+    assert path is not None
+    await sbx._delete(management, path, env._uid, state)
+    assert not state.sent
+    assert state.on_its_way
+    assert CLOUD.boxes == {}
+    await env.stop()
+
+
+async def test_failed_start_settles_the_sandbox_it_made() -> None:
+    """Settle a box whose start failed after sbx made the sandbox."""
+    CLOUD.final_status = "failed"
+    env = _protected()
+    with pytest.raises(SandboxError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 405, 409, 413, 415, 422, 429])
+async def test_refused_create_releases_the_hold(status: int) -> None:
+    """Release the hold when sbx refuses the create, as it made no sandbox."""
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (status, "someCode")
+    env = _protected()
+    with pytest.raises(SandboxError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "release"]
+
+
+async def test_lost_create_found_late_settles() -> None:
+    """Settle a box whose create answer was lost once the list shows and the delete removes it."""
+    CLOUD.create_fails = 503
+    CLOUD.list_hides = 2
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "stop", "settle"]
+
+
+async def test_lost_create_with_no_sandbox_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the hold pending when no one can say if a sandbox exists."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (503, "unavailable")
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert RESERVED[0].calls == ["start", "pending"]
+
+
+async def test_cancelled_create_settles_the_sandbox_it_made() -> None:
+    """Settle a cancelled create once the stop finds and deletes its sandbox."""
+    CLOUD.create_hangs = True
+    CLOUD.list_hides = 2
+    env = _protected()
+    task = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "stop", "settle"]
+
+
+async def test_cancel_during_the_reservation_releases_it() -> None:
+    """Release a reservation that finished after a cancel, and send no create."""
+    reserving = asyncio.Event()
+    finish = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def slow_factory(budget: object, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Reserve only after the test cancels the start.
+
+        Args:
+            budget: The budget that funds the box.
+            request: The usage request of the box.
+            operation_key: The ledger key of the box.
+
+        Returns:
+            The recorded reservation.
+        """
+        loop.call_soon_threadsafe(reserving.set)
+        asyncio.run_coroutine_threadsafe(finish.wait(), loop).result()
+        return FakeUsage(budget, request, operation_key=operation_key)
+
+    RESERVED.clear()
+    env = SbxEnvironment(_spec(operation_key="box-1"), budget=object(), usage_factory=slow_factory)
+    task = asyncio.ensure_future(env.start())
+    await reserving.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert CLOUD.calls("POST", "/v1/sandboxes") == []
+    assert RESERVED[0].calls == ["release"]
+
+
+async def test_measured_runtime_ends_before_the_clients_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the clock at the confirmed delete, so slow client closes are not billed."""
+    env = _protected()
+    await env.start()
+    close = httpx.AsyncClient.aclose
+
+    async def recording_close(client: httpx.AsyncClient) -> None:
+        """Record the close, then close the client.
+
+        Args:
+            client: The client to close.
+        """
+        RESERVED[0].calls.append("close")
+        await close(client)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", recording_close)
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle", "close", "close"]
+
+
+async def test_cancel_during_the_confirm_waits_for_it_before_the_settle() -> None:
+    """Finish the confirm thread before the teardown settles, so the two never race."""
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    class SlowConfirm(FakeUsage):
+        """Hold the confirm until the test cancels the start."""
+
+        def confirm_created(self, uid: str, body: dict[str, Any]) -> None:
+            """Wait for the test, then record the confirm.
+
+            Args:
+                uid: The sandbox uid.
+                body: The create body.
+            """
+            entered.set()
+            proceed.wait(5)
+            super().confirm_created(uid, body)
+
+    RESERVED.clear()
+    env = SbxEnvironment(_spec(operation_key="box-1"), budget=object(), usage_factory=SlowConfirm)
+    task = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_timed_out_create_answer_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat a 408 create answer as unknown: look for the sandbox and keep the hold."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (408, "requestTimeout")
+    env = _protected()
+    with pytest.raises(SandboxError):
+        await env.start()
+    assert CLOUD.calls("GET", "/v1/sandboxes")
+    assert RESERVED[0].calls == ["start", "pending"]
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout])
+async def test_failed_connect_on_create_releases_the_hold(
+    monkeypatch: pytest.MonkeyPatch, error: type[httpx.TransportError]
+) -> None:
+    """Release the hold when the create never reached sbx, and look for no sandbox."""
+
+    async def unreachable_create(request: httpx.Request) -> httpx.Response:
+        """Fail the connection of the create, and serve every other call.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method == "POST" and request.url.path.endswith("/v1/sandboxes"):
+            raise error("unreachable", request=request)
+        return await _handle(request)
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(unreachable_create))
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert CLOUD.calls("GET", "/v1/sandboxes") == []
+    assert RESERVED[0].calls == ["start", "release"]
+
+
+async def test_cancel_during_the_client_closes_still_settles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle the bill before the client closes, so a cancel there cannot skip it."""
+    env = _protected()
+    await env.start()
+
+    async def cancelled_close(client: httpx.AsyncClient) -> None:
+        """Act as a close that a second cancel interrupts.
+
+        Args:
+            client: The client to close.
+
+        Raises:
+            asyncio.CancelledError: Always.
+        """
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", cancelled_close)
+    with pytest.raises(asyncio.CancelledError):
+        await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_cancel_while_the_bill_closes_still_closes_the_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Close both clients when a cancel hits the stop while the settle thread runs."""
+    env = _protected()
+    await env.start()
+    settling = threading.Event()
+    release = threading.Event()
+    closed: list[httpx.AsyncClient] = []
+
+    def slow_settle(self: FakeUsage) -> None:
+        """Hold the settle thread until the test cancels the stop.
+
+        Args:
+            self: The fake usage.
+        """
+        settling.set()
+        release.wait(5)
+        self.calls.append("settle")
+
+    async def record_close(client: httpx.AsyncClient) -> None:
+        """Record a client close.
+
+        Args:
+            client: The client to close.
+        """
+        closed.append(client)
+
+    monkeypatch.setattr(FakeUsage, "settle", slow_settle)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", record_close)
+    stopping = asyncio.ensure_future(env.stop())
+    await asyncio.to_thread(settling.wait, 5)
+    assert env._stop_task is not None
+    env._stop_task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+    assert len(closed) == 2
+
+
+async def _cancel_a_hanging_create(env: SbxEnvironment) -> asyncio.Future[None]:
+    """Start the box with a create that hangs, then cancel the start.
+
+    Args:
+        env: The box.
+
+    Returns:
+        The cancelled start task, which runs the stop.
+    """
+    CLOUD.create_hangs = True
+    task = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    return task
+
+
+async def test_found_orphan_whose_delete_fails_settles_the_whole_lifetime() -> None:
+    """Settle without a stop time when the stop finds the lost sandbox but cannot delete it."""
+    CLOUD.failures[("DELETE", "")] = (500, "internal")
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert RESERVED[0].calls == ["start", "settle"]
+
+
+async def test_found_orphan_whose_accepted_delete_is_slow_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait past STOP_TIMEOUT for the accepted delete of a found lost sandbox, then settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.6
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "stop", "settle"]
+
+
+async def test_found_orphan_with_an_invalid_name_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle, not keep pending, a lost sandbox the stop found when its listed name is invalid."""
+
+    async def bad_names(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and give each listed sandbox an invalid name.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        response = await _handle(request)
+        if request.method == "GET" and request.url.path == "/sandboxes/v1/sandboxes":
+            page = json.loads(response.content)
+            for sandbox in page["sandboxes"]:
+                sandbox["name"] = "other/x"
+            return _json(response.status_code, page)
+        return response
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(bad_names))
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert CLOUD.calls("DELETE", "") == []
+    assert RESERVED[0].calls == ["start", "settle"]
+
+
+async def test_orphan_not_found_after_a_cancelled_create_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the hold pending when the list never shows the sandbox of a cancelled create."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    CLOUD.list_hides = 10**6
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert CLOUD.calls("DELETE", "") == []
+    assert RESERVED[0].calls == ["start", "pending"]
+
+
+async def test_cancel_during_a_found_orphan_delete_settles_the_whole_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settle, not keep pending, a lost sandbox the stop found when a cancel hits its delete."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    deleting = asyncio.Event()
+
+    async def hanging_delete(request: httpx.Request) -> httpx.Response:
+        """Hang every delete, and serve every other call.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method == "DELETE":
+            deleting.set()
+            await asyncio.sleep(60)
+        return await _handle(request)
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(hanging_delete))
+    env = _protected()
+    task = await _cancel_a_hanging_create(env)
+    await asyncio.wait_for(deleting.wait(), 5)
+    assert env._stop_task is not None
+    env._stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with contextlib.suppress(asyncio.CancelledError):
+        await env._stop_task
+    assert RESERVED[0].calls == ["start", "settle"]

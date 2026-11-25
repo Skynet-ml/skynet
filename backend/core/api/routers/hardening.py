@@ -1,4 +1,4 @@
-"""The caller's metric-hardening jobs: start, read, review exploits, decide fixes, retry.
+"""The caller's metric-hardening jobs: start, read, review exploits, decide fixes, stop, retry.
 
 These routes only keep job state. The worker (SKY-360) runs the attack loop
 from ``core.service_gateway.optimization.blackbox.hardening`` and writes each
@@ -37,6 +37,7 @@ from ...service_gateway.optimization.blackbox.hardening import (
     new_job,
     record_verdict,
     retry,
+    stop,
 )
 from ...worker.hardening_runner import finish_hardening_budget
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -202,7 +203,7 @@ def create_hardening_router(*, job_store) -> APIRouter:
         """Create a job that waits for its preflight.
 
         Args:
-            body: The draft, rounds, round cap, models, view, repository target and budget.
+            body: The draft, rounds, round cap, models, view, sessions, repository target and budget.
             user: Authenticated caller.
 
         Returns:
@@ -239,6 +240,7 @@ def create_hardening_router(*, job_store) -> APIRouter:
                 rounds=body.rounds,
                 round_cap_usd=body.round_cap_usd,
                 view=body.view,
+                parallel_sessions=body.parallel_sessions,
             ).model_copy(
                 update={
                     "target": None if body.target is None else body.target.model_dump(mode="json"),
@@ -344,13 +346,32 @@ def create_hardening_router(*, job_store) -> APIRouter:
 
         Args:
             job_id: The job.
-            body: Whether the caller approves the fix.
+            body: Whether the caller approves the fix, and a note for a new draft.
             user: Authenticated caller.
 
         Returns:
             The job after the decision.
         """
-        return _change(user.username, job_id, lambda job: decide_fix(job, approve=body.approve))
+        return _change(user.username, job_id, lambda job: decide_fix(job, approve=body.approve, note=body.note))
+
+    @router.post(
+        "/hardening/jobs/{job_id}/stop",
+        response_model=HardeningJob,
+        operation_id="stop_hardening_job",
+        summary="Stop a hardening job that waits for the user",
+        tags=["agent"],
+    )
+    def stop_hardening_job(job_id: str, user: AuthenticatedUserDep) -> HardeningJob:
+        """End a job that waits for a review or a fix decision as a clean stop.
+
+        Args:
+            job_id: The job.
+            user: Authenticated caller.
+
+        Returns:
+            The stopped job.
+        """
+        return _change(user.username, job_id, stop)
 
     @router.post(
         "/hardening/jobs/{job_id}/retry",

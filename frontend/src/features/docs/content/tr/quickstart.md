@@ -55,26 +55,27 @@ Belirli bir motor seçmek için [Motorlar](/docs/concepts/engines) sayfasını o
 
 ## 5. Metrik ve çalıştırma
 
-Son adım **Metrik ve çalıştırma**'dır. Asistan puanlayıcıyı sizin için yazar. Onu düzenleyebilirsiniz. Puanlayıcı, deponun bir sürümünün yolunu ve bir vakayı alır:
+Son adım **Metrik ve çalıştırma**'dır. Asistan puanlayıcıyı ve `ascent.toml` dosyasını sizin için yazar. Onları düzenleyebilirsiniz. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı, giriş noktasının çıktısını ve vakayı alır:
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
-    want = case["expected"]["label"].strip().lower()
-    if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+[run]
+entry = "serve.py:serve"
 ```
 
-`case["input"]` bir vakanın Girdi sütunlarını tutar. `case["expected"]` Çıktı sütununu, sütun adıyla anahtarlanmış olarak tutar. Depoda `def serve(input)` içeren bir `serve.py` dosyası vardır. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için aynı fonksiyonu kullanır.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
+    want = case["expected"]["label"].strip().lower()
+    if got == want:
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
+```
 
-Ardından kontrolü çalıştırın. Kontrol, kurulumunuzu ve puanlayıcınızı sandbox içinde başlangıç sürümü üzerinde çalıştırır. Çalıştırmayı ancak kontrol geçtikten sonra başlatabilirsiniz.
+`case["input"]` bir vakanın Girdi sütunlarını tutar. `case["expected"]` Çıktı sütununu, sütun adıyla anahtarlanmış olarak tutar. Depoda `def serve(input)` içeren bir `serve.py` dosyası vardır. `[run]` giriş noktası onu çağırır ve `output` onun döndürdüğü değerdir. Puanlayıcı, yalnızca metrik dosyalarınızı tutan ve sürüm kodu olmayan ayrı bir sandbox içinde çalışır, bu yüzden `serve.py` dosyasını içe aktaramaz. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için aynı fonksiyonu kullanır.
+
+Ardından kontrolü çalıştırın. Kontrol, kurulumunuzu, `[run]` giriş noktasını ve puanlayıcınızı sandbox içinde başlangıç sürümü üzerinde çalıştırır. Çalıştırmayı ancak kontrol geçtikten sonra başlatabilirsiniz.
 
 ## 6. Başlatın ve izleyin
 

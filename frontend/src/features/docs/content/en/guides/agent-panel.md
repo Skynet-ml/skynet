@@ -88,10 +88,10 @@ You can attach files to a message. Each file can be up to 20 MB. You can attach 
 To upload a dataset through the agent:
 
 1. Attach a CSV, JSON or Excel file.
-2. Check the upload card. It shows the columns of the file.
-3. Set the column roles on the card, then confirm.
+2. While the file reads, a "Reading the file…" notice shows.
+3. The file waits in your message as a file card. Send the message.
 
-If the agent cannot read the file, the card shows "Couldn't read the file. Use a CSV, JSON, or XLSX file."
+If the file cannot be read, a notice shows "Couldn't read the file. Use a CSV, JSON, or XLSX file."
 
 For file rules, see [Prepare a dataset](/docs/guides/datasets).
 
@@ -109,7 +109,7 @@ To set a default model for new chats, open **Settings** > **Agent panel** > **De
 
 ### Cost
 
-Agent chats on Skynet credits use your balance. If your balance is empty, the panel shows "Your balance is empty. Add funds to keep chatting with the agent." For prices, read [Billing](/docs/concepts/billing).
+Agent chats on Skynet credits use your balance. If your available balance is too low, the panel shows "Your available balance is too low. Active runs can hold part of your balance." Select the wallet button (**Add funds**) to open the **Billing** settings. For prices, read [Billing](/docs/concepts/billing).
 
 ## Tips
 

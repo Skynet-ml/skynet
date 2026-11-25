@@ -2,26 +2,29 @@ Skynet همان Optimize Anything است: هر اجرا یک مخزن را به�
 
 ## قرارداد مشترک
 
-هر اجرا یک مخزن و یک امتیازدهنده دارد. امتیازدهنده یک تابع Python است که مسیر یک نسخه از مخزن و یک مورد را می‌گیرد.
+هر اجرا یک مخزن، یک فایل `ascent.toml` با یک `entry` در `[run]` یا یک مرحلهٔ `[target.<name>]`، و یک امتیازدهنده دارد. `entry` بخش `[run]` یک نسخه از مخزن را روی یک مورد اجرا می‌کند. امتیازدهنده یک تابع Python است که خروجی `entry` و مورد را می‌گیرد.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path` پوشهٔ یک نسخه از مخزن است، پس از اجرای دستور راه‌اندازی.
-- `case` یک dict است. `case["input"]` فیلدهای ورودی یک مورد را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا وقتی مورد مقداری ندارد `None` است.
-- `score` یک جفت برمی‌گرداند: یک عدد، و یک dict با یک رشتهٔ `"feedback"`.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-مخزن در ریشهٔ خود یک فایل `serve.py` با `def serve(input)` دارد. امتیازدهنده می‌تواند آن را فراخوانی کند، و Skynet پس از اجرا با آن بهترین نسخه را سرویس می‌دهد.
+- `output` همان چیزی است که `entry` بخش `[run]` برای این مورد برگرداند.
+- `case` یک dict است. `case["input"]` فیلدهای ورودی یک مورد را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا وقتی مورد مقداری ندارد `None` است.
+- `repo_path` پوشه‌ای است که فقط فایل‌های معیار شما را نگه می‌دارد.
+- `score` یک شیء برمی‌گرداند: یک عدد زیر `"score"`، و یک رشتهٔ `"feedback"` اختیاری.
+
+مخزن در ریشهٔ خود یک فایل `serve.py` با `def serve(input)` دارد. `entry` بخش `[run]` آن را در جعبهٔ ایزولهٔ خودش فراخوانی می‌کند. Skynet پس از اجرا با آن بهترین نسخه را سرویس می‌دهد.
+
+امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه اجرا می‌شود. این جعبه فقط فایل‌های معیار شما را دارد و هیچ کدی از نسخه ندارد، پس امتیازدهنده نمی‌تواند `serve.py` را import کند. نسخه را فقط از طریق `output`، یا از طریق `call()` به یک مرحلهٔ `[target.<name>]` می‌بیند. تابع `call` را با `from openascent import call` import کنید. بدون یک `entry` در `[run]` یا یک مرحلهٔ `[target.<name>]`، Skynet فایل `ascent.toml` را رد می‌کند.
 
 > [!NOTE]
 > عامل کدنویسی که نسخه‌ها را می‌نویسد نمی‌تواند کد منبع امتیازدهنده، مقدارهای مورد انتظار یا رازهای اجرا را ببیند.
@@ -34,9 +37,9 @@ def score(repo_path, case):
 
 | متغیر                | چه چیزی را نگه می‌دارد                                     |
 | -------------------- | ---------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | نشانی دروازه. `APP_GATEWAY_URL` همان مقدار را نگه می‌دارد. |
-| `APP_API_KEY`        | یک توکن فقط برای این اجرا. کلید ارائه‌دهنده نیست.           |
-| `APP_MODEL`          | نام مدلی که باید بفرستید. این مدل امتیازدهندهٔ اجراست.      |
+| `OPENAI_BASE_URL`    | نشانی دروازه. `ASCENT_MODEL_URL` همان مقدار را نگه می‌دارد. |
+| `ASCENT_MODEL_KEY`   | یک توکن فقط برای این اجرا. کلید ارائه‌دهنده نیست.           |
+| `ASCENT_MODEL`       | نام مدلی که باید بفرستید. این مدل امتیازدهندهٔ اجراست.      |
 | `ANTHROPIC_BASE_URL` | نشانی دروازه برای SDKهای Anthropic.                         |
 
 ```python tab="pipeline.py"
@@ -44,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
@@ -58,7 +61,7 @@ def label(message):
 - فراخوانی‌هایی که از کلیدهای Skynet استفاده می‌کنند از بودجهٔ اجرا اندازه‌گیری و کسر می‌شوند.
 - با کلید خودتان (BYOK)، فراخوانی به کلید ارائه‌دهندهٔ شما می‌رود. Skynet هیچ کارمزد مدلی دریافت نمی‌کند.
 - دروازه درخواست‌ها برای هر مدل دیگری را رد می‌کند.
-- رازهای اجرا به‌صورت متغیرهای محیطی به کد و امتیازدهندهٔ شما می‌رسند. نام متغیر همان نام راز است. Skynet مقدار رازها را در خروجی پنهان می‌کند.
+- کد و امتیازدهندهٔ شما رازهای اجرا را به‌صورت متغیرهای محیطی نمی‌گیرند. یک راز فقط از راه یک جدول `[services.<name>]` که نقش آن را در `[run] services` یا `[metric] services` فهرست می‌کند، یا از راه یک سرور در فایل `mcp` آن نقش، به آن نقش می‌رسد. راز را در `headers` جدول به‌صورت `${NAME}` بنویسید. Skynet راز را بیرون از محیط اجرای ایزوله اضافه می‌کند و مقدار رازها را در خروجی پنهان می‌کند.
 
 محیط اجرای ایزوله هیچ دسترسی شبکهٔ دیگری ندارد.
 

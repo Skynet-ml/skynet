@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` は、リクエストの入力フィールドの dict です。
 - 戻り値は JSON にシリアライズできる必要があります。dict は `outputs` になります。それ以外の値は `{"output": value}` になります。
-- `serve.py` は、ヘルパーモジュール `skynet` の `llm` でモデルを呼び出せます。実行のシークレットは受け取りません。
+- `serve.py` は、ヘルパーモジュール `openascent` の `llm` でモデルを呼び出せます。実行のシークレットは受け取りません。
 
 Skynet は、実行と同じ保護されたサンドボックスで最良のバージョンを実行します。**使用状況** タブには 2 つの部分があります。
 
@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 レスポンスには、`outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged`、`budget` が含まれます。
 
 > [!TIP]
-> 各呼び出しは個別に、呼び出し元の残高から請求されます。`max_cost_cents` は、この 1 回の呼び出しにかけられる最大コストをセント単位で設定します。同じ `Idempotency-Key` を再度送信しても、Skynet はその呼び出しを再度請求しません。
+> 各呼び出しは個別に、呼び出し元の残高から請求されます。`max_cost_cents` は省略可能です。この 1 回の呼び出しで許容する最大額をセント単位で記録します。呼び出しの上限は残高で決まります。同じ `Idempotency-Key` を再度送信しても、Skynet はその呼び出しを再度請求しません。
 
 認証とその他のエンドポイントについては、[API](/docs/api) をお読みください。
 

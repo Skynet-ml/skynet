@@ -46,14 +46,24 @@ import { msg } from "@/shared/lib/messages";
 
 import { emptyModelConfig } from "../../constants";
 import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
-import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
-import { DEFAULT_PROPOSER, proposerKnobs, usesNativeProposer } from "../../lib/engine-contract";
+import { useModelCatalog } from "../../hooks/use-submit-wizard-data";
+import {
+  DEFAULT_PROPOSER,
+  HARNESS_DEFAULT_PICK,
+  harnessPickerValue,
+  pickHarness,
+  proposerHeader,
+  proposerKnobs,
+  usesNativeProposer,
+} from "../../lib/engine-contract";
 import { keepEconomy } from "../../lib/model-config";
+import { metricCommandText } from "../../lib/repo-run";
 import {
   DEFAULT_SHINKA_SETTINGS,
   MAX_EXTRA_OPTIMIZATION_MODELS,
   takesExtraModels,
 } from "../../lib/shinka-settings";
+import { fileProposerCommand } from "../../lib/wizard-v2";
 import { Disclosure } from "../Disclosure";
 import { ModelConfigModal } from "../ModelConfigModal";
 import { MaxToolCallsField } from "../blackbox/MaxToolCallsField";
@@ -81,12 +91,11 @@ type Editing = {
  * metric model lives with the metric in step 4.
  */
 export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
-  const { state, patchOptimizer, guided, runSource, sandboxProviders } =
+  const { state, patchOptimizer, guided, runSource, sandboxProviders, proposerCommand } =
     useWizardV2Shell();
   const t = (key: string) => v2Msg(key, guided);
   const level = useExperienceLevel();
   const catalog = useModelCatalog(runSource);
-  const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
   const [editing, setEditing] = React.useState<Editing | null>(null);
   const [proposerOpen, setProposerOpen] = React.useState(() =>
     defaultOpen("wizard.optimizer_settings", level),
@@ -106,8 +115,20 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
   const reflectionLabel = t("submit.v2.optimizer.models.reflection.label");
   const updateProposer = (patch: Partial<typeof proposer>) =>
     patchOptimizer({ proposer: { ...proposer, ...patch } });
-  // The proposer harness runs the reflection model, so it limits the effort.
-  const limitingHarness = effortHarness(proposer, nativeProposer);
+  // Until the user picks a harness, the request sends none: the contract
+  // file's [proposer] entry runs if it names one, else the server default
+  // (SKY-753). The effort limit assumes the default harness, but a file's
+  // command is no built-in agent, so no limit applies to it (SKY-771).
+  const fileCommand = fileProposerCommand(proposer, proposerCommand, choice);
+  // The first picker item shows the file's command whenever the engine runs it.
+  const offeredCommand = fileProposerCommand({}, proposerCommand, choice);
+  const limitingHarness = fileCommand
+    ? null
+    : effortHarness(
+        { ...proposer, harness: proposer.harness ?? DEFAULT_PROPOSER.harness },
+        nativeProposer,
+      );
+  const header = proposerHeader(proposer);
   const fitHarness = (config: ModelConfig) =>
     limitingHarness ? keepHarnessEffort(config, limitingHarness) : config;
   // A harness, host CLI or engine change can leave a stored effort the new
@@ -280,8 +301,16 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
           onOpenChange={setProposerOpen}
           trailing={
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <HarnessLogo harness={proposer.harness} size={14} />
-              {harnessLabel(proposer.harness)}
+              {fileCommand ? (
+                t("submit.v2.optimizer.proposer.from_file")
+              ) : "harness" in header ? (
+                <>
+                  <HarnessLogo harness={header.harness} size={14} />
+                  {harnessLabel(header.harness)}
+                </>
+              ) : (
+                t(header.labelKey)
+              )}
             </span>
           }
           alwaysShowTrailing
@@ -293,16 +322,39 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
               tip="submit.blackbox.proposer"
             >
               <Select
-                value={proposer.harness}
+                value={fileCommand ? HARNESS_DEFAULT_PICK : harnessPickerValue(proposer)}
                 onValueChange={(value) => {
-                  const harness = value as BlackboxHarness;
-                  patchOptimizer({ proposer: { ...proposer, harness } });
+                  patchOptimizer({
+                    proposer: pickHarness(
+                      proposer,
+                      value as BlackboxHarness | typeof HARNESS_DEFAULT_PICK,
+                    ),
+                  });
                 }}
               >
                 <SelectTrigger id="v2-proposer-harness" className={cn("w-full", TOUCH_FIELD)}>
-                  <SelectValue />
+                  {/* The h-9 trigger shows one line; the command line stays in the open list. */}
+                  <SelectValue placeholder={t("submit.v2.optimizer.proposer.harness_default")}>
+                    {fileCommand ? t("submit.v2.optimizer.proposer.from_file") : undefined}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
+                  {/* With a [proposer] entry, the first item is the file's command (SKY-771). */}
+                  <SelectItem value={HARNESS_DEFAULT_PICK}>
+                    {offeredCommand ? (
+                      <span className="flex min-w-0 flex-col items-start">
+                        <span>{t("submit.v2.optimizer.proposer.from_file")}</span>
+                        <bdi
+                          dir="ltr"
+                          className="max-w-full truncate font-mono text-xs text-muted-foreground"
+                        >
+                          {metricCommandText(offeredCommand)}
+                        </bdi>
+                      </span>
+                    ) : (
+                      t("submit.v2.optimizer.proposer.harness_default")
+                    )}
+                  </SelectItem>
                   {BLACKBOX_HARNESSES.map((h) => (
                     <SelectItem key={h} value={h}>
                       <span className="flex items-center gap-2">
@@ -399,13 +451,10 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
           config={editing.config}
           onSave={(config) => {
             editing.onSave(config);
-            if (config.name.trim()) saveToRecent(keepEconomy(config, null));
             setEditing(null);
           }}
           roleLabel={editing.label}
           catalogModels={catalog?.models}
-          recentConfigs={recentConfigs}
-          onRemoveRecent={removeRecentConfig}
           modelDefaultsOnly={editing.modelDefaultsOnly}
           remote={runSource === "hosted"}
           harnessEfforts={editing.harnessEfforts}

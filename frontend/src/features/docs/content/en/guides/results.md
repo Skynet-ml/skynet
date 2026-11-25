@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` is the dict of input fields from the request.
 - The return value must be JSON-serializable. A dict becomes `outputs`. Any other value becomes `{"output": value}`.
-- `serve.py` can call a model with `llm` from the `skynet` helper module. It does not get the run's secrets.
+- `serve.py` can call a model with `llm` from the `openascent` helper module. It does not get the run's secrets.
 
 Skynet runs the best version in the same protected sandbox as the run. The **Usage** tab has two parts:
 
@@ -103,7 +103,7 @@ Replace `message` with the input fields of your run. The **Integration code** on
 The response contains `outputs`, the `input_fields`, the `output_fields`, the `model_used`, `cents_charged` and `budget`.
 
 > [!TIP]
-> Each call is billed on its own, from the balance of the caller. `max_cost_cents` sets the most this one call may cost, in cents. If you send the same `Idempotency-Key` again, Skynet does not charge the call again.
+> Each call is billed on its own, from the balance of the caller. `max_cost_cents` is optional. It records the most you accept for this one call, in cents. Your balance bounds the call. If you send the same `Idempotency-Key` again, Skynet does not charge the call again.
 
 Read [API](/docs/api) for authentication and the other endpoints.
 

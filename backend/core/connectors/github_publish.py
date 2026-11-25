@@ -3,22 +3,33 @@
 Runs only in the trusted parent, after the run ends. The version is applied to
 a fresh clone of the pinned commit, so the branch holds exactly one commit on
 top of the code the run started from.
+
+Each call is safe to repeat (SKY-712). A branch that already holds the same
+content is not pushed again, and an open pull request for the same head is
+returned, not opened again. With ``effects``, each call goes through the
+effect log keyed by the step id and the target branch or head, so a replayed
+step returns the stored result and does not call GitHub.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from ..api.errors import DomainError
 from ..brand import APP_NAME
+from ..storage.effect_store import StepEffects
 from .github import API_URL, PROVIDER, _headers
 from .github_repo import RepoFetchError, _git, git_auth_env, git_host
+from .repo_drafts import DraftFileError, write_to_checkout
 from .transport import get_json, request
 
 COMMIT_AUTHOR = ["-c", f"user.name={APP_NAME}", "-c", "user.email=noreply@skynetml.com", "-c", "commit.gpgsign=false"]
@@ -32,6 +43,10 @@ _REF_SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
 
 class RepoPublishError(RuntimeError):
     """Explain, in words a run's owner can act on, why the pull request was not opened."""
+
+
+class BranchConflictError(RepoPublishError):
+    """The branch already holds other content, so a push would replace it."""
 
 
 @dataclass(frozen=True)
@@ -106,8 +121,15 @@ def push_version(
     *,
     remote: str | None = None,
     provider: str = "github",
-) -> None:
+    drafts: Mapping[str, str] | None = None,
+    readonly_paths: Iterable[str] = (),
+    effects: StepEffects | None = None,
+) -> str:
     """Commit ``patch`` on top of ``commit`` and push it as a new branch.
+
+    The run's draft files go into the same commit, under the patch, because
+    the version was made against the tree with them. When the branch already
+    holds the same tree, nothing is pushed.
 
     Args:
         repository: ``owner/name``.
@@ -118,10 +140,35 @@ def push_version(
         token: Host token; ``None`` for a local remote.
         remote: Push URL override, used by tests with a local repository.
         provider: Repository host, see :data:`~.github_repo.GIT_HOSTS`.
+        drafts: The run's ``draft_files``; ``None`` for none.
+        readonly_paths: The run's submodule and Git LFS paths, which a draft cannot change.
+        effects: The effect log of the step that publishes; ``None`` pushes with no log.
+
+    Returns:
+        The commit id on the branch.
 
     Raises:
-        RepoPublishError: When the clone, the patch or the push fails.
+        BranchConflictError: When the branch already holds other content.
+        RepoPublishError: When the clone, a draft file, the patch or the push fails.
     """
+    if effects is not None:
+        return effects.once(
+            _effect_name("push_version", branch),
+            lambda: {
+                "commit": push_version(
+                    repository,
+                    commit,
+                    patch,
+                    branch,
+                    message,
+                    token,
+                    remote=remote,
+                    provider=provider,
+                    drafts=drafts,
+                    readonly_paths=readonly_paths,
+                )
+            },
+        )["commit"]
     workdir = Path(tempfile.mkdtemp(prefix="app-publish-"))
     try:
         origin, user = git_host(provider)
@@ -130,6 +177,7 @@ def push_version(
         _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], workdir, environment)
         _git(["fetch", "--quiet", "--depth", "1", "origin", commit], workdir, environment)
         _git([*_NO_LFS, "-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD"], workdir, environment)
+        _stage_drafts(workdir, drafts, readonly_paths, environment)
         applied = subprocess.run(
             ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
             cwd=workdir,
@@ -141,11 +189,80 @@ def push_version(
         if applied.returncode != 0:
             raise RepoPublishError("The best version no longer applies to the commit the run started from.")
         _git([*COMMIT_AUTHOR, *_NO_LFS, "commit", "--quiet", "--no-verify", "-m", message], workdir, environment)
+        head = _git(["rev-parse", "HEAD"], workdir, environment).strip()
+        ref = f"refs/heads/{branch}"
+        remote_head = _remote_heads(workdir, ref, environment).get(ref)
+        existing = _existing_branch(workdir, branch, head, remote_head, environment)
+        if existing is not None:
+            return existing
         _git(["push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"], workdir, environment)
+        return head
     except RepoFetchError as error:
         raise RepoPublishError(f"Could not push the branch: {error}") from error
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _effect_name(function: str, *arguments: str) -> str:
+    """Return the effect name of one publish call: the function and a digest of the arguments that name its target.
+
+    Two calls of one step for two branches or heads are then two effects. A
+    digest keeps the key inside the 255 characters of ``effect_key``.
+
+    Args:
+        function: The publish function's name.
+        *arguments: The branch, head or other arguments that name the target.
+
+    Returns:
+        ``<function>:<16 hex digits>``.
+    """
+    digest = hashlib.sha256(json.dumps(arguments).encode()).hexdigest()[:16]
+    return f"{function}:{digest}"
+
+
+def _remote_heads(workdir: Path, pattern: str, environment: dict[str, str]) -> dict[str, str]:
+    """List the remote refs that match ``pattern`` in one ``ls-remote`` call.
+
+    Args:
+        workdir: The local repository with ``origin``.
+        pattern: An ``ls-remote`` pattern, for example ``refs/heads/skynet/candidate-*``.
+        environment: The git environment.
+
+    Returns:
+        Each listed ref mapped to its commit id.
+    """
+    # ls-remote matches a pattern by its tail, so ``refs/heads/x`` also lists ``refs/heads/a/refs/heads/x``.
+    # Callers look a ref up by its full name, so such a ref is never taken for the branch.
+    lines = _git(["ls-remote", "origin", pattern], workdir, environment).splitlines()
+    return {ref: sha for sha, ref in (line.split() for line in lines)}
+
+
+def _existing_branch(
+    workdir: Path, branch: str, commit: str, remote_head: str | None, environment: dict[str, str]
+) -> str | None:
+    """Return the remote branch's commit when it holds the same tree as ``commit``.
+
+    Args:
+        workdir: The local repository with ``origin`` and ``commit``.
+        branch: The branch name.
+        commit: The local commit to compare with.
+        remote_head: The branch's commit on the remote, from :func:`_remote_heads`; ``None`` when it does not exist.
+        environment: The git environment.
+
+    Returns:
+        The remote commit id, or ``None`` when the branch does not exist.
+
+    Raises:
+        BranchConflictError: When the branch holds another tree.
+    """
+    if remote_head is None:
+        return None
+    if remote_head != commit:
+        _git(["fetch", "--quiet", "--depth", "1", "origin", f"refs/heads/{branch}"], workdir, environment)
+        remote_tree = _git(["rev-parse", "FETCH_HEAD^{tree}"], workdir, environment).strip()
+        if remote_tree != _git(["rev-parse", f"{commit}^{{tree}}"], workdir, environment).strip():
+            raise BranchConflictError(f"The branch '{branch}' already holds other content.")
+    return remote_head
 
 
 def candidate_branch(version_id: str) -> str:
@@ -174,12 +291,16 @@ def push_candidates(
     *,
     remote: str | None = None,
     provider: str = "github",
+    drafts: Mapping[str, str] | None = None,
+    readonly_paths: Iterable[str] = (),
+    effects: StepEffects | None = None,
 ) -> dict[str, str]:
     """Push each version to its own branch and move the best branch to one of them.
 
     Every candidate commit takes its dates from ``commit``, so the same
     version always makes the same commit id. A retry then pushes nothing new,
-    and only ``skynet/best`` is ever rewritten.
+    and only ``skynet/best`` is ever rewritten. A candidate branch that holds
+    the same tree under another commit keeps that commit.
 
     Args:
         repository: ``owner/name``.
@@ -190,14 +311,33 @@ def push_candidates(
         token: Host token; ``None`` for a local remote.
         remote: Push URL override, used by tests with a local repository.
         provider: Repository host, see :data:`~.github_repo.GIT_HOSTS`.
+        drafts: The run's ``draft_files``, committed with every version; ``None`` for none.
+        readonly_paths: The run's submodule and Git LFS paths, which a draft cannot change.
+        effects: The effect log of the step that publishes; ``None`` pushes with no log.
 
     Returns:
         Each pushed branch, ``skynet/best`` included, mapped to its commit id.
 
     Raises:
+        BranchConflictError: When a candidate branch already holds other content.
         RepoPublishError: When an id is invalid or repeated, ``best_id`` is
-            not a version, a patch does not apply, or the push fails.
+            not a version, a draft file or a patch does not apply, or the push fails.
     """
+    if effects is not None:
+        return effects.once(
+            _effect_name("push_candidates", best_id, *(version_id for version_id, _ in versions)),
+            lambda: push_candidates(
+                repository,
+                commit,
+                versions,
+                best_id,
+                token,
+                remote=remote,
+                provider=provider,
+                drafts=drafts,
+                readonly_paths=readonly_paths,
+            ),
+        )
     branches = [candidate_branch(version_id) for version_id, _ in versions]
     if len(set(branches)) != len(branches):
         raise RepoPublishError("Two candidate versions have the same id.")
@@ -212,16 +352,21 @@ def push_candidates(
         _git(["fetch", "--quiet", "--depth", "1", "origin", commit], workdir, environment)
         date = _git(["log", "-1", "--format=%cI", "FETCH_HEAD"], workdir, environment).strip()
         dated = {**environment, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+        remote_heads = _remote_heads(workdir, f"refs/heads/{CANDIDATE_PREFIX}*", dated)
         pushed: dict[str, str] = {}
         for (version_id, patch), branch in zip(versions, branches, strict=True):
             _git(
                 [*_NO_LFS, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", commit], workdir, dated
             )
+            staged = _stage_drafts(workdir, drafts, readonly_paths, dated)
             if patch.strip():
                 _apply(workdir, patch, version_id)
+            if patch.strip() or staged:
                 message = f"{APP_NAME} candidate {version_id}"
                 _git([*COMMIT_AUTHOR, *_NO_LFS, "commit", "--quiet", "--no-verify", "-m", message], workdir, dated)
-            pushed[branch] = _git(["rev-parse", "HEAD"], workdir, dated).strip()
+            head = _git(["rev-parse", "HEAD"], workdir, dated).strip()
+            remote_head = remote_heads.get(f"refs/heads/{branch}")
+            pushed[branch] = _existing_branch(workdir, branch, head, remote_head, dated) or head
         pushed[BEST_BRANCH] = pushed[candidate_branch(best_id)]
         refspecs = [f"{sha}:refs/heads/{branch}" for branch, sha in pushed.items() if branch != BEST_BRANCH]
         _git(
@@ -234,6 +379,36 @@ def push_candidates(
         raise RepoPublishError(f"Could not push the candidate branches: {error}") from error
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _stage_drafts(
+    workdir: Path, drafts: Mapping[str, str] | None, readonly_paths: Iterable[str], environment: dict[str, str]
+) -> bool:
+    """Write the run's draft files into the checkout and add them to the index.
+
+    Args:
+        workdir: Checkout of the pinned commit.
+        drafts: The run's ``draft_files``; ``None`` for none.
+        readonly_paths: The run's submodule and Git LFS paths, which a draft cannot change.
+        environment: The git environment.
+
+    Returns:
+        Whether the drafts changed the index.
+
+    Raises:
+        RepoPublishError: When a draft file cannot be written.
+    """
+    try:
+        paths = write_to_checkout(workdir, drafts, readonly_paths)
+    except DraftFileError as error:
+        raise RepoPublishError(f"A draft file of the run cannot be written: {error}") from None
+    if not paths:
+        return False
+    # A draft path is a file name, never a pattern: "a*.py" must not also add "ab.py".
+    # --force: the user chose each draft, so a path the repo's .gitignore ignores is still published.
+    _git([*_NO_LFS, "--literal-pathspecs", "add", "--force", "--", *paths], workdir, environment)
+    changed = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=workdir, capture_output=True, check=False)
+    return changed.returncode != 0
 
 
 def _apply(workdir: Path, patch: str, version_id: str) -> None:
@@ -268,8 +443,12 @@ def open_pull_request(
     title: str,
     body: str,
     hardening: HardeningSummary | None = None,
+    effects: StepEffects | None = None,
 ) -> PublishedChange:
     """Open a draft pull request, or a regular one where the plan has no drafts.
+
+    When an open pull request for ``head`` exists, into ``base_branch`` when
+    it is set, return it and open none.
 
     Args:
         token: GitHub token with ``repo`` scope.
@@ -279,14 +458,41 @@ def open_pull_request(
         title: Pull request title.
         body: Pull request description.
         hardening: The run's finished hardening job; ``None`` keeps the body as given.
+        effects: The effect log of the step that publishes; ``None`` opens with no log.
 
     Returns:
-        The opened pull request.
+        The opened or found pull request.
 
     Raises:
         RepoPublishError: When GitHub refuses the request.
     """
+    if effects is not None:
+        found = effects.once(
+            _effect_name("open_pull_request", head, base_branch or ""),
+            lambda: asdict(
+                open_pull_request(
+                    token,
+                    repository,
+                    head=head,
+                    base_branch=base_branch,
+                    title=title,
+                    body=body,
+                    hardening=hardening,
+                )
+            ),
+        )
+        return PublishedChange(**found)
     url = f"{API_URL}/repos/{repository}/pulls"
+    owner = repository.split("/", 1)[0]
+    params = {"head": f"{owner}:{head}", "state": "open"}
+    if base_branch:
+        params["base"] = base_branch
+    try:
+        open_ones = get_json(url, provider=PROVIDER, headers=_headers(token), params=params)
+    except DomainError as error:
+        raise RepoPublishError("GitHub refused to list the open pull requests.") from error
+    if open_ones:
+        return _published(head, open_ones[0])
     if hardening is not None:
         body = f"{body}\n\n{hardening_line(hardening)}" if body else hardening_line(hardening)
     try:
@@ -300,7 +506,19 @@ def open_pull_request(
             response = request("POST", url, provider=PROVIDER, headers=_headers(token), json=fields)
         except DomainError as retry_error:
             raise RepoPublishError("GitHub refused to open the pull request.") from retry_error
-    opened = response.json()
+    return _published(head, response.json())
+
+
+def _published(head: str, pull: dict[str, Any]) -> PublishedChange:
+    """Return the change for one GitHub pull request object.
+
+    Args:
+        head: The pushed branch.
+        pull: The pull request as GitHub returns it.
+
+    Returns:
+        The change.
+    """
     return PublishedChange(
-        branch=head, url=str(opened["html_url"]), number=int(opened["number"]), draft=bool(opened.get("draft"))
+        branch=head, url=str(pull["html_url"]), number=int(pull["number"]), draft=bool(pull.get("draft"))
     )

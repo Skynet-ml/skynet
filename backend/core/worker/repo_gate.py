@@ -1,4 +1,4 @@
-"""Refuse a repository run whose ``optimize.toml`` asks for what its sandbox cannot give.
+"""Refuse a repository run whose ``ascent.toml`` asks for what its sandbox cannot give.
 
 A setting the run ignores would look like protection the user does not get,
 for example an offline proposer that still has open egress. The gate runs in
@@ -52,26 +52,51 @@ Place = Literal["local", "cloud"]
 # supervisor that stops it at its timeout (SKY-375); only the gate still
 # refused it (SKY-635). The candidate box and the metric box are separate, so
 # each opens with its own role's hosts and vCPUs (SKY-398). No judge reads the
-# ``[run] illegal`` rules yet, so that key still stops the run.
+# ``[run] illegal`` rules yet, so that key still stops the run. Staging maps
+# ``[proposer] entry`` and ``setup`` to the custom proposer command, which runs
+# in the proposer's box under the same ``[proposer]`` rules (SKY-753).
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
 _PROPOSER_NETWORK = frozenset({"proposer.network"})
 _PROPOSER_MCP = frozenset({"proposer.mcp"})
 _PROPOSER_SERVICES = frozenset({"proposer.services"})
+_PROPOSER_COMMAND = frozenset({"proposer.entry", "proposer.setup"})
 _STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
 _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "target.illegal"})
 _TARGET_MCP = frozenset({"target.mcp"})
 _RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
 _ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.vcpus"})
+# Staging builds or pins each box image and checks it before the first candidate (SKY-737).
+_BOX_IMAGES = frozenset({"run.image", "run.dockerfile", "metric.image", "metric.dockerfile"})
+_OUTCOME_TARGET = frozenset({"outcome.target"})
+# The run end judges each limit on the final score (SKY-692), in its score's direction (SKY-775).
+_OUTCOME_LIMITS = frozenset({"outcome.require"})
+# The metric box calls a Python entry's function, or runs a command entry
+# through OpenAscent under the same [metric] rules (SKY-738).
+_METRIC_ENTRY = frozenset({"metric.entry"})
+# The eval server, the run end and the pull request read the score's direction (SKY-750).
+_METRIC_DIRECTION = frozenset({"metric.direction"})
+# The eval server, the engines and the run end read each named score's direction (SKY-775).
+_METRIC_SCORES = frozenset({"metric.scores"})
+# The metric setup box runs the build once before the first metric call (SKY-740).
+_METRIC_SETUP = frozenset({"metric.setup"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
     | _PROPOSER_MCP
     | _PROPOSER_SERVICES
+    | _PROPOSER_COMMAND
     | _STAGE_SERVICES
     | _TARGET_STAGES
     | _TARGET_MCP
     | _RUN_ENTRY
     | _ROLE_BOXES
+    | _BOX_IMAGES
+    | _OUTCOME_TARGET
+    | _OUTCOME_LIMITS
+    | _METRIC_ENTRY
+    | _METRIC_DIRECTION
+    | _METRIC_SCORES
+    | _METRIC_SETUP
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
@@ -83,7 +108,7 @@ _UNENFORCED_CODE: dict[Place, I18nKey] = {
 
 @dataclass(frozen=True)
 class GateFailure:
-    """One reason the run cannot start: the ``optimize.toml`` key, the place, and why."""
+    """One reason the run cannot start: the ``ascent.toml`` key, the place, and why."""
 
     key: str
     place: Place
@@ -125,8 +150,9 @@ def check_repository(
     place: Place,
     bindings: Mapping[str, str] | None = None,
     allowed_hosts: Mapping[str, Collection[str]] | None = None,
+    require_version: bool = True,
 ) -> list[GateFailure]:
-    """List every reason the repository's ``optimize.toml`` stops this run.
+    """List every reason the repository's ``ascent.toml`` stops this run.
 
     The role MCP files are read from the same snapshot as the toml (E49).
 
@@ -138,6 +164,9 @@ def check_repository(
             a name it does not hold binds to the user's secret.
         allowed_hosts: Each user secret's ``allowed_hosts`` (E52); a name it
             does not hold may go to no host.
+        require_version: Passed to :func:`read_constraints`; the staging of
+            the same tree gives it. ``False`` marks a started run, which also
+            reads the older forms, as its staging did (SKY-760).
 
     Returns:
         The failures, in file order. An empty list means the run may start.
@@ -146,7 +175,11 @@ def check_repository(
         ConstraintsError: When the file or a role's MCP file is invalid.
     """
     raw = read_constraints_file(archive)
-    constraints = read_constraints(archive) if raw is not None else None
+    constraints = (
+        read_constraints(archive, require_version=require_version, legacy_forms=not require_version)
+        if raw is not None
+        else None
+    )
     if raw is None or constraints is None:
         return []
     failures = [
@@ -243,7 +276,7 @@ def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, 
         name: The secret's name.
         host: The one host that receives the secret.
         allowed: The secret's allowed hosts.
-        setting: The ``optimize.toml`` setting that uses the secret.
+        setting: The ``ascent.toml`` setting that uses the secret.
         place: Where the run's sandbox runs.
 
     Returns:
@@ -261,6 +294,28 @@ def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, 
         host=host,
         allowed=", ".join(allowed),
     )
+
+
+def check_draft_base(has_drafts: bool, base: str | None, commit: str, *, place: Place) -> list[GateFailure]:
+    """Refuse draft files written on another commit than the one the run starts from.
+
+    A draft is a whole-file copy of the tree the setup agent read. When the
+    branch moves after that, the run would write the old copies over the new
+    commits and undo them.
+
+    Args:
+        has_drafts: Whether the run has draft files.
+        base: The commit the drafts were written on; ``None`` for drafts that
+            do not record it.
+        commit: The commit the run starts from.
+        place: Where the run's sandbox runs.
+
+    Returns:
+        One failure when the two commits differ; else an empty list.
+    """
+    if not has_drafts or base is None or base == commit:
+        return []
+    return [_failure("draft_files", place, I18nKey.REPO_GATE_DRAFT_BASE_MOVED, base=base[:7], commit=commit[:7])]
 
 
 def check_hidden(
@@ -288,7 +343,7 @@ def check_hidden(
         place: Where the run's sandbox runs.
         optional_paths: Hidden paths that may match no file, such as the
             exploit folder.
-        labels: The ``optimize.toml`` setting that names each hidden path;
+        labels: The ``ascent.toml`` setting that names each hidden path;
             a path it does not hold is labelled ``[metric] files``.
 
     Returns:
@@ -425,8 +480,8 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     gives, and a written default (``exploits = ".optimize/exploits"``) still
     asks for a folder to be hidden. ``[proposer] illegal`` is not listed: the
     judges enforce it in every place. Every ``[run]`` and ``[target.<name>]``
-    key and the ``[metric]`` role keys are listed. ``ENFORCED`` decides which of them still stop the
-    run: a key whose runtime does not exist yet stops here instead of failing
+    key, the ``[metric]`` role keys and the ``[outcome]`` keys are listed. ``ENFORCED`` decides which
+    of them still stop the run: a key whose runtime does not exist yet stops here instead of failing
     later in the sandbox.
 
     Args:
@@ -439,7 +494,11 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     """
     document: dict[str, Any] = tomllib.loads(raw.decode("utf-8"))
     proposer, metric, run = document.get("proposer", {}), document.get("metric", {}), document.get("run", {})
-    keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("mcp", "network", "services") if key in proposer]
+    keys = [
+        (f"proposer.{key}", f"[proposer] {key}")
+        for key in ("mcp", "network", "services", "entry", "setup")
+        if key in proposer
+    ]
     stages = document.get("target", {})
     target_keys = ("entry", "timeout", "vcpus", "illegal", "mcp", "network", "services")
     # A stage box is offline except for the relay, so ``network = []`` asks
@@ -451,10 +510,31 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         if key in stages[name] and not (key == "network" and stages[name][key] == [])
     ]
     keys += [("services", f"[services.{name}]") for name in services]
-    run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus")
+    run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus", "image", "dockerfile")
     keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
-    metric_keys = ("files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
+    metric_keys = (
+        "entry",
+        "files",
+        "exploits",
+        "reference",
+        "direction",
+        "setup",
+        "mcp",
+        "network",
+        "services",
+        "illegal",
+        "vcpus",
+        "image",
+        "dockerfile",
+    )
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
+    if "scores" in metric:
+        keys.append(("metric.scores", "[metric.scores]"))
+    outcome = document.get("outcome", {})
+    if "target" in outcome:
+        keys.append(("outcome.target", "[outcome] target"))
+    if "require" in outcome:
+        keys.append(("outcome.require", "[outcome.require]"))
     return keys
 
 
@@ -462,7 +542,7 @@ def _failure(setting: str, place: Place, code: I18nKey, **params: str) -> GateFa
     """Build one failure with its English reason and catalog code.
 
     Args:
-        setting: The ``optimize.toml`` setting that fails.
+        setting: The ``ascent.toml`` setting that fails.
         place: Where the run's sandbox runs.
         code: Catalog key of the message.
         **params: The message's placeholder values.

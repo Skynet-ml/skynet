@@ -68,7 +68,6 @@ Un agent de code lit le retour de votre évaluateur et corrige la version. Skyne
 | Paramètre                        | Par défaut  | Plage                                                           |
 | -------------------------------- | ----------- | --------------------------------------------------------------- |
 | Exécutions du scoreur max.       | 200         | 1 à 100000                                  |
-| Arrêter au score                 | Désactivé   | 0 ou plus                                                       |
 | Itérations max.                  | Désactivé   | 1 à 1000. Uniquement Meta-Harness, AutoSaddler et ShinkaEvolve. |
 
 Une exécution de l'évaluateur correspond à un appel de votre évaluateur sur un cas. La notation finale de la version de départ et de la version gagnante ne compte pas dans **Exécutions du scoreur max.**

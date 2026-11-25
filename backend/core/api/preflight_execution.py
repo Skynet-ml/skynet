@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import math
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, field_validator, model_serializer
@@ -32,11 +33,12 @@ from ..billing.runtime import BudgetRuntime, UsagePendingError
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
+from ..exceptions import ServiceError
 from ..models import BlackboxRunRequest
-from ..models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE
-from ..service_gateway.optimization.blackbox.native_runtime import NATIVE_ENGINES
-from ..service_gateway.optimization.blackbox.preflight import preflight_lifetime_seconds
+from ..service_gateway.optimization.blackbox.native_runtime import check_native_runtime
+from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
 from ..storage.preflights import PreflightStore
+from ..worker.loop_host import provider_message
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
     StagedRepository,
@@ -51,7 +53,7 @@ from .agent_engine import fill_proposer_host_cli
 from .errors import DomainError
 from .model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from .preflight_progress import report_preflight_phase
-from .routers.execution_budgets import ExecutionBudgetResponse, budget_http_error, budget_response
+from .routers import execution_budgets
 
 logger = logging.getLogger(__name__)
 
@@ -107,15 +109,18 @@ class WizardPreflightResponse(BaseModel):
     may_advance: bool
     pending_reason: WizardPreflightPendingReason | None = None
     checks: list[WizardPreflightCheck]
-    budget: ExecutionBudgetResponse
+    budget: execution_budgets.ExecutionBudgetResponse
     scorer_result: dict[str, Any] | None = None
     workflow_result: dict[str, Any] | None = None
     terminal: dict[str, Any] | None = None
     # A repository run's effective environment: what versions may change,
     # what stays protected, and which network and services each step gets.
     environment: dict[str, Any] | None = None
-    # The proposer CLI this check ran on. A submit sends it back so the server
-    # does not pick another CLI from changed readiness and refuse the evidence.
+    # The proposer CLI this check ran on. A client may send it back with
+    # ``host_cli_auto: true``, so that changed readiness does not make the
+    # server pick another CLI and refuse the evidence. Without the mark it is
+    # a picked CLI, which replaces a repository's [proposer] entry (SKY-753).
+    # The web wizard does not send it back; the submit fills the CLI again.
     proposer_host_cli: Literal["codex", "claude"] | None = None
 
     @model_serializer(mode="wrap")
@@ -171,8 +176,8 @@ def _canonical_execution_payload(request: WizardPreflightRequest, username: str,
 
 
 BUDGET_CHECK_KEY = "budget"
-# A failed budget check names the balance as what to fix when the account,
-# not the spending limit, refused the work: raising the limit cannot help then.
+# A failed budget check always names the balance as what to fix: setup bills
+# the balance only (SKY-925), so raising the spending limit cannot help.
 BALANCE_FIELD = "balance"
 # A runtime reports a budget stop only by its type name; these rebuild it.
 _BUDGET_STOPS = {stop.__name__: stop for stop in (BudgetInsufficientError, AccountFundsError)}
@@ -180,6 +185,13 @@ _BUDGET_STOPS = {stop.__name__: stop for stop in (BudgetInsufficientError, Accou
 # The browser waits on the check's response, and the connection is cut after
 # about five minutes; covered work still unsettled by then reads as pending.
 SETUP_WAIT_SECONDS = 90
+
+# A setup check runs in Skynet's image and never builds or pulls a user image,
+# so a role with one is reported as not checked instead of passed (SKY-893).
+SETUP_NOT_CHECKED = {
+    "run": "Setup not checked for the [run] box: the run prepares your image and checks the setup there.",
+    "metric": "Setup not checked for the [metric] box: the run prepares your image and checks the setup there.",
+}
 
 
 def _check(key: str, status: str, message: str | None = None, field: str | None = None) -> dict[str, Any]:
@@ -213,22 +225,19 @@ def _mark_usage_pending(result: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
-def _provider_refusal(response: ModelHTTPResult) -> str:
+def _provider_refusal(response: ModelHTTPResult, token: str) -> str:
     """Summarize a provider's error answer for the check report.
 
     Args:
         response: Non-2xx model response returned through the metered route.
+        token: The route's gateway guest token, not the provider key. It is the credential of the preflight
+            request, so the summary must never show it when the provider or the gateway echoes it.
 
     Returns:
-        The HTTP status, followed by the provider's own message when its body carries one.
+        The HTTP status, followed by the provider's own short message when its body carries one.
     """
-    try:
-        error = json.loads(response.content).get("error")
-    except (ValueError, AttributeError):
-        error = None
-    detail = error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else None
-    summary = f"HTTP {response.status}"
-    return f"{summary}: {str(detail)[:200]}" if detail else summary
+    detail = provider_message(response.body, token)
+    return f"HTTP {response.status}: {detail}" if detail else f"HTTP {response.status}"
 
 
 def _verify_model_routes(gateway: ModelGateway, *, native: bool) -> list[dict[str, Any]]:
@@ -253,19 +262,24 @@ def _verify_model_routes(gateway: ModelGateway, *, native: bool) -> list[dict[st
             {"anthropic-version": "2023-06-01"} if anthropic else {},
         )
         ok = 200 <= response.status < 300
-        detail = f"The selected {route['role']} model rejected its setup request ({_provider_refusal(response)})."
+        detail = None
+        if not ok:
+            refusal = _provider_refusal(response, route["token"])
+            detail = f"The selected {route['role']} model rejected its setup request ({refusal})."
         checks.append(
             _check(
                 f"model.{route['role']}",
                 "succeeded" if ok else "failed",
-                None if ok else detail,
+                detail,
                 route["role"],
             )
         )
     return checks
 
 
-def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: str, identity: str) -> dict[str, Any]:
+def _verify_anything(
+    gateway: ModelGateway, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """Run complete Anything readiness in its selected outer sandbox.
 
     Args:
@@ -273,6 +287,7 @@ def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: s
         payload: Canonical partial or full Anything request.
         scope: Evaluation or complete execution readiness.
         identity: Stable preflight evidence identity.
+        unchecked: Roles with a user image, whose setup this check skips (SKY-893).
 
     Returns:
         Real checks and, when a seed exists, its actual scorer preview.
@@ -282,24 +297,56 @@ def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: s
     protected = {
         **payload,
         "_optimization_type": OPTIMIZATION_TYPE_BLACKBOX,
-        "_preflight": {"scope": scope, "identity": identity},
+        "_preflight": {"scope": scope, "identity": identity, **({"unchecked": list(unchecked)} if unchecked else {})},
     }
     run_vercel_dspy(protected, f"preflight-{identity}", events, "spawn")
     result = events.evidence(gateway)
     optimizer_ready = any(check.get("key") == "optimizer" for check in result["checks"])
     if scope == "execution" and optimizer_ready:
         public = {key: value for key, value in payload.items() if not key.startswith("_")}
+        # The request accepts only a repository run (SKY-834), and every
+        # repository run calls its models through a native harness.
         typed = BlackboxRunRequest.model_validate(public)
-        # ShinkaEvolve calls its optimization models over chat completions, not
-        # through a native harness on the Anthropic protocol.
-        native = (
-            typed.strategy.mode != "single"
-            or typed.strategy.engine in NATIVE_ENGINES - {BLACKBOX_ENGINE_SHINKA_EVOLVE}
-            or typed.target.kind == "repo"
-        )
         optimizer_index = next(index for index, check in enumerate(result["checks"]) if check.get("key") == "optimizer")
-        result["checks"][optimizer_index:optimizer_index] = _verify_model_routes(gateway, native=native)
+        result["checks"][optimizer_index] = _engine_readiness(typed)
+        result["checks"][optimizer_index:optimizer_index] = _verify_model_routes(gateway, native=True)
     return result
+
+
+# A single run of either engine has nothing left to do on an image without its interpreter;
+# Auto only loses that lane.
+_ENGINE_NOT_READY = {
+    "autosaddler": (
+        "autosaddler_ready",
+        "This runtime does not ship the pinned AutoSaddler package on Python 3.12; choose another engine or Auto.",
+    ),
+    "shinka_evolve": (
+        "shinka_ready",
+        "This runtime does not ship the pinned ShinkaEvolve package on Python 3.12; choose another engine or Auto.",
+    ),
+}
+
+
+def _engine_readiness(request: BlackboxRunRequest) -> dict[str, Any]:
+    """Check that the worker can run the request's engine.
+
+    The setup box is not the worker, so this check runs here: the API and the
+    worker run one backend image, and the engines run in the worker (SKY-728).
+
+    Args:
+        request: The run request.
+
+    Returns:
+        The ``optimizer`` check, failed when a single run's engine has no interpreter in the image.
+    """
+    try:
+        readiness = check_native_runtime()
+    except ServiceError as error:
+        return _check("optimizer", "failed", str(error))
+    refusal = _ENGINE_NOT_READY.get(str(request.strategy.engine)) if request.strategy.mode == "single" else None
+    if refusal is not None and not readiness[refusal[0]]:
+        return _check("optimizer", "failed", refusal[1])
+    return _check("optimizer", "succeeded")
 
 
 class _Events:
@@ -325,29 +372,29 @@ class _Events:
         """Return the runtime's setup evidence, or raise the failure it reported.
 
         Args:
-            gateway: The setup's model gateway, which saw any call the limit refused.
+            gateway: The setup's model gateway, which saw any call the budget refused.
 
         Returns:
             The guest's terminal preflight result.
 
         Raises:
-            BudgetInsufficientError: When the spending limit or the account
-                balance stopped the runtime.
+            BudgetInsufficientError: When the account balance cannot fund
+                setup.
             ValueError: For any other runtime failure, or when no result came back.
         """
         # ``run_vercel_dspy`` turns every exception into an error event, so the
         # budget stop has to be rebuilt from its type name to reach the
         # ``budget`` check instead of the generic ``setup`` one. A guest model
-        # call the limit refused only reaches the guest as a 402, which its
+        # call the balance refused only reaches the guest as a 402, which its
         # client raises under its own type, so the gateway's record of the
         # refusal decides that case.
         # The guest sees an account-funds refusal as a plain budget stop, so
-        # the gateway's record keeps the balance from reading as the limit.
+        # the gateway's record keeps the refusal on the balance.
         if self.error and isinstance(gateway.budget_refusal, AccountFundsError):
             raise gateway.budget_refusal
         stop = _BUDGET_STOPS.get(self.error_type or "")
         if stop is not None:
-            raise stop(self.error or "The spending limit cannot cover setup.")
+            raise stop(self.error or "The account cannot fund the next operation.")
         if self.error and gateway.budget_refusal is not None:
             raise gateway.budget_refusal
         if self.error or self.result is None:
@@ -415,10 +462,10 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
         if snapshot.generation != claim.generation:
             raise BudgetConflictError("Another setup attempt replaced this execution generation.")
     except BudgetError as error:
-        raise budget_http_error(error) from error
+        raise execution_budgets.budget_http_error(error) from error
     if claim.token is None:
         return WizardPreflightResponse.model_validate(
-            {**claim.document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+            {**claim.document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
         )
     try:
         with evidence.heartbeat(claim.document["id"], claim_token=claim.token):
@@ -448,7 +495,7 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
                     result={"checks": [_check("setup", "failed", str(error))]},
                 )
                 return WizardPreflightResponse.model_validate(
-                    {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+                    {**document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
                 )
             parent_request = request.model_copy(update={"payload": parent_payload})
             status, result = _perform_preflight(
@@ -469,9 +516,9 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
                 )
             document = evidence.finish(claim.document["id"], claim_token=claim.token, status=status, result=result)
     except BudgetError as error:
-        raise budget_http_error(error) from error
+        raise execution_budgets.budget_http_error(error) from error
     return WizardPreflightResponse.model_validate(
-        {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+        {**document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
     )
 
 
@@ -505,17 +552,12 @@ def _perform_preflight(
     status = "failed"
     result: dict[str, Any] = {}
     try:
-        remote_evaluation = (
-            request.scope == "evaluation"
-            and payload.get("scorer", {}).get("kind") == "remote"
-            and payload.get("target", {}).get("kind") != "agent"
-        )
         uses_managed_models = payload_uses_token_source(
             payload,
             TOKEN_SOURCE_MANAGED,
             default_token_source=str(payload.get("token_source") or TOKEN_SOURCE_MANAGED),
         )
-        if settings.openrouter_api_key is None and uses_managed_models and not remote_evaluation:
+        if settings.openrouter_api_key is None and uses_managed_models:
             raise ValueError("Managed model routing is not configured.")
         gateway = ModelGateway(
             BudgetRuntime(
@@ -525,6 +567,14 @@ def _perform_preflight(
                 generation=snapshot.generation,
                 phase="setup",
                 wait_timeout=SETUP_WAIT_SECONDS,
+                # The limit of a setup_in_total budget (continuous-plan cycles, or accounts that
+                # turn off wallet setup billing) bounds setup, and submit needs one lease of that
+                # limit and of the balance left after the check, so the check must not spend into
+                # it. Local mode checks no balance at submit. The lease is read through the router
+                # module, which submit reads too, so a test that patches it changes both rules
+                # (SKY-923, SKY-925).
+                keep_cents=execution_budgets.CHUNK_CENTS if snapshot.setup_in_total else 0,
+                keep_funds=not settings.local_mode,
             )
         )
         # The box's hold is priced on its whole lifetime, so a check gets the
@@ -550,6 +600,7 @@ def _perform_preflight(
         # or released hold from an earlier run would block a new dispatch under
         # the same key, so every run of the row carries its own number.
         identity = f"{document['id']}-{attempt}"
+        unchecked: tuple[str, ...] = ()
         if is_repo_payload(protected):
             report_preflight_phase("sandbox")
             # Staging empties the secret list, so read the gate's inputs first.
@@ -560,6 +611,7 @@ def _perform_preflight(
                 username=user.username,
                 binding_id=request.execution_budget_id,
                 engine=engine,
+                require_constraints=True,
             )
             gate_failures = check_repository(
                 staged.snapshot.archive,
@@ -571,18 +623,21 @@ def _perform_preflight(
             if gate_failures:
                 raise RepoGateError(gate_failures)
             infer_repo_setup(protected, staged, gateway)
+            unchecked = tuple(role for role in SETUP_NOT_CHECKED if role in staged.box_sources)
             bind_repo_scorer(
                 protected,
                 staged,
                 gateway,
                 owner_id=f"preflight-{identity}",
                 managed_key=settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else "",
+                skip_setup=unchecked,
             )
-        result = _verify_anything(gateway, protected, scope=request.scope, identity=identity)
+        result = _verify_anything(gateway, protected, scope=request.scope, identity=identity, unchecked=unchecked)
+        result["checks"][:0] = [_check("setup", "skipped", SETUP_NOT_CHECKED[role]) for role in unchecked]
         if is_repo_payload(protected):
             result["environment"] = protected["target"]["repo"]["environment"]
         states = {check["status"] for check in result["checks"]}
-        if not states or not states.issubset({"failed", "pending", "succeeded"}):
+        if not states or not states.issubset({"failed", "pending", "succeeded", "skipped"}):
             raise ValueError("Setup did not return a complete set of readiness checks.")
         status = "failed" if "failed" in states else "pending" if "pending" in states else "succeeded"
         if status == "pending" and "pending_reason" not in result:
@@ -599,7 +654,12 @@ def _perform_preflight(
             ),
         )
     except BudgetInsufficientError as error:
-        field = BALANCE_FIELD if isinstance(error, AccountFundsError) else None
+        # Setup bills the balance only (SKY-925), so a guest that relays a plain budget stop still
+        # ran out of balance, never out of limit. A setup_in_total limit (continuous-plan cycles, or
+        # accounts that turn off wallet setup billing) still bounds setup, so its plain stop names
+        # the limit.
+        on_balance = isinstance(error, AccountFundsError) or not snapshot.setup_in_total
+        field = BALANCE_FIELD if on_balance else None
         result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), field)]}
     except RepoGateError as error:
         result = {
@@ -638,3 +698,119 @@ def _perform_preflight(
                 status = "failed"
                 result.setdefault("checks", []).append(_check("runtime", "failed", str(error)))
     return status, result
+
+
+@contextmanager
+def judge_scorer(
+    payload: dict[str, Any],
+    *,
+    username: str,
+    budget_id: str,
+    generation: int,
+    owner_id: str,
+    image: str | None,
+    engine: Any,
+    case_count: int,
+    before_scoring: Callable[[dict[str, Any], StagedRepository], None] | None = None,
+) -> Iterator[tuple[dict[str, Any], StagedRepository, ModelGateway]]:
+    """Stage a judge session's repository and bind its scorer in the parent (SKY-696).
+
+    The steps are those of a setup check and of the worker: the same
+    credentials, the same metered gateway and the same repository gate. No
+    guest opens. The repository scorer runs each version in its own run box
+    and scores it in a separate metric box.
+
+    Args:
+        payload: The session's stored run payload, credentials still protected.
+        username: Account that pays.
+        budget_id: The session's attached budget.
+        generation: The budget's current execution generation.
+        owner_id: Identity that names this attempt's paid operations.
+        image: The sandbox image pinned for the session, or ``None``.
+        engine: Database holding the ledger, the vaults and the connections.
+        case_count: How many cases the attempt scores, for the box lifetime.
+        before_scoring: Called after staging and before any paid box opens;
+            it raises to refuse the attempt.
+
+    Yields:
+        The protected payload, the staged repository and the gateway.
+
+    Raises:
+        RepoGateError: When the repository gate refuses the tree.
+    """
+    source = copy.deepcopy(payload)
+    alias_blackbox_metric_model(source)
+    source = resolve_execution_credentials(
+        source, username=username, binding_id=budget_id, vault=ProtectedCredentialVault(engine=engine)
+    )
+    source = prepare_protected_credentials(
+        source,
+        username=username,
+        vault=ProviderKeyVault(engine=engine),
+        default_token_source=str(source.get("token_source") or TOKEN_SOURCE_MANAGED),
+    )
+    uses_managed_models = payload_uses_token_source(
+        source,
+        TOKEN_SOURCE_MANAGED,
+        default_token_source=str(source.get("token_source") or TOKEN_SOURCE_MANAGED),
+    )
+    if settings.openrouter_api_key is None and uses_managed_models:
+        raise ValueError("Managed model routing is not configured.")
+    managed_key = settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else ""
+    gateway = ModelGateway(
+        BudgetRuntime(
+            BudgetService(engine=engine),
+            username=username,
+            budget_id=budget_id,
+            generation=generation,
+            phase="run",
+            wait_timeout=SETUP_WAIT_SECONDS,
+        )
+    )
+    staged: StagedRepository | None = None
+    try:
+        bind_protected_sandbox(
+            gateway,
+            settings,
+            owner_id=owner_id,
+            image=image,
+            lifetime_seconds=math.ceil(judge_lifetime_seconds(source, case_count)),
+            parent_hosts=PACKAGE_REGISTRY_HOSTS,
+            provider=source.get("sandbox_provider"),
+        )
+        protected = gateway.protect_payload(
+            source,
+            managed_key=managed_key,
+            allow_private_tools=settings.discover_allow_private,
+            allow_batch=False,
+        )
+        # Staging empties the secret list, so read the gate's inputs first.
+        secret_bindings = dict((protected["target"].get("repo") or {}).get("secret_bindings") or {})
+        secret_allowed_hosts = repo_secret_allowed_hosts(protected)
+        protected, staged = stage_repository(
+            protected, username=username, binding_id=budget_id, engine=engine, require_constraints=True
+        )
+        gate_failures = check_repository(
+            staged.snapshot.archive,
+            staged.secrets,
+            place=sandbox_place(settings.local_mode),
+            bindings=secret_bindings,
+            allowed_hosts=secret_allowed_hosts,
+            require_version=staged.require_version,
+        )
+        if gate_failures:
+            raise RepoGateError(gate_failures)
+        if before_scoring is not None:
+            before_scoring(protected, staged)
+        infer_repo_setup(protected, staged, gateway)
+        bind_repo_scorer(protected, staged, gateway, owner_id=owner_id, managed_key=managed_key)
+        yield protected, staged, gateway
+    finally:
+        if staged is not None:
+            staged.close_scorers()
+            staged.cleanup()
+        try:
+            gateway.close()
+        except UsagePendingError:
+            # The caller's evidence finish sees the budget's pending operations.
+            logger.info("judge attempt %s left usage awaiting confirmation", owner_id)

@@ -1,5 +1,10 @@
 import type { GeneralistAgentHandlers } from "./stream";
 
+/** True when `value` is the auto-review's `{denied: true}` block. */
+function isDenial(value: unknown): value is { denied: true } {
+  return typeof value === "object" && value !== null && (value as { denied?: unknown }).denied === true;
+}
+
 /**
  * Route one generalist-agent SSE event to its handler.
  *
@@ -59,6 +64,10 @@ export function dispatchGeneralistEvent(
         id: String(data.id ?? ""),
         tool: String(data.tool ?? ""),
         arguments: (data.arguments as Record<string, unknown>) ?? {},
+        ...(data.chat_rule === true ? { chat_rule: true } : {}),
+        ...(isDenial(data.auto_review)
+          ? { auto_review: { denied: true as const } }
+          : {}),
       });
       break;
     case "approval_resolved":
@@ -66,6 +75,9 @@ export function dispatchGeneralistEvent(
         id: String(data.id ?? ""),
         tool: String(data.tool ?? ""),
         approved: Boolean(data.approved),
+        ...(data.scope === "conversation" ? { scope: "conversation" as const } : {}),
+        ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
+        ...(data.auto_review_denied === true ? { auto_review_denied: true } : {}),
       });
       break;
     case "message_patch":
@@ -74,16 +86,30 @@ export function dispatchGeneralistEvent(
     case "message_reset":
       handlers.onMessageReset?.();
       break;
+    case "media_notice": {
+      const ids = Array.isArray(data.reference_ids) ? data.reference_ids.map(String) : [];
+      if (ids.length) handlers.onMediaNotice?.(ids);
+      break;
+    }
     case "steer_applied":
       handlers.onSteerApplied?.({
         ids: Array.isArray(data.ids) ? data.ids.map(String) : [],
         text: String(data.text ?? ""),
+        ...(typeof data.message_id === "number" ? { message_id: data.message_id } : {}),
       });
       break;
     case "conversation_meta":
       handlers.onConversationMeta?.({
         conversation_id: String(data.conversation_id ?? ""),
         title: String(data.title ?? ""),
+        ...(typeof data.user_message_id === "number" ? { user_message_id: data.user_message_id } : {}),
+      });
+      break;
+    case "conversation_title":
+      handlers.onConversationTitle?.({
+        conversation_id: String(data.conversation_id ?? ""),
+        title: String(data.title ?? ""),
+        cut_title: String(data.cut_title ?? ""),
       });
       break;
     case "done": {
@@ -97,6 +123,23 @@ export function dispatchGeneralistEvent(
       });
       break;
     }
+    case "compaction_start":
+      handlers.onCompactionStart?.({
+        reason: String(data.reason ?? "threshold"),
+        summarizedTurns:
+          typeof data.summarized_turns === "number" && data.summarized_turns >= 0
+            ? data.summarized_turns
+            : null,
+      });
+      break;
+    case "compaction":
+      handlers.onCompaction?.(data);
+      break;
+    case "compaction_error":
+      handlers.onCompactionError?.({
+        cents: typeof data.cents === "number" && Number.isFinite(data.cents) ? data.cents : null,
+      });
+      break;
     case "turn_stats":
       if (data.stats) handlers.onTurnStats?.(data.stats);
       break;

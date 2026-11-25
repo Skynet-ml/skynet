@@ -88,10 +88,10 @@ Bir mesaja dosya ekleyebilirsiniz. Her dosya en fazla 20 MB olabilir. Tek seferd
 Ajan aracılığıyla bir veri kümesi yüklemek için:
 
 1. Bir CSV, JSON veya Excel dosyası ekleyin.
-2. Yükleme kartını kontrol edin. Kart dosyanın sütunlarını gösterir.
-3. Karttaki sütun rollerini belirleyin, ardından onaylayın.
+2. Dosya okunurken "Dosya okunuyor…" bildirimi görünür.
+3. Dosya, mesajınızda bir dosya kartı olarak bekler. Mesajı gönderin.
 
-Ajan dosyayı okuyamazsa kart "Dosya okunamadı. CSV, JSON veya XLSX dosyası kullanın." mesajını gösterir.
+Dosya okunamazsa "Dosya okunamadı. CSV, JSON veya XLSX dosyası kullanın." bildirimi görünür.
 
 Dosya kuralları için [Veri kümesi hazırlayın](/docs/guides/datasets) sayfasına bakın.
 
@@ -109,7 +109,7 @@ Yeni sohbetler için varsayılan bir model belirlemek üzere **Ayarlar** > **Ara
 
 ### Maliyet
 
-Skynet kredileriyle yapılan ajan sohbetleri bakiyenizi kullanır. Bakiyeniz boşsa panel "Bakiyeniz boş. Ajanla sohbete devam etmek için bakiye ekleyin." mesajını gösterir. Fiyatlar için [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
+Skynet kredileriyle yapılan ajan sohbetleri bakiyenizi kullanır. Kullanılabilir bakiyeniz çok düşükse panel "Kullanılabilir bakiyeniz çok düşük. Etkin çalıştırmalar bakiyenizin bir kısmını ayırabilir." mesajını gösterir. **Faturalandırma** ayarlarını açmak için cüzdan düğmesini (**Bakiye ekle**) seçin. Fiyatlar için [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
 
 ## İpuçları
 

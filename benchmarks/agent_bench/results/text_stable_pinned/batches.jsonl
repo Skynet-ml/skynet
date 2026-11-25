@@ -1,2 +1,0 @@
-{"harness": "dspy-reactv2", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 708, "billed_usd": 0.877288}
-{"harness": "dspy-reactv2-stable", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 696, "billed_usd": 0.324722}

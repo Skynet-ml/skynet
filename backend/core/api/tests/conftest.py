@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from .. import artificial_analysis, model_catalog
 from .. import auth as auth_mod
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..routers import generalist_agent
 from ..routers.analytics import create_analytics_router
 from ..routers.models import create_models_router
 from ..routers.optimizations_meta import create_optimizations_meta_router
@@ -46,6 +47,12 @@ def _offline_page(url: str) -> tuple[int, str, str]:
 def _offline_artificial_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep ``/models`` from fetching Artificial Analysis pages during tests."""
     monkeypatch.setattr(artificial_analysis, "_fetch_head", _offline_page)
+
+
+@pytest.fixture(autouse=True)
+def _offline_chat_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a new agent chat from calling a real title model during tests."""
+    monkeypatch.setattr(generalist_agent, "_ai_title", lambda *args: "")
 
 
 @pytest.fixture(autouse=True)

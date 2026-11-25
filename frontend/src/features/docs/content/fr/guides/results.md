@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` est le dict des champs d'entrée de la requête.
 - La valeur de retour doit être sérialisable en JSON. Un dict devient `outputs`. Toute autre valeur devient `{"output": value}`.
-- `serve.py` peut appeler un modèle avec `llm` du module d'aide `skynet`. Il ne reçoit pas les secrets de l'exécution.
+- `serve.py` peut appeler un modèle avec `llm` du module d'aide `openascent`. Il ne reçoit pas les secrets de l'exécution.
 
 Skynet exécute la meilleure version dans la même sandbox protégée que l'exécution. L'onglet **Utilisation** comporte deux parties :
 
@@ -103,7 +103,7 @@ Remplacez `message` par les champs d'entrée de votre exécution. Le **Code d'in
 La réponse contient `outputs`, les `input_fields`, les `output_fields`, le `model_used`, `cents_charged` et `budget`.
 
 > [!TIP]
-> Chaque appel est facturé séparément, sur le solde de l'appelant. `max_cost_cents` définit le coût maximal de cet appel, en centimes. Si vous renvoyez la même `Idempotency-Key`, Skynet ne facture pas l'appel une seconde fois.
+> Chaque appel est facturé séparément, sur le solde de l'appelant. `max_cost_cents` est facultatif. Il indique le maximum que vous acceptez pour cet appel, en centimes. Votre solde borne l'appel. Si vous renvoyez la même `Idempotency-Key`, Skynet ne facture pas l'appel une seconde fois.
 
 Lisez [API](/docs/api) pour l'authentification et les autres points de terminaison.
 

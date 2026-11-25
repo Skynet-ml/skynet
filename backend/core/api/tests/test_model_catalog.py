@@ -462,6 +462,56 @@ def test_get_catalog_adds_probe_only_models_with_metadata(monkeypatch: pytest.Mo
     assert any(p.slug == "openrouter" for p in result.providers)
 
 
+def test_get_catalog_carries_output_limit_and_default_temperature(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A probed model carries its output limit, temperature support and recommended temperature."""
+    monkeypatch.setattr(litellm, "model_cost", {})
+    monkeypatch.setattr(litellm, "get_valid_models", list)
+    text_only = {"input_modalities": ["text"], "output_modalities": ["text"]}
+    probe = {
+        ("openrouter", None): {
+            "moonshotai/kimi-k3": {
+                "id": "moonshotai/kimi-k3",
+                "architecture": text_only,
+                "top_provider": {"max_completion_tokens": 65536},
+                "default_parameters": {"temperature": 0.6},
+                "supported_parameters": ["tools", "temperature"],
+            },
+            "acme/plain": {"id": "acme/plain", "architecture": text_only, "default_parameters": {}},
+            "openai/reasoner": {
+                "id": "openai/reasoner",
+                "architecture": text_only,
+                "supported_parameters": ["tools", "reasoning"],
+            },
+        }
+    }
+    monkeypatch.setattr(mc, "_probe_all_providers", lambda: probe)
+
+    by_value = {m.value: m for m in get_catalog().models}
+
+    kimi = by_value["openrouter/moonshotai/kimi-k3"]
+    assert (kimi.max_output_tokens, kimi.default_temperature, kimi.takes_temperature) == (65536, 0.6, True)
+    plain = by_value["openrouter/acme/plain"]
+    assert (plain.max_output_tokens, plain.default_temperature, plain.takes_temperature) == (None, None, None)
+    assert by_value["openrouter/openai/reasoner"].takes_temperature is False
+
+
+@pytest.mark.parametrize(
+    ("item", "tokens", "temperature"),
+    [
+        ({"top_provider": {"max_completion_tokens": 0}, "default_parameters": {"temperature": 3}}, None, None),
+        ({"top_provider": {"max_completion_tokens": True}, "default_parameters": {"temperature": True}}, None, None),
+        ({"max_output_tokens": 8192, "default_parameters": {"temperature": 1}}, 8192, 1.0),
+        ({"top_provider": None, "default_parameters": None}, None, None),
+    ],
+)
+def test_probe_item_output_limit_and_temperature_reject_bad_values(
+    item: dict, tokens: int | None, temperature: float | None
+) -> None:
+    """Keep only a positive int limit and a 0-2 temperature; booleans and out-of-range values read as None."""
+    assert mc._probe_item_max_output_tokens(item) == tokens
+    assert mc._probe_item_default_temperature(item) == temperature
+
+
 def test_get_catalog_surfaces_per_model_reasoning_efforts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each model carries the effort levels and default its probe item declares.
 
@@ -1141,6 +1191,16 @@ def test_two_cold_effort_checks_at_once_share_one_build(monkeypatch: pytest.Monk
     assert len(builds) == 1
 
 
+def test_a_cold_kick_after_a_landed_refresh_starts_no_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold check that read an empty cache just before a refresh landed starts no second build."""
+    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[]))
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+
+    assert mc._kick_background_refresh(only_when_cold=True) is None
+    assert mc._refresh_in_flight is False
+
+
 def test_the_lowest_effort_from_low_is_shared_by_the_unpicked_effort() -> None:
     """Below-``low`` efforts are skipped, and a model that thinks by default still gets its catalog default."""
 
@@ -1193,6 +1253,21 @@ def test_jev_stays_hidden_for_every_other_role(monkeypatch: pytest.MonkeyPatch, 
         mc.require_known_model(_JEV, role=role)
 
 
+def test_the_auto_review_decision_model_passes_only_for_its_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The auto-review role accepts its decision model; no other role does, and it accepts no other model."""
+    kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
+    monkeypatch.setattr(mc, "get_catalog_cached", lambda: ModelCatalogResponse(providers=[], models=[kept]))
+
+    mc.require_known_model(mc.AUTO_REVIEW_MODEL, role=mc.AUTO_REVIEW_ROLE)
+
+    for role in (None, "agent", "hook", "judge"):
+        with pytest.raises(mc.DomainError):
+            mc.require_known_model(mc.AUTO_REVIEW_MODEL, role=role)
+    for other in (_JEV, "openrouter/typesafe/jev-1.13"):
+        with pytest.raises(mc.DomainError):
+            mc.require_known_model(other, role=mc.AUTO_REVIEW_ROLE)
+
+
 def test_classifier_roles_do_not_unlock_other_routers(monkeypatch: pytest.MonkeyPatch) -> None:
     """The classifier exception names Jev only; other routers stay refused for the judge."""
     empty = ModelCatalogResponse(providers=[], models=[])
@@ -1207,13 +1282,16 @@ def test_cold_effort_check_joins_the_thread_the_kick_returns(monkeypatch: pytest
     plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
     real_kick = mc._kick_background_refresh
 
-    def kick_then_replace() -> threading.Thread | None:
+    def kick_then_replace(*, only_when_cold: bool = False) -> threading.Thread | None:
         """Start the refresh, then store an unstarted thread, as a racing new refresh can.
+
+        Args:
+            only_when_cold: Passed on to the real kick.
 
         Returns:
             The thread the real kick returned.
         """
-        thread = real_kick()
+        thread = real_kick(only_when_cold=only_when_cold)
         mc._refresh_thread = threading.Thread(target=lambda: None)
         return thread
 

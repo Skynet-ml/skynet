@@ -165,7 +165,6 @@ function setupChat(options: {
     shownScreenRef, setupRunRef, kickedScreensRef,
     newSession: () => log.push(["new"]),
     activateConversation: (id: string) => (log.push(["activate", id]), options.active ?? false),
-    setSetupLoad: (id: string | null) => log.push(["loading", id]),
     setKickoffScreen: (screen: string) => log.push(["kickoff", screen]),
     loadConversation: (id: string) => (log.push(["load", id]), (options.load ?? (async () => ({ detail: null, missing: false })))(id)),
   });
@@ -187,31 +186,30 @@ const server = [{ role: "user", content: "server" }];
 test("a new setup chat starts with no server id and its kickoff, so its first turn saves it", async () => {
   const chat = setupChat({ setupId: null });
   await chat.openSetupChat(null, "brief");
-  assert.equal(chat.log.length, 4);
-  assert.deepEqual(chat.log[0], ["loading", null]);
-  assert.match(String(chat.log[1][1]), /^setup-/);
-  assert.deepEqual(chat.log.slice(2), [["new"], ["kickoff", "brief"]]);
+  assert.equal(chat.log.length, 3);
+  assert.match(String(chat.log[0][1]), /^setup-/);
+  assert.deepEqual(chat.log.slice(1), [["new"], ["kickoff", "brief"]]);
 });
 
 test("a tab-only setup chat from an older build opens with no server id", async () => {
   const chat = setupChat({ setupId: "setup-1" });
   await chat.openSetupChat({ id: "setup-1", messages: tab }, "brief");
-  assert.deepEqual(chat.log, [["loading", null], ["open", null, tab], ["kickoff", "brief"]]);
+  assert.deepEqual(chat.log, [["open", null, tab], ["kickoff", "brief"]]);
 });
 
 test("a reopened setup chat shows the tab copy, loads the server copy, then sends its kickoff", async () => {
   const chat = setupChat({ live: { id: null, messages: [] }, load: async () => ({ detail: { messages: server }, missing: false }) });
   await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
   assert.deepEqual(chat.log, [
-    ["loading", null], ["activate", "c1"], ["open", "c1", tab], ["loading", "c1"], ["load", "c1"],
-    ["loading", null], ["open", "c1", server], ["kickoff", "brief"],
+    ["activate", "c1"], ["open", "c1", tab], ["load", "c1"],
+    ["open", "c1", server], ["kickoff", "brief"],
   ]);
 });
 
 test("a setup chat already open in the panel sends its kickoff at once", async () => {
   const chat = setupChat({ active: true });
   await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  assert.deepEqual(chat.log, [["loading", null], ["activate", "c1"], ["kickoff", "brief"]]);
+  assert.deepEqual(chat.log, [["activate", "c1"], ["kickoff", "brief"]]);
 });
 
 test("a load for a setup that closed changes nothing and sends no kickoff", async () => {
@@ -221,7 +219,7 @@ test("a load for a setup that closed changes nothing and sends no kickoff", asyn
   chat.setupChatRef.current = null;
   load.finish({ detail: null, missing: true });
   await done;
-  assert.deepEqual(chat.log.slice(-2), [["load", "c1"], ["loading", null]]);
+  assert.deepEqual(chat.log.at(-1), ["load", "c1"]);
 });
 
 test("a load for a setup that opened again leaves the new setup's chat and kickoff alone", async () => {
@@ -314,7 +312,7 @@ test("a kickoff sent again after not found counts as the kickoff of the screen o
   assert.equal(plain.kickoffTurnRef.current, null);
 });
 
-test("the agent's Back request stays hidden in a shared link and in the chat history", async () => {
+test("the agent's Back request stays hidden in the chat history", async () => {
   const back = backRequest("Change the metric to accuracy");
   assert.match(back, /Change the metric to accuracy$/);
   const stored = [
@@ -323,9 +321,6 @@ test("the agent's Back request stays hidden in a shared link and in the chat his
     { role: "user", content: back },
     { role: "user", content: "Change the metric to accuracy" },
   ];
-  const sharedView = "src/features/agent-panel/components/SharedChatView.tsx";
-  const visible = expression(sharedView, "visible", { hideKickoffs, messages: stored })();
-  assert.deepEqual(visible.map((m: { hidden?: boolean }) => m.hidden === true), [true, false, true, false]);
   const opened: unknown[][] = [];
   const pick = expression(panel, "handlePickConversation", {
     setDrawerOpen: () => {}, hideKickoffs,
@@ -336,32 +331,6 @@ test("the agent's Back request stays hidden in a shared link and in the chat his
   await pick("c1");
   const shown = opened[0][1] as { hidden?: boolean }[];
   assert.deepEqual(shown.map((m) => m.hidden === true), [true, false, true, false]);
-});
-
-test("Copy chat on a share page gets the wizard's kickoff and Back turns as hidden turns", () => {
-  const sharePage = "src/app/share/chat/[token]/page.tsx";
-  const tree = ts.createSourceFile(sharePage, source(sharePage), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let found: ts.Expression | undefined;
-  const visit = (node: ts.Node) => {
-    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "CopyChatMenu") {
-      for (const attr of node.attributes.properties) {
-        if (ts.isJsxAttribute(attr) && attr.name.getText(tree) === "messages" && attr.initializer
-          && ts.isJsxExpression(attr.initializer)) found = attr.initializer.expression;
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(tree);
-  assert.ok(found, "CopyChatMenu messages");
-  const chat = {
-    messages: [
-      { role: "user", content: SCREEN_KICKOFF },
-      { role: "user", content: backRequest("Change the metric") },
-      { role: "user", content: "typed" },
-    ],
-  };
-  const copied = new Function("hideKickoffs", "chat", `return ${found.getText(tree)}`)(hideKickoffs, chat);
-  assert.deepEqual(copied.map((m: { hidden?: boolean }) => m.hidden === true), [true, true, false]);
 });
 
 test("closing the setup stops its chat, even before the server gave it an id", () => {
@@ -400,32 +369,9 @@ test("discardActive stops and drops the chat on view and shows a new one", () =>
   assert.equal(activeKeyRef.current, "k2");
 });
 
-test("an old load that ends late leaves the newer load's Share block on", async () => {
-  const first = pendingLoad();
-  let calls = 0;
-  const chat = setupChat({ load: () => (calls++ === 0 ? first.start() : new Promise(() => {})) });
-  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  void chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  first.load.finish({ detail: null, missing: false });
-  await done;
-  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [
-    ["loading", null], ["loading", "c1"], ["loading", null], ["loading", "c1"],
-  ]);
-});
-
 test("a Back request of only spaces stays hidden after send trims it", () => {
   const sent = backRequest("   ").trim();
   assert.deepEqual(hideKickoffs([{ role: "user", content: sent }]).map((m) => m.hidden), [true]);
-});
-
-test("a new setup chat clears the Share block an old load left on", async () => {
-  const first = pendingLoad();
-  const chat = setupChat({ load: first.start });
-  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  void chat.openSetupChat(null, null);
-  first.load.finish({ detail: null, missing: false });
-  await done;
-  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [["loading", null], ["loading", "c1"], ["loading", null]]);
 });
 
 test("the server copy keeps the hidden mark of each turn the tab copy hid", () => {
@@ -526,18 +472,6 @@ test("only a 404 marks a conversation as gone", async () => {
     await load(async () => ({ ok: true, status: 200, json: async () => ({ id: "c1", messages: server }) })),
     { detail: { id: "c1", messages: server }, missing: false },
   );
-});
-
-test("the setup chat shows Share only once the server saved it and its load ended", () => {
-  const share = (conversationId: string | null, setupLoad: string | null = null) =>
-    expression(panel, "canShareChat", {
-      canShare: true, webChat: false, setupLoad,
-      agent: { conversationId, messages: [{ role: "user", content: "q" }] },
-    });
-  assert.equal(share("c1"), true);
-  // An older build's tab-only chat, or one the server lost, opens with no id.
-  assert.equal(share(null), false);
-  assert.equal(share("c1", "c1"), false);
 });
 
 function keepWith(
@@ -676,15 +610,18 @@ test("a submitted setup leaves no draft behind", () => {
 });
 
 test("Start new deletes the server draft", () => {
-  const text = source("src/features/submit/components/SubmitEntry.tsx");
-  assert.match(text, /function discardSetupDraft\(account: string, draft: SetupDraft \| null\) \{\n\s+void deleteSetupDraft\(account, setupDraftApi\);/);
-  assert.match(text, /onStartNew=\{\(\) => \{\n\s+discardSetupDraft\(accountId, offer\);/);
+  const offer = source("src/features/submit/lib/setup-offer.ts");
+  assert.match(offer, /function discardSetupOffer\(account: string, offer: SetupDraft\): void \{\n\s+void deleteSetupDraft\(account, setupDraftApi\);/);
+  const entry = source("src/features/submit/components/SubmitEntry.tsx");
+  assert.match(entry, /onStartNew=\{\(\) => \{\n\s+discardSetupOffer\(accountId, offer\);/);
+  const newOptimization = source("src/features/submit/hooks/use-new-optimization.tsx");
+  assert.match(newOptimization, /onStartNew=\{\(\) => \{\n\s+discardSetupOffer\(offer\.account, offer\.draft\);/);
 });
 
 test("a draft this build cannot read stays on the server and is not offered", () => {
-  const text = source("src/features/submit/components/SubmitEntry.tsx");
-  assert.match(text, /else if \(draft && !usable\) clearSetupDraft\(\);/);
-  assert.equal(text.match(/discardSetupDraft\(/g)?.length, 2);
+  const text = source("src/features/submit/lib/setup-offer.ts");
+  assert.match(text, /if \(draft && !usable\) clearSetupDraft\(\);/);
+  assert.equal(text.match(/discardSetupOffer\(/g)?.length, 1);
   assert.equal(text.match(/deleteSetupDraft\(/g)?.length, 1);
 });
 
@@ -825,7 +762,7 @@ function screenEffect(options: { handoff: { id: string | null } | null; live: { 
     discardConversation: (id: string) => log.push(["discard", id]),
     newSetupChatStart, reopenedScreenRef: { current: null },
     kickedScreensRef: { current: new Set() }, setupRunRef: { current: 0 },
-    setSetupLoad: () => {}, setupMessagesRef: { current: [] },
+    setupMessagesRef: { current: [] },
     keepSetupChat: (id: string | null) => log.push(["keep", id]),
     setKickoffScreen: (screen: string) => log.push(["kickoff", screen]),
     setActiveConversation: (id: string | null) => log.push(["active", id]),
@@ -873,4 +810,164 @@ test("leaving /submit before the wizard mounts drops the setup mark", () => {
   };
   assert.deepEqual(run("/submit"), { id: "c1" });
   assert.equal(run("/runs"), null);
+});
+
+test("Send reads the ready media and the wait reason for the draft's own file cards (SKY-782)", () => {
+  const calls: string[] = [];
+  const cards = (files: { id: string }[]) => files.map((f) => f.id).join();
+  const submit = expression(panel, "handleSubmit", {
+    draft: "see report.pdf",
+    lineComments: [],
+    splitPastes: () => ({ files: [{ name: "report.pdf", id: "c-1" }] }),
+    chatMedia: {
+      ready: (files: { id: string }[]) => (calls.push(`ready ${cards(files)}`), null),
+      blocked: (files: { id: string }[]) => (calls.push(`blocked ${cards(files)}`), "wait"),
+    },
+    toast: { info: (text: string) => calls.push(`toast ${text}`) },
+    msg: (key: string) => key,
+  });
+  submit();
+  assert.deepEqual(calls, ["ready c-1", "blocked c-1", "toast wait"]);
+});
+
+test("a confirmed dataset card stores its file's original under the card's id (SKY-782)", () => {
+  for (const webChat of [false, true]) {
+    const calls: unknown[][] = [];
+    const file = { name: "qa.xlsx" };
+    let uploads: ReadonlySet<string> = new Set();
+    const confirm = expression(panel, "handleDatasetConfirm", {
+      webChat,
+      setConfirmedUploadCalls: (update: (c: ReadonlySet<string>) => ReadonlySet<string>) =>
+        (uploads = update(uploads)),
+      datasetDraft: { attach: (...args: unknown[]) => (calls.push(["attach", ...args]), "card-1") },
+      addOriginals: (files: unknown) => calls.push(["addOriginals", files]),
+    });
+    confirm("call-1", { fileName: "qa.xlsx" }, file);
+    assert.deepEqual(
+      calls,
+      webChat
+        ? []
+        : [
+            ["attach", { fileName: "qa.xlsx" }, "call-1"],
+            ["addOriginals", [{ file, card: "card-1" }]],
+          ],
+    );
+    // The turn drops a confirmed upload card, so it does not split the steps (SKY-783).
+    assert.deepEqual([...uploads], webChat ? [] : ["call-1"]);
+  }
+  assert.match(source(panel), /if \(confirmedUploadCalls\.has\(call\.id\)\) return null;/);
+  // A switch to a hosted chat drops a composer read under way, as a chat switch does.
+  assert.match(
+    source(panel),
+    /useComposerDatasetAttach\(\s*`\$\{agent\.sessionKey\}:\$\{webChat\}`/,
+  );
+  // The composer reads a dataset file itself, except in a hosted chat, where it
+  // stays a plain file card (SKY-783).
+  assert.match(source(panel), /claimsFile=\{webChat \? undefined : isDatasetFile\}/);
+  assert.match(source(panel), /onAttachFile=\{attachComposerDataset\}/);
+});
+
+// Run the panel's handleSubmit with a pending dataset card (SKY-780).
+function datasetSubmit(options: {
+  staging?: boolean;
+  compacting?: boolean;
+  media?: { kind: string }[];
+  noCard?: boolean;
+  sendFails?: boolean;
+}) {
+  const calls: unknown[][] = [];
+  const submit = expression(panel, "handleSubmit", {
+    draft: "use it <card>",
+    lineComments: [],
+    splitPastes: () => ({ files: [] }),
+    chatMedia: {
+      ready: () => options.media ?? [],
+      filePaths: () => [],
+      blocked: () => null,
+      clear: () => calls.push(["clear media"]),
+    },
+    withFilePaths: (text: string) => text,
+    toast: { info: (text: string) => calls.push(["toast", text]) },
+    msg: (key: string) => key,
+    joinLineComments: (text: string) => text,
+    compacting: options.compacting ?? false,
+    datasetDraft: {
+      staging: () => options.staging ?? false,
+      take: () => (calls.push(["take"]), options.noCard ? null : { override: { staged_dataset_id: "s1" } }),
+    },
+    sendAfterRender: (...args: unknown[]) => calls.push(["sendAfterRender", ...args]),
+    agent: { send: (...args: unknown[]) => (calls.push(["send", ...args]), !options.sendFails) },
+    setDraft: (text: string) => calls.push(["setDraft", text]),
+    clearLineComments: () => {},
+  });
+  submit();
+  return calls;
+}
+
+test("Send with a dataset card sends the text, the override and the media after a render (SKY-780)", () => {
+  const media = [{ kind: "image" }];
+  assert.deepEqual(datasetSubmit({ media }), [
+    ["take"],
+    ["sendAfterRender", "use it <card>", { staged_dataset_id: "s1" }, { media }],
+    ["setDraft", ""],
+    ["clear media"],
+  ]);
+});
+
+test("Send with no dataset card sends at once (SKY-780)", () => {
+  const media = [{ kind: "image" }];
+  assert.deepEqual(datasetSubmit({ noCard: true, media }), [
+    ["take"],
+    ["send", "use it <card>", undefined, { media }],
+    ["setDraft", ""],
+    ["clear media"],
+  ]);
+});
+
+test("a refused Send with media and no dataset card keeps the draft (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ noCard: true, sendFails: true, media: [{ kind: "image" }] }), [
+    ["take"],
+    ["send", "use it <card>", undefined, { media: [{ kind: "image" }] }],
+    ["toast", "agent.media.wait_compact"],
+  ]);
+});
+
+test("Send waits while the dataset rows stage and keeps the draft (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ staging: true }), [["toast", "agent.media.uploading"]]);
+});
+
+test("a /compact with an image keeps the dataset card for a later Send (SKY-780)", () => {
+  assert.deepEqual(datasetSubmit({ compacting: true, media: [{ kind: "image" }] }), [
+    ["toast", "agent.media.wait_compact"],
+  ]);
+});
+
+test("a mid-turn Send with the dataset card goes through handleSubmit, not the queue (SKY-780)", () => {
+  const submitted: string[] = [];
+  const accepts = expression(panel, "acceptsMidTurn", {
+    datasetDraft: { holds: (text: string) => text.includes("<card>") },
+    handleSubmit: () => submitted.push("submit"),
+  });
+  assert.equal(accepts("plain text"), true);
+  assert.equal(accepts("use it <card>"), false);
+  assert.deepEqual(submitted, ["submit"]);
+  assert.match(source(panel), /acceptsMidTurn=\{acceptsMidTurn\}/);
+});
+
+test("a dataset card that left the draft unsent reopens its tool card (SKY-780)", () => {
+  const confirmedDatasetCallsRef = { current: new Set(["call-1", "call-2"]) };
+  let cards: Record<string, number> = { "call-1": 1 };
+  let uploads: ReadonlySet<string> = new Set(["call-1", "call-2"]);
+  const reopen = expression(panel, "reopenDatasetCard", {
+    confirmedDatasetCallsRef,
+    setConfirmedUploadCalls: (update: (c: ReadonlySet<string>) => ReadonlySet<string>) =>
+      (uploads = update(uploads)),
+    setReopenedCards: (update: (c: Record<string, number>) => Record<string, number>) => (cards = update(cards)),
+  });
+  reopen("call-1");
+  assert.deepEqual([...confirmedDatasetCallsRef.current], ["call-2"]);
+  assert.deepEqual([...uploads], ["call-2"], "the turn shows the reopened card again");
+  assert.deepEqual(cards, { "call-1": 2 });
+  // The new key remounts the card, so it shows its picker again.
+  assert.equal(source(panel).match(/key=\{`\$\{call\.id\}:\$\{reopenedCards\[call\.id\] \?\? 0\}`\}/g)?.length, 2);
 });

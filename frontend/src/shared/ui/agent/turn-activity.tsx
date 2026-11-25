@@ -1,17 +1,27 @@
 "use client";
 
 import * as React from "react";
+import { motion, useReducedMotion } from "framer-motion";
+
 import { CaretRight } from "@/shared/ui/icons";
 
-import { cn } from "@/shared/lib/utils";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { cn } from "@/shared/lib/utils";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
-import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segments";
+import {
+  interleaveThinking,
+  latestHeading,
+  mergeAdjacentThinking,
+} from "@/shared/lib/thinking-segments";
+
 
 import { ActivityGroup } from "./activity-steps";
-import { Reveal, RevealMounted } from "./reveal";
+import { Reveal } from "./reveal";
 import { RevealText } from "./reveal-text";
+import { formatSpan, ThinkingSection } from "./thinking-section";
+import { deniedCount } from "./denied-count";
+import { DeniedCount } from "./denied-count-note";
 import {
   blockWorkMs,
   earliestStart,
@@ -24,13 +34,14 @@ import type { AgentThinking, AgentToolCall } from "./types";
 /** One stretch of a turn's thinking, placed by the tool calls before it. */
 export type TurnThinking = AgentThinking & { toolsBefore: number };
 
+/** A finished thinking segment and its place among the turn's segments. */
+type Row = TurnThinking & { order: number };
+
 type Step = {
   call: AgentToolCall;
   isRetry: boolean;
   index: number;
   card?: boolean;
-  /** A card that stays shown when the history folds; every card does unless false. */
-  pinned?: boolean;
 };
 
 /** A finished earlier turn of the same work block, shown inside its history. */
@@ -48,8 +59,8 @@ interface TurnActivityProps {
   thinking: readonly TurnThinking[];
   /**
    * Each call with its index among the turn's tool calls. A ``card`` call
-   * renders on its own at its place in the history and stays shown when the
-   * history is folded; every other call is a one-line step.
+   * renders on its own at its place in the history; every other call is a
+   * one-line step.
    */
   steps: Step[];
   /** The turn is still running. */
@@ -65,17 +76,21 @@ interface TurnActivityProps {
   durationMs?: number | null;
   /** The turn's start, when the caller knows it better than the steps do. */
   startedAt?: number | null;
-  /** Earlier turns of the same work block; they open with the history. */
+  /** Earlier turns of the same work block, shown before this one. */
   earlier?: readonly EarlierTurn[];
 }
 
-// Mirrors Codex's local turn: a "Working for 14s" line over what the agent
-// said and the tools it ran, then a single shimmering line at the bottom
-// naming what it is thinking about, which gives way to a running tool or to
-// the answer. Reasoning itself never shows as rows. Once done, a "Worked for
-// 39s" line folds the history away and leaves the answer; a click opens it.
-// Cards the user acts on sit at their place in the history and stay shown
-// when it folds.
+// Mirrors Codex's local turn: a "Working" line ("Working for 14s" after the
+// first second) over what the agent said and the tools it ran, then a single
+// shimmering line at the bottom naming what it is thinking about, which gives
+// way to a running tool or to the answer. Each finished stretch of reasoning
+// becomes one folded "Thought for Ns" row at its place among the tools; the
+// stretch still open shows only as that line (SKY-773). Once the answer
+// starts, the history folds behind one "Worked for 39s" row with a chevron
+// and a full-width rule; cards and failed steps stay out.
+// Matches the fold's close time in reveal.tsx.
+const FOLD_CLOSE_S = 0.14;
+
 export function TurnActivity({
   thinking,
   steps,
@@ -95,9 +110,6 @@ export function TurnActivity({
   const isLive =
     streaming ||
     allSteps.some(({ call, card }) => call.working || (!card && call.status === "running"));
-  // Open while the turn runs, folded once it ends, unless the reader chose.
-  const [choice, setChoice] = React.useState<boolean | null>(null);
-  const open = choice ?? isLive;
   const [nowTs, setNowTs] = React.useState(() => Date.now());
   const [mountedAt] = React.useState(() => Date.now());
   // One start for the whole turn, so the live timer only ever counts up.
@@ -115,43 +127,105 @@ export function TurnActivity({
     return () => clearInterval(id);
   }, [isLive]);
 
-  const pieces = interleaveThinking([], steps);
-  const earlierPieces = earlier.map((t) => interleaveThinking([], t.steps));
-  const hasCards = [pieces, ...earlierPieces].some((list) =>
-    list.some((piece) => piece.kind === "card"),
-  );
-  const hasHistory = Boolean(plan) || pieces.length > 0 || earlier.length > 0;
-  const isPinned = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card" && piece.step.pinned !== false;
-  const anyPinned = [pieces, ...earlierPieces].some((list) => list.some(isPinned));
+  // A card that renders nothing (the ask-user call, a setup write that
+  // changed nothing) is no piece: it would cut the steps around it into two
+  // groups with nothing between them (SKY-743).
+  const shown = (list: Step[]) =>
+    list.filter((s) => !s.card || renderStep(s.call, { isRetry: s.isRetry }) !== null);
+  // A card can drop out after it rendered (a write that ended with nothing to
+  // show) and join the rows around it into the first one's row. ``joined``
+  // maps that row to the segments it holds, so the open state, kept by turn
+  // and segment, follows the row the reader opened.
+  const layOut = (rows: Row[], list: Step[]) => {
+    const laidOut = interleaveThinking(rows, shown(list));
+    const joined = new Map<number, number[]>();
+    let group: number[] | null = null;
+    for (const piece of laidOut) {
+      if (piece.kind !== "thinking") {
+        group = null;
+        continue;
+      }
+      if (!group) {
+        group = [];
+        joined.set(piece.segment.order, group);
+      }
+      group.push(piece.segment.order);
+    }
+    return { pieces: mergeAdjacentThinking(laidOut), joined };
+  };
+  const thinkingRows = finishedThinking(thinking);
+  const current = layOut(thinkingRows, steps);
+  const earlierLaidOut = earlier.map((t) => layOut(finishedThinking(t.thinking), t.steps));
+  // A steer moves this turn into ``earlier`` under the same index, so an
+  // opened row stays open there and the new turn's rows start folded.
+  const [openRows, setOpenRows] = React.useState<ReadonlySet<string>>(() => new Set());
+  // Every call counts, also a dropped card, so the header does not leave
+  // and come back when a running write ends with nothing to show. A thinking
+  // row counts only once the turn ends: a live segment can reopen (ReActV2's
+  // message_reset) and take its row away again (SKY-773).
+  const hasHistory =
+    Boolean(plan) ||
+    steps.length > 0 ||
+    earlier.length > 0 ||
+    (!isLive && thinkingRows.length > 0);
   const toolRunning = useSettled(steps.some(({ call }) => call.status === "running"));
   const showThinking = streaming && !answering && !toolRunning;
+  // Codex folds the history once the final answer starts; a click overrides.
+  const [openChoice, setOpenChoice] = React.useState<boolean | null>(null);
+  const foldable = !isLive || answering;
+  const historyOpen = !foldable || (openChoice ?? false);
 
-  const pieceKey = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card"
-      ? piece.step.call.id
-      : piece.kind === "steps"
-        ? (piece.steps[0]?.call.id ?? "")
-        : "";
-
-  const renderPiece = (piece: (typeof pieces)[number]) =>
-    piece.kind === "card" ? (
-      <div key={`card-${piece.step.call.id}`} className="py-1.5">
-        {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
-      </div>
-    ) : piece.kind === "steps" ? (
+  const renderBurst = (group: Step[]) => {
+    const kinds = group.map(({ call }) => stepKind?.(call) ?? "tool");
+    const explore = kinds.every(isExplore);
+    return (
       <ActivityGroup
-        key={`steps-${piece.steps[0]?.call.id}`}
+        key={`steps-${group[0]?.call.id}`}
         autoOpen={false}
-        steps={piece.steps.map(({ call }) => ({
-          kind: stepKind?.(call) ?? "tool",
-          status: call.status,
-        }))}
+        activeLabel={explore ? msg("shared.agent.exploring") : undefined}
+        title={explore ? exploredTitle(kinds) : undefined}
+        steps={group.map(({ call }, i) => ({ kind: kinds[i] ?? "tool", status: call.status }))}
       >
-        {piece.steps.map(({ call, isRetry }) => (
+        {group.map(({ call, isRetry }) => (
           <React.Fragment key={call.id}>{renderStep(call, { isRetry })}</React.Fragment>
         ))}
       </ActivityGroup>
+    );
+  };
+
+  type Laid = ReturnType<typeof layOut>;
+  type Piece = Laid["pieces"][number];
+
+  const renderRow = (segment: Row, turn: number, joined: Laid["joined"]) => {
+    const rows = (joined.get(segment.order) ?? [segment.order]).map((o) => `${turn}:${o}`);
+    return (
+      <ThinkingSection
+        key={`thinking-${segment.order}`}
+        thinking={segment}
+        compact
+        open={rows.some((r) => openRows.has(r))}
+        onOpenChange={(next) =>
+          setOpenRows((prev) => {
+            const out = new Set(prev);
+            for (const r of rows) out.delete(r);
+            if (next) out.add(`${turn}:${segment.order}`);
+            return out;
+          })
+        }
+      />
+    );
+  };
+
+  const renderPiece = (piece: Piece, turn: number, joined: Laid["joined"]) =>
+    piece.kind === "thinking" ? (
+      renderRow(piece.segment, turn, joined)
+    ) : piece.kind === "card" ? (
+      // A card whose component renders nothing when it mounts leaves no padded gap.
+      <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
+        {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
+      </div>
+    ) : piece.kind === "steps" ? (
+      splitExploration(piece.steps, (step) => isExplore(stepKind?.(step.call) ?? "tool")).map(renderBurst)
     ) : null;
 
   const renderPlan = (text: string | undefined, key: string) =>
@@ -165,47 +239,53 @@ export function TurnActivity({
     ) : null;
   const planLine = renderPlan(plan, "plan");
 
-  // A pinned card stands outside the fold and never moves. Everything else
-  // rolls up behind it: a card stays mounted, since one can wait on the user,
-  // and a burst of steps leaves once it has rolled away.
-  const renderPieces = (list: typeof pieces, shown: boolean) =>
-    list.map((piece) => {
-      if (isPinned(piece)) return renderPiece(piece);
-      const key = `fold-${pieceKey(piece)}`;
-      return piece.kind === "card" ? (
-        <RevealMounted key={key} shown={shown} depth="block">
-          {renderPiece(piece)}
-        </RevealMounted>
-      ) : (
-        <Reveal key={key} open={shown} depth="block">
-          {renderPiece(piece)}
-        </Reveal>
-      );
-    });
-
-  // Folded, an earlier turn keeps only its pinned cards; its reply stays inside.
-  const earlierNodes = (shown: boolean) =>
-    earlier.map((turn, i) => (
-      <React.Fragment key={`earlier-${i}`}>
-        {turn.plan && (
-          <Reveal open={shown} depth="block">
-            {renderPlan(turn.plan, `plan-${i}`)}
-          </Reveal>
-        )}
-        {renderPieces(earlierPieces[i] ?? [], shown)}
-        {turn.answer && (
-          <Reveal open={shown} depth="block">
-            <div className="py-1">{turn.answer}</div>
-          </Reveal>
-        )}
+  // The fold hides only what sits between the cards. A card waits on the
+  // user, so it keeps one place in the tree and never remounts when the turn
+  // folds; a failed step must not hide behind a fold either.
+  const fold = (key: string, node: React.ReactNode) => (
+    <Reveal key={`fold-${key}`} open={historyOpen}>
+      {node}
+    </Reveal>
+  );
+  const reduceMotion = Boolean(useReducedMotion());
+  const renderFolded = (turn: number, { joined }: Laid) => (piece: Piece) =>
+    piece.kind === "thinking" ? (
+      fold(`thinking-${piece.segment.order}`, renderPiece(piece, turn, joined))
+    ) : piece.kind === "card" ? (
+      renderPiece(piece, turn, joined)
+    ) : piece.kind === "steps" ? (
+      <React.Fragment key={`steps-${piece.steps[0]?.call.id}`}>
+        {fold("steps", renderPiece(piece, turn, joined))}
+        {!historyOpen &&
+          piece.steps
+            .filter(({ call }) => call.status === "error")
+            .map(({ call, isRetry }) => (
+              // It shows once the fold's exit ends, so the step never shows twice.
+              <motion.div
+                key={call.id}
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                transition={{ duration: 0, delay: reduceMotion ? 0 : FOLD_CLOSE_S }}
+              >
+                {renderStep(call, { isRetry })}
+              </motion.div>
+            ))}
       </React.Fragment>
-    ));
+    ) : null;
+
+  const earlierNodes = earlier.map((turn, i) => (
+    <React.Fragment key={`earlier-${i}`}>
+      {turn.plan && fold(`plan-${i}`, renderPlan(turn.plan, `plan-${i}`))}
+      {(earlierLaidOut[i]?.pieces ?? []).map(renderFolded(i, earlierLaidOut[i]!))}
+      {turn.answer && fold(`answer-${i}`, <div className="py-1">{turn.answer}</div>)}
+    </React.Fragment>
+  ));
 
   const thinkingLine = showThinking && (
     <ThinkingLine label={latestHeading(thinking) ?? msg("shared.agent.thinking")} />
   );
 
-  // Codex shows no header until the turn has something to fold.
+  // Codex shows no header until the turn has history to show.
   if (isLive && !hasHistory) return thinkingLine || null;
 
   const workedMs = blockWorkMs(
@@ -213,41 +293,75 @@ export function TurnActivity({
     { thinking, steps, durationMs, start: isLive ? (start ?? mountedAt) : start },
     isLive ? nowTs : null,
   );
-  const label = isLive
-    ? formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) })
-    : formatMsg("shared.agent.worked_for", { duration: formatSpan(workedMs) });
+  const label = !isLive
+    ? formatMsg("shared.agent.worked_for", { duration: formatSpan(workedMs) })
+    : workedMs < 1000
+      ? msg("shared.agent.working")
+      : formatMsg("shared.agent.working_for", { duration: formatSpan(workedMs) });
+
+  // Codex ends the turn's row with the actions its auto-review blocked.
+  const denied = deniedCount(allSteps.map(({ call }) => call));
 
   if (!hasHistory) {
-    return start === null ? null : <Header label={label} />;
+    return start === null ? null : <Header label={label} denied={denied} />;
   }
 
   return (
     <div className="flex flex-col">
-      <Header label={label} open={open} onToggle={() => setChoice(!open)} />
-      {hasCards ? (
-        // Folding keeps the cards mounted where they are, so one waiting on
-        // the user (an upload, the coding tool) keeps its state.
-        <div className={cn("flex flex-col", (open || anyPinned) && "pt-1.5")}>
-          {earlierNodes(open)}
-          {planLine && (
-            <Reveal open={open} depth="block">
-              {planLine}
-            </Reveal>
-          )}
-          {renderPieces(pieces, open)}
-        </div>
-      ) : (
-        <Reveal open={open} depth="block">
-          <div className="flex flex-col pt-1.5">
-            {earlierNodes(true)}
-            {planLine}
-            {pieces.map((piece) => renderPiece(piece))}
-          </div>
-        </Reveal>
-      )}
+      <Header
+        label={label}
+        denied={denied}
+        open={foldable ? historyOpen : undefined}
+        onToggle={foldable ? () => setOpenChoice(!historyOpen) : undefined}
+      />
+      <div className="flex flex-col pt-1.5 empty:hidden">
+        {earlierNodes}
+        {plan && fold("plan", planLine)}
+        {current.pieces.map(renderFolded(earlier.length, current))}
+      </div>
       {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
     </div>
   );
+}
+
+/**
+ * The segments that show as rows: those with reasoning, except the one still
+ * being thought. ``order`` is the segment's place in the turn, a key that
+ * holds when a dropped card merges the bursts around a row.
+ */
+function finishedThinking(thinking: readonly TurnThinking[]): Row[] {
+  return thinking.flatMap((t, order) =>
+    t.reasoning && !(t.streaming && t.endedAt === null) ? [{ ...t, order }] : [],
+  );
+}
+
+/** Codex's exploration: reading and searching, which fold together into one "Exploring" unit. */
+function isExplore(kind: ActivityKind): boolean {
+  return kind === "read" || kind === "search";
+}
+
+/** Split a burst into runs, so each run of exploration steps folds on its own, as in Codex. */
+function splitExploration<T>(steps: readonly T[], explore: (step: T) => boolean): T[][] {
+  const runs: T[][] = [];
+  for (const step of steps) {
+    const last = runs.at(-1);
+    if (last && explore(last[0] as T) === explore(step)) last.push(step);
+    else runs.push([step]);
+  }
+  return runs;
+}
+
+/** "Explored 2 files, 1 search", from the kinds of an exploration run. */
+function exploredTitle(kinds: readonly ActivityKind[]): string {
+  const files = kinds.filter((k) => k === "read").length;
+  const searches = kinds.length - files;
+  const parts = [
+    files ? formatMsg("shared.agent.explored_files", { count: files }) : "",
+    searches ? formatMsg("shared.agent.explored_searches", { count: searches }) : "",
+  ].filter(Boolean);
+  return formatMsg("shared.agent.explored", {
+    items: new Intl.ListFormat(getActiveIntlLocale(), { style: "short", type: "unit" }).format(parts),
+  });
 }
 
 // Most wizard tools answer in tens of ms; swapping the "Thinking" line out
@@ -281,58 +395,49 @@ function ThinkingLine({ label }: { label: string }) {
   );
 }
 
+/**
+ * The turn's "Worked for" row; with ``onToggle`` it folds the history, as in Codex.
+ * ``denied`` counts the actions the auto-review blocked, shown at the row's end.
+ */
 function Header({
   label,
-  open = false,
+  denied = 0,
+  open,
   onToggle,
 }: {
   label: string;
+  denied?: number;
   open?: boolean;
   onToggle?: () => void;
 }) {
-  const content = (
-    <>
-      <span className="truncate">{label}</span>
-      {onToggle && (
-        <CaretRight
-          className={cn(
-            "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
-            open ? "rotate-90" : "rtl:-scale-x-100",
-          )}
-          aria-hidden
-        />
-      )}
-    </>
-  );
-  const className =
-    "flex w-full items-center gap-1.5 border-b border-border/60 pb-2 text-start text-[0.8125rem] text-muted-foreground";
-  if (!onToggle) return <div className={className}>{content}</div>;
+  const rule = "flex w-full min-w-0 items-center gap-1.5 text-[0.8125rem] text-muted-foreground";
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={open}
-      className={cn(
-        className,
-        "cursor-pointer transition-colors hover:text-foreground",
-        open && "text-foreground/80",
+    <div className="flex w-full min-w-0 items-center gap-2 border-b border-border/60 pb-2">
+      {onToggle ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className={cn(rule, "w-auto cursor-pointer text-start transition-colors hover:text-foreground")}
+        >
+          <span className="truncate">{label}</span>
+          <CaretRight
+            className={cn(
+              "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
+              open ? "rotate-90" : "rtl:-scale-x-100",
+            )}
+            aria-hidden
+          />
+        </button>
+      ) : (
+        <span className={cn(rule, "w-auto")}>
+          <span className="truncate">{label}</span>
+        </span>
       )}
-    >
-      {content}
-    </button>
+      <DeniedCount count={denied} />
+    </div>
   );
 }
 
-function formatSpan(ms: number): string {
-  const total = Math.max(1, Math.round(ms / 1000));
-  const unit = (value: number, u: "minute" | "second") =>
-    new Intl.NumberFormat(getActiveIntlLocale(), {
-      style: "unit",
-      unit: u,
-      unitDisplay: "narrow",
-    }).format(value);
-  const mins = Math.floor(total / 60);
-  const secs = total % 60;
-  if (!mins) return unit(secs, "second");
-  return secs ? `${unit(mins, "minute")} ${unit(secs, "second")}` : unit(mins, "minute");
-}
+// CompactionRow still imports it from here.
+export { formatSpan };

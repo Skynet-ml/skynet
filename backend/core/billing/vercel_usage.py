@@ -636,6 +636,12 @@ class VercelUsageReservation:
             BudgetError: When provider evidence violates reserved funding bounds.
         """
         try:
+            current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
+            if current.state == "settled":
+                # A snapshot delete or the reconciler can settle the hold from a
+                # newer receipt than the one this hold stored.
+                self.runtime.unpin(self.operation.id)
+                return
             if self.session_id is None:
                 raise UsagePendingError("Cloud sandbox creation has not returned an exact session identity.")
             session = self._sessions.get(self.session_id, {})
@@ -720,6 +726,9 @@ class VercelUsage:
             reservation: The box's claimed reservation.
         """
         reservation.settle()
+
+
+USAGE = VercelUsage()
 
 
 def _snapshot_usd(size_bytes: int, retained_ms: int, rate: Decimal) -> Decimal:

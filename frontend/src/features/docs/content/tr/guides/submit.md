@@ -81,7 +81,6 @@ Sihirbaz yalnızca görevinize ve girdilerinize uyan optimize edicileri listeler
 Çalıştırmanın ne kadar süre denemeye devam edebileceğini ve ne kadar harcayabileceğini belirleyin:
 
 - **Maks. puanlayıcı çalıştırması** (Rehberli: **Maks. deneme**): Skynet'in puanladığı en fazla aday sayısı. Bazı optimize ediciler en az belirli bir sayı gerektirir.
-- **Durma puanı** (Rehberli: **Puan şuna ulaşınca erken dur**): bir sürüm bu puana ulaştığında çalıştırma durur.
 - **Maks. yineleme** (Rehberli: **Maks. tur**): bunu destekleyen optimize ediciler için gösterilir.
 - **Harcama limiti**: çalıştırmanın harcayabileceği en yüksek tutar. Varsayılan 5 $'dır; **Başlamak için gereken** tutar daha yüksekse o tutardır. **Limit yok** seçeneğini de seçebilirsiniz.
 
@@ -91,13 +90,13 @@ Limit veya bakiyeniz başlamak için gereken tutarın altındaysa sihirbaz devam
 
 ### Puanlayıcı
 
-`scorer.py` dosyasını yazın. Bu dosya `score(repo_path, case)` fonksiyonunu tanımlar ve geri bildirimle birlikte bir puan döndürür. Asistan onu sizin için yazabilir. [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
+`scorer.py` dosyasını yazın. Bu dosya `score(repo_path, case, output=None)` fonksiyonunu tanımlar ve geri bildirimle birlikte bir puan döndürür. Puanlayıcı `output` değerini, yani `[run]` giriş noktasının o durum için döndürdüğü değeri okur. Puanlayıcı sürümün klasöründe çalışmaz ve depodan kod içe aktarmaz. Asistan onu sizin için yazabilir. [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
 
 Depoda `def serve(input)` içeren bir `serve.py` dosyası olabilir. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için bu dosyayı kullanır. [Sonuçları okuyun](/docs/guides/results) sayfasını okuyun.
 
 ### Gizli anahtarlar
 
-Kodunuzun ihtiyaç duyduğu API anahtarları gibi gizli anahtarları ekleyin. Her gizli anahtar, kodunuza ve puanlayıcınıza aynı adlı bir ortam değişkeni olarak ulaşır. Kodlama ajanı bunları göremez. Skynet değerlerini günlüklerde gizler.
+Kodunuzun ihtiyaç duyduğu API anahtarları gibi gizli anahtarları ekleyin. Kodunuz ve puanlayıcınız çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar bir role yalnızca rolün `[run] services` veya `[metric] services` içinde listelediği bir `[services.<name>]` tablosu veya rolün `mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Kodlama ajanı bunları göremez. Skynet değerlerini günlüklerde gizler.
 
 ### Kontrol
 

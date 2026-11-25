@@ -247,7 +247,7 @@ def test_validate_code_prefers_metric_over_a_helper_named_score(cv_client: TestC
 
 def test_validate_code_accepts_a_score_entry_point_beside_helpers(cv_client: TestClient) -> None:
     """A repository scorer's ``score`` with a helper validates with the mapping the setup agent's wrapper fills."""
-    scorer = "def _run(path):\n    return 1.0\n\ndef score(repo_path, case=None):\n    return _run(repo_path), 'ok'\n"
+    scorer = "def _run(path):\n    return 1.0\n\ndef score(repo_path, case=None):\n    return {'score': _run(repo_path), 'feedback': 'ok'}\n"
     mapping = {"inputs": {"repo_path": "repo_path"}, "outputs": {}}
     response = cv_client.post("/validate-code", json={"metric_code": scorer, "column_mapping": mapping})
 

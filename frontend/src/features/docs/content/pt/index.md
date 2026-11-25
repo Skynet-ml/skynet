@@ -11,7 +11,7 @@ Toda execução otimiza um repositório. Você pode começar de duas formas:
 
 O código no repositório pode ser qualquer coisa: uma aplicação, um serviço, um script ou uma biblioteca. Ele pode usar qualquer biblioteca.
 
-Toda execução usa o mesmo contrato. O seu avaliador define `score(repo_path, case)`. Ele retorna uma pontuação e um feedback escrito. O otimizador lê o feedback para melhorar a próxima versão.
+Toda execução usa o mesmo contrato. O seu avaliador define `score(repo_path, case, output=None)`. O avaliador lê `output`, o que a entrada `[run]` retornou para o caso. Ele não roda na pasta da versão e não importa código do repositório. Ele retorna uma pontuação e um feedback escrito. O otimizador lê o feedback para melhorar a próxima versão.
 
 > [!NOTE]
 > Cada versão roda em uma sandbox. O agente de código que escreve as versões não vê o código do avaliador nem os valores esperados.

@@ -16,6 +16,7 @@ const claude = ["low", "medium", "high", "xhigh", "max"];
 
 test("the slider starts at the model default and ends at the top level", () => {
   assert.deepEqual(sliderStops(["low", "high"]), [null, "low", "high"]);
+  assert.deepEqual(sliderStops(["low", "high"], false), ["low", "high"]);
 });
 
 test("arrow keys step one level and stop at the ends", () => {
@@ -29,6 +30,9 @@ test("arrow keys step one level and stop at the ends", () => {
   assert.equal(stepEffort(claude, "high", "Home", false), null);
   assert.equal(stepEffort(claude, "high", "End", false), "max");
   assert.equal(stepEffort(claude, "high", "Enter", false), undefined);
+  // With no default stop, the lowest level is the floor.
+  assert.equal(stepEffort(claude, "low", "ArrowLeft", false, false), "low");
+  assert.equal(stepEffort(claude, "high", "Home", false, false), "low");
 });
 
 test("in a right-to-left page Left steps up and Right steps down", () => {
@@ -46,6 +50,8 @@ test("the track fill follows the level", () => {
   assert.equal(effortFill(claude, "max"), 1);
   assert.equal(effortFill(["low"], "low"), 1);
   assert.equal(effortFill([], null), 0);
+  assert.equal(effortFill(["low", "medium", "high"], "low", false), 0);
+  assert.equal(effortFill(["low", "medium", "high"], "medium", false), 0.5);
   assert.equal(effortFill(["low", "high"], "max"), 0);
 });
 

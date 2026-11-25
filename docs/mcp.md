@@ -64,13 +64,26 @@ knows what to fix and what to do next:
 | Start | `repo_draft_start` (objective, name). It lists the engines. | Yes |
 | Repository | `repo_draft_set_repository` (owner/name, branch or commit, editable paths, setup command) | Yes |
 | Data | `repo_draft_set_data` (inline cases or a staged dataset) | No |
-| Scorer | `repo_draft_set_scorer` (Python metric code) | Yes |
+| Scorer | `repo_draft_set_scorer` (Python metric code; empty when the `ascent.toml` `[metric] entry` is a command, see `repository-constraints.md`) | Yes |
+| Contract | `repo_draft_set_contract` (the `ascent.toml` text) | When the repository has no `ascent.toml` |
 | Models | `repo_draft_set_models` (reflection model, token source, more models) | Yes |
 | Engine | `repo_draft_set_engine` (one engine id from the start answer) | Yes |
-| Budget | `repo_draft_set_budget` (scorer runs, iterations, stop score) | No |
+| Budget | `repo_draft_set_budget` (scorer runs, iterations; the run stops at `[outcome] target` in ascent.toml) | No |
 | Review | `repo_draft_review` | Yes |
 | Setup check | `repo_draft_preflight` (paid; it runs the setup check of the run once) | No |
 | Submit | `repo_draft_submit` (optional `hardening_job_id`) | Yes |
+
+Every new run needs an `ascent.toml` contract, in the draft or in the
+repository. `repo_draft_contract_guide` gives the format guide and an example
+file. The setup screen's agent uses the same guide. `repo_draft_set_contract`
+saves the text into the draft, and the run writes it over the repository's
+own file. Each parser error is one issue: the parser's message, then its
+line, such as `(line 4)`. `repo_draft_set_contract` and `repo_draft_review`
+list at most 20 diagnostics, errors first, then one line with the count of
+the rest. A parser warning is a note, and it does not stop the run. When the
+repository has an `ascent.toml`, the step is optional. When the draft and
+the repository both have none, `repo_draft_review` reports an issue and the
+run does not start.
 
 `repo_draft_review` gives the minimum spending limit, a suggested limit and
 the amount the account can spend now (`spendable_cents`). The agent must show
@@ -99,9 +112,11 @@ The hosted server runs `managed` and `byok` models. The Mac app runs
 source as an issue. In the Mac app, name a subscription model
 `subscription/<codex|claude>/<model>`, so Skynet knows which CLI runs it.
 
-The scorer is `score(repo_path, case)`. It returns a `(score, feedback)` pair
-or a `{"score": ..., "feedback": ...}` dict. The engines learn from the
-feedback. A bare number on any path, an error path too, stops the whole run. A scorer that takes only `repo_path`
+The scorer is `score(repo_path, case)`. It returns one object:
+`{"score": ..., "feedback": ..., "scores": {"<name>": {"score": ..., "feedback": ...}}}`.
+Only `score` is required. The feedback is optional and recommended: the
+engines learn from it. A bare number, a pair or any other key is an error, on
+any path, an error path too. A scorer that takes only `repo_path`
 also works, but the step adds a note when the draft has data: every case gets
 the same score.
 
@@ -109,6 +124,86 @@ After the submit, use `get_run`, `get_run_progress`, `list_runs` and
 `stop_run` to follow the run. `get_run_progress` returns the progress events
 after `since`, `next_since` for the next call, the best score and the
 candidate count.
+
+## Score your own versions with the judge
+
+`repo_judge_score` scores a version that the agent wrote itself. It uses
+the draft's repository, metric and contract, and Skynet runs no engine.
+Finish the draft and call `repo_draft_review` first.
+
+- Send `draft_id`, `max_cost_cents` and `confirm=true`, after the user
+  agrees to `max_cost_cents`.
+- Send exactly one candidate: `candidate_commit`, the full 40-character
+  SHA of a pushed commit that descends from the base commit, or
+  `candidate_patch`, a `git diff` against the base commit.
+- `max_cost_cents` is the limit of the whole session. It must be at least
+  two times the draft's minimum: one scored call and the final score. A
+  lower limit gets `budget.below_minimum`, which names this minimum.
+
+The first call opens a judge session. It creates one budget and one run,
+and the answer gives the `session_id`. Skynet pins the base commit on that
+call. Later calls with the same `draft_id` and `max_cost_cents` score in the
+same session. While a session is open, the draft steps refuse a change
+(`judge.session_open`), and a call with another limit is refused
+(`judge.limit_changed`).
+
+Each call reads `ascent.toml` at the base commit. Skynet refuses a
+candidate that changes `ascent.toml` or a protected path
+(`judge.candidate_refused`), and the refusal names every broken rule. Skynet
+also refuses a `candidate_commit` that it cannot fetch or that does not
+descend from the base commit. It refuses a `candidate_commit` that changes a
+text file that is not UTF-8, and a candidate that is too long. These
+refusals also answer `judge.candidate_refused`, and Skynet does not store
+them. When a fetch fails because of a network error or a timeout, call again
+with the same arguments. The candidate runs in its own sandbox, and the
+metric runs in a separate sandbox. The answer gives the mean `score`, the
+`named_scores`, the `feedback` and the result of each search case. The
+answer never holds the metric code or a held-out case. A retry with the same
+candidate returns the stored score and does not pay again, also when the
+budget cannot pay for a new call. An answer with `status: in_progress`
+means: call again with the same arguments. Skynet answers `in_progress`
+while other calls of the session hold its budget, and after a temporary
+repository or sandbox failure while the candidate is scored. A sandbox API
+rate limit (HTTP 429) or server error (HTTP 5xx) is a temporary failure.
+A call that does not finish in 25 seconds also answers `in_progress`. The
+score continues, and a later call with the same arguments returns its
+result and does not pay again. A retry after
+such a failure pays for its own work. After three temporary failures of the
+same candidate, the call answers `judge.score_failed`. Any other failure,
+for example a saved secret that the user deleted, answers
+`judge.score_failed` at once, and a retry returns the same error.
+
+Only the budget or `stop_run` with the `session_id` ends a session. A bulk
+cancel skips a judge session. Before each call, the budget must still pay
+for one call (the draft's minimum) and a reserve for the final score. The
+reserve is one minimum at first. After scored calls, it is 1.5 times the
+mean spend per search case times the number of final cases, and never less
+than one minimum. When the budget cannot pay for that, the call ends the
+session. While usage of an earlier call still settles, it answers
+`in_progress` instead. The end scores the best version once on the held-out cases. With
+fewer than five cases, nothing is held out, and the end scores the best
+version on every case. With no cases, it scores the version once.
+
+The end waits (`budget.pending`) while a call of the session still runs,
+also when the budget is closed.
+After a temporary repository or sandbox failure of the final score, the end
+also answers `budget.pending`, and the session stays open. The next
+`stop_run` or call scores again. After three such failures, the session
+ends `failed`. Any other failure of the final score, for example a saved
+secret that the user deleted, ends the session `failed` at once. A call
+that starts after the end starts scores nothing. It
+gets `in_progress` while the end runs. After that, it drives an end that
+waits or that stopped before it finished, and then gets the ended answer.
+Every later end keeps the `ended_by` of the first end. When a call stops at the budget limit, the end still tries the
+final score with the money that is left. When that money cannot pay for
+it, the session ends `stopped`, and its message says that no held-out score
+exists. One call can still spend more than the reserve, because Skynet does
+not cap the spend of a single call.
+
+`get_run` gives the result: `details.judge` holds the call count, the
+`best_patch_sha256`, the search score and the held-out score, and
+`details.record` holds the run record with the final `score`. Skynet opens
+no pull request for the best version.
 
 ## Platform tools
 

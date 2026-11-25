@@ -13,10 +13,24 @@ above each class, not in class bodies.
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Iterable
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    ValidationInfo,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
@@ -58,6 +72,9 @@ BLACKBOX_HARNESS_HERMES = "hermes"
 BLACKBOX_HARNESS_EVE = "eve"
 BLACKBOX_HARNESS_CODE_PUPPY = "code_puppy"
 BLACKBOX_HARNESS_CUSTOM = "custom"
+# Stored next to a ``host_cli`` that local mode filled in, not one the client
+# picked, so the stored request still lets ``[proposer] entry`` apply (SKY-753).
+HOST_CLI_AUTO_KEY = "host_cli_auto"
 BLACKBOX_HARNESSES = (
     BLACKBOX_HARNESS_PI,
     BLACKBOX_HARNESS_CODEX,
@@ -83,10 +100,6 @@ BLACKBOX_HARNESSES = (
     BLACKBOX_HARNESS_CODE_PUPPY,
     BLACKBOX_HARNESS_CUSTOM,
 )
-# Engines that accept a multi-part (named files) starting point.
-BLACKBOX_MULTI_PART_ENGINES = frozenset(
-    {BLACKBOX_ENGINE_GEPA, BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_ENGINE_SHINKA_EVOLVE}
-)
 # Engines that can optimize a repository: each writes versions against a real
 # checkout (a coding agent's edits, or ShinkaEvolve's per-file bundles) and the
 # parent scores the resulting patch.
@@ -105,6 +118,11 @@ BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
     {BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_ENGINE_SHINKA_EVOLVE}
 )
 CLAUDE_CODE_RETIRED = "Claude Code is no longer available as an agent harness. Choose another one, such as codex."
+# Every run optimizes a repository (SKY-834). A stored text or agent run still
+# loads for its history, but nothing starts or resumes it.
+TARGET_RETIRED = (
+    "Every run optimizes a repository. Text and agent targets are no longer accepted; set target.kind to repo."
+)
 # Extra optimization models a single run may add beyond the reflection model.
 BLACKBOX_MAX_EXTRA_REFLECTION_MODELS = 4
 # Stands in for ``module_name`` in the job overview and notifications.
@@ -125,9 +143,13 @@ BlackboxCandidate = str | dict[str, str]
 # ``install_command`` runs inside the offline managed sandbox. It may use
 # dependencies already in the immutable image or deployment-owned package
 # artifacts; it cannot reach a public package registry at run time.
+# ``command_metric`` says the repository's ``ascent.toml`` names a command
+# ``[metric] entry``: the metric box runs that command, so the request needs no
+# ``metric_code``, and the run fails at staging if the entry is Python (SKY-738).
 class BlackboxScorer(BaseModel):
     kind: Literal["python", "remote"] = "python"
     metric_code: str | None = None
+    command_metric: bool = False
     url: str | None = None
     secret: str | None = None
     timeout_seconds: float = Field(default=60.0, gt=0, le=600)
@@ -143,26 +165,72 @@ class BlackboxScorer(BaseModel):
             The validated scorer instance.
 
         Raises:
-            ValueError: When a python scorer has no code or a remote scorer
-                has no URL.
+            ValueError: When a python scorer has no code and no command
+                metric, or a remote scorer has no URL.
         """
-        if self.kind == "python" and not (self.metric_code or "").strip():
+        if self.kind == "python" and not self.command_metric and not (self.metric_code or "").strip():
             raise ValueError("A python scorer needs metric_code.")
         if self.kind == "remote" and not (self.url or "").strip():
             raise ValueError("A remote scorer needs a url.")
         return self
 
 
+STOP_AT_SCORE_RETIRED = (
+    "budget.stop_at_score is no longer accepted. Set the stop score as [outcome] target in ascent.toml."
+)
+# A stored run's payload passes this context to ``model_validate``: it may
+# still hold the retired ``budget.stop_at_score``. The value leaves the public
+# model and stays private, so an older run keeps its stop score when its
+# snapshot has no ``[outcome] target`` (SKY-691).
+STORED_PAYLOAD_KEY = "stored_payload"
+STORED_PAYLOAD_CONTEXT = {STORED_PAYLOAD_KEY: True}
+
+
 # Hard stops for a run. ``max_scorer_runs`` caps optimizer-driven scorer
 # calls (the final run that re-scores the starting point and the winner is
 # outside the cap);
 # ``max_iterations`` caps proposer rounds for the engines that iterate
-# (Meta-Harness, AutoSaddler, ShinkaEvolve generations); ``stop_at_score`` ends the run early once a version
-# reaches it.
+# (Meta-Harness, AutoSaddler, ShinkaEvolve generations). The stop score is
+# ``[outcome] target`` in the repository's ascent.toml (SKY-691).
 class BlackboxBudget(BaseModel):
     max_scorer_runs: int = Field(default=200, ge=1, le=100_000)
     max_iterations: int | None = Field(default=None, ge=1, le=1_000)
-    stop_at_score: float | None = None
+
+    # A private attribute is not a field: it stays out of ``model_dump()``,
+    # the JSON schema and ``openapi.json``.
+    _legacy_stop_at_score: float | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _refuse_stop_at_score(
+        cls, data: Any, handler: ModelWrapValidatorHandler[BlackboxBudget], info: ValidationInfo
+    ) -> BlackboxBudget:
+        """Refuse the retired stop score in a new request, and keep it privately for a stored run.
+
+        The model ignores unknown keys, so without this check a client that
+        still sends the key would lose its stop score with no error. A stored
+        run keeps a finite number as ``_legacy_stop_at_score``; a null or a
+        value of another type gives ``None``.
+
+        Args:
+            data: The raw budget before field validation.
+            handler: The standard validation of the budget fields.
+            info: Validation info; its context marks a stored run's payload.
+
+        Returns:
+            The validated budget.
+
+        Raises:
+            ValueError: When a new request holds ``stop_at_score``.
+        """
+        stored = bool((info.context or {}).get(STORED_PAYLOAD_KEY))
+        legacy = data.get("stop_at_score") if isinstance(data, dict) else None
+        if isinstance(data, dict) and "stop_at_score" in data and not stored:
+            raise ValueError(STOP_AT_SCORE_RETIRED)
+        model = handler(data)
+        if stored and isinstance(legacy, int | float) and not isinstance(legacy, bool) and math.isfinite(legacy):
+            model._legacy_stop_at_score = float(legacy)
+        return model
 
 
 REPO_SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
@@ -173,6 +241,67 @@ REPO_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
 # An exact host, or ``*.`` and a suffix of two or more labels: ``*.com``
 # would let a secret go to any host of a top-level domain.
 REPO_SECRET_HOST_PATTERN = re.compile(r"^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$")
+# Caps on the setup draft's files that a repository run writes over its checkout.
+DRAFT_FILES_MAX = 100
+DRAFT_FILE_BYTES = 200_000
+DRAFT_FILES_TOTAL_BYTES = 2_000_000
+DRAFT_PATH_MAX_CHARS = 512
+DRAFT_PATH_MAX_PARTS = 16
+
+
+def clean_draft_path(raw: str) -> str:
+    """Normalize one draft file path and refuse any path that could leave the repository.
+
+    The setup agent and the run request share this rule. It strips the
+    surrounding space and slashes and keeps ``/`` as the only separator.
+
+    Args:
+        raw: The path the agent or the request names.
+
+    Returns:
+        The clean relative path.
+
+    Raises:
+        ValueError: When the path is empty, absolute, has a backslash or a
+            control character, has an empty, ``.`` or ``..`` part, names the
+            ``.git`` folder, or is too long or too deep.
+    """
+    path = raw.strip()
+    if path.startswith("/"):
+        raise ValueError(f"The file path {raw[:100]!r} must be relative to the repository root.")
+    path = path.strip("/")
+    if not path:
+        raise ValueError("The file path is empty.")
+    if "\\" in path or any(ord(char) < 32 or ord(char) == 127 for char in path):
+        raise ValueError(f"The file path {raw[:100]!r} has a character that is not allowed.")
+    if len(path) > DRAFT_PATH_MAX_CHARS:
+        raise ValueError(f"The file path is longer than {DRAFT_PATH_MAX_CHARS} characters.")
+    parts = path.split("/")
+    if len(parts) > DRAFT_PATH_MAX_PARTS:
+        raise ValueError(f"The file path {raw[:100]!r} is more than {DRAFT_PATH_MAX_PARTS} folders deep.")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"The file path {raw[:100]!r} must stay inside the repository.")
+    # A case-insensitive file system treats ``.GIT`` as ``.git``.
+    if any(part.lower() == ".git" for part in parts):
+        raise ValueError("Files in the .git folder cannot be written.")
+    return path
+
+
+def path_inside(path: str, folders: Iterable[str]) -> bool:
+    """Say whether a path is one of the folders or lies inside one.
+
+    Args:
+        path: A clean repository path.
+        folders: Repository paths, such as other draft files or the read-only submodules.
+
+    Returns:
+        ``True`` when ``path`` equals or lies under one of ``folders``.
+    """
+    for folder in folders:
+        clean = folder.strip("/")
+        if clean and (path == clean or path.startswith(f"{clean}/")):
+            return True
+    return False
 
 
 # One environment variable a repository needs to build or score. ``value`` is
@@ -246,12 +375,27 @@ class BlackboxRepoSource(BaseModel):
     commit: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
     editable_paths: list[str] = Field(min_length=1, max_length=200)
     secrets: list[BlackboxRepoSecret] = Field(default_factory=list, max_length=100)
-    # How each ``${NAME}`` in optimize.toml and the role MCP files is filled
+    # How each ``${NAME}`` in ascent.toml and the role MCP files is filled
     # (SKY-381 E50): ``user`` from the run's secrets (BYOK, no Skynet fee), or
     # ``managed`` with Skynet's key for a catalog host, metered per call. A
     # name this map does not hold binds to ``user``.
     secret_bindings: dict[str, Literal["user", "managed"]] = Field(default_factory=dict, max_length=100)
     created_by_skynet: bool = False
+    # The setup draft's files (``ascent.toml`` and any file the setup agent
+    # wrote or edited), keyed by repository path. The trusted parent writes
+    # them over the fetched checkout before the run starts; the user's
+    # repository stays unchanged. ``metric.py`` travels as the scorer instead.
+    draft_files: dict[str, str] = Field(default_factory=dict, max_length=DRAFT_FILES_MAX)
+    # The commit the setup agent read when it wrote the first draft file. The
+    # drafts are whole-file copies of that tree, so a run that would start from
+    # another commit is refused. ``None`` (older drafts) skips the check.
+    draft_base: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
+    # Where the run's ascent.toml comes from (SKY-693): the setup screen's
+    # draft, the MCP contract step's draft, or the repository. The server
+    # decides: the validator reads it from the drafts, and keeps ``mcp`` only
+    # with a draft. ``/blackbox/run`` turns a client's ``mcp`` into
+    # ``setup_screen``, so only the MCP draft flow stores ``mcp``.
+    contract_source: Literal["setup_screen", "mcp", "repository"] | None = None
 
     @model_validator(mode="after")
     def _ensure_clean_paths(self) -> BlackboxRepoSource:
@@ -263,7 +407,8 @@ class BlackboxRepoSource(BaseModel):
         Raises:
             ValueError: When a path is absolute, empty, or walks out with ``..``,
                 when two secrets share a name, when a binding name is invalid,
-                or when the repository path does not fit its host.
+                when the repository path does not fit its host, or when a draft
+                file path fails :func:`clean_draft_path` or the drafts are too large.
         """
         if self.provider != "gitlab" and not re.fullmatch(REPO_NAME_PATTERN, self.repository):
             raise ValueError("The repository must be written as 'owner/name'.")
@@ -290,20 +435,41 @@ class BlackboxRepoSource(BaseModel):
         for name in self.secret_bindings:
             if not re.fullmatch(REPO_SECRET_NAME_PATTERN, name):
                 raise ValueError(f"The secret binding name '{name[:100]}' must use only letters, digits and '_'.")
+        drafts: dict[str, str] = {}
+        total = 0
+        for raw, text in self.draft_files.items():
+            path = clean_draft_path(raw)
+            if path in drafts:
+                raise ValueError(f"The draft file {path!r} is named twice.")
+            try:
+                size = len(text.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"The draft file {path!r} is not valid text.") from exc
+            if size > DRAFT_FILE_BYTES:
+                raise ValueError(f"The draft file {path!r} is larger than {DRAFT_FILE_BYTES} bytes.")
+            total += size
+            drafts[path] = text
+        if total > DRAFT_FILES_TOTAL_BYTES:
+            raise ValueError(f"The draft files are larger than {DRAFT_FILES_TOTAL_BYTES} bytes together.")
+        for path in drafts:
+            # A file cannot also be a folder of another draft; the trusted parent would fail to write both.
+            if path_inside(path, [other for other in drafts if other != path]):
+                raise ValueError(f"The draft file {path!r} lies under another draft file.")
+        # An empty ascent.toml would replace the repository's file with one that names no run entry.
+        if not drafts.get("ascent.toml", "x").strip():
+            raise ValueError("The draft ascent.toml is empty. Remove it or write its settings.")
+        self.draft_files = drafts
+        if "ascent.toml" not in drafts:
+            self.contract_source = "repository"
+        elif self.contract_source != "mcp":
+            self.contract_source = "setup_screen"
         return self
 
 
-# What the versions under optimization drive. ``text``: the scorer reads a
-# version directly. ``agent``: every scorer run launches a coding harness in a
-# private workspace inside the run's managed sandbox, with the version as the
-# harness's instruction file(s), and the scorer judges the run record (what
-# the agent produced) instead of the version. The ``(harness, model)`` pair is fixed
-# for the whole run — the optimizer searches harness text only (joint
-# harness + model search is a TODO). ``model`` is the target/worker model
-# id as the agent gateway knows it; the optimizer model is
-# ``reflection_model_config`` on the request. Clients also send the full
-# target role as ``task_model_config`` on the request so its credential source
-# can be metered independently; ``model`` remains for stored-client compatibility.
+# What the versions under optimization drive. A run request takes only
+# ``repo`` (SKY-834). ``text`` and ``agent`` stay in the type so stored runs
+# still load for their history; an ``agent`` target is also how a proposer
+# names the harness and model it launches.
 # ``repo``: every version is a patch against ``repo.commit``. The scorer runs
 # on a checkout with the patch applied, after ``setup_command``; the coding
 # agent that writes versions is the request's ``proposer``. The wizard never
@@ -367,8 +533,36 @@ class BlackboxProposer(BaseModel):
     max_tool_calls: int = Field(default=100, ge=1, le=1000)
     host_cli: Literal["codex", "claude"] | None = None
     host_permission: Literal["workspace_only", "full_access"] = "workspace_only"
+    # Input only: the serializer below writes the mark from ``model_fields_set``.
+    host_cli_auto: bool = Field(
+        default=False,
+        exclude=True,
+        description=(
+            "Local mode only. True says that host_cli is the CLI that the server filled in, for example the "
+            "proposer_host_cli of a wizard check, not one the client picked. A filled-in CLI lets the repository's "
+            "[proposer] entry apply, and a picked CLI replaces it. Send it back with that CLI so a check on a "
+            "request that names no harness, run_command or install_command stays current."
+        ),
+    )
 
     _refuse_removed_cli = field_validator("host_cli", mode="before")(refuse_removed_cli)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _keep_host_cli_auto(cls, data: Any, handler: ModelWrapValidatorHandler[BlackboxProposer]) -> BlackboxProposer:
+        """Keep a filled-in ``host_cli`` out of the client's choices when a stored request is read again.
+
+        Args:
+            data: The raw proposer before field validation.
+            handler: The standard validation of the proposer fields.
+
+        Returns:
+            The validated proposer.
+        """
+        proposer = handler(data)
+        if proposer.host_cli_auto:
+            proposer.model_fields_set.discard("host_cli")
+        return proposer
 
     @model_validator(mode="after")
     def _ensure_launchable(self) -> BlackboxProposer:
@@ -390,6 +584,30 @@ class BlackboxProposer(BaseModel):
         if self.harness == BLACKBOX_HARNESS_CUSTOM and not (self.run_command or "").strip():
             raise ValueError("A custom proposer harness needs a run_command.")
         return self
+
+    # No return annotation: with one, openapi.json would lose the model's own schema.
+    @model_serializer(mode="wrap")
+    def _keep_harness_choice(self, handler: SerializerFunctionWrapHandler):
+        """Leave ``harness`` out of the dump when the client did not send it.
+
+        A repository run then uses the ``[proposer] entry`` of its contract
+        file, and the stored request still tells that apart from a chosen
+        Codex (SKY-753). Validating the dump gives the same default again.
+        A ``host_cli`` that local mode filled in gets :data:`HOST_CLI_AUTO_KEY`
+        for the same reason.
+
+        Args:
+            handler: Pydantic's default serializer.
+
+        Returns:
+            The serialized proposer.
+        """
+        data = handler(self)
+        if "harness" not in self.model_fields_set and isinstance(data, dict):
+            data.pop("harness", None)
+        if self.host_cli is not None and "host_cli" not in self.model_fields_set and isinstance(data, dict):
+            data[HOST_CLI_AUTO_KEY] = True
+        return data
 
 
 # ShinkaEvolve's evolution knobs (island model, parent selection, mutation
@@ -535,6 +753,16 @@ class BlackboxRunRequest(BaseModel):
             "lifetime still caps it, so it can only shorten the run."
         ),
     )
+    conversation_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=36,
+        description=(
+            "The setup chat that created this run. The run keeps it only when the submitter owns "
+            "the chat; any other id is ignored. Only the chat's own user reads it unmasked, admins "
+            "read it masked, and anyone else, also a new owner after a transfer, gets 404."
+        ),
+    )
     # The setup's metric-hardening job (SKY-356). A finished job of the same
     # owner ships its exploit suite and counts in the repository run's PR.
     hardening_job_id: str | None = Field(default=None, min_length=1, max_length=36)
@@ -569,6 +797,33 @@ class BlackboxRunRequest(BaseModel):
             return {**data, "proposer_runtime": "vercel"}
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_retired_target(cls, data: Any, info: ValidationInfo) -> Any:
+        """Refuse a new text or agent target before the target's own checks run.
+
+        The target's agent checks would otherwise answer first with a harness or
+        model error that hides the real reason (SKY-834).
+
+        Args:
+            data: Raw request data before field validation.
+            info: Validation info; its context marks a stored run's payload.
+
+        Returns:
+            The input unchanged.
+
+        Raises:
+            ValueError: When a new request names a target other than a repository.
+        """
+        if not isinstance(data, dict) or (info.context or {}).get(STORED_PAYLOAD_KEY):
+            return data
+        target = data.get("target")
+        # A request with no target is a text run, because the target kind defaults to text.
+        kind = target.get("kind") if isinstance(target, dict) else getattr(target, "kind", BLACKBOX_TARGET_TEXT)
+        if kind != BLACKBOX_TARGET_REPO:
+            raise ValueError(TARGET_RETIRED)
+        return data
+
     @model_validator(mode="after")
     def _ensure_starting_point(self) -> BlackboxRunRequest:
         """Reject starting points and limits the selected engine cannot honor.
@@ -577,39 +832,15 @@ class BlackboxRunRequest(BaseModel):
             The validated request instance.
 
         Raises:
-            ValueError: When the seed is blank or an empty dict; when a multi-part seed is paired with
-                an engine that only takes text; or when an iteration cap is
+            ValueError: When a repository run sends a task model; or when an iteration cap is
                 supplied outside a single Meta-Harness, AutoSaddler or
                 ShinkaEvolve run; or when extra optimization models are sent
                 to a single run of another engine.
         """
-        seed = self.seed_candidate
         if self.target.kind == BLACKBOX_TARGET_REPO:
             self._ensure_repo_run()
-        elif seed is None:
-            # The scorer alone drives the climb; with nothing to draft a seed
-            # from, the run starts from empty text.
-            if not (self.objective or "").strip():
-                self.seed_candidate = ""
-        elif isinstance(seed, dict):
-            if not seed:
-                raise ValueError("A multi-part starting point needs at least one part.")
-            if self.strategy.mode != "single" or self.strategy.engine not in BLACKBOX_MULTI_PART_ENGINES:
-                raise ValueError(
-                    "Multi-part starting points are only supported by the "
-                    f"{', '.join(sorted(BLACKBOX_MULTI_PART_ENGINES))} engines."
-                )
-        elif not seed.strip():
-            raise ValueError("The starting point cannot be blank.")
-        if self.target.kind == BLACKBOX_TARGET_AGENT and self.task_model_settings is not None:
-            task_model = self.task_model_settings.normalized_identifier()
-            if not task_model:
-                raise ValueError("An agent target needs a task model.")
-            if self.target.model and self.target.model.strip("/") != task_model:
-                raise ValueError("target.model and task_model_config.name must identify the same model.")
-            self.target.model = self.task_model_settings.name
-        if self.target.kind != BLACKBOX_TARGET_AGENT and self.task_model_settings is not None:
-            raise ValueError("task_model_config is only used when the evaluated target is an agent.")
+            if self.task_model_settings is not None:
+                raise ValueError("task_model_config does not apply to a repository run.")
         if self.budget.max_iterations is not None and (
             self.strategy.mode != "single" or self.strategy.engine not in BLACKBOX_ITERATION_LIMIT_ENGINES
         ):
@@ -725,7 +956,11 @@ class BlackboxRunResponse(BaseModel):
     engine_used: str
     baseline_score: float | None = None
     best_score: float | None = None
+    # Positive when the run got better, in the direction below (SKY-750).
     metric_improvement: float | None = None
+    # ``[metric] direction``: every score in this result is the metric's own
+    # score, and for ``minimize`` a lower score is better.
+    direction: Literal["maximize", "minimize"] = "maximize"
     baseline_feedback: str | None = None
     best_feedback: str | None = None
     baseline_named_scores: dict[str, BlackboxNamedScore] = Field(default_factory=dict)
@@ -876,15 +1111,13 @@ class BlackboxRepoArchiveRequest(BaseModel):
 
 
 # One entry of ``GET /blackbox/engines``: the catalog the wizard renders,
-# with availability resolved for the requested target kind.
+# with availability resolved for a repository run.
 class BlackboxEngineInfo(BaseModel):
     id: str
     label: str
     description: str
     available: bool
     unavailable_reason: str | None = None
-    requires_agent_target: bool = False
-    supports_parts: bool = False
     checkpoint_recovery_supported: bool = False
     checkpoint_recovery_reason: str | None = None
 
@@ -907,7 +1140,7 @@ class BlackboxProposerRuntimeInfo(BaseModel):
 
 
 class BlackboxEngineCatalogResponse(BaseModel):
-    target_kind: Literal["text", "agent", "repo"]
+    target_kind: Literal["repo"]
     sandbox_available: bool
     sandbox_reason: str | None = None
     engines: list[BlackboxEngineInfo] = Field(default_factory=list)

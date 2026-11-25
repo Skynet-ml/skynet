@@ -9,9 +9,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from vercel.sandbox import SandboxApiError
 
 from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import json_fingerprint
@@ -22,7 +24,7 @@ from core.sandbox.providers.vercel import box_name
 from core.sandbox.services import ComposeService
 from core.storage.models import Base, BillingCustomerModel
 
-from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError, RepoScorer
 from ..repo_workspace import PREPARED_DIR, SERVICES_DIR, WORK_DIR, CandidateBox, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import SandboxBroker
@@ -33,7 +35,7 @@ from .test_sandbox_broker import IMAGE, FakeRuntime
 
 _SETUP = 'echo "key=${API_KEY:-unset}"; cat src/app.py > built.txt'
 _TWO_STAGES = (
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    doubled = call('double', {'v': 3})\n"
     "    return {'score': doubled['v'] / 10, 'feedback': call('shout', 'hi')}\n"
@@ -428,6 +430,173 @@ def test_a_candidate_box_without_the_prepared_tree_sets_up_again_with_tar_states
     assert space._snapshots_off
 
 
+_RUN = (
+    "import time\n"
+    "def run(value):\n"
+    "    if value == 'slow':\n"
+    "        time.sleep(30)\n"
+    "    if value == 'boom':\n"
+    "        raise RuntimeError('broke')\n"
+    "    return value\n"
+)
+
+
+class _VersionRuntime(_SnapshotRuntime):
+    """Record what each candidate box sees: which earlier candidate boxes closed, and its own ``src`` work tree."""
+
+    def __init__(self, root: Path, **options: Any) -> None:
+        """Start with no candidate box.
+
+        Args:
+            root: Where the saved snapshots go.
+            **options: The ``_SnapshotRuntime`` options.
+        """
+        super().__init__(root, **options)
+        self.closed_before: list[list[bool]] = []
+        self.trees: list[dict[str, str]] = []
+
+    def open(self, spec: SandboxSpec) -> _Box:
+        """Open a box; for a candidate box, record the earlier ones' close state and wrap its close.
+
+        Args:
+            spec: The requested box.
+
+        Returns:
+            The box.
+        """
+        box = super().open(spec)
+        if ":candidate-" not in str(spec.operation_key):
+            return box
+        self.closed_before.append([earlier.closed for earlier in _boxes(self, "candidate")[:-1]])
+        close = box.close
+
+        def recording_close() -> None:
+            """Record the box's ``src`` work tree, then close the box."""
+            if not box.closed:
+                work = box.path / WORK_DIR / "src"
+                self.trees.append({path.name: path.read_text() for path in sorted(work.glob("*.py"))})
+            close()
+
+        box.close = recording_close  # type: ignore[method-assign]
+        return box
+
+
+def _score_two(tmp_path: Path, runtime: _VersionRuntime, first: str) -> tuple[list[float | None], list[bool]]:
+    """Score two different versions with a repository scorer that runs ``src/run.py`` in its candidate boxes.
+
+    The first version adds ``src/one.py``, the second adds ``src/two.py``.
+
+    Args:
+        tmp_path: Scratch folder.
+        runtime: The box runtime.
+        first: The first version's input; the second version's input is ``ok``.
+
+    Returns:
+        The two scores (``None`` for a failed run), and the close state of every box before the scorer closes.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.py": _RUN})
+    versions = [
+        _patch(tmp_path / "one", archive, {"src/one.py": "one = 1\n"}),
+        _patch(tmp_path / "two", archive, {"src/two.py": "two = 2\n"}),
+    ]
+    scorer = RepoScorer(
+        _space(archive, runtime),
+        "def score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': 'ran'}\n",
+        timeout_seconds=60,
+        run_entry="src/run.py:run",
+        run_timeout=5.0,
+    )
+    try:
+        scores = [
+            scorer.score(version, {"input": value})["score"]
+            for version, value in zip(versions, (first, "ok"), strict=True)
+        ]
+        return scores, [box.closed for box in runtime.boxes]
+    finally:
+        scorer.close()
+
+
+def _boxes(runtime: _SnapshotRuntime, kind: str) -> list[_Box]:
+    """Return the boxes of one kind, in open order.
+
+    Args:
+        runtime: The box runtime.
+        kind: ``setup``, ``candidate`` or ``metric``.
+
+    Returns:
+        The boxes whose operation key names that kind.
+    """
+    return [box for box in runtime.boxes if f":{kind}-" in str(box.spec.operation_key)]
+
+
+def _assert_own_box_per_version(runtime: _VersionRuntime, closed: list[bool]) -> None:
+    """Check that each version ran alone in a new candidate box that closed before the next one opened.
+
+    Args:
+        runtime: The box runtime after two scores.
+        closed: The close state of every box before the scorer closed.
+    """
+    assert all(closed)
+    assert runtime.closed_before == [[], [True]]
+    base = {"app.py": "x = 1\n", "run.py": _RUN}
+    assert runtime.trees == [{**base, "one.py": "one = 1\n"}, {**base, "two.py": "two = 2\n"}]
+    assert len(_boxes(runtime, "metric")) == 2
+    keys = [box.spec.operation_key for box in runtime.boxes]
+    assert len(set(keys)) == len(keys)
+
+
+@pytest.mark.parametrize("first", ["ok", "boom", "slow"])
+def test_each_scored_version_runs_in_a_new_candidate_box_from_the_snapshot(tmp_path: Path, first: str) -> None:
+    """Give each version its own new candidate box from the snapshot, and close it after its run (SKY-805).
+
+    A box is never reused, so the second version's tree lacks the first
+    version's change, and the setup runs only once. The first box closes
+    before the second opens, also after a failed run. Each score also gets
+    its own new metric box.
+
+    Args:
+        tmp_path: Scratch folder.
+        first: The first version's input: it succeeds, raises or runs out of time.
+    """
+    runtime = _VersionRuntime(tmp_path / "snaps")
+
+    scores, closed = _score_two(tmp_path, runtime, first)
+
+    assert scores == [None if first != "ok" else 1.0, 1.0]
+    _assert_own_box_per_version(runtime, closed)
+    assert [box.spec.snapshot_id for box in _boxes(runtime, "candidate")] == ["snap-0", "snap-0"]
+    assert len(_boxes(runtime, "setup")) == 1
+    assert [_setups(box) for box in runtime.boxes] == [1] + [0] * (len(runtime.boxes) - 1)
+
+
+@pytest.mark.parametrize("fault", ["snapshot", "open"])
+def test_each_scored_version_gets_a_new_box_from_the_tar_state_when_the_snapshot_fails(
+    tmp_path: Path, fault: str
+) -> None:
+    """Open a new candidate box from the tar state for each version when the snapshot fails (SKY-805).
+
+    Args:
+        tmp_path: Scratch folder.
+        fault: Which step the provider refuses: the save or the open from the snapshot.
+    """
+    error = ServiceError("provider refused")
+    runtime = _VersionRuntime(
+        tmp_path / "snaps",
+        snapshot_error=error if fault == "snapshot" else None,
+        open_error=error if fault == "open" else None,
+    )
+
+    scores, closed = _score_two(tmp_path, runtime, "boom")
+
+    assert scores == [None, 1.0]
+    _assert_own_box_per_version(runtime, closed)
+    candidates = _boxes(runtime, "candidate")
+    assert all(box.spec.snapshot_id is None and box.spec.snapshot_archive for box in candidates)
+    assert all(_setups(box) == 0 for box in candidates)
+    # The open fault is found only at the first candidate open, so setup runs once more to make the tar state.
+    assert len(_boxes(runtime, "setup")) == (1 if fault == "snapshot" else 2)
+
+
 @pytest.mark.parametrize("fault", ["snapshot", "open"])
 def test_a_snapshot_fault_keeps_the_state_as_a_tar(tmp_path: Path, fault: str) -> None:
     """Keep a tar state when the snapshot cannot be saved or a box cannot open from it.
@@ -649,7 +818,9 @@ def test_stage_boxes_start_from_their_own_snapshot_without_scorer_files(tmp_path
     assert "stages.py" in names
     assert "metric.py" not in names
     assert "labels.csv" not in names
-    assert "hidden\n" not in _texts(saved)
+    # The metric file is the one line "hidden" (_stage_scorer). The copied openascent source holds the
+    # text "error.hidden", so the check looks for that whole line, not the substring (SKY-760).
+    assert "hidden" not in _texts(saved).splitlines()
     assert runtime.keys[0] not in scorer_runtime.keys
     assert all(spec.snapshot_id != "stage-0" for spec in scorer_runtime.specs)
 
@@ -689,19 +860,19 @@ def test_stage_runtime_without_snapshots_opens_no_builder(tmp_path: Path) -> Non
     assert all(spec.snapshot_id is None for spec in runtime.specs)
 
 
-@pytest.mark.parametrize("fault", ["open", "tree"])
+@pytest.mark.parametrize("fault", ["open", "open-503", "tree"])
 def test_stage_boxes_from_a_bad_snapshot_fall_back_to_unpacked_boxes(tmp_path: Path, fault: str) -> None:
     """Drop the stage snapshot and score with unpacked boxes when boxes from it fail, for this and later versions.
 
     Args:
         tmp_path: Scratch folder.
-        fault: ``open`` when a box cannot open from the snapshot, ``tree`` when
-            the restored box has no tree.
+        fault: ``open`` when a box cannot open from the snapshot, ``open-503``
+            when the provider refuses that open for now, as a run outside the
+            judge sees it, ``tree`` when the restored box has no tree.
     """
+    open_errors = {"open": ServiceError("refused"), "open-503": SandboxApiError(httpx.Response(503), "HTTP 503")}
     runtime = _StageSnapshotRuntime(
-        tmp_path / "stage-snaps",
-        open_error=ServiceError("refused") if fault == "open" else None,
-        empty_restore=fault == "tree",
+        tmp_path / "stage-snaps", open_error=open_errors.get(fault), empty_restore=fault == "tree"
     )
     scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
     try:
@@ -711,7 +882,7 @@ def test_stage_boxes_from_a_bad_snapshot_fall_back_to_unpacked_boxes(tmp_path: P
         scorer.close()
     assert len(runtime.keys) == 1
     snapshot_ids = [spec.snapshot_id for spec in runtime.specs[1:]]
-    tried = 1 if fault == "open" else 2
+    tried = 2 if fault == "tree" else 1
     assert snapshot_ids[:tried] == ["stage-0"] * tried
     assert snapshot_ids[tried:] == [None] * 4
 
@@ -742,6 +913,26 @@ def test_a_version_that_does_not_apply_in_restored_stage_boxes_keeps_the_stage_s
     finally:
         scorer.close()
     assert [spec.snapshot_id for spec in runtime.specs[1:]] == ["stage-0"] * 4
+
+
+def test_a_temporary_provider_error_from_a_snapshot_stage_box_keeps_the_stage_snapshot(tmp_path: Path) -> None:
+    """In judge use, raise a 503 from a stage box opened from the snapshot raw, and keep the good snapshot for the retry.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    error = SandboxApiError(httpx.Response(503), "HTTP 503: provider text")
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps", open_error=error)
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
+    scorer.raw_provider_errors = True
+    try:
+        with pytest.raises(SandboxApiError) as raised:
+            scorer.score("")
+        assert raised.value is error
+        assert scorer._stage_snapshot_id == "stage-0"
+    finally:
+        scorer.close()
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "stage-0"]
 
 
 def test_budget_refusal_from_a_snapshot_stage_box_is_raised(tmp_path: Path) -> None:

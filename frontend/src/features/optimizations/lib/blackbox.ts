@@ -11,13 +11,17 @@ import type { ScorePoint } from "./extract-scores";
  * scorer run, and its `best_score` is the eval server's best running mean,
  * which a version's first strong case inflates until its weaker ones come in.
  */
-export function extractBlackboxScorePoints(candidates: CandidateMetrics[]): ScorePoint[] {
+export function extractBlackboxScorePoints(
+  candidates: CandidateMetrics[],
+  // SKY-750: a minimize run's best so far is its lowest score.
+  minimize = false,
+): ScorePoint[] {
   const points: ScorePoint[] = [];
-  let best = Number.NEGATIVE_INFINITY;
+  let best = minimize ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
   for (const candidate of candidates) {
     const parsed = Number(candidate.candidate_id);
     const trial = Number.isFinite(parsed) ? parsed : points.length;
-    best = Math.max(best, candidate.score);
+    best = minimize ? Math.min(best, candidate.score) : Math.max(best, candidate.score);
     points.push({ trial, score: candidate.score, best });
   }
   return points;

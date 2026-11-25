@@ -115,6 +115,7 @@ RUN if [ "$PKG_MANAGER" = "pip" ]; then \
     else \
         umask 0002; \
         pip install --no-cache-dir uv \
+        && chmod 0755 /usr/local/bin/uv /usr/local/bin/uvx \
         && UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-install-project; \
     fi
 
@@ -131,12 +132,12 @@ RUN python -m venv /opt/prime-agent/kernel-venv \
 
 # ShinkaEvolve pins its own closure (openai, anthropic, numpy, pandas, ...) that
 # conflicts with the backend's, so it gets its own venv instead of /app/.venv.
-# Protected sandboxes have no network to build it at run time; the native
-# runtime uses this interpreter when present (native_runtime.SHINKA_IMAGE_PYTHON)
-# and the readiness probe reports shinka_ready from it.
-# Off by default: the layer is ~700 MB and carries a GPL package (Levenshtein),
-# so only the sandbox image build opts in with
-# --build-arg INCLUDE_SHINKA_EVOLVE=1; API/worker images stay without it.
+# The engine runs it as a child process of the worker with this interpreter
+# (native_runtime.SHINKA_IMAGE_PYTHON, SKY-728), and the Continue check reports
+# shinka_ready from it. Off by default: the layer is ~700 MB and carries a GPL
+# package (Levenshtein). The sandbox image and the deployed backend image, which
+# the API and the worker share (infra/terraform/scripts/build-push.sh), opt in
+# with --build-arg INCLUDE_SHINKA_EVOLVE=1.
 ARG INCLUDE_SHINKA_EVOLVE=false
 COPY core/service_gateway/optimization/blackbox/shinka_requirements.txt /opt/shinka/requirements.txt
 RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true" ]; then \
@@ -146,11 +147,46 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
         && /opt/shinka/venv/bin/python -c "import shinka.core.async_runner"; \
     fi
 
+# Vercel runs a box's commands as the image's USER and runs `sudo: true`
+# commands (the [run] supervisor, the Codex requirements write) through the
+# box's own `sudo` binary, so a custom image must ship one. The NOPASSWD rule
+# matches Vercel's managed images. Root stays out of reach of Codex and the
+# [run] entry (SKY-389, SKY-398): the parent starts every other command under
+# `setpriv --no-new-privs`, and the kernel then ignores sudo's setuid bit, so
+# the build fails without setpriv. The box user can write /app/.venv/bin, so
+# root must never find a program there: secure_path sets root's own PATH here
+# and not in the base image's sudoers. Root's PATH holds only root-owned
+# folders, and a check before USER 1001 fails the build if the box user can
+# change a program in them. Vercel's in-box agent starts `sudo` itself,
+# without no_new_privs, and may find it by a PATH lookup. A planted
+# /app/.venv/bin/sudo would then get root, so a root-only guard folder with a
+# link to the real sudo comes first on the image PATH. Sandbox image builds
+# only (--build-arg INCLUDE_SANDBOX_SUDO=1): API/worker images keep no root
+# path.
+ARG INCLUDE_SANDBOX_SUDO=false
+RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends sudo \
+        && rm -rf /var/lib/apt/lists/* \
+        && printf '%s\n' \
+            'Defaults always_set_home' \
+            'Defaults !env_reset' \
+            'Defaults !fqdn' \
+            'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+            'appuser ALL=(ALL) NOPASSWD:ALL' \
+            > /etc/sudoers.d/sandbox \
+        && chmod 0440 /etc/sudoers.d/sandbox \
+        && visudo -cf /etc/sudoers.d/sandbox \
+        && test -x /usr/bin/setpriv \
+        && install -d -o root -g root -m 0755 /usr/local/libexec/skynet-path-guard \
+        && ln -s /usr/bin/sudo /usr/local/libexec/skynet-path-guard/sudo; \
+    fi
+
 # AutoSaddler v2 needs Python 3.12+ and pins its own closure (pydantic, starlette,
-# mcp, ...) apart from the backend's, so it also gets its own venv. Protected
-# sandboxes have no network to build it at run time; the native runtime uses
-# this interpreter when present (native_runtime.AUTOSADDLER_IMAGE_PYTHON) and the
-# readiness probe reports autosaddler_ready from it (SKY-645).
+# mcp, ...) apart from the backend's, so it also gets its own venv. The engine
+# runs it as a child process of the worker with this interpreter
+# (native_runtime.AUTOSADDLER_IMAGE_PYTHON, SKY-728), and the Continue check
+# reports autosaddler_ready from it (SKY-645).
 COPY core/service_gateway/optimization/blackbox/autosaddler_requirements.txt /opt/autosaddler/requirements.txt
 RUN python -m venv /opt/autosaddler/venv \
     && /opt/autosaddler/venv/bin/python -m pip install --no-cache-dir --no-deps \
@@ -177,7 +213,7 @@ RUN umask 0002; \
             "https://github.com/denoland/deno/releases/download/v$DENO_VERSION/deno-$DENO_TARGET.zip" -o /tmp/deno.zip \
         && unzip -o /tmp/deno.zip -d /usr/local/bin \
         && rm /tmp/deno.zip \
-        && chmod +x /usr/local/bin/deno \
+        && chmod 0755 /usr/local/bin/deno \
         && if [ "$PKG_MANAGER" = "uv" ]; then PY=/app/.venv/bin/python; else PY=python; fi \
         && RUNNER_JS=$("$PY" -c 'import os, dspy.primitives.python_interpreter as m; print(os.path.join(os.path.dirname(m.__file__), "runner.js"))') \
         && deno cache "$RUNNER_JS"
@@ -194,9 +230,54 @@ RUN case "$(dpkg --print-architecture)" in \
             "https://github.com/github/github-mcp-server/releases/download/v$GITHUB_MCP_VERSION/github-mcp-server_Linux_$GH_MCP_ARCH.tar.gz" \
             -o /tmp/github-mcp-server.tar.gz \
         && echo "$GH_MCP_SHA256  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
-        && tar -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server \
+        && tar --no-same-owner -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server \
         && rm /tmp/github-mcp-server.tar.gz \
         && chmod 0755 /usr/local/bin/github-mcp-server
+
+# Go and Rust, so a repository or a metric in these languages can build in a
+# box (SKY-739). Sandbox image builds only (--build-arg INCLUDE_GO_RUST=1):
+# API/worker images stay without the two large toolchains. Each toolchain has
+# its own layer, under the VCR limit of 500 MB for each compressed layer.
+# Root owns both trees, because the sudo check below follows the links in
+# /usr/local/bin. The Rust archive is the official standalone installer: it
+# installs only rustc, cargo and the standard library, with no rustup.
+ARG INCLUDE_GO_RUST=false
+ARG GO_VERSION=1.27.4
+RUN if [ "$INCLUDE_GO_RUST" = "1" ] || [ "$INCLUDE_GO_RUST" = "true" ]; then \
+        case "$(dpkg --print-architecture)" in \
+            amd64) GO_ARCH=amd64; GO_SHA256=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
+            arm64) GO_ARCH=arm64; GO_SHA256=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
+            *) echo "unsupported arch for Go: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSL --retry 10 --retry-all-errors --retry-delay 2 \
+            "https://go.dev/dl/go$GO_VERSION.linux-$GO_ARCH.tar.gz" -o /tmp/go.tar.gz \
+        && echo "$GO_SHA256  /tmp/go.tar.gz" | sha256sum -c - \
+        && tar --no-same-owner -xzf /tmp/go.tar.gz -C /usr/local \
+        && rm /tmp/go.tar.gz \
+        && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+        && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+        && go version | grep -Fq "go$GO_VERSION "; \
+    fi
+ARG RUST_VERSION=1.100.0
+RUN if [ "$INCLUDE_GO_RUST" = "1" ] || [ "$INCLUDE_GO_RUST" = "true" ]; then \
+        case "$(dpkg --print-architecture)" in \
+            amd64) RUST_TARGET=x86_64-unknown-linux-gnu; RUST_SHA256=5fb0a7fff979867975f375e23687d265254ffc4129325351bb611c209519cd0b ;; \
+            arm64) RUST_TARGET=aarch64-unknown-linux-gnu; RUST_SHA256=95dabd6b3a6c7114646e067a36f512cbbf03eb09bec8b0dbef454aa2c721c364 ;; \
+            *) echo "unsupported arch for Rust: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSL --retry 10 --retry-all-errors --retry-delay 2 \
+            "https://static.rust-lang.org/dist/rust-$RUST_VERSION-$RUST_TARGET.tar.gz" -o /tmp/rust.tar.gz \
+        && echo "$RUST_SHA256  /tmp/rust.tar.gz" | sha256sum -c - \
+        && tar --no-same-owner -xzf /tmp/rust.tar.gz -C /tmp \
+        && "/tmp/rust-$RUST_VERSION-$RUST_TARGET/install.sh" --prefix=/opt/rust --disable-ldconfig \
+            --components="rustc,cargo,rust-std-$RUST_TARGET" \
+        && rm -rf /tmp/rust.tar.gz "/tmp/rust-$RUST_VERSION-$RUST_TARGET" \
+        && for BIN in rustc rustdoc cargo; do \
+            ln -s "/opt/rust/bin/$BIN" "/usr/local/bin/$BIN" || exit 1; \
+        done \
+        && rustc --version | grep -Fq "rustc $RUST_VERSION " \
+        && cargo --version | grep -Fq "cargo $RUST_VERSION "; \
+    fi
 
 COPY --chown=1001:0 . .
 
@@ -249,12 +330,13 @@ RUN install -d -o 1001 -g 0 -m 0770 /opt/swe-agent-root /opt/swe-agent-root/tool
 ARG GIT_SHA=unknown
 
 # Login shells must retain the same interpreter used to install the pinned dependencies.
-RUN printf '%s\n' 'export PATH="/app/.venv/bin:$PATH"' > /etc/profile.d/skynet-runtime.sh
+# The sudo guard folder comes first, as on the image PATH below.
+RUN printf '%s\n' 'export PATH="/usr/local/libexec/skynet-path-guard:/app/.venv/bin:$PATH"' > /etc/profile.d/skynet-runtime.sh
 
 # Codex turns unified exec on unless a root-owned /etc/codex/requirements.toml
 # turns it off (SKY-389). The image ships that file, so a Vercel box needs no
-# root step and the image carries no sudo: Codex runs as appuser with its own
-# sandbox off, and any root path would let the model rewrite the file.
+# root write. Codex runs as appuser with its own sandbox off, under
+# no_new_privs, so it cannot use the sandbox image's sudo to rewrite the file.
 # Keep the content equal to CODEX_REQUIREMENTS in
 # core/service_gateway/optimization/blackbox/sandbox_runtime.py.
 RUN install -d -o root -g root -m 0755 /etc/codex \
@@ -262,10 +344,39 @@ RUN install -d -o root -g root -m 0755 /etc/codex \
     && chown root:root /etc/codex/requirements.toml \
     && chmod 0644 /etc/codex/requirements.toml
 
+# Root commands trust every program on root's PATH, so a sandbox sudo build
+# fails if the box user (UID 1001, GID 0) can change one. /bin and /sbin link
+# to /usr/bin and /usr/sbin here. A link is checked by its target, and a
+# broken link fails the build. The check tests only the final target of a
+# link, not the folders on the way. A build with PKG_MANAGER=pip and the sudo
+# argument fails here by design; the sandbox image uses the default uv
+# installer.
+RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
+        set -e; \
+        open=$(find -L /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin \( ! -user root -o -perm /022 \) -print); \
+        if [ -n "$open" ]; then \
+            echo "box user can change these root PATH entries:" >&2; \
+            echo "$open" >&2; \
+            exit 1; \
+        fi; \
+    fi
+
 USER 1001
 
-ENV PATH="/app/.venv/bin:$PATH"
+# The box user can write /app/.venv/bin. A PATH lookup of `sudo` by a process
+# without no_new_privs must never find a box user program, so the root-only
+# guard folder comes first. Images without INCLUDE_SANDBOX_SUDO have no such
+# folder, and the box user cannot create it.
+ENV PATH="/usr/local/libexec/skynet-path-guard:/app/.venv/bin:$PATH"
+# sudo gives a root command its secure_path, without /app/.venv/bin. The root
+# [run] supervisor gives this PATH back to the entry it starts as the box user.
+ENV APP_ENTRY_PATH="$PATH"
 ENV PYTHONUNBUFFERED=1
+# The Go and Rust caches go to /tmp, because a local Docker box has a
+# read-only root and only /tmp and /workspace are writable. GOTOOLCHAIN=local
+# keeps the pinned Go: a go.mod that asks for a newer one fails instead of
+# downloading it from proxy.golang.org during setup.
+ENV GOCACHE=/tmp/go-build GOPATH=/tmp/go CARGO_HOME=/tmp/cargo GOTOOLCHAIN=local
 ENV WORKER_CONCURRENCY=4
 ENV WORKER_POLL_INTERVAL=2.0
 ENV SKYNET_CODE_VERSION=$GIT_SHA

@@ -69,6 +69,8 @@ export class SteerQueue {
   private listeners = new Set<() => void>();
   private nextId = 0;
   private pumpScheduled = false;
+  // The queued item to send first once an interrupted turn ends, even if Stop paused the tray.
+  private interruptId: string | null = null;
   // Posts go out one after another so the agent reads steers in list order.
   private postChain: Promise<void> = Promise.resolve();
   private withdrawals = new Set<Promise<unknown>>();
@@ -209,6 +211,7 @@ export class SteerQueue {
     } finally {
       this.settling -= 1;
       this.emit();
+      if (this.interruptId) this.schedulePump();
     }
   }
 
@@ -468,6 +471,24 @@ export class SteerQueue {
     this.sendItem(item);
   }
 
+  /**
+   * Send a queued follow-up as the next turn, ahead of the rest. The caller
+   * stops the running turn; the item goes out as soon as that turn ends.
+   */
+  interrupt(id: string): void {
+    const item = this.queued.find((entry) => entry.id === id);
+    if (!item || item.uncertain || item.text.length > this.maxLength) return;
+    this.interruptId = id;
+    if (!this.busy) this.schedulePump();
+  }
+
+  /** Queue `text` and send it first once the running turn ends; the caller stops that turn. */
+  interruptWith(text: string): void {
+    this.enqueue(text);
+    const last = this.queued[this.queued.length - 1];
+    if (last && last.text === text.trim()) this.interrupt(last.id);
+  }
+
   /** Pull the last queued follow-up back out for editing. */
   recallLast(): string | null {
     const last = this.queued[this.queued.length - 1];
@@ -479,6 +500,7 @@ export class SteerQueue {
     this.queued = [];
     this.steering = [];
     this.paused = false;
+    this.interruptId = null;
     this.trayOrder = [];
     this.emit();
   }
@@ -531,7 +553,15 @@ export class SteerQueue {
   }
 
   private pump(): void {
-    if (this.busy || this.settling > 0 || this.paused) return;
+    if (this.busy || this.settling > 0) return;
+    const interrupt = this.queued.find((item) => item.id === this.interruptId);
+    this.interruptId = null;
+    if (interrupt) {
+      this.paused = false;
+      this.sendItem(interrupt);
+      return;
+    }
+    if (this.paused) return;
     const head = this.queued.find((item) => !item.uncertain);
     if (!head) return;
     if (head.text.length > this.maxLength) {
@@ -569,6 +599,8 @@ export interface MidTurnQueue extends SteerQueueSnapshot {
   steer: (text: string) => void;
   queue: (text: string) => void;
   promote: (id: string) => void;
+  interrupt: (id: string) => void;
+  interruptWith: (text: string) => void;
   /** Pulls a queued or unread steered message out; resolves its text, or
    *  null when the agent already read it. */
   edit: (id: string) => Promise<string | null>;
@@ -589,6 +621,8 @@ export function midTurnOf(
     steer: (text) => getStore()?.steer(text),
     queue: (text) => getStore()?.enqueue(text),
     promote: (id) => getStore()?.promote(id),
+    interrupt: (id) => getStore()?.interrupt(id),
+    interruptWith: (text) => getStore()?.interruptWith(text),
     edit: async (id) => (await getStore()?.edit(id)) ?? null,
     remove: (id) => getStore()?.remove(id),
     reorderQueued: (ids) => getStore()?.reorderQueued(ids),
@@ -601,16 +635,18 @@ export type MidTurnKeyAction = "steer" | "queue" | "recall" | null;
 
 /**
  * What a composer keystroke does to mid-turn input. While a turn runs, Enter
- * steers (or queues, in a chat that cannot steer) and Tab queues; Up in an
- * empty composer pulls the last queued follow-up back for editing.
+ * and Tab queue and Cmd/Ctrl+Enter steers; Up in an empty composer pulls the
+ * last queued follow-up back for editing.
  */
 export function midTurnKeyAction(
   key: { key: string; shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean },
-  ctx: { streaming: boolean; draft: string; canSteer: boolean; queuedCount: number },
+  ctx: { streaming: boolean; draft: string; queuedCount: number },
 ): MidTurnKeyAction {
-  if (key.altKey || key.ctrlKey || key.metaKey || key.shiftKey) return null;
   const hasDraft = ctx.draft.trim().length > 0;
-  if (key.key === "Enter" && ctx.streaming && hasDraft) return ctx.canSteer ? "steer" : "queue";
+  const command = key.metaKey || key.ctrlKey;
+  if (key.key === "Enter" && command && !key.altKey && !key.shiftKey && ctx.streaming && hasDraft) return "steer";
+  if (key.altKey || key.ctrlKey || key.metaKey || key.shiftKey) return null;
+  if (key.key === "Enter" && ctx.streaming && hasDraft) return "queue";
   if (key.key === "Tab" && ctx.streaming && hasDraft) return "queue";
   if (key.key === "ArrowUp" && ctx.draft === "" && ctx.queuedCount > 0) return "recall";
   return null;

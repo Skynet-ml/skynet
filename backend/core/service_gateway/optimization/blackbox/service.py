@@ -5,9 +5,8 @@
 every train case (or once, without cases), pick the winner from those
 scores, then score the starting point and the winner afresh in a separate
 final run: on the validation cases to apply the regression guard, and on the
-held-out test cases for the reported scores. On an agent target the scorer is
-wrapped so every scorer run launches the harness in a private workspace
-inside the run's managed sandbox. ``validate_blackbox_payload`` backs the
+held-out test cases for the reported scores. Every run optimizes a
+repository (SKY-834). ``validate_blackbox_payload`` backs the
 submissions router. The unified (wizard v2) entry point reuses the same
 plumbing through :class:`JobSpec` and :func:`run_job`.
 """
@@ -17,13 +16,14 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import dspy
 
@@ -47,6 +47,7 @@ from ....constants import (
     DETAIL_BASELINE,
     DETAIL_OPTIMIZED,
     PROGRESS_BASELINE,
+    PROGRESS_CANDIDATE,
     PROGRESS_EVALUATION_STARTED,
     PROGRESS_OPTIMIZED,
     PROGRESS_OPTIMIZER,
@@ -55,12 +56,12 @@ from ....constants import (
     TQDM_PERCENT_KEY,
     TQDM_TOTAL_KEY,
 )
-from ....exceptions import ServiceError
+from ....exceptions import InfrastructureInterruptionError, ServiceError
 from ....models.blackbox import (
     BLACKBOX_REPO_ENGINES,
     BLACKBOX_STRATEGY_AUTO,
-    BLACKBOX_TARGET_AGENT,
     BLACKBOX_TARGET_REPO,
+    TARGET_RETIRED,
     BlackboxBudget,
     BlackboxCandidateNode,
     BlackboxCaseResult,
@@ -92,15 +93,16 @@ from ..cost_ceiling import CostCeilingCallback
 from ..timing import STAGE_BASELINE, STAGE_EVALUATION, STAGE_TRAINING
 from ..trajectory import MINIBATCH_FEEDBACK_CHAR_CAP
 from ..unified.split import CaseSplits, report_cases, selection_cases, split_cases
-from .agent_eval import SandboxAgentScorer, agent_target_unavailable_reason, gateway_from_settings
-from .agent_runs import PHASE_BASELINE, PHASE_FINAL, AgentRunRecorder, AgentRunSink, run_scope
+from .agent_eval import agent_target_unavailable_reason, gateway_from_settings
+from .agent_runs import PHASE_BASELINE, PHASE_FINAL
 from .auto import LaneOutcome, run_strategy
 from .feedback import FEEDBACK_KEY, named_scores, without_images
 from .harness import GatewayConfig
 from .harnesses import REGISTRY
-from .native_runtime import NATIVE_ENGINES, NativeOptions, native_runtime_unavailable_reason
+from .native_runtime import NativeOptions, native_runtime_unavailable_reason
 from .protocol import (
     METRIC_ERROR,
+    RUN_FAILED_STATUS,
     STATUS_KEY,
     Candidate,
     EngineContext,
@@ -110,12 +112,15 @@ from .protocol import (
     Task,
     candidate_key,
     is_metric_error,
+    is_run_failed,
+    warn_once_without_feedback,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
-from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, RUN_FAILED_STATUS, SETUP_ALLOWANCE_SECONDS
+from .repo_constraints import CONSTRAINTS_FILE, MAXIMIZE, MINIMIZE, ConstraintsError, parse_constraints
+from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
 from .runner import side_info_json_default
-from .sandbox import current_sandbox_runtime, sandbox_runtime_from_settings
-from .scorer import JobScorer, RemoteScorer, build_scorer
+from .sandbox import current_sandbox_runtime
+from .scorer import JobScorer, RemoteScorer
 from .upstream import AUTO_ENGINES, GEPA_REVISION, finite_json
 from .workspace_scorer import run_on_pool
 
@@ -124,6 +129,9 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 _REPO_ENGINE_REASON = "This engine does not optimize a repository."
+
+# The ``details`` key of the case positions in each part of the run's split (SKY-694).
+CASE_SPLIT_KEY = "case_split"
 
 # Progress events per run are capped near this many so a 100k-run budget
 # does not flood the job log.
@@ -144,37 +152,31 @@ def _proposer_runtime() -> Literal["vercel", "docker"]:
     return "docker" if settings.local_mode else "vercel"
 
 
-def engine_capabilities(target: BlackboxTarget) -> EngineCapabilities:
-    """Describe what this deployment and ``target`` offer the engines.
+def engine_capabilities() -> EngineCapabilities:
+    """Describe what this deployment offers the engines.
 
-    Args:
-        target: The job's target.
     Returns:
-        Capabilities for the registry: sandboxes per the settings, agent
-        target per the job.
+        Capabilities for the registry: sandboxes and the proposer runtime per the settings.
     """
     reason = None if current_sandbox_runtime() is not None else agent_target_unavailable_reason(settings)
     proposer_reason = native_runtime_unavailable_reason(_proposer_runtime(), settings)
     return EngineCapabilities(
         sandbox=reason is None,
-        agent_target=target.kind == BLACKBOX_TARGET_AGENT,
         sandbox_reason=reason,
         proposer_available=proposer_reason is None,
         proposer_reason=proposer_reason,
     )
 
 
-def engine_catalog(target_kind: str) -> BlackboxEngineCatalogResponse:
-    """List every engine with its availability for a job whose target is ``target_kind``.
+def engine_catalog() -> BlackboxEngineCatalogResponse:
+    """List every engine with its availability for a repository run.
 
-    Args:
-        target_kind: ``text``, ``agent`` or ``repo`` — the target the wizard is building.
     Returns:
         The catalog in registry order, each entry carrying the user-facing
         reason it cannot run here, when it cannot.
     """
     reason = agent_target_unavailable_reason(settings)
-    caps = engine_capabilities(BlackboxTarget())
+    caps = engine_capabilities()
     auto_reason = next(
         (ENGINES[name].unavailable_reason_for(caps) for name in AUTO_ENGINES if not ENGINES[name].available_for(caps)),
         None,
@@ -192,7 +194,7 @@ def engine_catalog(target_kind: str) -> BlackboxEngineCatalogResponse:
         )
     ]
     return BlackboxEngineCatalogResponse(
-        target_kind=target_kind,
+        target_kind=BLACKBOX_TARGET_REPO,
         sandbox_available=caps.sandbox,
         sandbox_reason=reason,
         engines=[
@@ -200,18 +202,11 @@ def engine_catalog(target_kind: str) -> BlackboxEngineCatalogResponse:
                 id=spec.id,
                 label=spec.label,
                 description=spec.description,
-                available=spec.available_for(caps)
-                and (target_kind != BLACKBOX_TARGET_REPO or spec.id in BLACKBOX_REPO_ENGINES),
+                available=spec.available_for(caps) and spec.id in BLACKBOX_REPO_ENGINES,
                 unavailable_reason=(
                     spec.unavailable_reason_for(caps)
-                    or (
-                        _REPO_ENGINE_REASON
-                        if target_kind == BLACKBOX_TARGET_REPO and spec.id not in BLACKBOX_REPO_ENGINES
-                        else None
-                    )
+                    or (_REPO_ENGINE_REASON if spec.id not in BLACKBOX_REPO_ENGINES else None)
                 ),
-                requires_agent_target=spec.requires_agent_target,
-                supports_parts=spec.supports_parts,
                 checkpoint_recovery_supported=spec.checkpoint_recovery_supported,
                 checkpoint_recovery_reason=(
                     None
@@ -302,20 +297,93 @@ def legacy_case_splits(cases: list[Any], seed: int | None) -> CaseSplits:
     return split_cases(cases, "pairs" if len(cases) > 1 else "single", SplitFractions(), shuffle=True, seed=seed or 0)
 
 
-def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:
-    """Report whether a job runs a coding-agent proposer in the native runtime.
+def case_split_positions(cases: list[Any], splits: CaseSplits, seed: int | None) -> dict[str, Any]:
+    """Describe the split a run made by case positions, with no case content (SKY-694).
+
+    The splits hold the same case objects as ``cases``, so each one maps back
+    to its position by identity; nothing splits the cases a second time.
+
+    Args:
+        cases: The run's cases, in the order the run received them.
+        splits: The split :func:`legacy_case_splits` made of ``cases``.
+        seed: The job's seed; 0 when unset, as in the split.
+
+    Returns:
+        ``rule`` (``pairs`` or ``single``), ``seed``, and the positions of the
+        ``search`` (train), ``validation`` and ``held_out`` (test) cases.
+    """
+    position = {id(case): index for index, case in reversed(list(enumerate(cases)))}
+    return {
+        "rule": "pairs" if len(cases) > 1 else "single",
+        "seed": seed or 0,
+        "search": [position[id(case)] for case in splits.train],
+        "validation": [position[id(case)] for case in splits.val],
+        "held_out": [position[id(case)] for case in splits.test],
+    }
+
+
+# The ``(engine, target kind)`` pairs that run on the worker's engine loop (SKY-829). Every run optimizes a
+# repository (SKY-834), and since the cutover (SKY-728) every engine has its row, so every run, Auto included,
+# runs on the loop.
+LOOP_ROUTES: frozenset[tuple[str, str]] = frozenset((engine, BLACKBOX_TARGET_REPO) for engine in BLACKBOX_REPO_ENGINES)
+
+
+def loop_route(engine: str | None, mode: str) -> bool:
+    """Report whether a repository run of this engine and mode runs on the worker's engine loop.
+
+    It reads :data:`LOOP_ROUTES` at each call, so a test that patches the table takes effect.
+
+    Args:
+        engine: The strategy's engine, or ``None`` when the run names none.
+        mode: The strategy's mode.
+
+    Returns:
+        True when the engine, or every Auto engine in auto mode, has a ``repo`` row in :data:`LOOP_ROUTES`.
+    """
+    engines = AUTO_ENGINES if mode == BLACKBOX_STRATEGY_AUTO else (str(engine),)
+    return all((name, BLACKBOX_TARGET_REPO) in LOOP_ROUTES for name in engines)
+
+
+def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
+    """Report whether a job runs on the worker's engine loop.
 
     Args:
         payload: The submitted or stored job.
 
     Returns:
-        True for auto mode, a native engine, or any repository run.
+        :func:`loop_route` for the job's strategy.
     """
-    return (
-        payload.strategy.mode != "single"
-        or payload.strategy.engine in NATIVE_ENGINES
-        or payload.target.kind == BLACKBOX_TARGET_REPO
-    )
+    return loop_route(payload.strategy.engine, payload.strategy.mode)
+
+
+class LoopBinding(Protocol):
+    """The worker's engine loop, as a job sees it: steps for the scorer and the engine, and the replay check."""
+
+    def scorer(self, base: ScorerFn) -> ScorerFn:
+        """Return a scorer whose each call is one committed loop step.
+
+        Args:
+            base: The job's scorer.
+
+        Returns:
+            The scorer that the eval server and the final runs use.
+        """
+        ...
+
+    def context(self, **fields: Any) -> EngineContext:
+        """Return the engine context of the loop.
+
+        Args:
+            **fields: The job's own :class:`EngineContext` fields.
+
+        Returns:
+            The context, with the loop's model, box and file calls.
+        """
+        ...
+
+    def finish(self) -> None:
+        """Check that the run replayed every committed step of the loop."""
+        ...
 
 
 def _shinka_models(payload: BlackboxRunRequest | JobSpec, gateway: GatewayConfig) -> tuple[dict[str, str], ...]:
@@ -368,13 +436,39 @@ def validate_blackbox_payload(
         api_bases: Available saved provider endpoints.
 
     Raises:
-        ServiceError: When the job has an agent target but this deployment
-            cannot run agents, the chosen engine is unknown/unavailable, or
-            the python scorer code does not load.
+        ServiceError: When the chosen engine is unknown/unavailable, or the
+            python scorer code does not load.
     """
     validate_job(payload, api_bases=api_bases)
-    if verify_scorer and payload.scorer.kind == "python":
-        validate_scorer_code(str(payload.scorer.metric_code))
+    if verify_scorer and payload.scorer.kind == "python" and not payload.scorer.command_metric:
+        entry = _draft_metric_entry(payload)
+        # A command entry does not run the metric code, so the run's setup checks the command (SKY-738).
+        if not isinstance(entry, tuple):
+            function = entry.rsplit(":", 1)[1] if entry else None
+            # Without a draft ascent.toml, the repository's own file can name another function.
+            entry_known = entry is not None or payload.target.repo is None
+            validate_scorer_code(str(payload.scorer.metric_code), entrypoint=function, entry_known=entry_known)
+
+
+def _draft_metric_entry(payload: BlackboxRunRequest) -> str | tuple[str, ...] | None:
+    """Read the ``[metric] entry`` of the request's draft ``ascent.toml`` (SKY-738).
+
+    Args:
+        payload: The submitted job.
+
+    Returns:
+        The entry, or ``None`` when the request has no draft ``ascent.toml``
+        or the draft does not parse. The run's staging then checks the
+        repository's entry.
+    """
+    repo = payload.target.repo
+    text = repo.draft_files.get(CONSTRAINTS_FILE) if repo is not None else None
+    if text is None:
+        return None
+    try:
+        return parse_constraints(text.encode("utf-8")).metric.entry
+    except ConstraintsError:
+        return None
 
 
 def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, str | None] | None = None) -> None:
@@ -385,9 +479,9 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
         api_bases: Available saved provider endpoints.
 
     Raises:
-        ServiceError: When the target cannot run here, the engine is unknown
-            or unavailable, a native proposer gets custom model settings or no
-            spending budget, or Auto has too few scorer runs.
+        ServiceError: When the engine is unknown or unavailable, a native
+            proposer gets custom model settings or no spending budget, or Auto
+            has too few scorer runs.
     """
     reflection = payload.reflection_model_settings.model_dump()
     reflection["token_source"] = reflection.get("token_source") or getattr(payload, "token_source", None)
@@ -396,38 +490,35 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
         bool(payload.shinka and payload.shinka.novelty),
         api_bases=api_bases,
     )
-    caps = engine_capabilities(payload.target)
-    if caps.agent_target and not caps.sandbox:
-        raise ServiceError(f"Agent targets cannot run on this deployment: {caps.sandbox_reason}")
+    caps = engine_capabilities()
     if payload.strategy.mode == "single":
         get_engine(str(payload.strategy.engine), caps)
     else:
         for name in AUTO_ENGINES:
             get_engine(name, caps)
-    needs_native = uses_native_runtime(payload)
-    if needs_native:
-        models = [payload.reflection_model_settings, *payload.extra_reflection_model_settings]
-        # The proposer CLI applies the main model's effort; the extra models feed
-        # ShinkaEvolve's own calls, which have no effort setting.
-        allowed = [{ROUTE_KEY, "reasoning_effort"}, *({ROUTE_KEY} for _ in payload.extra_reflection_model_settings)]
-        if any(
-            model.temperature is not None
-            or model.max_tokens is not None
-            or model.base_url
-            or any(key not in keys for key in model.extra)
-            or model.extra.get("reasoning_effort") not in _NATIVE_EFFORTS
-            for model, keys in zip(models, allowed, strict=True)
-        ):
-            raise ServiceError(
-                "Native proposers accept a model selection; custom sampling and routing settings are unsupported."
-            )
-        _check_proposer_effort(payload.proposer, payload.reflection_model_settings.extra.get("reasoning_effort"))
-        # A run backed by an execution budget keeps its allowance in the ledger
-        # and is metered by the gateway route; the parent hands its guest the
-        # ceiling the proposer plans against, so only a budget-less run must
-        # state one here.
-        if payload.max_cost_cents is None and payload.execution_budget_id is None:
-            raise ServiceError("Set a total spending budget before starting an upstream agent proposer.")
+    # A loop-routed run calls the same proposer models with the same budget, so every run gets the same checks.
+    models = [payload.reflection_model_settings, *payload.extra_reflection_model_settings]
+    # The proposer CLI applies the main model's effort; the extra models feed
+    # ShinkaEvolve's own calls, which have no effort setting.
+    allowed = [{ROUTE_KEY, "reasoning_effort"}, *({ROUTE_KEY} for _ in payload.extra_reflection_model_settings)]
+    if any(
+        model.temperature is not None
+        or model.max_tokens is not None
+        or model.base_url
+        or any(key not in keys for key in model.extra)
+        or model.extra.get("reasoning_effort") not in _NATIVE_EFFORTS
+        for model, keys in zip(models, allowed, strict=True)
+    ):
+        raise ServiceError(
+            "Native proposers accept a model selection; custom sampling and routing settings are unsupported."
+        )
+    _check_proposer_effort(payload.proposer, payload.reflection_model_settings.extra.get("reasoning_effort"))
+    # A run backed by an execution budget keeps its allowance in the ledger
+    # and is metered by the gateway route; the parent hands its guest the
+    # ceiling the proposer plans against, so only a budget-less run must
+    # state one here.
+    if payload.max_cost_cents is None and payload.execution_budget_id is None:
+        raise ServiceError("Set a total spending budget before starting an upstream agent proposer.")
     if payload.strategy.mode == "auto" and payload.budget.max_scorer_runs < len(AUTO_ENGINES) + 1:
         raise ServiceError(f"Auto needs at least {len(AUTO_ENGINES) + 1} scorer runs.")
 
@@ -454,67 +545,33 @@ def _check_proposer_effort(proposer: BlackboxProposer, effort: str | None) -> No
         )
 
 
-def _agent_scorer(
-    scorer: ScorerFn,
-    target: BlackboxTarget,
-    *,
-    job_id: str,
-    progress_callback: ProgressCallback | None,
-    agent_run_sink: AgentRunSink | None,
-    target_route: dict[str, str] | None = None,
-) -> SandboxAgentScorer:
-    """Wrap ``scorer`` so every call runs the harness in a fresh sandbox first.
-
-    Args:
-        scorer: The user's scorer.
-        target: The job's agent target.
-        job_id: Tags the sandboxes with the job.
-        progress_callback: The job's progress sink, told when each run starts and ends.
-        agent_run_sink: Receives each run's full record and live transcript.
-        target_route: Opaque parent route for the target model, when protected.
-
-    Returns:
-        The wrapped scorer.
-
-    Raises:
-        ServiceError: When this deployment has no sandbox runtime or gateway.
-    """
-    runtime = sandbox_runtime_from_settings(settings)
-    if getattr(runtime, "protected", False) and not target_route:
-        raise ServiceError("Protected agent targets require an opaque model route from the trusted parent.")
-    gateway = (
-        GatewayConfig(url=target_route["url"], api_key=target_route["token"])
-        if target_route
-        else gateway_from_settings(settings)
-    )
-    if runtime is None or gateway is None:
-        raise ServiceError(f"Agent targets cannot run on this deployment: {agent_target_unavailable_reason(settings)}")
-    recorder = AgentRunRecorder(
-        progress_callback=progress_callback, run_sink=agent_run_sink, secrets=(gateway.api_key,)
-    )
-    return SandboxAgentScorer(scorer, runtime=runtime, target=target, gateway=gateway, job_id=job_id, recorder=recorder)
-
-
 @dataclass
 class FinalRun:
     """One version's fresh scores from the final run, outside the optimization budget."""
 
-    # ``None`` when the metric crashed on any case (a metric error): a crash is
-    # not a measurement, so the version has no score at all (SKY-350).
+    # ``None`` when the metric crashed on any case (a metric error) or the
+    # version's ``[run]`` entry failed on one: a crash is not a measurement, so
+    # the version has no score at all (SKY-350, SKY-751).
     score: float | None
     feedback: str | None
     named: dict[str, BlackboxNamedScore]
-    # Per case ``(score, feedback)``; empty when the run has no cases. A metric
-    # error case has no score, and its feedback is the error text.
+    # Per case ``(score, feedback)``; empty when the run has no cases. A case
+    # with no score has its error text, or its "Run failed" text, as feedback.
     cases: list[tuple[float | None, str]] = field(default_factory=list)
     runs: int = 0
     # Per case, the trusted observation of the run stage (time, model calls,
     # service cost); ``None`` where the scorer does not measure one.
     observations: list[dict[str, Any] | None] = field(default_factory=list)
     # Error text of each run that failed: a metric error, or, on a repository
-    # run, the traceback of the version's own crashed run, which scores 0 (SKY-221).
-    # The traceback is stored without its "Run failed: " prefix.
+    # run, the traceback of the version's own failed run (SKY-221). The
+    # traceback is stored without its "Run failed: " prefix.
     failures: list[str] = field(default_factory=list)
+    # How many cases returned each named score. ``named`` holds a name's mean
+    # but cannot show that some cases left the name out (SKY-692).
+    named_cases: dict[str, int] = field(default_factory=dict)
+    # Whether the version's ``[run]`` entry failed on any case, not only the
+    # metric: only that makes the starting code lose to a scored version (SKY-751).
+    run_failed: bool = False
 
 
 def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
@@ -554,9 +611,10 @@ def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNa
 
     Returns:
         Each name's mean score; its feedback verbatim with one case, else one
-        ``Case n: ...`` line per case, capped like any feedback text. A case
-        that failed (its side info is an ``error``) counts as 0 on every name,
-        as it does in the total, so a failure never vanishes from the parts.
+        ``Case n: ...`` line per case that has feedback, capped like any
+        feedback text. A case that failed (its side info is an ``error``)
+        counts as 0 on every name, as it does in the total, so a failure never
+        vanishes from the parts.
     """
     collected: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for position, side_info in enumerate(side_infos, start=1):
@@ -568,7 +626,9 @@ def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNa
         if len(side_infos) == 1:
             feedback = entries[0][1]["feedback"]
         else:
-            feedback = "\n".join(f"Case {position}: {entry['feedback']}" for position, entry in entries)
+            feedback = "\n".join(
+                f"Case {position}: {entry['feedback']}" for position, entry in entries if entry["feedback"]
+            )
         merged[name] = BlackboxNamedScore(
             score=sum(entry["score"] for _, entry in entries) / (len(entries) + len(failed)),
             feedback=feedback[:MINIBATCH_FEEDBACK_CHAR_CAP],
@@ -583,9 +643,7 @@ def _final_run(
     *,
     label: str,
     phase: str,
-    concurrency: int = 1,
     case_offset: int = 0,
-    repo_scorer: bool = False,
 ) -> FinalRun:
     """Score ``candidate`` afresh on every case, or once without cases, outside the budget.
 
@@ -598,23 +656,18 @@ def _final_run(
         candidate: The version to score.
         cases: The run's cases; empty to score the version on its own.
         label: What the candidate is, for logs and the error message.
-        phase: Which pass this is, for the agent run records: ``PHASE_BASELINE`` or ``PHASE_FINAL``.
-        concurrency: How many cases to score at once (agent targets run one
-            sandbox per case, so this is the number of sandboxes in flight).
-        case_offset: Added to each case's index in the run records, so the
+        phase: Which pass this is: ``PHASE_BASELINE`` or ``PHASE_FINAL``.
+        case_offset: Added to each case's index in the usage records, so the
             held-out pass does not overwrite the selection pass's records.
-        repo_scorer: Whether ``scorer`` is the repository scorer, the only
-            scorer whose ``run_failed`` status counts as a failed case.
 
     Returns:
         The mean score, the feedback and named scores, and each case's result.
-        The score is ``None``, and the named scores empty, when the metric
-        crashed on any case. ``failures`` holds the error text of each failed
-        case: metric errors, and on a repository run the crashed runs.
+        The score is ``None``, and the named scores empty, when any case has
+        no score. ``failures`` holds the error text of each such case: metric
+        errors, and on a repository run the failed runs.
 
     Raises:
-        ServiceError: When the scorer fails on the candidate, including when
-            it returns no feedback.
+        ServiceError: When the scorer fails on the candidate.
     """
     targets: list[Any] = cases or [None]
     observed = getattr(scorer, "score_observed", None)
@@ -626,14 +679,14 @@ def _final_run(
             numbered: The case's 1-based position and the case itself.
 
         Returns:
-            The score (``None`` after a metric error), side information and
-            trusted observation for that case.
+            The score (``None`` when the case has no score), side information
+            and trusted observation for that case.
         """
         position, case = numbered
         stage = STAGE_BASELINE if phase == PHASE_BASELINE else STAGE_EVALUATION
         index = str(case_offset + position - 1)
         observation: dict[str, Any] | None = None
-        with run_scope(phase, index), usage_scope(stage=stage, case=index if cases else None):
+        with usage_scope(stage=stage, case=index if cases else None):
             if callable(observed):
                 score, side_info, observation = observed(candidate, case)
             else:
@@ -641,38 +694,45 @@ def _final_run(
         # Per-case heartbeats at DEBUG surface only in the Logs tab's verbose view.
         if score is None or is_metric_error(side_info):
             error = side_info.get("error")
-            logger.debug("%s final run %d/%d %s: %s", label, position, len(targets), METRIC_ERROR, error)
+            status = side_info.get(STATUS_KEY) or METRIC_ERROR
+            logger.debug("%s final run %d/%d %s: %s", label, position, len(targets), status, error)
             return None, side_info, observation
         logger.debug("%s final run %d/%d score=%.3f", label, position, len(targets), score)
         return score, side_info, observation
 
     started = time.perf_counter()
     try:
-        workers = max(1, min(concurrency, len(targets)))
-        logger.info("final run: scoring the %s on %d case(s), %d at a time", label, len(cases), workers)
+        logger.info("final run: scoring the %s on %d case(s)", label, len(cases))
         scored = run_on_pool(
             Phase.RUN,
             [functools.partial(score_case, numbered) for numbered in enumerate(targets, start=1)],
-            workers,
+            1,
         )
-    except (BudgetError, UsagePendingError, UnpricedOperationError):
+    # An interruption, such as an engine loop's scorer outage, must reach the worker as one, so the run requeues.
+    except (BudgetError, UsagePendingError, UnpricedOperationError, InfrastructureInterruptionError):
         raise
     except ServiceError as exc:
         raise ServiceError(f"scorer failed on the {label}: {exc}") from exc
     except Exception as exc:
         raise ServiceError(f"scorer failed on the {label}: {type(exc).__name__}: {exc}") from exc
     side_infos = [side_info for _, side_info, _ in scored]
-    errors = [str(side_info.get("error") or METRIC_ERROR) for score, side_info, _ in scored if score is None]
     feedbacks = [
         str(side_info.get(FEEDBACK_KEY) or (side_info.get("error") if score is None else "") or "")
         for score, side_info, _ in scored
     ]
+    errors = [
+        # Pending rule-judge notes can come before the failure text.
+        feedback.rpartition(RUN_FAILED)[2]
+        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        else str(side_info.get("error") or METRIC_ERROR)
+        for (score, side_info, _), feedback in zip(scored, feedbacks, strict=True)
+        if score is None
+    ]
     elapsed = time.perf_counter() - started
     mean: float | None = None
     if errors:
-        logger.warning(
-            "%s has no score: %s on %d of %d run(s): %s", label, METRIC_ERROR, len(errors), len(scored), errors[0]
-        )
+        kind = next(str(side_info.get(STATUS_KEY) or METRIC_ERROR) for score, side_info, _ in scored if score is None)
+        logger.warning("%s has no score: %s on %d of %d run(s): %s", label, kind, len(errors), len(scored), errors[0])
     else:
         mean = sum(score for score, _, _ in scored if score is not None) / len(scored)
         logger.info("%s scored %.3f over %d run(s) in %.0fs", label, mean, len(scored), elapsed)
@@ -680,16 +740,12 @@ def _final_run(
         score=mean,
         feedback=None if cases else feedbacks[0],
         named={} if errors else _mean_named_scores(side_infos),
+        named_cases={} if errors else Counter(name for side_info in side_infos for name in named_scores(side_info)),
         cases=[(score, feedback) for (score, _, _), feedback in zip(scored, feedbacks, strict=True)] if cases else [],
         runs=len(scored),
         observations=[observation for _, _, observation in scored] if cases else [],
-        failures=errors
-        + [
-            # Pending rule-judge notes can come before the failure text.
-            feedback.rpartition(RUN_FAILED)[2]
-            for (score, side_info, _), feedback in zip(scored, feedbacks, strict=True)
-            if repo_scorer and score is not None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
-        ],
+        failures=errors,
+        run_failed=any(score is None and is_run_failed(side_info) for score, side_info, _ in scored),
     )
 
 
@@ -724,10 +780,146 @@ def _case_results(baseline: FinalRun | None, best: FinalRun | None) -> list[Blac
     return rows
 
 
+def _reaches(value: float, bound: float) -> bool:
+    """Tell whether ``value`` is equal to or above ``bound``.
+
+    Args:
+        value: The measured score; finite.
+        bound: The target or limit from ``ascent.toml``.
+
+    Returns:
+        True when ``value`` is above ``bound`` or equal to it within float rounding.
+    """
+    # A mean of equal case scores can land one rounding step below the number in the file.
+    return value >= bound or math.isclose(value, bound, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _improvement(baseline: float, optimized: float, direction: str) -> float:
+    """Return how much ``optimized`` beat ``baseline``: positive when the run got better.
+
+    Args:
+        baseline: The starting point's score.
+        optimized: The reported version's score.
+        direction: ``"maximize"`` or ``"minimize"`` (SKY-750).
+
+    Returns:
+        ``optimized - baseline`` for a maximize run, ``baseline - optimized`` for a minimize run.
+    """
+    return baseline - optimized if direction == MINIMIZE else optimized - baseline
+
+
+def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str, Any]:
+    """Judge the ``[outcome]`` target and limits of ``ascent.toml`` on the reported final run.
+
+    The engine may stop on its search-time score; this verdict uses the final
+    run of the reported version, so the search can stop and the target still
+    fail. The verdict only reports: it never changes what the run publishes.
+
+    Args:
+        outcome: The snapshot's ``{"target": float | None, "require": {name: limit}, "direction": str}``,
+            with ``"scores": {name: direction}`` when ``[metric.scores]`` names directions.
+        best: The reported version's final run, if it had one.
+
+    Returns:
+        ``target`` and ``target_reached`` when the file sets a target (for a
+        minimize run, a score equal to or below it reaches it), and
+        ``requirements_passed`` and ``failed_requirements`` when it sets limits.
+        A limit is a minimum for a maximize named score and a maximum for a
+        minimize one; a name with no direction maximizes (SKY-775).
+        A version with no final score reaches no target and passes no limit.
+        A score that is not a finite number reaches nothing and is stored as
+        ``None``, because this dict is stored without ``finite_json``.
+    """
+    score = best.score if best else None
+    verdict: dict[str, Any] = {}
+    if outcome.get("target") is not None:
+        target = float(outcome["target"])
+        # Only the total score follows ``[metric] direction`` (SKY-750); named scores follow [metric.scores].
+        sign = -1.0 if outcome.get("direction") == MINIMIZE else 1.0
+        reached = score is not None and math.isfinite(score) and _reaches(sign * score, sign * target)
+        verdict.update(target=target, target_reached=reached)
+    limits = outcome.get("require") or {}
+    if limits:
+        directions = outcome.get("scores") or {}
+        failed = []
+        for name, limit in limits.items():
+            direction = MINIMIZE if directions.get(name) == MINIMIZE else MAXIMIZE
+            sign = -1.0 if direction == MINIMIZE else 1.0
+            entry = best.named.get(name) if best and score is not None else None
+            if score is None:
+                reason = f"The final run has no score, so {name!r} has no value."
+            elif best is None or entry is None:
+                reason = f"The metric returned no score named {name!r}."
+            elif (returned := best.named_cases.get(name, 0)) < best.runs:
+                reason = f"The metric returned {name!r} on only {returned} of {best.runs} cases."
+            elif not math.isfinite(entry.score):
+                reason = f"The metric returned a value for {name!r} that is not a finite number."
+            elif not _reaches(sign * entry.score, sign * float(limit)):
+                # Twelve digits always show the gap: ``_reaches`` passes anything closer than that.
+                side = "above its maximum" if direction == MINIMIZE else "below its minimum"
+                reason = f"{name!r} scored {entry.score:.12g}, {side} {float(limit):.12g}."
+            else:
+                continue
+            value = entry.score if entry and math.isfinite(entry.score) else None
+            failed.append(
+                {"name": name, "direction": direction, "limit": float(limit), "value": value, "reason": reason}
+            )
+        verdict.update(requirements_passed=not failed, failed_requirements=failed)
+    return verdict
+
+
 # Side info persisted with the version history is capped so a run whose scorer
 # returns renders for every version cannot bloat the job row; images are shed
 # from the weakest versions first and the best version always keeps its own.
 VERSION_SIDE_INFO_BYTE_CAP = 3_000_000
+
+
+# SKY-750: engine events and engine metadata carry engine-scale scores under
+# these keys; a minimize run must show the metric's own scores. Side info
+# (``scores``, ``infos``) and named scores hold the scorer's own numbers, so
+# they are left alone.
+_ENGINE_SCORE_KEYS = frozenset(
+    {
+        "score",
+        "best_score",
+        "val_score",
+        "best_val_score",
+        "parent_score",
+        "proposal_score",
+        "average_score",
+        "development_score",
+    }
+)
+_SCORER_OWNED_KEYS = frozenset({"scores", "infos", "side_info", "scorer_feedback", "named_scores"})
+
+
+def _raw_engine_scores(value: Any, server: EvalServer) -> Any:
+    """Copy an engine payload with each engine-scale score turned back into the metric's own score.
+
+    Args:
+        value: A progress payload, engine metadata, or a part of one.
+        server: The run's root eval server, which knows the run's direction.
+
+    Returns:
+        The same shape; a number under a key of :data:`_ENGINE_SCORE_KEYS` is
+        unchanged for a maximize run and negated for a minimize run.
+    """
+    if not server.minimizes:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: (
+                server.raw_score(item)
+                if key in _ENGINE_SCORE_KEYS and isinstance(item, int | float) and not isinstance(item, bool)
+                else item
+                if key in _SCORER_OWNED_KEYS
+                else _raw_engine_scores(item, server)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_raw_engine_scores(item, server) for item in value]
+    return value
 
 
 def _validation_scores(lanes: list[LaneOutcome]) -> dict[str, float]:
@@ -752,19 +944,20 @@ def _validation_scores(lanes: list[LaneOutcome]) -> dict[str, float]:
 
 
 def _version_history(server: EvalServer, val_scores: dict[str, float] | None = None) -> list[BlackboxVersion]:
-    """Turn the eval server's records into the persisted version history.
+    """Turn the eval server's records into the persisted version history, with the metric's own scores.
 
     Args:
         server: The run's root eval server.
-        val_scores: Validation-set score per :func:`candidate_key` from the
+        val_scores: Raw validation-set score per :func:`candidate_key` from the
             engines that recorded lineage; a version with one shows it as its
             ``score`` instead of the running mean.
 
     Returns:
         One entry per distinct version in first-seen order, side info made
         JSON-safe and trimmed to :data:`VERSION_SIDE_INFO_BYTE_CAP` in total.
-        A version that hit a metric error has no score, and its side info
-        carries the error text and ``status: metric_error``.
+        A version with a case that has no score has no score, and its side
+        info carries the error text and ``status: metric_error``, or
+        ``status: run_failed`` when its ``[run]`` entry failed (SKY-751).
     """
     val_scores = val_scores or {}
     versions = [
@@ -772,15 +965,19 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
             candidate=record.candidate,
             score=None
             if record.metric_error is not None
-            else val_scores.get(candidate_key(record.candidate), record.mean_score),
-            mean_score=record.mean_score,
+            else val_scores.get(candidate_key(record.candidate), server.raw_score(record.mean_score)),
+            mean_score=server.raw_score(record.mean_score),
             evals=record.count,
             first_run=record.first_eval,
             side_info=json.loads(
                 json.dumps(
                     record.side_info
                     if record.metric_error is None
-                    else {**record.side_info, "error": record.metric_error, "status": METRIC_ERROR},
+                    else {
+                        **record.side_info,
+                        "error": record.metric_error,
+                        "status": RUN_FAILED_STATUS if record.run_failed else METRIC_ERROR,
+                    },
                     default=side_info_json_default,
                 )
             ),
@@ -789,7 +986,15 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
     ]
     sizes = [len(json.dumps(version.side_info)) for version in versions]
     total = sum(sizes)
-    weakest_first = sorted(range(len(versions)), key=lambda i: (versions[i].score or 0.0, versions[i].first_run))
+    # An unscored version ranks below every scored one, whatever the sign of
+    # the scores; the engine scale puts the best version last in both directions.
+    weakest_first = sorted(
+        range(len(versions)),
+        key=lambda i: (
+            float("-inf") if versions[i].score is None else server.raw_score(versions[i].score),
+            versions[i].first_run,
+        ),
+    )
     for i in weakest_first[:-1]:
         if total <= VERSION_SIDE_INFO_BYTE_CAP:
             break
@@ -826,14 +1031,16 @@ def _progress_listener(progress_callback: ProgressCallback | None) -> Callable[[
                 TQDM_N_KEY: server.used,
                 TQDM_PERCENT_KEY: round(100.0 * server.used / server.max_evals, 1),
                 "last_score": score,
-                "best_score": server.best_score,
+                "best_score": server.raw_score(server.best_score),
             },
         )
 
     return on_eval
 
 
-def _without_unscored(progress_callback: ProgressCallback | None) -> ProgressCallback | None:
+def _without_unscored(
+    progress_callback: ProgressCallback | None, server: EvalServer | None = None
+) -> ProgressCallback | None:
     """Wrap the job's progress sink so engine events never show an unscored value.
 
     SKY-367: the pinned upstream engines get ``-inf`` for a metric error case
@@ -843,6 +1050,10 @@ def _without_unscored(progress_callback: ProgressCallback | None) -> ProgressCal
 
     Args:
         progress_callback: The job's progress sink, if any.
+        server: The run's root eval server; with one, a minimize run's
+            engine-scale scores go out as the metric's own scores (SKY-750),
+            and its candidate events say ``direction`` so the worker's
+            readers (notifications, recovery) pick the lowest score.
 
     Returns:
         A sink that nulls every non-finite number in the payload, or ``None``
@@ -858,6 +1069,10 @@ def _without_unscored(progress_callback: ProgressCallback | None) -> ProgressCal
             event: The progress event name.
             metrics: Its payload.
         """
+        if server is not None and server.minimizes:
+            metrics = _raw_engine_scores(metrics, server)
+            if event == PROGRESS_CANDIDATE:
+                metrics = {**metrics, "direction": MINIMIZE}
         progress_callback(event, finite_json(metrics))
 
     return sink
@@ -911,7 +1126,9 @@ def _reflection_caller(lm: dspy.LM) -> tuple[Callable[[str | list[dict[str, Any]
                     completions = lm(messages=prompt) if isinstance(prompt, list) else lm(prompt)
             finally:
                 durations_ms.append((time.monotonic() - started) * 1000.0)
-            return str(completions[0])
+            first = completions[0]
+            # DSPy returns a dict, not text, when the model also sends its reasoning (SKY-774).
+            return str((first.get("text") or "") if isinstance(first, dict) else first)
 
     return ReflectionCaller(), durations_ms
 
@@ -942,10 +1159,9 @@ def run_blackbox_optimization(
     artifact_id: str,
     progress_callback: ProgressCallback | None = None,
     gepa_log_dir_path: str | None = None,
-    agent_run_sink: AgentRunSink | None = None,
-    target_route: dict[str, str] | None = None,
     evaluator_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
+    loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run one legacy black-box job end to end.
 
@@ -954,55 +1170,61 @@ def run_blackbox_optimization(
         artifact_id: Job id, used to name the workspace.
         progress_callback: The job's progress sink, if any.
         gepa_log_dir_path: Workspace for engine state; a temp dir when unset.
-        agent_run_sink: Receives each sandboxed agent run's record and live transcript, if any.
-        target_route: Opaque parent route for the optimized task model.
         evaluator_route: Opaque parent route for the selected external evaluator.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
+        loop: The worker's engine loop, for a run that :func:`has_loop_route` sends there.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
 
     Raises:
-        ServiceError: When the scorer cannot be built, the job has an agent
-            target this deployment cannot run, the scorer fails on the
-            starting point, no engine produced a version for a seedless job, or
-            the reported version failed on every final case.
+        ServiceError: When the target is not a repository, the parent sent no
+            scorer route or repository, the scorer fails on the starting point,
+            or the reported version failed on every final case.
     """
     started = time.perf_counter()
+    # A stored text or agent run loads for its history, but it never runs again (SKY-834).
+    if payload.target.kind != BLACKBOX_TARGET_REPO:
+        raise ServiceError(TARGET_RETIRED)
     validate_blackbox_payload(
         payload,
         verify_scorer=payload.execution_budget_id is None and ROUTE_KEY not in payload.reflection_model_settings.extra,
     )
-    protected = payload.execution_budget_id is not None or ROUTE_KEY in payload.reflection_model_settings.extra
-    if payload.scorer.kind == "remote" and protected and not evaluator_route:
-        raise ServiceError("Protected remote evaluation requires its parent-issued capability.")
-    if payload.target.kind == BLACKBOX_TARGET_REPO:
-        if not evaluator_route:
-            raise ServiceError("A repository run is scored only by its trusted parent.")
-        if not repo_snapshot or not repo_snapshot.get("chunks"):
-            raise ServiceError("A repository run needs the repository its parent fetched.")
-        base_scorer: JobScorer = RemoteScorer(
-            REPO_SCORER_URL,
-            secret=None,
-            timeout_seconds=payload.scorer.timeout_seconds + SETUP_ALLOWANCE_SECONDS,
-            protected_route=evaluator_route,
-            label="repository scorer",
-        )
-    else:
-        base_scorer = build_scorer(payload.scorer, job_id=artifact_id, protected_route=evaluator_route)
-    return run_job(
-        job_spec_from_payload(payload),
-        base_scorer,
-        legacy_case_splits(list(payload.cases or []), payload.seed),
-        artifact_id=artifact_id,
-        started=started,
-        progress_callback=progress_callback,
-        gepa_log_dir_path=gepa_log_dir_path,
-        agent_run_sink=agent_run_sink,
-        target_route=target_route,
-        repo_snapshot=repo_snapshot,
-        repo_scorer=payload.target.kind == BLACKBOX_TARGET_REPO,
+    if not evaluator_route:
+        raise ServiceError("A repository run is scored only by its trusted parent.")
+    # The engine loop reads the worker's archive; only a guest box gets the tree in chunks.
+    if not repo_snapshot or not repo_snapshot.get("archive" if loop is not None else "chunks"):
+        raise ServiceError("A repository run needs the repository its parent fetched.")
+    base_scorer: JobScorer = RemoteScorer(
+        REPO_SCORER_URL,
+        secret=None,
+        timeout_seconds=payload.scorer.timeout_seconds + SETUP_ALLOWANCE_SECONDS,
+        protected_route=evaluator_route,
+        label="repository scorer",
+        trusted_reply=True,
     )
+    cases = list(payload.cases or [])
+    splits = legacy_case_splits(cases, payload.seed)
+    # The parent's run record (SKY-694) reads these positions; a run with no cases has no split.
+    case_split = {CASE_SPLIT_KEY: case_split_positions(cases, splits, payload.seed)} if cases else {}
+    try:
+        response = run_job(
+            job_spec_from_payload(payload),
+            base_scorer,
+            splits,
+            artifact_id=artifact_id,
+            started=started,
+            progress_callback=progress_callback,
+            gepa_log_dir_path=gepa_log_dir_path,
+            repo_snapshot=repo_snapshot,
+            loop=loop,
+        )
+    except BudgetReached as exc:
+        if isinstance(exc.result, BlackboxRunResponse):
+            exc.result.details.update(case_split)
+        raise
+    response.details.update(case_split)
+    return response
 
 
 def run_job(
@@ -1014,10 +1236,8 @@ def run_job(
     started: float,
     progress_callback: ProgressCallback | None,
     gepa_log_dir_path: str | None,
-    agent_run_sink: AgentRunSink | None = None,
-    target_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
-    repo_scorer: bool = False,
+    loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run a job over an already-built scorer and close the scorer afterwards.
 
@@ -1029,11 +1249,8 @@ def run_job(
         started: When the run began, for the elapsed time.
         progress_callback: The job's progress sink, if any.
         gepa_log_dir_path: Workspace for engine state; a temp dir when unset.
-        agent_run_sink: Receives each sandboxed agent run's record and live transcript, if any.
-        target_route: Opaque parent route for the optimized task model.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
-        repo_scorer: Whether ``base_scorer`` is the repository scorer, whose
-            ``run_failed`` status marks a case where the version's run crashed.
+        loop: The worker's engine loop, if the run uses it.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
@@ -1052,10 +1269,8 @@ def run_job(
             started=started,
             progress_callback=progress_callback,
             gepa_log_dir_path=gepa_log_dir_path,
-            agent_run_sink=agent_run_sink,
-            target_route=target_route,
             repo_snapshot=repo_snapshot,
-            repo_scorer=repo_scorer,
+            loop=loop,
         )
     except BudgetReached as exc:
         exc.evidence.setdefault("candidate_origin", None)
@@ -1110,10 +1325,8 @@ def _run_job(
     started: float,
     progress_callback: ProgressCallback | None,
     gepa_log_dir_path: str | None,
-    agent_run_sink: AgentRunSink | None,
-    target_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
-    repo_scorer: bool = False,
+    loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run the job over an already-built scorer; see :func:`run_job`.
 
@@ -1130,10 +1343,9 @@ def _run_job(
         started: When the run began, for the elapsed time.
         progress_callback: The job's progress sink, if any.
         gepa_log_dir_path: Workspace for engine state; a temp dir when unset.
-        agent_run_sink: Receives each sandboxed agent run's record and live transcript, if any.
-        target_route: Opaque parent route for the optimized task model.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
-        repo_scorer: Whether ``base_scorer`` is the repository scorer; see :func:`run_job`.
+        loop: The worker's engine loop, if the run uses it. Each scorer call, the final runs too, is then one
+            loop step, so a resume replays the run's evaluations; the run's end checks the replay.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
@@ -1143,17 +1355,9 @@ def _run_job(
     """
     scorer: ScorerFn = base_scorer
     target = job.target
-    caps = engine_capabilities(target)
-    if caps.agent_target:
-        scorer = _agent_scorer(
-            scorer,
-            target,
-            job_id=artifact_id,
-            progress_callback=progress_callback,
-            agent_run_sink=agent_run_sink,
-            target_route=target_route,
-        )
-    concurrency = target.concurrency if caps.agent_target else 1
+    caps = engine_capabilities()
+    if loop is not None:
+        scorer = loop.scorer(scorer)
     counts = splits.counts
     logger.info(
         "cases: %d train, %d validation, %d held out; selecting on %s, reporting on %s",
@@ -1163,8 +1367,17 @@ def _run_job(
         counts.selection_split,
         counts.report_split,
     )
-    server = EvalServer(scorer, max_evals=job.budget.max_scorer_runs, on_eval=_progress_listener(progress_callback))
-    engine_progress = _without_unscored(progress_callback)
+    # A run stored before SKY-750 has no direction in its snapshot, so it maximizes.
+    outcome_rules = (repo_snapshot or {}).get("outcome") or {}
+    direction = outcome_rules.get("direction") or MAXIMIZE
+    server = EvalServer(
+        warn_once_without_feedback(scorer),
+        max_evals=job.budget.max_scorer_runs,
+        on_eval=_progress_listener(progress_callback),
+        direction=direction,
+        score_directions=outcome_rules.get("scores") or {},
+    )
+    engine_progress = _without_unscored(progress_callback, server)
     seed_candidate = job.seed_candidate
 
     lm = build_language_model(job.reflection_model_settings, disable_cache=True)
@@ -1172,43 +1385,46 @@ def _run_job(
     token_budget = None
     if job.max_cost_cents is not None and job.reflection_model_settings.token_source != "byok":
         token_budget = job.max_cost_cents * CENT_USD_VALUE / usage_markup()
-    native_options = None
-    if uses_native_runtime(job):
-        budget_route = job.reflection_model_settings.extra.get(ROUTE_KEY)
-        gateway = (
-            GatewayConfig(url=budget_route["url"], api_key=budget_route["token"])
-            if budget_route
-            else gateway_from_settings(settings)
-        )
-        if gateway is None or (token_budget is None and job.reflection_model_settings.token_source != "byok"):
-            raise ServiceError("The upstream proposer needs a gateway and a total spending budget.")
-        active_runtime = current_sandbox_runtime()
-        effort = job.reflection_model_settings.extra.get("reasoning_effort")
-        native_options = NativeOptions(
-            shinka=(job.shinka or BlackboxShinkaSettings()).model_dump(),
-            shinka_models=_shinka_models(job, gateway),
-            shinka_embedding=_shinka_embedding(job, gateway),
-            runtime=job.proposer_runtime,
-            sandbox_runtime=active_runtime,
-            model=budget_route["model"] if budget_route else job.reflection_model_settings.name,
-            gateway=gateway,
-            budget_route=budget_route,
-            max_token_cost=token_budget,
-            proposer=job.proposer,
-            reasoning_effort=effort if isinstance(effort, str) and effort else None,
-            repo=(
-                {
-                    "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot["chunks"]],
-                    "editable_paths": list(target.repo.editable_paths),
-                    "readonly_paths": list(repo_snapshot.get("readonly_paths") or ()),
-                    "constrained": bool(repo_snapshot.get("constrained")),
-                    "proposer_hosts": list(repo_snapshot.get("proposer_hosts") or ()),
-                    "hidden_hashes": dict(repo_snapshot.get("hidden_hashes") or {}),
-                }
-                if target.repo is not None and repo_snapshot is not None
-                else None
-            ),
-        )
+    # The engine loop's tool loop reads these options: the contract file's command and the settings it refuses.
+    budget_route = job.reflection_model_settings.extra.get(ROUTE_KEY)
+    gateway = (
+        GatewayConfig(url=budget_route["url"], api_key=budget_route["token"])
+        if budget_route
+        else gateway_from_settings(settings)
+    )
+    if gateway is None or (token_budget is None and job.reflection_model_settings.token_source != "byok"):
+        raise ServiceError("The upstream proposer needs a gateway and a total spending budget.")
+    active_runtime = current_sandbox_runtime()
+    effort = job.reflection_model_settings.extra.get("reasoning_effort")
+    native_options = NativeOptions(
+        shinka=(job.shinka or BlackboxShinkaSettings()).model_dump(),
+        shinka_models=_shinka_models(job, gateway),
+        shinka_embedding=_shinka_embedding(job, gateway),
+        runtime=job.proposer_runtime,
+        sandbox_runtime=active_runtime,
+        model=budget_route["model"] if budget_route else job.reflection_model_settings.name,
+        gateway=gateway,
+        budget_route=budget_route,
+        max_token_cost=token_budget,
+        proposer=job.proposer,
+        reasoning_effort=effort if isinstance(effort, str) and effort else None,
+        repo=(
+            {
+                # The engine loop reads the worker's archive, so its snapshot has no chunks.
+                "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot.get("chunks") or ()],
+                "editable_paths": list(target.repo.editable_paths),
+                "readonly_paths": list(repo_snapshot.get("readonly_paths") or ()),
+                "constrained": bool(repo_snapshot.get("constrained")),
+                "proposer_hosts": list(repo_snapshot.get("proposer_hosts") or ()),
+                "hidden_hashes": dict(repo_snapshot.get("hidden_hashes") or {}),
+                "file_proposer": bool(repo_snapshot.get("file_proposer")),
+                "proposer_setup": list(repo_snapshot.get("proposer_setup") or ()),
+                "proposer_mcp": [dict(server) for server in repo_snapshot.get("proposer_mcp") or ()],
+            }
+            if target.repo is not None and repo_snapshot is not None
+            else None
+        ),
+    )
 
     task = Task(
         seed_candidate=seed_candidate,
@@ -1218,17 +1434,29 @@ def _run_job(
         valset=list(splits.val),
         context=job.context,
     )
-    ctx = EngineContext(
-        reflection_lm=reflection_lm,
-        native_options=native_options,
-        proposer_token_budget_usd=token_budget,
-        run_dir=gepa_log_dir_path or tempfile.mkdtemp(prefix=f"app-blackbox-{artifact_id}-"),
-        seed=job.seed or 0,
-        stop_at_score=job.budget.stop_at_score,
-        max_iterations=job.budget.max_iterations,
-        concurrency=concurrency,
-        target_label=f"{target.harness} · {target.model}" if caps.agent_target else None,
-        progress_callback=engine_progress,
+    # A run stored before SKY-691 has no ``[outcome]`` in its snapshot; its
+    # retired ``budget.stop_at_score`` stays its stop score.
+    outcome_target = outcome_rules.get("target")
+    fields: dict[str, Any] = {
+        "native_options": native_options,
+        "proposer_token_budget_usd": token_budget,
+        "seed": job.seed or 0,
+        # The engines stop on their own scale, so a minimize run stops at the negated target.
+        "stop_at_score": server.raw_score(outcome_target)
+        if outcome_target is not None
+        else job.budget._legacy_stop_at_score,
+        "max_iterations": job.budget.max_iterations,
+        "progress_callback": engine_progress,
+    }
+    # The loop gives its own model and run directory, so that each step has one place in its log.
+    ctx = (
+        loop.context(**fields)
+        if loop is not None
+        else EngineContext(
+            reflection_lm=reflection_lm,
+            run_dir=gepa_log_dir_path or tempfile.mkdtemp(prefix=f"app-blackbox-{artifact_id}-"),
+            **fields,
+        )
     )
     # The scorer's own model calls are part of the run: they count toward
     # the cost ceiling and the usage the worker bills.
@@ -1289,6 +1517,7 @@ def _run_job(
         result = exc.result
         lanes = exc.evidence.pop("_lanes", [])
         if result is None and seed_candidate is not None:
+            # The Result stays on the engine scale, like an engine's own; the evidence is raw.
             seed_score = server.mean_score(seed_candidate)
             result = Result(
                 best_candidate=seed_candidate,
@@ -1296,7 +1525,9 @@ def _run_job(
                 total_evals=server.used,
                 metadata={"selection_source": "seed"},
             )
-            exc.evidence.update(selection_scope=selection_scope, selection_score=seed_score, candidate_origin="seed")
+            exc.evidence.update(
+                selection_scope=selection_scope, selection_score=server.raw_score(seed_score), candidate_origin="seed"
+            )
         elif result is None:
             raise
 
@@ -1309,7 +1540,11 @@ def _run_job(
             "the engine picked a version with a %s (%s); using the best scored version", METRIC_ERROR, engine_pick_error
         )
         best_candidate = server.best_candidate or seed_candidate or best_candidate
-    logger.info("optimization finished after %d scorer run(s): best score %s", server.used, server.best_score)
+    logger.info(
+        "optimization finished after %d scorer run(s): best score %s",
+        server.used,
+        server.raw_score(server.best_score),
+    )
     if progress_callback is not None:
         progress_callback(PROGRESS_EVALUATION_STARTED, {})
     select_on = selection_cases(splits)
@@ -1329,8 +1564,6 @@ def _run_job(
                     select_on,
                     label="starting point",
                     phase=PHASE_BASELINE,
-                    concurrency=concurrency,
-                    repo_scorer=repo_scorer,
                 )
             best_val = (
                 baseline_val
@@ -1341,27 +1574,22 @@ def _run_job(
                     select_on,
                     label="optimized version",
                     phase=PHASE_FINAL,
-                    concurrency=concurrency,
-                    repo_scorer=repo_scorer,
                 )
             )
             if baseline_val is not None and best_val.score is None:
-                logger.info("the optimized version has no score (%s); keeping the starting point", METRIC_ERROR)
-                best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
-            elif (
-                baseline_val is not None
-                and len(best_val.failures) == best_val.runs
-                and len(baseline_val.failures) < baseline_val.runs
-            ):
-                # SKY-221: every run of the winner crashed, so its 0 scores are
-                # not a measurement; keep the starting point, as for a metric error.
-                logger.info("the optimized version failed on every case; keeping the starting point")
+                if baseline_val.score is None:
+                    logger.warning(
+                        "No version has a score: each one failed on at least one case. "
+                        "The run keeps the starting version."
+                    )
+                else:
+                    logger.info("the optimized version has no score; keeping the starting point")
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
             elif (
                 baseline_val is not None
                 and best_val.score is not None
                 and baseline_val.score is not None
-                and best_val.score < baseline_val.score
+                and _improvement(baseline_val.score, best_val.score, direction) < 0
             ):
                 logger.info("the optimized version scored below the starting point on %s; keeping it", selection_scope)
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
@@ -1375,9 +1603,7 @@ def _run_job(
                         report_on,
                         label="starting point on held-out cases",
                         phase=PHASE_BASELINE,
-                        concurrency=concurrency,
                         case_offset=len(select_on),
-                        repo_scorer=repo_scorer,
                     )
                 best_run = (
                     baseline_run
@@ -1388,9 +1614,7 @@ def _run_job(
                         report_on,
                         label="optimized version on held-out cases",
                         phase=PHASE_FINAL,
-                        concurrency=concurrency,
                         case_offset=len(select_on),
-                        repo_scorer=repo_scorer,
                     )
                 )
         except BudgetReached as exc:
@@ -1399,6 +1623,9 @@ def _run_job(
             _raise_if_every_run_failed(
                 best_run, "optimized version" if best_candidate != seed_candidate else "starting point"
             )
+            if loop is not None:
+                # After the final runs, which are loop steps too: a resume must give back every committed step.
+                loop.finish()
     distinct_runs = {id(run): run for run in (baseline_val, best_val, baseline_run, best_run) if run is not None}
     final_scorer_runs = sum(run.runs for run in distinct_runs.values())
     baseline = baseline_run.score if baseline_run else None
@@ -1414,18 +1641,25 @@ def _run_job(
         replace(row, model=canonical_model_id(row.model)) for row in _combined_usage(lms, native_options)
     )
     engine_used = str(result.metadata.get("engine") or job.strategy.engine or BLACKBOX_STRATEGY_AUTO)
+    metadata = _raw_engine_scores(result.metadata, server)
     candidate_tree = [
         BlackboxCandidateNode(**{**node, "val_score": None} if server.metric_error(node["candidate"]) else node)
-        for node in result.metadata.pop("candidate_tree", [])
+        for node in metadata.pop("candidate_tree", [])
     ]
-    optimizer_best_score = None if engine_pick_error is not None else result.best_score
+    optimizer_best_score = None if engine_pick_error is not None else server.raw_score(result.best_score)
+    verdict = _outcome_verdict((repo_snapshot or {}).get("outcome") or {}, best_run)
+    # The engine metadata comes from the guest's result file; with no rule set, a guest
+    # ``outcome`` would otherwise survive the spread below and pass for Skynet's verdict.
+    metadata.pop("outcome", None)
     response = BlackboxRunResponse(
         optimizer_name=job.optimizer_name,
         strategy_mode=job.strategy.mode,
         engine_used=engine_used,
         baseline_score=baseline,
         best_score=optimized,
-        metric_improvement=None if baseline is None or optimized is None else optimized - baseline,
+        metric_improvement=None
+        if baseline is None or optimized is None
+        else _improvement(baseline, optimized, direction),
         baseline_feedback=baseline_run.feedback if baseline_run else None,
         best_feedback=best_run.feedback if best_run else None,
         baseline_named_scores=baseline_run.named if baseline_run else {},
@@ -1443,13 +1677,16 @@ def _run_job(
                 status=lane.status,
                 best_score=None
                 if lane.best_candidate is not None and server.metric_error(lane.best_candidate)
-                else lane.best_score,
+                else server.raw_score(lane.best_score),
                 scorer_runs=lane.scorer_runs,
                 error=lane.error,
             )
             for lane in lanes
         ],
-        versions=_version_history(server, _validation_scores(lanes)),
+        versions=_version_history(
+            server,
+            _validation_scores([replace(lane, metadata=_raw_engine_scores(lane.metadata, server)) for lane in lanes]),
+        ),
         candidate_tree=candidate_tree,
         total_scorer_runs=server.used,
         runtime_seconds=time.perf_counter() - started,
@@ -1459,18 +1696,28 @@ def _run_job(
         optimization_metadata={
             "strategy": job.strategy.model_dump(),
             "budget": job.budget.model_dump(),
-            "target": target.model_dump(),
+            # The guest sees the drafts without ascent.toml, so its validator
+            # resets the source to "repository"; the stored payload keeps the true one.
+            "target": target.model_dump(exclude={"repo": {"contract_source"}}),
             "proposer_runtime": job.proposer_runtime,
             "upstream_revision": GEPA_REVISION,
         },
         details={
             "optimizer_best_score": optimizer_best_score,
             "selection_scope": selection_scope,
-            **finite_json(result.metadata),
+            **finite_json(metadata),
             # SKY-221: how many of the reported version's final cases failed.
             "failed_cases": len(best_run.failures) if best_run else None,
+            # SKY-751: whether the starting code's final run had a failed [run]
+            # case; the pull request decision reads it with ``baseline_score``.
+            # It stays None unless both final runs finished, so a budget stop
+            # in the winner's held-out run never passes for a finished final run.
+            "baseline_run_failed": baseline_run.run_failed if baseline_run and best_run else None,
+            # SKY-692: the [outcome] verdict, absent when ascent.toml sets no target and no limit.
+            **({"outcome": verdict} if verdict else {}),
         },
         split_counts=counts,
+        direction=direction,
         baseline_val_score=baseline_val.score if baseline_val else None,
         best_val_score=best_val.score if best_val else None,
     )

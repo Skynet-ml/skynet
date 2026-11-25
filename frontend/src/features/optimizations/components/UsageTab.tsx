@@ -30,7 +30,7 @@ import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { OptimizationStatusResponse } from "@/shared/types/api";
 import { cn } from "@/shared/lib/utils";
 import { budgetPaceLine } from "../lib/budget-pace";
-import { isBudgetPause, isBudgetStop } from "../lib/run-lifecycle";
+import { isBudgetPause, isBudgetStop, limitPaceCents } from "../lib/run-lifecycle";
 import {
   availableGroupings,
   groupUsage,
@@ -240,11 +240,14 @@ function Summary({
  * The live budget block: what the run has spent against its limit and, once
  * the first scorer runs have priced a call, how far the rest of the limit goes.
  */
-function BudgetPace({ job, spentCents }: { job: OptimizationStatusResponse; spentCents: number }) {
+function BudgetPace({ job }: { job: OptimizationStatusResponse }) {
   const locale = getActiveIntlLocale();
   const budget = job.execution_budget;
   const pace = budgetPaceLine(job.latest_metrics ?? {});
   if (!budget && !pace) return null;
+  const { spentCents, usedCents } = budget
+    ? limitPaceCents(budget)
+    : { spentCents: 0, usedCents: 0 };
   const spent = formatCentsUsd(spentCents, locale);
   const capped = budget != null && !budget.uncapped;
   return (
@@ -268,7 +271,7 @@ function BudgetPace({ job, spentCents }: { job: OptimizationStatusResponse; spen
           </span>
         )}
       </div>
-      {capped && <ProgressBar value={spentCents} max={budget.total_cents} />}
+      {capped && <ProgressBar value={usedCents} max={budget.total_cents} />}
       {pace && (
         <p className="text-xs text-muted-foreground" dir="auto" aria-live="polite">
           {pace.kind === "calibrating"
@@ -519,7 +522,7 @@ export function UsageTab({ job }: { job: OptimizationStatusResponse }) {
   return (
     <FadeIn>
       <div className="space-y-4">
-        {running && <BudgetPace job={job} spentCents={total.chargedCents} />}
+        {running && <BudgetPace job={job} />}
         <Summary
           job={job}
           usage={usage}

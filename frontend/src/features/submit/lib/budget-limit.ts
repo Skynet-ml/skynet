@@ -1,3 +1,5 @@
+import type { WizardStepId } from "./wizard-v2";
+
 export interface BudgetChoice {
   uncapped: boolean;
   /** The spending limit, or null while it is unset. */
@@ -47,6 +49,85 @@ export function budgetContinueBlock(
 ): BudgetShortfall | null {
   if (floorCents == null || (!gate && !LIMIT_SCREENS.has(screen))) return null;
   return budgetShortfall(floorCents, choice);
+}
+
+/**
+ * Whether `screen` sets the limit and the user left it empty or unreadable.
+ * The card fills a default on mount, so an unset capped limit means the
+ * user cleared the field.
+ */
+export function limitMissing(screen: string, { uncapped, limit }: BudgetChoice): boolean {
+  return LIMIT_SCREENS.has(screen) && !uncapped && limit == null;
+}
+
+/**
+ * Whether the user cleared a capped run's limit. The limit card fills a
+ * default when it mounts, so an unset limit before that (`limitSeen` false)
+ * is not a choice. A reload restores the setup but mounts only the current
+ * step, so past an Optimizer step the flow shows (`steps`), an unset limit
+ * was cleared before the reload. Guided's hidden Optimizer mounts once the
+ * user is past it and fills the default, so there it does not count.
+ *
+ * Args:
+ *   choice: The run's cap choice and spending limit.
+ *   limitSeen: The limit had a value at some point since the page loaded.
+ *   steps: The wizard's steps without the limit's own hold.
+ *   furthestStep: The furthest step the user reached.
+ *
+ * Returns:
+ *   True when a capped run has no limit and the user cleared it.
+ */
+export function limitCleared(
+  { uncapped, limit }: Pick<BudgetChoice, "uncapped" | "limit">,
+  limitSeen: boolean,
+  steps: readonly WizardStepId[],
+  furthestStep: WizardStepId,
+): boolean {
+  if (uncapped || limit != null) return false;
+  return limitSeen || (steps.includes("optimizer") && furthestStep === "metric");
+}
+
+/**
+ * Whether Continue (the user's and the agent's) holds for an empty limit.
+ * The limit screens hold an empty capped limit. A cleared limit also holds
+ * the last screen before the metric step and the metric step's own screens,
+ * since Guided can reach them with the Optimizer step out of the way.
+ *
+ * Args:
+ *   screen: The screen Continue leaves.
+ *   choice: The run's cap choice and spending limit.
+ *   cleared: The user cleared the limit (`limitCleared`).
+ *   beforeMetric: `screen` is the last one before the metric step.
+ *   step: The step `screen` belongs to.
+ *
+ * Returns:
+ *   True when Continue must hold and say the limit is empty.
+ */
+export function limitHoldsContinue(
+  screen: string,
+  choice: BudgetChoice,
+  cleared: boolean,
+  beforeMetric: boolean,
+  step: WizardStepId,
+): boolean {
+  return limitMissing(screen, choice) || (cleared && (beforeMetric || step === "metric"));
+}
+
+/**
+ * Whether the stepper and the agent's jumps hold the metric step. They hold
+ * while costs are unsettled, while the run falls short of its floor, and
+ * while the user cleared a capped run's limit (`cleared`, from
+ * `limitCleared`): the hardening Start and the run need a budget, and
+ * without a limit they fail with `budget.invalid` (SKY-450).
+ */
+export function metricStepHeld(
+  floorCents: number | null,
+  choice: BudgetChoice,
+  costSettled: boolean,
+  cleared: boolean,
+): boolean {
+  if (!costSettled || cleared) return true;
+  return floorCents != null && budgetShortfall(floorCents, choice) !== null;
 }
 
 /** A saved setup's spending limit: the draft slice fields a reload restores. */

@@ -18,7 +18,7 @@ from core.billing import vercel_usage
 from core.billing.budgets import BudgetNotFoundError, BudgetService, OperationSnapshot
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.runtime import UsagePendingError
-from core.billing.vercel_reconciliation import VercelSessionUsageClient, VercelUsageReconciler
+from core.billing.vercel_reconciliation import SessionNotFoundError, VercelSessionUsageClient, VercelUsageReconciler
 from core.billing.vercel_usage import quote_vercel_sandbox, vercel_actual_usd
 from core.config import settings
 from core.storage.models import Base, BillingCustomerModel
@@ -274,3 +274,73 @@ def test_provider_client_only_reads_exact_session_and_strips_secrets() -> None:
     assert request.url.path == "/api/v2/sandboxes/sessions/session-one"
     assert request.url.params["teamId"] == "team"
     assert request.headers["Authorization"] == "Bearer parent-token"
+
+
+@pytest.mark.parametrize(
+    ("respond", "expected"),
+    [
+        (lambda request: httpx.Response(404, json={"error": "gone"}), "(HTTP 404)"),
+        (lambda request: httpx.Response(401, json={"error": "denied"}), "(HTTP 401)"),
+        (lambda request: (_ for _ in ()).throw(httpx.ConnectTimeout("timed out", request=request)), "(ConnectTimeout)"),
+        (lambda request: httpx.Response(200, content=b"not json"), "(JSONDecodeError)"),
+        (lambda request: httpx.Response(200, json={"session": {"id": "other"}}), "(ValueError)"),
+    ],
+)
+def test_provider_client_pending_reason_names_failure_without_secrets(respond: Any, expected: str) -> None:
+    """Name the failure kind in the pending reason, but never the URL, team, session or token.
+
+    Args:
+        respond: Fake provider behavior for one request.
+        expected: Failure label the reason must carry.
+    """
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        reader = VercelSessionUsageClient("secret-token-value", "team-secret-id", client=client)
+        with pytest.raises(UsagePendingError) as caught:
+            reader("session-secret-id")
+    reason = str(caught.value)
+    assert reason.startswith("Vercel final usage remains unavailable")
+    assert expected in reason
+    for secret in ("secret-token-value", "team-secret-id", "session-secret-id", "vercel.com"):
+        assert secret not in reason
+
+
+def _gone(request: httpx.Request) -> httpx.Response:
+    """Answer like Vercel for a session of a destroyed sandbox.
+
+    Args:
+        request: The session read.
+
+    Returns:
+        A 404 answer.
+    """
+    return httpx.Response(404, json={"error": "gone"})
+
+
+@pytest.mark.parametrize("status", [401, 500])
+def test_provider_client_raises_session_not_found_only_for_a_404(status: int) -> None:
+    """Give a 404 its own typed error, and keep every other failure a plain pending error.
+
+    Args:
+        status: Another failure status.
+    """
+    with httpx.Client(transport=httpx.MockTransport(_gone)) as client, pytest.raises(SessionNotFoundError):
+        VercelSessionUsageClient("token", "team", client=client)("session-one")
+    failing = httpx.MockTransport(lambda request: httpx.Response(status))
+    with httpx.Client(transport=failing) as client, pytest.raises(UsagePendingError) as caught:
+        VercelSessionUsageClient("token", "team", client=client)("session-one")
+    assert not isinstance(caught.value, SessionNotFoundError)
+
+
+def test_sweep_reports_a_missing_session_as_pending_with_the_same_reason(ledger: BudgetService) -> None:
+    """Keep a 404 session pending in the sweep, with the usual reason text.
+
+    Args:
+        ledger: Private ledger fixture.
+    """
+    operation = _admit(ledger)
+    with httpx.Client(transport=httpx.MockTransport(_gone)) as client:
+        page = VercelUsageReconciler(ledger, VercelSessionUsageClient("token", "team", client=client)).sweep()
+    [result] = page.results
+    assert (result.operation_id, result.state) == (operation.id, "pending")
+    assert result.reason == "Vercel final usage remains unavailable (HTTP 404); its reservation is retained."
+    assert ledger.get_operation(operation.id, "alice").state == "dispatched"

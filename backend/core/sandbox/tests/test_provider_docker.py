@@ -9,14 +9,17 @@ that is unique to this test process, and a module finalizer removes them.
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import io
 import json
+import os
 import subprocess
 import tarfile
 import time
 import uuid
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -28,13 +31,17 @@ from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
 from core.sandbox.factory import PROVIDERS
+from core.sandbox.providers import apple_container as apple_provider
 from core.sandbox.providers import docker as docker_provider
+from core.sandbox.providers.apple_container import AppleContainerEnvironment
 from core.sandbox.providers.docker import (
     EXEC_STATE_DIR,
     DockerEnvironment,
     _CliResult,
     _env_stream,
     _sandbox_path,
+    digest_image,
+    registry_host,
 )
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
@@ -181,7 +188,13 @@ class _FakeDocker:
         self.answers = answers or {}
 
     async def __call__(
-        self, docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None, cli_seconds: float = 0
+        self,
+        docker_bin: str,
+        args: Sequence[str],
+        *,
+        stdin: bytes | None = None,
+        cli_seconds: float = 0,
+        kill_on_cancel: bool = False,
     ) -> _CliResult:
         """Record one call and return the answer for the longest matching prefix.
 
@@ -190,11 +203,12 @@ class _FakeDocker:
             args: The CLI arguments.
             stdin: The stdin bytes.
             cli_seconds: The CLI time limit.
+            kill_on_cancel: Whether a cancel kills the CLI at once.
 
         Returns:
             The scripted answer, or a success with no output.
         """
-        del docker_bin, stdin, cli_seconds
+        del docker_bin, stdin, cli_seconds, kill_on_cancel
         self.calls.append(list(args))
         joined = " ".join(args)
         matches = [prefix for prefix in self.answers if joined.startswith(prefix)]
@@ -251,7 +265,7 @@ def test_rejects_header_injection() -> None:
                 lifetime_seconds=60,
                 image=BASE_IMAGE,
                 allowed_hosts=("api.example.com",),
-                inject_headers={"api.example.com": {"X-Key": "value"}},
+                inject_headers={"api.example.com": {"/": {"X-Key": "value"}}},
             )
         )
 
@@ -268,19 +282,32 @@ def test_env_stream_rejects_nul() -> None:
     [("a.txt", "/workspace/a.txt"), ("sub/../b.txt", "/workspace/b.txt"), ("/tmp/x", "/tmp/x"), ("../etc", "/etc")],
 )
 def test_sandbox_path_resolves_relative_to_the_workspace(path: str, expected: str) -> None:
-    """Resolve relative paths against the workspace and keep absolute ones."""
+    """Resolve relative paths against the workspace and keep absolute ones.
+
+    Args:
+        path: The path to resolve.
+        expected: The path in the box that the resolve must give.
+    """
     assert _sandbox_path(path) == expected
 
 
 @pytest.mark.parametrize("path", ["", "/", "..", "a\0b"])
 def test_sandbox_path_rejects_empty_root_and_nul(path: str) -> None:
-    """Refuse a path that names nothing or the root."""
+    """Refuse a path that names nothing or the root.
+
+    Args:
+        path: A path that names nothing, the root, or holds a NUL.
+    """
     with pytest.raises(SandboxSpecError):
         _sandbox_path(path)
 
 
 async def test_offline_start_runs_a_hardened_box(fake_docker: _FakeDocker) -> None:
-    """Start an offline box with no network, the limits and the labels."""
+    """Start an offline box with no network, the limits and the labels.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     env = DockerEnvironment(_spec(name="My Box!", tags={JOB_TAG: "job-1"}))
     await env.start()
     (run,) = fake_docker.calls
@@ -299,7 +326,11 @@ async def test_offline_start_runs_a_hardened_box(fake_docker: _FakeDocker) -> No
 
 
 async def test_tags_cannot_replace_the_sweep_labels(fake_docker: _FakeDocker) -> None:
-    """Keep the sandbox and job labels, and drop a role tag, whatever the tags say."""
+    """Keep the sandbox and job labels, and drop a role tag, whatever the tags say.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     tags = {"skynet": "other", "skynet.job": "other", "skynet.role": "egress", JOB_TAG: "job-1"}
     await DockerEnvironment(_spec(tags=tags)).start()
     (run,) = fake_docker.calls
@@ -309,7 +340,11 @@ async def test_tags_cannot_replace_the_sweep_labels(fake_docker: _FakeDocker) ->
 
 
 async def test_a_job_label_tag_without_a_job_is_dropped(fake_docker: _FakeDocker) -> None:
-    """Put a box in no job when only a raw job label tag names one."""
+    """Put a box in no job when only a raw job label tag names one.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     await DockerEnvironment(_spec(tags={"skynet.job": "other"})).start()
     (run,) = fake_docker.calls
     labels = {run[index + 1] for index, item in enumerate(run) if item == "--label"}
@@ -317,7 +352,11 @@ async def test_a_job_label_tag_without_a_job_is_dropped(fake_docker: _FakeDocker
 
 
 async def test_ignore_mode_sets_no_limits(fake_docker: _FakeDocker) -> None:
-    """Pass no CPU or memory limit when the resource mode is IGNORE."""
+    """Pass no CPU or memory limit when the resource mode is IGNORE.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     await DockerEnvironment(_spec(resources=ResourceRequest(cpus=3, mode=ResourceMode.IGNORE))).start()
     (run,) = fake_docker.calls
     assert "--cpus" not in run
@@ -325,7 +364,11 @@ async def test_ignore_mode_sets_no_limits(fake_docker: _FakeDocker) -> None:
 
 
 async def test_allowlist_start_opens_the_proxy_first(fake_docker: _FakeDocker) -> None:
-    """Create the internal network and the proxy before the box."""
+    """Create the internal network and the proxy before the box.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["logs"] = _CliResult(0, docker_provider.READY_MARKER.encode(), b"")
     env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("b.example.com", "a.example.com")))
     await env.start()
@@ -413,10 +456,14 @@ def test_call_event_matches_the_proxy() -> None:
 
 
 async def test_stop_records_each_proxy_request_in_start_order(fake_docker: _FakeDocker) -> None:
-    """Write one masked egress row for each proxy request before the proxy goes away (SKY-634)."""
+    """Write one masked egress row for each proxy request before the proxy goes away (SKY-634).
+
+    Args:
+        fake_docker: The Docker CLI recorder, which answers with the proxy log.
+    """
     fake_docker.answers["logs"] = _CliResult(0, _PROXY_LOG, b"")
     store, recorder = _run_record()
-    spec = _spec(network_disabled=False, allowed_hosts=("pypi.org",), env={"APP_API_KEY": _BOX_VALUE, "FLAG": "1"})
+    spec = _spec(network_disabled=False, allowed_hosts=("pypi.org",), env={"ASCENT_MODEL_KEY": _BOX_VALUE, "FLAG": "1"})
     env = DockerEnvironment(spec, recorder=recorder)
     await env.start()
     await env.stop()
@@ -440,7 +487,12 @@ async def test_stop_records_each_proxy_request_in_start_order(fake_docker: _Fake
 
 
 async def test_the_box_cap_spans_proxy_restarts(fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Count the rows of every proxy of one box against the box cap, then write one summary row."""
+    """Count the rows of every proxy of one box against the box cap, then write one summary row.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(egress_record, "BOX_ROWS", 3)
     fake_docker.answers["logs"] = _CliResult(0, _PROXY_LOG, b"")
     store, recorder = _run_record()
@@ -455,7 +507,11 @@ async def test_the_box_cap_spans_proxy_restarts(fake_docker: _FakeDocker, monkey
 
 
 async def test_a_proxy_restart_records_the_old_proxy_requests(fake_docker: _FakeDocker) -> None:
-    """Write the old proxy's requests before a new allowlist replaces it."""
+    """Write the old proxy's requests before a new allowlist replaces it.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["logs"] = _CliResult(0, _PROXY_LOG, b"")
     store, recorder = _run_record()
     env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("pypi.org",)), recorder=recorder)
@@ -469,7 +525,11 @@ async def test_a_proxy_restart_records_the_old_proxy_requests(fake_docker: _Fake
 
 
 async def test_an_unreadable_proxy_log_records_nothing(fake_docker: _FakeDocker) -> None:
-    """Skip the record, and still remove the proxy, when its log cannot be read."""
+    """Skip the record, and still remove the proxy, when its log cannot be read.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["logs"] = _CliResult(0, docker_provider.READY_MARKER.encode(), b"")
     store, recorder = _run_record()
     env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("pypi.org",)), recorder=recorder)
@@ -481,7 +541,11 @@ async def test_an_unreadable_proxy_log_records_nothing(fake_docker: _FakeDocker)
 
 
 async def test_an_offline_box_reads_no_proxy_log(fake_docker: _FakeDocker) -> None:
-    """Read no log for a box that never had a proxy."""
+    """Read no log for a box that never had a proxy.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     _, recorder = _run_record()
     env = DockerEnvironment(_spec(), recorder=recorder)
     await env.start()
@@ -490,14 +554,335 @@ async def test_an_offline_box_reads_no_proxy_log(fake_docker: _FakeDocker) -> No
 
 
 async def test_offline_box_never_pulls_its_image(fake_docker: _FakeDocker) -> None:
-    """Start the box only from a local image, so a pull cannot outlive the CLI timeout."""
+    """Start the box only from a local image, so a pull cannot outlive the CLI timeout.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     await DockerEnvironment(_spec()).start()
     (run,) = fake_docker.calls
     assert run[run.index("--pull") + 1] == "never"
 
 
+USER_IMAGE = "ghcr.io/acme/repo@sha256:" + "e" * 64
+
+
+def _missing_image(fake: _FakeDocker) -> None:
+    """Make ``docker image inspect`` report that the user image is not on this machine.
+
+    Args:
+        fake: The Docker CLI recorder.
+    """
+    fake.answers["image inspect"] = _CliResult(1, b"", b"Error: No such image\n")
+
+
+async def test_a_missing_digest_image_is_pulled_before_the_box_runs(fake_docker: _FakeDocker) -> None:
+    """Check that a user image pinned by digest is pulled first, and ``docker run`` still never pulls.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
+    _missing_image(fake_docker)
+    await DockerEnvironment(_spec(image=USER_IMAGE)).start()
+    inspect, pull, run = fake_docker.calls
+    assert inspect[:2] == ["image", "inspect"]
+    assert pull == ["pull", USER_IMAGE]
+    assert run[run.index("--pull") + 1] == "never"
+    assert run[-2] == USER_IMAGE
+
+
+async def test_a_present_digest_image_is_not_pulled(fake_docker: _FakeDocker) -> None:
+    """Check that a digest image already on this machine starts with no pull.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
+    await DockerEnvironment(_spec(image=USER_IMAGE)).start()
+    assert [call[0] for call in fake_docker.calls] == ["image", "run"]
+
+
+@pytest.mark.parametrize("image", [BASE_IMAGE, "sha256:" + "e" * 64])
+async def test_a_tagged_or_local_image_is_never_pulled(fake_docker: _FakeDocker, image: str) -> None:
+    """Check that a mutable tag or a local image id never reaches ``docker pull``.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+        image: The image of the box.
+    """
+    _missing_image(fake_docker)
+    await DockerEnvironment(_spec(image=image)).start()
+    assert [call[0] for call in fake_docker.calls] == ["run"]
+
+
+async def test_pull_credentials_stay_in_a_private_config(
+    fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that the credentials reach the pull only through its own config file, never the argv.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    _missing_image(fake_docker)
+    fake_docker.answers["context inspect"] = _CliResult(0, b"unix:///var/run/docker.sock\n", b"")
+    configs: list[dict[str, Any]] = []
+
+    async def docker(docker_bin: str, args: Sequence[str], **kwargs: Any) -> _CliResult:
+        """Read the pull's config while it exists, then answer as the recorder.
+
+        Args:
+            docker_bin: The Docker CLI path.
+            args: The CLI arguments.
+            **kwargs: The other call options.
+
+        Returns:
+            The recorder's answer.
+        """
+        if "pull" in args:
+            folder = args[list(args).index("--config") + 1]
+            configs.append(json.loads((Path(folder) / "config.json").read_text()))
+        return await fake_docker(docker_bin, args, **kwargs)
+
+    monkeypatch.setattr(docker_provider, "_docker", docker)
+    await DockerEnvironment(_spec(image=USER_IMAGE), pull_credentials=("reader", "s3cret")).start()
+    pull = fake_docker.calls[2]
+    assert pull[:4] == ["--config", pull[1], "-H", "unix:///var/run/docker.sock"]
+    assert pull[4:] == ["pull", USER_IMAGE]
+    assert not await asyncio.to_thread(Path(pull[1]).exists)
+    assert all("s3cret" not in " ".join(call) for call in fake_docker.calls)
+    auth = base64.b64encode(b"reader:s3cret").decode()
+    assert configs == [{"auths": {"ghcr.io": {"auth": auth}}}]
+
+
+async def test_a_failed_pull_fails_the_start_before_any_box(fake_docker: _FakeDocker) -> None:
+    """Check that a failed pull raises a clear error and starts no box.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
+    _missing_image(fake_docker)
+    fake_docker.answers["pull"] = _CliResult(1, b"", b"denied: requested access to the resource is denied\n")
+    with pytest.raises(SandboxInfraError, match=r"Could not pull the image .*denied"):
+        await DockerEnvironment(_spec(image=USER_IMAGE)).start()
+    assert [call[0] for call in fake_docker.calls] == ["image", "pull"]
+
+
+@pytest.mark.parametrize(
+    ("image", "docker_key", "apple_host"),
+    [
+        (USER_IMAGE, "ghcr.io", "ghcr.io"),
+        ("localhost:5000/repo@sha256:" + "e" * 64, "localhost:5000", "localhost:5000"),
+        ("acme/repo@sha256:" + "e" * 64, "https://index.docker.io/v1/", "docker.io"),
+        ("ubuntu@sha256:" + "e" * 64, "https://index.docker.io/v1/", "docker.io"),
+        ("docker.io/acme/repo@sha256:" + "e" * 64, "https://index.docker.io/v1/", "docker.io"),
+        ("index.docker.io/acme/repo@sha256:" + "e" * 64, "https://index.docker.io/v1/", "docker.io"),
+        ("registry-1.docker.io/acme/repo@sha256:" + "e" * 64, "https://index.docker.io/v1/", "docker.io"),
+    ],
+)
+def test_the_registry_host_of_an_image(image: str, docker_key: str, apple_host: str) -> None:
+    """Check the registry each CLI reads the pull credentials for.
+
+    Args:
+        image: The image reference.
+        docker_key: Docker's ``auths`` key.
+        apple_host: The ``container registry login`` server.
+    """
+    assert docker_provider._auth_key(image) == docker_key
+    assert registry_host(image) == apple_host
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "--config=/x@sha256:" + "e" * 64,
+        "user:pass@ghcr.io/acme/img@sha256:" + "e" * 64,
+        "ghcr.io/acme/img@sha256:" + "E" * 64,
+        "ghcr.io/Acme/img@sha256:" + "e" * 64,
+        "ghcr.io/acme/img:tag@sha256:" + "e" * 64,
+        "ghcr.io/acme/img@sha256:" + "e" * 63,
+        "ghcr.io/acme/img @sha256:" + "e" * 64,
+    ],
+)
+def test_a_reference_outside_the_strict_digest_grammar_is_refused(image: str) -> None:
+    """Check that a CLI option, user info, or a loose name is never a digest image.
+
+    Args:
+        image: The image reference.
+    """
+    assert not digest_image(image)
+
+
+@pytest.mark.parametrize("image", [USER_IMAGE, "ubuntu@sha256:" + "e" * 64, "Host.io:5000/a_b/c-d@sha256:" + "e" * 64])
+def test_a_strict_digest_reference_is_accepted(image: str) -> None:
+    """Check that a normal digest reference, with or without a host, is a digest image.
+
+    Args:
+        image: The image reference.
+    """
+    assert digest_image(image)
+
+
+async def test_a_pull_past_its_limit_names_the_subcommand(tmp_path: Path) -> None:
+    """Check that the time-out of a pull with its own config names ``pull``, not a global option.
+
+    Args:
+        tmp_path: A folder for the fake Docker CLI.
+    """
+    cli = tmp_path / "docker"
+    cli.write_text("#!/bin/sh\nexec sleep 60\n")
+    cli.chmod(0o755)
+    args = ["--config", str(tmp_path), "-H", "unix:///var/run/docker.sock", "pull", USER_IMAGE]
+    with pytest.raises(SandboxInfraError, match=r"^docker pull did not finish"):
+        await docker_provider._docker(str(cli), args, cli_seconds=0.2, kill_on_cancel=True)
+
+
+@pytest.mark.parametrize(
+    ("args", "subcommand"),
+    [
+        (["pull", USER_IMAGE], "pull"),
+        (["--config", "/tmp/x", "-H", "unix:///s", "pull", USER_IMAGE], "pull"),
+        (["--config=/tmp/x", "image", "inspect"], "image"),
+        (["--debug"], ""),
+    ],
+)
+def test_the_subcommand_of_a_docker_call(args: list[str], subcommand: str) -> None:
+    """Check that the subcommand skips global options and their values.
+
+    Args:
+        args: The CLI arguments.
+        subcommand: The expected subcommand.
+    """
+    assert docker_provider._subcommand(args) == subcommand
+
+
+async def test_a_cancel_kills_the_pull_at_once(tmp_path: Path) -> None:
+    """Check that a cancel during a slow pull kills the Docker CLI and starts no box.
+
+    Args:
+        tmp_path: A folder for the fake Docker CLI.
+    """
+    pid_file = tmp_path / "pull.pid"
+    calls = tmp_path / "calls"
+    cli = tmp_path / "docker"
+    cli.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$1" in\n'
+        "  image) exit 1 ;;\n"
+        f'  pull) echo $$ > "{pid_file}"; exec sleep 60 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    cli.chmod(0o755)
+    start = asyncio.ensure_future(DockerEnvironment(_spec(image=USER_IMAGE), docker_bin=str(cli)).start())
+    for _ in range(200):
+        if await asyncio.to_thread(pid_file.exists):
+            break
+        await asyncio.sleep(0.05)
+    assert await asyncio.to_thread(pid_file.exists)
+    began = time.monotonic()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert time.monotonic() - began < 10
+    pid = int(await asyncio.to_thread(pid_file.read_text))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    lines = (await asyncio.to_thread(calls.read_text)).splitlines()
+    assert [line.split()[0] for line in lines] == ["image", "pull"]
+
+
+async def test_apple_container_logs_in_over_stdin_before_the_pull(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the Apple provider sends the password only on stdin, and a failed login stops the start.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    calls: list[tuple[list[str], bytes | None]] = []
+
+    async def cli(container_bin: str, args: Sequence[str], *, stdin: bytes | None = None, **_kwargs: Any) -> Any:
+        """Record the call and refuse the login.
+
+        Args:
+            container_bin: The CLI path.
+            args: The CLI arguments.
+            stdin: The stdin bytes.
+            **_kwargs: Unused.
+
+        Returns:
+            A failed CLI result.
+        """
+        del container_bin
+        calls.append((list(args), stdin))
+        return apple_provider._CliResult(1, b"", b"Error: unauthorized\n")
+
+    monkeypatch.setattr(apple_provider, "_cli", cli)
+    env = AppleContainerEnvironment(
+        _spec(image=USER_IMAGE, network_disabled=False),
+        container_bin="container",
+        pull_credentials=("reader", "s3cret"),
+    )
+    with pytest.raises(SandboxInfraError, match="could not log in"):
+        await env.start()
+    ((args, stdin),) = calls
+    assert args == ["registry", "login", "--username", "reader", "--password-stdin", "ghcr.io"]
+    assert stdin == b"s3cret"
+
+
+async def test_apple_container_pulls_after_a_successful_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a successful login comes before the pull, and both can be killed at once on a cancel.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    calls: list[tuple[list[str], bytes | None, bool]] = []
+
+    async def cli(
+        container_bin: str,
+        args: Sequence[str],
+        *,
+        stdin: bytes | None = None,
+        kill_on_cancel: bool = False,
+        **_kwargs: Any,
+    ) -> Any:
+        """Record the call, accept the login and refuse the pull, so the start stops there.
+
+        Args:
+            container_bin: The CLI path.
+            args: The CLI arguments.
+            stdin: The stdin bytes.
+            kill_on_cancel: Whether a cancel kills the CLI at once.
+            **_kwargs: Unused.
+
+        Returns:
+            A CLI result.
+        """
+        del container_bin
+        calls.append((list(args), stdin, kill_on_cancel))
+        if args[0] == "registry":
+            return apple_provider._CliResult(0, b"", b"")
+        return apple_provider._CliResult(1, b"", b"Error: not found\n")
+
+    monkeypatch.setattr(apple_provider, "_cli", cli)
+    env = AppleContainerEnvironment(
+        _spec(image=USER_IMAGE, network_disabled=False),
+        container_bin="container",
+        pull_credentials=("reader", "s3cret"),
+    )
+    with pytest.raises(SandboxInfraError, match="could not pull"):
+        await env.start()
+    assert calls == [
+        (["registry", "login", "--username", "reader", "--password-stdin", "ghcr.io"], b"s3cret", True),
+        (["image", "pull", "--progress", "none", USER_IMAGE], None, True),
+    ]
+
+
 async def test_failed_proxy_start_removes_the_network(fake_docker: _FakeDocker) -> None:
-    """Remove the proxy and the network when the proxy does not start."""
+    """Remove the proxy and the network when the proxy does not start.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["run -d --rm --init --name"] = _CliResult(125, b"", b"proxy failed")
     env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("a.example.com",)))
     with pytest.raises(docker_provider.SandboxInfraError, match="proxy failed"):
@@ -506,7 +891,11 @@ async def test_failed_proxy_start_removes_the_network(fake_docker: _FakeDocker) 
 
 
 async def test_failed_proxy_restart_can_be_retried(fake_docker: _FakeDocker) -> None:
-    """Keep the network and remove the failed proxy, so a retry of the allowlist works."""
+    """Keep the network and remove the failed proxy, so a retry of the allowlist works.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["logs"] = _CliResult(0, docker_provider.READY_MARKER.encode(), b"")
     env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("a.example.com",)))
     await env.start()
@@ -529,13 +918,21 @@ async def test_failed_proxy_restart_can_be_retried(fake_docker: _FakeDocker) -> 
 
 
 async def test_stop_before_start_calls_no_docker(fake_docker: _FakeDocker) -> None:
-    """Make no CLI call when the box never started."""
+    """Make no CLI call when the box never started.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     await DockerEnvironment(_spec()).stop()
     assert fake_docker.calls == []
 
 
 async def test_calls_before_start_raise(fake_docker: _FakeDocker) -> None:
-    """Refuse exec, upload and download before start."""
+    """Refuse exec, upload and download before start.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     env = DockerEnvironment(_spec())
     with pytest.raises(RuntimeError):
         await env.exec("true")
@@ -576,7 +973,12 @@ def _box_archive(kind: str) -> bytes:
 
 @pytest.mark.parametrize("kind", ["directory", "symlink", "missing"])
 async def test_download_refuses_an_archive_without_the_regular_file(fake_docker: _FakeDocker, kind: str) -> None:
-    """Raise SandboxInfraError when the box sends no regular file under the asked name."""
+    """Raise SandboxInfraError when the box sends no regular file under the asked name.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+        kind: What the archive holds under the asked name instead of a regular file.
+    """
     env = DockerEnvironment(_spec())
     await env.start()
     fake_docker.answers["exec"] = _CliResult(0, _box_archive(kind), b"")
@@ -585,7 +987,11 @@ async def test_download_refuses_an_archive_without_the_regular_file(fake_docker:
 
 
 async def test_download_refuses_a_stream_that_is_not_a_tar(fake_docker: _FakeDocker) -> None:
-    """Raise SandboxInfraError when the box sends bytes that are not a tar archive."""
+    """Raise SandboxInfraError when the box sends bytes that are not a tar archive.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     env = DockerEnvironment(_spec())
     await env.start()
     fake_docker.answers["exec"] = _CliResult(0, b"not a tar archive", b"")
@@ -594,7 +1000,11 @@ async def test_download_refuses_a_stream_that_is_not_a_tar(fake_docker: _FakeDoc
 
 
 async def test_stop_job_sandboxes_counts_only_boxes(fake_docker: _FakeDocker) -> None:
-    """Remove boxes and proxies, but count only the boxes."""
+    """Remove boxes and proxies, but count only the boxes.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["ps"] = _CliResult(0, b"box1 \nproxy1 egress\nbox2 \n", b"")
     fake_docker.answers["network ls"] = _CliResult(0, b"net1\n", b"")
     assert await DockerEnvironment.stop_job_sandboxes("job-1") == 2
@@ -604,14 +1014,22 @@ async def test_stop_job_sandboxes_counts_only_boxes(fake_docker: _FakeDocker) ->
 
 
 async def test_stop_job_sandboxes_skips_networks_when_the_list_fails(fake_docker: _FakeDocker) -> None:
-    """Remove no network when Docker cannot list them."""
+    """Remove no network when Docker cannot list them.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["network ls"] = _CliResult(1, b"net1\n", b"daemon error")
     assert await DockerEnvironment.stop_job_sandboxes("job-1") == 0
     assert not [call for call in fake_docker.calls if call[:2] == ["network", "rm"]]
 
 
 async def test_proxy_that_exits_fails_the_start_at_once(fake_docker: _FakeDocker) -> None:
-    """Stop the ready poll when the proxy container is gone."""
+    """Stop the ready poll when the proxy container is gone.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     fake_docker.answers["logs"] = _CliResult(1, b"", b"No such container")
     env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("a.example.com",)))
     with pytest.raises(docker_provider.SandboxInfraError, match="stopped"):
@@ -620,7 +1038,11 @@ async def test_proxy_that_exits_fails_the_start_at_once(fake_docker: _FakeDocker
 
 
 async def test_idle_network_sweep_keeps_young_and_used_networks(fake_docker: _FakeDocker) -> None:
-    """Remove only networks with no container that are old enough."""
+    """Remove only networks with no container that are old enough.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
     now = int(time.time())
     fake_docker.answers["network ls"] = _CliResult(0, b"old used young\n", b"")
     fake_docker.answers["network inspect --format {{len .Containers}} {{.Created.Unix}} old"] = _CliResult(
@@ -666,7 +1088,11 @@ async def test_exec_reports_a_timeout() -> None:
 @needs_docker
 @pytest.mark.parametrize("code", [124, 125, 137])
 async def test_exit_codes_of_a_timeout_do_not_read_as_a_timeout(code: int) -> None:
-    """Report a command that exits with a wrapper exit code by itself as a normal exit."""
+    """Report a command that exits with a wrapper exit code by itself as a normal exit.
+
+    Args:
+        code: The wrapper exit code that the command itself returns.
+    """
     async with DockerEnvironment(_spec()) as env:
         result = await env.exec(f"exit {code}", timeout_sec=30)
     assert result.exit_code == code
@@ -749,7 +1175,11 @@ async def test_cancelled_exec_leaves_the_box_running() -> None:
 @needs_docker
 @pytest.mark.parametrize("sudo", [False, True])
 async def test_cancelled_exec_kills_the_command_in_the_box(sudo: bool) -> None:
-    """Kill the command and its children in the box, not only the docker exec client."""
+    """Kill the command and its children in the box, not only the docker exec client.
+
+    Args:
+        sudo: Whether the command runs through sudo.
+    """
     async with DockerEnvironment(_spec()) as env:
         command = asyncio.ensure_future(env.exec("sleep 411 & sleep 412; wait", sudo=sudo))
         await asyncio.sleep(1.5)
@@ -814,7 +1244,11 @@ async def test_exec_state_directory_hides_and_keeps_root_files() -> None:
 
 @needs_docker
 async def test_cancel_before_the_env_reaches_the_box_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never start a command whose exec was cancelled before its env stream arrived."""
+    """Never start a command whose exec was cancelled before its env stream arrived.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     feed = docker_provider._feed
 
     async def slow_feed(writer: asyncio.StreamWriter, data: bytes) -> None:
@@ -902,7 +1336,11 @@ def host_listener() -> Iterator[int]:
 
 @needs_proxy_image
 async def test_allowlisted_box_cannot_reach_the_docker_host(host_listener: int) -> None:
-    """Give the box no route to a service that listens on the Docker host."""
+    """Give the box no route to a service that listens on the Docker host.
+
+    Args:
+        host_listener: The port of the service that listens on the Docker host.
+    """
     spec = _spec(image=PROXY_IMAGE, network_disabled=False, allowed_hosts=("example.com",))
     async with DockerEnvironment(spec) as env:
         network = f"{env.container_name}-net"

@@ -18,32 +18,52 @@ All endpoints are hidden from the public Scalar reference (none are in
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import partial
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
+import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints, model_validator
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
-from ...billing.metering import meter_llm_run
+from ...billing.cli_dispatch import CHAT_TITLE_ROLE, NEXT_PROMPT_ROLE
+from ...billing.metering import estimate_run_cents, meter_llm_run
 from ...config import settings
 from ...connectors import github
 from ...connectors.vault import ConnectorVault
-from ...constants import TOKEN_SOURCE_MANAGED
+from ...constants import TOKEN_SOURCE_MANAGED, TOKEN_SOURCE_SUBSCRIPTION
 from ...local.cli_catalog import RetiredEffort
+from ...models import ModelConfig
+from ...service_gateway.agents import compaction
+from ...service_gateway.agents.approval_choices import DECLINE_NOTE_MAX_CHARS, ApprovalScope, post_approval_choice
+from ...service_gateway.agents.attachment_sandbox import (
+    attachment_path,
+    charge_chat_sandbox,
+    chat_command_tools,
+    rewrite_paths,
+)
+from ...service_gateway.agents.auto_review import send_protected_review
+from ...service_gateway.agents.chat_title import with_title_event, write_chat_title
 from ...service_gateway.agents.code import _reply_language
+from ...service_gateway.agents.feedback import FeedbackTarget
 from ...service_gateway.agents.generalist import (
+    CHAT_RULES_MAX_TOOLS,
     ThinkingTrail,
     TrustMode,
     WizardState,
     approval_key,
     build_hosted_suggest_lm,
     build_local_suggest_lm,
+    build_turn_lm,
     fallback_summary,
     get_approval_registry,
     run_generalist_agent,
@@ -58,21 +78,32 @@ from ...service_gateway.agents.steering import (
     get_steer_store,
 )
 from ...service_gateway.embedding_pipeline import queue_conversation_embed
-from ...storage.models import AgentConversationModel, AgentMessageModel
+from ...service_gateway.language_models import usage_by_model_from_history
+from ...storage.models import AgentConversationModel, AgentMessageModel, ChatMediaModel
 from ..agent_engine import engine_agent_model
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..model_catalog import ReasoningEffort
+from ..model_catalog import ReasoningEffort, catalog_snapshot
 from ..model_fast_mode import with_fast_mode
 from ..model_router import effective_reasoning_effort, metering_token_source, route_agent_model, route_local_byok_model
 from ..suggest_model import hosted_suggest_model
-from ._helpers import enforce_llm_balance, sse_from_events, stream_with_llm_metering
+from ._helpers import enforce_llm_balance, enforce_storage_quota, sse_from_events, stream_with_llm_metering
+from .chat_media import (
+    MAX_MEDIA_PER_MESSAGE,
+    MAX_MODEL_IMAGE_BYTES,
+    attach_media_to_chat,
+    load_media_data,
+    load_owned_media,
+    media_copy_bytes,
+)
 from .connectors import connector_secret
 
 logger = logging.getLogger(__name__)
 # A suggestion has a larger prompt than a thinking label, and on a CLI engine a
 # process start alone takes 3-7 s, so the label's 8 s limit made every CLI
 # suggestion time out. The CLI side stops its run at 25 s.
+# The chat title call uses this timeout too (_ai_title → _next_prompt_lm).
+# Keep in sync with TITLE_RELOAD_GAPS_MS in frontend/src/features/agent-panel/lib/title-reload.ts.
 _SUGGEST_TIMEOUT_SECONDS = 30.0
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
@@ -81,19 +112,13 @@ TITLE_MAX_CHARS = 40
 # Composer blocks for attached files and long pastes (frontend
 # ``shared/ui/agent/pasted-text.ts``); their bodies are not the user's words.
 _COMPOSER_BLOCK_RE = re.compile(
-    r'<pasted_text>.*?</pasted_text>|<attached_file name="([^"]*)">.*?</attached_file>', re.DOTALL
+    r'<pasted_text>.*?</pasted_text>|<attached_file name="([^"]*)"(?: id="[^"]*")?>.*?</attached_file>', re.DOTALL
 )
 # Hidden setup wizard turns (frontend ``features/agent-panel/lib/screen-agent.ts``).
 # The kickoff holds no user words; a Back turn carries the agent's request.
 _WIZARD_KICKOFF_MARK = "[The wizard opened this screen; I typed nothing.]"
 _WIZARD_BACK_MARK = "[The wizard went back to this screen for your request; I typed nothing.]"
 
-# The history is re-sent in full every turn, so an unbounded thread grows the
-# prompt without limit. Recent turns carry the working context.
-HISTORY_MAX_TURNS = 24
-HISTORY_TURN_MAX_CHARS = 4000
-HISTORY_MAX_TOOL_CALLS = 8
-HISTORY_TOOL_RESULT_MAX_CHARS = 400
 NEXT_PROMPT_MAX_TURNS = 100
 NEXT_PROMPT_MAX_ACTIONS = 20
 
@@ -102,7 +127,9 @@ NEXT_PROMPT_MAX_ACTIONS = 20
 class ChatToolCall(BaseModel):
     tool: str = Field(..., max_length=200, description="MCP tool name.")
     status: str = Field(default="done", max_length=40, description="'done' or 'error'.")
-    result: str | None = Field(default=None, description="Tool result text, clipped client-side.")
+    result: str | None = Field(
+        default=None, description="Tool result text, in full. Compaction clears old results near the context window."
+    )
 
 
 class ChatTurn(BaseModel):
@@ -110,36 +137,56 @@ class ChatTurn(BaseModel):
 
     role: str = Field(..., description="'user' or 'assistant'.")
     content: str = Field(..., description="Message text.")
+    id: int | None = Field(
+        default=None,
+        description="The saved message id, when the chat is saved. A compaction is stored on the user message with this id.",
+    )
     tool_calls: list[ChatToolCall] = Field(
         default_factory=list,
         description="Assistant turns only: the tool calls that turn made, oldest first.",
     )
+    media: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="User turns only: the ``{name, kind}`` of each file the turn attached.",
+    )
 
 
 def history_for_agent(turns: list[ChatTurn]) -> list[dict[str, Any]]:
-    """Bound the prior turns and attach each assistant turn's tool trace.
+    """Copy each prior turn in full and attach each assistant turn's tool trace.
+
+    No turn is cut here. The history is re-sent in full every turn, and
+    ``agents.compaction`` alone bounds it: it clears old tool results first,
+    then summarizes old turns.
 
     Without the trace the model only sees its own prose from earlier turns, so
     it cannot tell which id a past submit returned or why a past call failed.
+    A user turn's files go only as a short note with their kind and name: the
+    bytes went with that turn, and resending them would fill the context. A
+    ``document`` gets no note: its text is already in the turn's content.
 
     Args:
         turns: The client-supplied prior turns, oldest first.
 
     Returns:
-        At most ``HISTORY_MAX_TURNS`` ``{role, content}`` dicts, newest kept,
-        each assistant turn that called tools carrying a compact ``tools`` list.
+        One ``{role, content}`` dict for each turn, each assistant turn that
+        called tools carrying a ``tools`` list.
     """
     history: list[dict[str, Any]] = []
-    for turn in turns[-HISTORY_MAX_TURNS:]:
-        entry: dict[str, Any] = {"role": turn.role, "content": turn.content[:HISTORY_TURN_MAX_CHARS]}
+    for turn in turns:
+        content = turn.content
+        noted = [item for item in turn.media if item.get("kind") != "document"] if turn.role == "user" else []
+        if noted:
+            notes = " ".join(f"[{item.get('kind', 'file')}: {item.get('name', '')}]" for item in noted)
+            content = f"{content}\n{notes}" if content else notes
+        entry: dict[str, Any] = {"role": turn.role, "content": content}
         if turn.role == "assistant" and turn.tool_calls:
             entry["tools"] = [
                 {
                     "tool": call.tool,
                     "status": call.status,
-                    "result": (call.result or "")[:HISTORY_TOOL_RESULT_MAX_CHARS],
+                    "result": call.result or "",
                 }
-                for call in turn.tool_calls[-HISTORY_MAX_TOOL_CALLS:]
+                for call in turn.tool_calls
             ]
         history.append(entry)
     return history
@@ -160,6 +207,14 @@ class GeneralistAgentRequest(BaseModel):
     trust_mode: TrustMode = Field(
         default="ask",
         description="'ask' (confirm every mutation), 'auto_safe' (confirm destructive only), 'yolo' (never confirm).",
+    )
+    chat_allowed_tools: list[Annotated[str, Field(max_length=128)]] = Field(
+        default_factory=list,
+        max_length=CHAT_RULES_MAX_TOOLS,
+        description=(
+            "Exact tool names the user allowed for this chat. The server ignores every name that a chat "
+            "rule may not cover, such as the tools that spend the balance."
+        ),
     )
     conversation_id: str | None = Field(
         default=None,
@@ -240,6 +295,64 @@ class GeneralistAgentRequest(BaseModel):
             "``conversation_meta`` event. The setup wizard's chat sends False."
         ),
     )
+    compaction_summary: str | None = Field(
+        default=None,
+        max_length=compaction.SUMMARY_MAX_CHARS,
+        description=(
+            "Summary of the turns before ``chat_history`` from the chat's latest compaction. The "
+            "agent gets it in place of those turns, and the next compaction updates it."
+        ),
+    )
+    media_ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_MEDIA_PER_MESSAGE,
+        description=(
+            "Ids from ``POST /agent/media`` of the images, video, audio and document originals attached "
+            "to this message. The model sees the images when it accepts image input. Every other "
+            "image, video and audio file is a reference, listed in a ``media_notice`` event. A document "
+            "original is the attached file: the message names its path, and the agent reads it with commands."
+        ),
+    )
+    media_cards: dict[str, Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9-]{1,64}$")]] = Field(
+        default_factory=dict,
+        max_length=MAX_MEDIA_PER_MESSAGE,
+        description=(
+            "Maps a document original's id in ``media_ids`` to the ``id`` of its file block in the "
+            "message. The stored turn keeps it as the media item's ``card``, so the viewer links the "
+            "original to its file after a reload."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _cards_name_sent_media(self) -> GeneralistAgentRequest:
+        """Refuse a card link for a file that the message does not send.
+
+        Returns:
+            The request.
+
+        Raises:
+            ValueError: A ``media_cards`` key is not in ``media_ids``.
+        """
+        if not set(self.media_cards) <= set(self.media_ids):
+            raise ValueError("media_cards keys must be in media_ids.")
+        return self
+
+
+# Input for a compaction the user asked for with /compact.
+class CompactChatRequest(BaseModel):
+    chat_history: list[ChatTurn] = Field(..., description="The turns after the latest compaction, oldest first.")
+    compaction_summary: str | None = Field(
+        default=None, max_length=compaction.SUMMARY_MAX_CHARS, description="Summary from the chat's latest compaction."
+    )
+    instructions: str | None = Field(
+        default=None, max_length=2000, description="What the summary should focus on (the /compact argument)."
+    )
+    conversation_id: str | None = Field(default=None, description="Saved conversation that stores the compaction.")
+    model: str | None = Field(default=None, description="LiteLLM id of the chat's model; absent = default.")
+    reasoning_effort: ReasoningEffort | RetiredEffort | None = Field(
+        default=None, description="The chat's reasoning-effort level; absent keeps the model's default."
+    )
+    fast_mode: bool = Field(default=False, description="The chat's fast mode.")
 
 
 class ConfirmApprovalRequest(BaseModel):
@@ -247,6 +360,15 @@ class ConfirmApprovalRequest(BaseModel):
 
     call_id: str = Field(..., max_length=24, description="The id carried by the pending_approval event.")
     approved: bool = Field(..., description="True to proceed with the tool, False to decline.")
+    scope: ApprovalScope = Field(
+        default="once",
+        description="'conversation' also allows this tool for the rest of the chat, when a chat rule may cover it.",
+    )
+    note: str | None = Field(
+        default=None,
+        max_length=DECLINE_NOTE_MAX_CHARS,
+        description="With a decline: what the agent should do instead. The agent reads it as user text.",
+    )
 
 
 class ConfirmApprovalResponse(BaseModel):
@@ -318,7 +440,9 @@ class NextPromptResponse(BaseModel):
     suggestion: str
 
 
-def _next_prompt_lm(job_store, username: str, model: str | None) -> tuple[Any | None, str]:
+def _next_prompt_lm(
+    job_store, username: str, model: str | None, role: str = NEXT_PROMPT_ROLE
+) -> tuple[Any | None, str]:
     """Build the small model a suggestion runs on; never the composer, interview or agent model.
 
     Hosted, it is the scored suggestion model (see
@@ -330,6 +454,8 @@ def _next_prompt_lm(job_store, username: str, model: str | None) -> tuple[Any | 
         job_store: Job store whose engine holds the caller's engine setting and saved keys.
         username: The caller.
         model: The composer's model pick.
+        role: The CLI side-call role in the Mac app. The chat title passes
+            :data:`CHAT_TITLE_ROLE`, so it does not share the suggestion's pool.
 
     Returns:
         ``(lm, token_source)``; ``lm`` is ``None`` when no model can run it.
@@ -343,7 +469,7 @@ def _next_prompt_lm(job_store, username: str, model: str | None) -> tuple[Any | 
         return lm, TOKEN_SOURCE_MANAGED
     picked = engine_agent_model(job_store, username, model)
     config = route_local_byok_model(picked, job_store=job_store, username=username) or route_agent_model(picked)
-    return build_local_suggest_lm(config, _SUGGEST_TIMEOUT_SECONDS), metering_token_source(config)
+    return build_local_suggest_lm(config, _SUGGEST_TIMEOUT_SECONDS, role), metering_token_source(config)
 
 
 def next_prompt_suggestion(job_store, username: str, req: NextPromptRequest) -> str:
@@ -397,17 +523,19 @@ def next_prompt_suggestion(job_store, username: str, req: NextPromptRequest) -> 
         )
 
 
-def _derive_title(user_message: str) -> str:
+def _derive_title(user_message: str, media_name: str = "") -> str:
     """Auto-title a fresh conversation from the user's opening message.
 
     Truncates whitespace-collapsed text to ``TITLE_MAX_CHARS`` and appends an
     ellipsis when truncation actually loses characters. Attached-file and
     pasted-text blocks are left out; a message with only files is titled
-    from the first file's name. A setup wizard kickoff gives no title, and a
-    wizard Back turn is titled from its request without the marker.
+    from the first file's name. A message with no text and only media files
+    is titled from the first media file's name. A setup wizard kickoff gives
+    no title, and a wizard Back turn is titled from its request without the marker.
 
     Args:
         user_message: The first user turn's text.
+        media_name: The name of the turn's first media file, if any.
 
     Returns:
         A short, single-line title suitable for the conversation header.
@@ -418,14 +546,45 @@ def _derive_title(user_message: str) -> str:
     typed = _COMPOSER_BLOCK_RE.sub(" ", user_message)
     if not typed.strip():
         files = [m.group(1) for m in _COMPOSER_BLOCK_RE.finditer(user_message) if m.group(1)]
-        typed = files[0] if files else ""
+        typed = files[0] if files else media_name
     collapsed = " ".join(typed.split())
     if len(collapsed) <= TITLE_MAX_CHARS:
         return collapsed
     return collapsed[: TITLE_MAX_CHARS - 1].rstrip() + "…"
 
 
-def _ensure_conversation(job_store, conversation_id: str | None, username: str, user_message: str) -> tuple[str, str]:
+@contextmanager
+def _write_session(job_store, session: Session | None) -> Iterator[Session]:
+    """Yield the caller's session, or a new one that commits when the block ends.
+
+    A send passes one session to every step, so a failed step rolls back the
+    new chat and the deleted turns with it.
+
+    Args:
+        job_store: Job-store instance whose engine backs a new session.
+        session: The caller's open session, or None for a new one.
+
+    Yields:
+        The session to write in. The caller's session is flushed, not
+        committed, so a later step in it sees these rows.
+    """
+    if session is not None:
+        yield session
+        session.flush()
+        return
+    with Session(job_store.engine) as own:
+        yield own
+        own.commit()
+
+
+def _ensure_conversation(
+    job_store,
+    conversation_id: str | None,
+    username: str,
+    user_message: str,
+    media_name: str = "",
+    session: Session | None = None,
+) -> tuple[str, str]:
     """Create a new conversation row when one isn't supplied; touch existing rows.
 
     A fresh conversation gets an auto-derived title from the user's first
@@ -437,6 +596,8 @@ def _ensure_conversation(job_store, conversation_id: str | None, username: str, 
         conversation_id: Optional caller-supplied conversation id.
         username: Authenticated principal that owns the row.
         user_message: First user message (used for auto-title on creation).
+        media_name: The first media file's name; it titles a message with no text.
+        session: The caller's open session; None opens one and commits it.
 
     Returns:
         ``(conversation_id, title)`` — the id is freshly generated when input
@@ -447,7 +608,7 @@ def _ensure_conversation(job_store, conversation_id: str | None, username: str, 
             different user; 404 when an explicit id is unknown.
     """
     now = datetime.now(UTC)
-    with Session(job_store.engine) as session:
+    with _write_session(job_store, session) as session:
         if conversation_id:
             row = session.get(AgentConversationModel, conversation_id)
             if row is None:
@@ -455,10 +616,9 @@ def _ensure_conversation(job_store, conversation_id: str | None, username: str, 
             if row.username != username:
                 raise DomainError("agent.conversation.forbidden", status=403)
             row.updated_at = cast(Any, now)
-            session.commit()
             return cast(str, row.id), cast(str, row.title)
         new_id = str(uuid4())
-        title = _derive_title(user_message)
+        title = _derive_title(user_message, media_name)
         row = AgentConversationModel(
             id=new_id,
             username=username,
@@ -469,33 +629,230 @@ def _ensure_conversation(job_store, conversation_id: str | None, username: str, 
             updated_at=now,
         )
         session.add(row)
-        session.commit()
         return new_id, title
 
 
-def _persist_user_turn(job_store, conversation_id: str, content: str) -> None:
+def _save_ai_title(job_store, conversation_id: str, cut_title: str, title: str) -> bool:
+    """Replace the cut title with the model's title, unless the user renamed the chat.
+
+    Args:
+        job_store: Job-store instance whose engine backs the DB session.
+        conversation_id: The new conversation.
+        cut_title: The title cut from the first message, stored at creation.
+        title: The model's title.
+
+    Returns:
+        Whether the title was saved.
+    """
+    with Session(job_store.engine) as session:
+        # Compare and set in one statement: a rename that lands while the
+        # model writes changes the row, so the update matches nothing.
+        saved = (
+            session.query(AgentConversationModel)
+            .filter(AgentConversationModel.id == conversation_id, AgentConversationModel.title == cut_title)
+            .update({AgentConversationModel.title: title}, synchronize_session=False)
+        )
+        session.commit()
+    return saved == 1
+
+
+def _ai_title(
+    job_store, username: str, model: str | None, conversation_id: str, user_message: str, cut_title: str
+) -> str:
+    """Write and save a model title for a new chat; ``""`` on any block or failure.
+
+    It runs on the next-message suggestion's small model, with the same
+    balance gate, BYOK routing and metering, so the cut title stays when
+    anything blocks it.
+
+    Args:
+        job_store: Job store whose engine backs billing and the conversation row.
+        username: The caller, who pays for the call.
+        model: The composer's model pick; only the Mac app reads it.
+        conversation_id: The new conversation.
+        user_message: The first user message.
+        cut_title: The title cut from the first message.
+
+    Returns:
+        The saved title, or ``""`` when the cut title stays.
+    """
+    typed = " ".join(_COMPOSER_BLOCK_RE.sub(" ", user_message.lstrip().removeprefix(_WIZARD_BACK_MARK)).split())
+    if not typed:
+        return ""
+    try:
+        enforce_llm_balance(job_store, username)
+        lm, token_source = _next_prompt_lm(job_store, username, model, CHAT_TITLE_ROLE)
+    except DomainError:
+        return ""
+    except Exception:
+        logger.warning("chat title model unavailable", exc_info=True)
+        return ""
+    if lm is None:
+        return ""
+    try:
+        title = write_chat_title(lm, typed)
+    except Exception:
+        logger.warning("chat title failed", exc_info=True)
+        title = ""
+    finally:
+        meter_llm_run(
+            getattr(job_store, "engine", None),
+            username,
+            [lm],
+            description="Agent chat title",
+            token_source=token_source,
+        )
+    if not title or title == cut_title:
+        return ""
+    try:
+        return title if _save_ai_title(job_store, conversation_id, cut_title, title) else ""
+    except Exception:
+        logger.warning("chat title save failed", exc_info=True)
+        return ""
+
+
+# Holds each running title task so the event loop does not drop it when the
+# stream that started it closes first; the thread still saves the title.
+_TITLE_TASKS: set[asyncio.Future[str]] = set()
+
+
+def _start_title_task(
+    job_store, username: str, model: str | None, conversation_id: str, user_message: str, cut_title: str
+) -> asyncio.Future[str]:
+    """Start :func:`_ai_title` in a worker thread, in parallel with the turn.
+
+    Args:
+        job_store: Job store whose engine backs billing and the conversation row.
+        username: The caller.
+        model: The composer's model pick.
+        conversation_id: The new conversation.
+        user_message: The first user message.
+        cut_title: The title cut from the first message.
+
+    Returns:
+        The task; it resolves to the saved title or ``""``.
+    """
+    task = asyncio.ensure_future(
+        asyncio.to_thread(_ai_title, job_store, username, model, conversation_id, user_message, cut_title)
+    )
+    _TITLE_TASKS.add(task)
+    task.add_done_callback(_TITLE_TASKS.discard)
+    return task
+
+
+def _persist_user_turn(
+    job_store,
+    conversation_id: str,
+    content: str,
+    *,
+    steer: bool = False,
+    compaction: dict[str, Any] | None = None,
+    media: list[ChatMediaModel] | None = None,
+    cards: dict[str, str] | None = None,
+    replaced: bool = False,
+    copy_bytes: int | None = None,
+    session: Session | None = None,
+) -> int:
     """Insert the user's message into ``agent_messages``.
 
     Args:
         job_store: Job-store instance whose engine backs the DB session.
         conversation_id: Owning conversation id.
-        content: User message text exactly as received from the client.
+        content: User message text as received from the client. Its file
+            paths are changed to name the chat's own copies of the files.
+        steer: True for a message sent while a turn runs. A run's setup chat
+            keeps a steer as part of that turn, not as a later turn.
+        compaction: The compaction entry of the turn this message replaces, if any.
+        media: The caller's attached files. The row names them, so a reload
+            shows them again. The conversation holds its own rows for them, so
+            deleting the chat deletes them and never touches another chat.
+        cards: The file block id that each document original belongs to, by
+            the caller's media id.
+        replaced: True when this message replaces stored turns (an edit or a
+            regenerate). The files that only those turns named are deleted.
+        copy_bytes: The file copy bytes that the caller already checked
+            against the storage quota; None checks the quota here.
+        session: The caller's open session; None opens one and commits it.
+
+    Returns:
+        The id of the new row.
+
+    Raises:
+        DomainError: 409 when copies of the files would go over the storage
+            quota, and 409 ``agent.media.changed`` when the files changed after
+            the caller checked the quota.
+        HTTPException: 404 when an attached file is deleted before it attaches.
     """
-    with Session(job_store.engine) as session:
-        session.add(
-            AgentMessageModel(
-                conversation_id=conversation_id,
-                role="user",
-                content=content,
-                tool_calls=None,
-                model=None,
-                created_at=datetime.now(UTC),
+    metadata: dict[str, Any] = {"steer": True} if steer else {}
+    if compaction:
+        metadata["compaction"] = compaction
+    with _write_session(job_store, session) as session:
+        if media:
+            held = attach_media_to_chat(
+                session, job_store, media[0].username, [row.id for row in media], conversation_id, copy_bytes
             )
+            # A file deleted after the send loaded it must fail the send, not
+            # store a turn that names a missing file.
+            if any(row.id not in held for row in media):
+                raise HTTPException(status_code=404, detail="Attachment not found.")
+            metadata["media"] = [
+                {"id": held[row.id], "name": row.filename, "kind": row.kind}
+                | ({"card": cards[row.id]} if row.kind == "document" and row.id in (cards or {}) else {})
+                for row in media
+            ]
+            content = rewrite_paths(content, held)
+        if replaced:
+            _free_unnamed_media(session, conversation_id, {item["id"] for item in metadata.get("media", [])})
+        message = AgentMessageModel(
+            conversation_id=conversation_id,
+            role="user",
+            content=content,
+            tool_calls=None,
+            model=None,
+            router_metadata=metadata or None,
+            created_at=datetime.now(UTC),
         )
-        session.commit()
+        session.add(message)
+        session.flush()
+        return message.id
 
 
-def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | None = None) -> None:
+def _free_unnamed_media(session: Session, conversation_id: str, keep: set[str]) -> None:
+    """Delete the chat's files that no stored user turn names any more.
+
+    An edit or a regenerate deletes the turns that named the old files, so
+    without this the files stay, and count against storage, until the chat goes.
+
+    Args:
+        session: The open session; the caller commits it.
+        conversation_id: The chat to clean.
+        keep: The ids that the new, not yet flushed, turn names.
+    """
+    held = set(session.scalars(select(ChatMediaModel.id).where(ChatMediaModel.conversation_id == conversation_id)))
+    if not held - keep:
+        return
+    metas = session.scalars(
+        select(AgentMessageModel.router_metadata).where(
+            AgentMessageModel.conversation_id == conversation_id, AgentMessageModel.role == "user"
+        )
+    )
+    named = set(keep)
+    for meta in metas:
+        media = meta.get("media") if isinstance(meta, dict) else None
+        if isinstance(media, list):
+            named.update(item.get("id") for item in media if isinstance(item, dict))
+    unnamed = held - named
+    if unnamed:
+        session.execute(delete(ChatMediaModel).where(ChatMediaModel.id.in_(unnamed)))
+
+
+def _discard_latest_turn(
+    job_store,
+    conversation_id: str,
+    only_if_text: str | None = None,
+    only_if_media: list[str] | None = None,
+    session: Session | None = None,
+) -> dict[str, Any] | None:
     """Delete the final persisted user turn and every response after it.
 
     The regenerate UI replaces the latest assistant response in memory. Remove
@@ -509,8 +866,16 @@ def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | No
         conversation_id: Conversation whose latest turn should be replaced.
         only_if_text: When set, delete nothing unless the latest user turn has
             exactly this text.
+        only_if_media: When set, delete nothing unless the latest user turn
+            names exactly these file ids, in order. Messages with only files
+            all have empty text, so the text alone cannot tell them apart.
+        session: The caller's open session; None opens one and commits it.
+
+    Returns:
+        The compaction entry stored on the deleted user turn, so its
+        replacement keeps the summary and its cost; ``None`` when it had none.
     """
-    with Session(job_store.engine) as session:
+    with _write_session(job_store, session) as session:
         latest_user = (
             session.query(AgentMessageModel)
             .filter(
@@ -521,15 +886,21 @@ def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | No
             .first()
         )
         if latest_user is None or (only_if_text is not None and latest_user.content != only_if_text):
-            return
+            return None
+        metadata = latest_user.router_metadata or {}
+        if only_if_media is not None and [item.get("id") for item in metadata.get("media", [])] != only_if_media:
+            return None
+        entry = metadata.get("compaction")
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= latest_user.id,
         ).delete(synchronize_session=False)
-        session.commit()
+        return entry
 
 
-def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occurrence: int) -> bool:
+def _discard_from_user_turn(
+    job_store, conversation_id: str, user_text: str, occurrence: int, session: Session | None = None
+) -> tuple[bool, dict[str, Any] | None]:
     """Delete the stored copy of the edited user turn and every message after it.
 
     Edit-and-resend keeps only the turns before the edited one in memory, so the
@@ -545,13 +916,16 @@ def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occ
         conversation_id: Conversation whose history is cut.
         user_text: Original text of the edited turn.
         occurrence: How many earlier chat user turns have the same text.
+        session: The caller's open session; None opens one and commits it.
 
     Returns:
-        Whether a stored turn matched and was deleted with its suffix.
+        Whether a stored turn matched and was deleted with its suffix, and the
+        compaction entry stored on that turn: its summary covers only earlier
+        turns, so the edited copy keeps it.
     """
-    with Session(job_store.engine) as session:
+    with _write_session(job_store, session) as session:
         edited = (
-            session.query(AgentMessageModel.id)
+            session.query(AgentMessageModel.id, AgentMessageModel.router_metadata)
             .filter(
                 AgentMessageModel.conversation_id == conversation_id,
                 AgentMessageModel.role == "user",
@@ -562,13 +936,12 @@ def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occ
             .first()
         )
         if edited is None:
-            return False
+            return False, None
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= edited.id,
         ).delete(synchronize_session=False)
-        session.commit()
-        return True
+        return True, (edited.router_metadata or {}).get("compaction")
 
 
 def _persist_assistant_turn(
@@ -680,6 +1053,8 @@ async def _wrap_with_persistence(
     conversation_id: str | None,
     title: str | None,
     wizard_state_before: dict[str, Any] | None = None,
+    user_message_id: int | None = None,
+    steer_ids: dict[str, int] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Mirror upstream SSE events, accumulate state, persist on ``done``.
 
@@ -703,16 +1078,20 @@ async def _wrap_with_persistence(
         title: Current conversation title (emitted in ``conversation_meta``).
         wizard_state_before: Wizard snapshot the caller handed to the agent
             this turn — persisted verbatim alongside the row.
+        user_message_id: The saved row of the turn's user message. The client
+            sends it back with that message, so a compaction finds its row.
+        steer_ids: The saved row of each steered text, by text; each
+            ``steer_applied`` event takes its id from here.
 
     Yields:
         The same ``{event, data}`` mappings the SSE serializer expects, with
         the leading ``conversation_meta`` envelope when persistence is active.
     """
     if conversation_id and job_store is not None:
-        yield {
-            "event": "conversation_meta",
-            "data": {"conversation_id": conversation_id, "title": title or ""},
-        }
+        meta: dict[str, Any] = {"conversation_id": conversation_id, "title": title or ""}
+        if user_message_id is not None:
+            meta["user_message_id"] = user_message_id
+        yield {"event": "conversation_meta", "data": meta}
 
     assistant_buf: list[str] = []
     tool_calls: dict[str, dict[str, Any]] = {}
@@ -798,13 +1177,12 @@ async def _wrap_with_persistence(
                 # Internal envelope — never forward to the frontend.
                 continue
             elif name == STEER_APPLIED_EVENT:
-                # The steered message is a user turn of this conversation; it
-                # goes in now so it sits before the reply written on ``done``.
-                if conversation_id and job_store is not None and isinstance(data.get("text"), str):
-                    try:
-                        await asyncio.to_thread(_persist_user_turn, job_store, conversation_id, data["text"])
-                    except Exception:
-                        logger.exception("Failed to persist a steered user message")
+                # The router stored the steer before the agent read it. The
+                # client sends the id back with the turn, so a later compaction
+                # that keeps from this message can store on it.
+                steer_id = steer_ids.pop(data.get("text"), None) if steer_ids is not None else None
+                if steer_id is not None:
+                    event = {**event, "data": {**data, "message_id": steer_id}}
             elif name == "tool_start":
                 tid = str(data.get("id", ""))
                 if tid:
@@ -863,6 +1241,407 @@ async def _wrap_with_persistence(
             await _do_persist("".join(assistant_buf))
 
 
+def _context_window(model_name: str) -> int:
+    """Read a model's context window from the model catalog.
+
+    Args:
+        model_name: The LiteLLM id the turn runs on.
+
+    Returns:
+        The catalog's ``max_input_tokens``, or ``DEFAULT_CONTEXT_WINDOW`` when
+        the catalog is not built yet or does not list a window for the model.
+    """
+    catalog = catalog_snapshot()
+    entry = next((m for m in catalog.models if m.value == model_name), None) if catalog else None
+    return entry.max_input_tokens if entry and entry.max_input_tokens else compaction.DEFAULT_CONTEXT_WINDOW
+
+
+def _sees_images(model_config: ModelConfig) -> bool:
+    """Tell whether a turn's model accepts image input.
+
+    Args:
+        model_config: The turn's resolved model config.
+
+    Returns:
+        ``True`` when the catalog marks the model as a vision model and the
+        route is not a local CLI subscription, whose text protocol drops images.
+    """
+    if model_config.token_source == TOKEN_SOURCE_SUBSCRIPTION:
+        return False
+    catalog = catalog_snapshot()
+    entry = next((m for m in catalog.models if m.value == model_config.name), None) if catalog else None
+    return bool(entry and entry.supports_vision)
+
+
+def _split_media(media: list[ChatMediaModel], sees_images: bool) -> tuple[list[ChatMediaModel], list[ChatMediaModel]]:
+    """Split a message's media into model image input and reference-only files.
+
+    Args:
+        media: The message's owned media rows, in order.
+        sees_images: Whether the turn's model accepts image input.
+
+    Returns:
+        ``(images, references)``: the images the model sees, and the files it
+        only gets named. Images past ``MAX_MODEL_IMAGE_BYTES`` in total are
+        references. A ``document`` is in neither list: the message already
+        names its workspace path, where the agent reads it with commands.
+    """
+    images: list[ChatMediaModel] = []
+    references: list[ChatMediaModel] = []
+    image_bytes = 0
+    for row in media:
+        if row.kind == "document":
+            continue
+        if sees_images and row.kind == "image" and image_bytes + row.byte_size <= MAX_MODEL_IMAGE_BYTES:
+            image_bytes += row.byte_size
+            images.append(row)
+        else:
+            references.append(row)
+    return images, references
+
+
+def _image_data_uris(engine: Any, images: list[ChatMediaModel]) -> list[str]:
+    """Read the bytes of the images the model sees, as data URIs.
+
+    Args:
+        engine: The SQLAlchemy engine.
+        images: The image rows from ``_split_media``, in order.
+
+    Returns:
+        One ``data:`` URI for each image that is still stored, in order.
+    """
+    data = load_media_data(engine, [row.id for row in images])
+    # A file deleted after the rows loaded drops out instead of failing the turn.
+    return [
+        f"data:{row.mime_type};base64,{base64.b64encode(data[row.id]).decode('ascii')}"
+        for row in images
+        if row.id in data
+    ]
+
+
+def _with_media_references(
+    user_message: str, references: list[ChatMediaModel], held: dict[str, str] | None = None
+) -> str:
+    """Name the files the model cannot view in the message the agent reads.
+
+    Args:
+        user_message: The user's text.
+        references: The files the model only gets named.
+        held: Maps each sent file id to the chat's copy, when the agent can
+            read the chat's files with ``exec_command``; None when it cannot.
+
+    Returns:
+        The text with one note for each reference file, or the text unchanged.
+    """
+    notes = [
+        (
+            f"[Attached {row.kind} file: {row.filename}, at {attachment_path(held.get(row.id, row.id), row.filename)}. "
+            "You cannot view it, but you can read it with exec_command.]"
+            if held is not None
+            else f"[Attached {row.kind} file: {row.filename}. You cannot view this file. Tell the user that you "
+            "cannot see it, and use it only as a reference.]"
+        )
+        for row in references
+    ]
+    return "\n\n".join([user_message, *notes]) if notes else user_message
+
+
+def _auto_review_sender(
+    model_config: ModelConfig, username: str, engine: Any
+) -> Callable[[dict[str, Any]], bytes] | None:
+    """Choose whether a turn's auto-safe calls get the paid Jev review.
+
+    The review is a managed call that reserves on the wallet before it runs.
+    A BYOK, CLI or local turn has no managed wallet route, so it gets no
+    review and keeps the normal approval prompt. A CLI turn needs its own
+    check: :func:`metering_token_source` counts it as managed.
+
+    Args:
+        model_config: The turn's resolved model.
+        username: The wallet owner.
+        engine: The database engine of the wallet, or ``None``.
+
+    Returns:
+        The sender bound to the managed wallet and key, or ``None`` for no review.
+    """
+    if (
+        metering_token_source(model_config) != TOKEN_SOURCE_MANAGED
+        or model_config.token_source not in (None, TOKEN_SOURCE_MANAGED)
+        or model_config.cli_provider is not None
+        or settings.local_mode
+        or settings.openrouter_api_key is None
+        or engine is None
+    ):
+        return None
+    return partial(send_protected_review, engine, username, settings.openrouter_api_key.get_secret_value())
+
+
+def _anchor_by_text(
+    turns: list[ChatTurn], cut: int, newest_id: int | None
+) -> tuple[str, int | None, int | None, int, int]:
+    """Describe the first kept user message for a lookup by text, when the client sent no id for it.
+
+    A message has no id in the browser when its stream stopped before
+    ``conversation_meta``, but also when the server never saved it (a refused
+    turn, or a stream that failed first). So the search has two bounds: the
+    nearest earlier turn with an id, and the nearest later kept user message
+    with an id (or the turn's own new row). The browser's messages with the
+    same text and no id inside those bounds give the number of rows the
+    search must find. A different number means one of them was never saved,
+    and the entry is not stored rather than stored on the wrong row.
+
+    Args:
+        turns: The client's chat history.
+        cut: The index of the first kept turn.
+        newest_id: The saved row of the turn's new user message, if any.
+
+    Returns:
+        ``(text, after_id, before_id, skip, prior)``: the message text, the id
+        the row must be above and the id it must be below (``None`` for no
+        bound), how many newer matching rows to skip, and how many older
+        matching messages with no id the browser has inside the bounds.
+    """
+    text = turns[cut].content
+    before_id, skip = newest_id, 0
+    for turn in turns[cut + 1 :]:
+        if turn.role != "user":
+            continue
+        if turn.id is not None:
+            before_id = turn.id
+            break
+        if turn.content == text:
+            skip += 1
+    after_id, prior = None, 0
+    for turn in reversed(turns[:cut]):
+        if turn.id is not None:
+            after_id = turn.id
+            break
+        if turn.role == "user" and turn.content == text:
+            prior += 1
+    return text, after_id, before_id, skip, prior
+
+
+def _save_compaction(
+    job_store,
+    conversation_id: str,
+    username: str,
+    anchor_id: int | None,
+    entry: dict[str, Any],
+    by_text: tuple[str, int | None, int | None, int, int] | None = None,
+) -> None:
+    """Store a compaction on the first user message it keeps.
+
+    A reopened chat then sends history from that message on, with the summary.
+    The client sends each saved message's id, so the row is found by id: the
+    same text ("yes") can be in the chat more than once. A message with no id
+    is found by its text, with ``by_text``.
+
+    Args:
+        job_store: Job-store instance whose engine backs the DB session.
+        conversation_id: The saved conversation.
+        username: The caller; another account's conversation is left alone.
+        anchor_id: The id of the first kept user message, or ``None`` when the
+            client did not send it.
+        entry: The compaction entry, as the ``compaction`` event carries it.
+        by_text: The ``_anchor_by_text`` lookup, used when ``anchor_id`` is ``None``.
+    """
+    with Session(job_store.engine) as session:
+        owner = session.get(AgentConversationModel, conversation_id)
+        if owner is None or owner.username != username:
+            return
+        if anchor_id is None and by_text is not None:
+            text, after_id, before_id, skip, prior = by_text
+            query = session.query(AgentMessageModel.id).filter(
+                AgentMessageModel.conversation_id == conversation_id,
+                AgentMessageModel.role == "user",
+                AgentMessageModel.content == text,
+            )
+            if after_id is not None:
+                query = query.filter(AgentMessageModel.id > after_id)
+            if before_id is not None:
+                query = query.filter(AgentMessageModel.id < before_id)
+            found = [row.id for row in query.order_by(AgentMessageModel.id.desc()).all()]
+            # A count that differs from the browser's means a message there was
+            # never saved, so no offset names the anchor row with certainty.
+            anchor_id = found[skip] if len(found) == prior + 1 + skip else None
+        row = session.get(AgentMessageModel, anchor_id) if anchor_id is not None else None
+        if row is None or row.conversation_id != conversation_id or row.role != "user":
+            logger.warning("No user message %s to store the compaction on in %s", anchor_id, conversation_id)
+            return
+        row.router_metadata = {**(row.router_metadata or {}), "compaction": entry}
+        session.commit()
+
+
+def _add_side_cents(
+    job_store, conversation_id: str, username: str, cents: float, message_id: int | None = None
+) -> None:
+    """Add the cost of a summary call that stored no compaction to a saved message.
+
+    The chat's cost counts these cents once, from ``side_cents``, so /session
+    shows them after a reload.
+
+    Args:
+        job_store: Job-store instance whose engine backs the DB session.
+        conversation_id: The saved conversation.
+        username: The caller; another account's conversation is left alone.
+        cents: The call's cost in cents.
+        message_id: The message to add them to; ``None`` picks the latest message.
+    """
+    with Session(job_store.engine) as session:
+        owner = session.get(AgentConversationModel, conversation_id)
+        if owner is None or owner.username != username:
+            return
+        query = session.query(AgentMessageModel).filter(AgentMessageModel.conversation_id == conversation_id)
+        if message_id is not None:
+            query = query.filter(AgentMessageModel.id == message_id)
+        row = query.order_by(AgentMessageModel.created_at.desc(), AgentMessageModel.id.desc()).first()
+        if row is None:
+            return
+        meta = row.router_metadata or {}
+        row.router_metadata = {**meta, "side_cents": float(meta.get("side_cents") or 0) + cents}
+        session.commit()
+
+
+async def _finish_in_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run ``func`` in a worker thread, and wait for it to end also when the caller is cancelled.
+
+    The stream's metering reads the LM usage when the stream closes. A model
+    call still running in its thread then would record its usage after the
+    debit, so the user would get the call for free.
+
+    Args:
+        func: The blocking call.
+        *args: Its positional arguments.
+        **kwargs: Its keyword arguments.
+
+    Returns:
+        What ``func`` returns.
+    """
+    future = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        # StreamingResponse cancels an anyio scope on disconnect, and that scope
+        # cancels again at every await: without the shield the loop below spins
+        # a core until the thread ends. The loop still absorbs plain task.cancel().
+        with anyio.CancelScope(shield=True):
+            while not future.done():
+                try:
+                    await asyncio.wait({future})
+                except asyncio.CancelledError:
+                    continue
+        if not future.cancelled():
+            future.exception()
+        raise
+
+
+async def _compaction_events(
+    *,
+    model_config: ModelConfig,
+    usage_sink: list,
+    turns: list[ChatTurn],
+    previous_summary: str | None,
+    instructions: str | None,
+    window: int,
+    tokens_before: int,
+    kept_history: list[dict[str, Any]],
+    user_message: str,
+    reason: str,
+    result: dict[str, Any],
+    save: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run one compaction and stream its ``compaction_start`` and ``compaction`` events.
+
+    The summary runs on the turn's own model, and its LM joins the turn's
+    usage sink, so ``stream_with_llm_metering`` reserves, debits and reports
+    it with the turn, under the same BYOK and subscription rules.
+
+    Args:
+        model_config: The turn's resolved model config.
+        usage_sink: The turn's usage sink.
+        turns: The chat turns to summarize, oldest first.
+        previous_summary: The summary from the chat's latest compaction, if any.
+        instructions: What the summary should focus on, if anything.
+        window: The model's context window.
+        tokens_before: The estimated prompt tokens before the compaction.
+        kept_history: The history entries that stay after the cut.
+        user_message: The new user message, or ``""`` for no new turn.
+        reason: ``"threshold"`` or ``"manual"``.
+        result: Filled with ``summary`` and ``entry`` on success. A call that
+            stores no entry (it failed, or the stream stopped) sets
+            ``lost_cents`` to its cost instead.
+        save: Stores the entry before the ``compaction`` event goes out, so a
+            stop after that event keeps the summary and its cost.
+
+    Yields:
+        ``compaction_start``, then ``compaction`` with the entry, or
+        ``compaction_error`` with the failed call's ``cents``.
+    """
+    token_source = metering_token_source(model_config)
+
+    def cost(lm: Any) -> float | None:
+        """Price the summary call.
+
+        Args:
+            lm: The summary LM.
+
+        Returns:
+            The call's cents, or ``None`` when it reported no usage.
+        """
+        return estimate_run_cents([lm], token_source) if usage_by_model_from_history(lm) else None
+
+    yield {
+        "event": "compaction_start",
+        "data": {
+            "reason": reason,
+            "summarized_turns": len(turns),
+            "kept_turns": len(kept_history),
+            "tokens_before": tokens_before,
+        },
+    }
+    lm: Any = None
+    try:
+        lm = build_turn_lm(model_config)
+        lm.side_call = True
+        usage_sink.append(lm)
+        summary = await _finish_in_thread(
+            compaction.summarize,
+            lm,
+            [turn.model_dump() for turn in turns],
+            previous_summary=previous_summary,
+            instructions=instructions,
+            window=window,
+        )
+    except asyncio.CancelledError:
+        if lm is not None:
+            result["lost_cents"] = cost(lm)
+        raise
+    except Exception:
+        logger.exception("Chat compaction failed")
+        cents = cost(lm) if lm is not None else None
+        result["lost_cents"] = cents
+        yield {"event": "compaction_error", "data": {"reason": reason, "cents": cents}}
+        return
+    breakdown = usage_by_model_from_history(lm)
+    entry = {
+        "summary": summary,
+        "reason": reason,
+        "summarized_turns": len(turns),
+        "kept_turns": len(kept_history),
+        "tokens_before": tokens_before,
+        "tokens_after": compaction.context_tokens(kept_history, user_message, summary),
+        "input_tokens": sum(pair[0] for pair in breakdown.values()) if breakdown else None,
+        "output_tokens": sum(pair[1] for pair in breakdown.values()) if breakdown else None,
+        "cents": cost(lm),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    result["summary"] = summary
+    result["entry"] = entry
+    if save is not None:
+        await save(entry)
+    yield {"event": "compaction", "data": entry}
+
+
 def _merge_wizard_patch(state: dict[str, Any], result: Any) -> None:
     """Merge a tool result's ``wizard_state`` patch into the running state.
 
@@ -870,8 +1649,9 @@ def _merge_wizard_patch(state: dict[str, Any], result: Any) -> None:
     ``set_column_roles``, …) echo the validated patch under
     ``result.wizard_state``. We treat the patch as a shallow overlay so the
     persisted ``wizard_state_after`` reflects every change the agent
-    successfully made this turn. Tool results that don't carry the field
-    leave the state untouched.
+    successfully made this turn. ``workspace_files`` is the exception: a
+    file tool's patch holds only the file it wrote, so it merges into the
+    map. Tool results that don't carry the field leave the state untouched.
 
     Args:
         state: Running ``wizard_state_after`` buffer; mutated in place.
@@ -883,7 +1663,11 @@ def _merge_wizard_patch(state: dict[str, Any], result: Any) -> None:
     if not isinstance(patch, dict):
         return
     for key, value in patch.items():
-        state[str(key)] = value
+        current = state.get(str(key))
+        if key == "workspace_files" and isinstance(value, dict) and isinstance(current, dict):
+            state[str(key)] = {**current, **value}
+        else:
+            state[str(key)] = value
 
 
 def create_generalist_agent_router(*, job_store=None) -> APIRouter:
@@ -907,6 +1691,89 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         get_approval_registry().bind_engine(engine)
         get_steer_store().bind_engine(engine)
 
+    async def _turn_model_config(
+        username: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        fast_mode: bool,
+    ) -> ModelConfig:
+        """Resolve the model config of a chat turn or a compaction.
+
+        Args:
+            username: The caller.
+            model: The composer's model pick, or ``None``.
+            reasoning_effort: The composer's effort pick, or ``None``.
+            fast_mode: The composer's fast-mode switch.
+
+        Returns:
+            The routed model config, with effort and fast mode applied.
+        """
+        picked = await asyncio.to_thread(engine_agent_model, job_store, username, model)
+        # A cold model catalog builds on the calling thread, so the catalog
+        # reads below run off the event loop (SKY-603).
+        model_config = await asyncio.to_thread(
+            route_local_byok_model, picked, job_store=job_store, username=username
+        ) or await asyncio.to_thread(route_agent_model, picked)
+        # A CLI takes its own effort ladder, not the catalog's, and with no
+        # pick it runs its own default. The CLI dispatcher drops a level or
+        # fast mode the model does not take.
+        on_cli = model_config.token_source == "subscription"
+        effort = (
+            reasoning_effort
+            if on_cli
+            else await asyncio.to_thread(effective_reasoning_effort, model_config.name, reasoning_effort)
+        )
+        if effort:
+            model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
+        return await asyncio.to_thread(with_fast_mode, model_config, fast_mode)
+
+    async def _save_compaction_safely(
+        conversation_id: str,
+        anchor_id: int | None,
+        entry: dict[str, Any],
+        username: str,
+        by_text: tuple[str, int | None, int | None, int, int] | None = None,
+    ) -> None:
+        """Store a compaction entry off the event loop; log and go on when the write fails.
+
+        Waits for the write also when the stream is cancelled, so a stop just
+        after the summary keeps it.
+
+        Args:
+            conversation_id: The saved conversation.
+            anchor_id: The id of the first kept user message; ``None`` when the
+                client did not send it, so the row is found by ``by_text``.
+            entry: The compaction entry.
+            username: The caller.
+            by_text: The ``_anchor_by_text`` lookup for a message with no id.
+        """
+        try:
+            await _finish_in_thread(_save_compaction, job_store, conversation_id, username, anchor_id, entry, by_text)
+        except Exception:
+            logger.exception("Failed to save the chat compaction")
+
+    async def _save_side_cents_safely(
+        conversation_id: str | None, result: dict[str, Any], username: str, message_id: int | None = None
+    ) -> None:
+        """Store the cost of a summary call that stored no compaction; log and go on when the write fails.
+
+        Waits for the write also when the stream is cancelled, so a stopped
+        turn keeps the cost in /session.
+
+        Args:
+            conversation_id: The saved conversation, or ``None`` for an unsaved chat.
+            result: The ``_compaction_events`` result; only ``lost_cents`` is read.
+            username: The caller.
+            message_id: The message to store the cost on; ``None`` picks the latest message.
+        """
+        cents = result.get("lost_cents")
+        if not cents or not conversation_id or job_store is None:
+            return
+        try:
+            await _finish_in_thread(_add_side_cents, job_store, conversation_id, username, cents, message_id)
+        except Exception:
+            logger.exception("Failed to save the summary call's cost")
+
     @router.post(
         "/optimizations/generalist-agent",
         summary="Stream generalist-agent events for one user turn",
@@ -921,7 +1788,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         Event types: ``conversation_meta`` (only when persistence is on),
         ``reasoning_patch``, ``tool_start``, ``tool_end``, ``status_patch``,
         ``pending_approval``, ``approval_resolved``, ``message_patch``,
-        ``message_reset``, ``done``, ``error``.
+        ``message_reset``, ``media_notice`` (the attached files the model cannot
+        view), ``done``, ``error``.
 
         Args:
             req: Request body with user message, chat history, wizard
@@ -937,69 +1805,167 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             A :class:`StreamingResponse` of Server-Sent Events.
         """
 
-        def _setup_turn() -> tuple[str | None, str | None]:
+        def _setup_turn() -> tuple[str | None, str | None, int | None, dict[str, str]]:
             """Persist the user turn off the event loop.
 
             Runs the blocking conversation upsert and user-message insert in a
             worker thread so the single event loop is not stalled before the SSE
             stream starts. Auth is already enforced by the route dependency, so
-            the turn is always attributed to ``current_user``; a conversation
-            ``DomainError`` (403/404) is allowed to propagate.
+            the turn is always attributed to ``current_user``. A conversation
+            ``DomainError`` (403/404), the storage quota ``DomainError`` (409),
+            the ``agent.media.changed`` ``DomainError`` (409) and the attachment
+            404 ``HTTPException`` propagate.
 
             Returns:
-                ``(conversation_id, title)`` — both ``None`` when persistence is
-                off (no ``job_store`` or ``persist`` is False) or failed non-fatally.
+                ``(conversation_id, title, user_message_id, held)``. ``held`` maps
+                each attached file id to the id that the chat stores. All ``None``
+                and an empty map when persistence is off (no ``job_store`` or
+                ``persist`` is False) or failed non-fatally.
             """
             if job_store is None or not req.persist:
-                return None, None
+                return None, None, None, {}
             try:
-                cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)
-                if req.edit_user_text is not None:
-                    found = _discard_from_user_turn(job_store, cid, req.edit_user_text, req.edit_user_occurrence)
-                    # A retry of an edit the server saved, but whose
-                    # conversation_meta never reached the client, finds no old
-                    # turn. Replace the saved edit only when it is the latest
-                    # turn, so a missing target never deletes another turn.
-                    if not found and req.regenerate:
-                        _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
-                elif req.regenerate:
-                    # A retry of a send refused before it was stored also
-                    # sends regenerate; the text check keeps the previous turn.
-                    _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
-                _persist_user_turn(job_store, cid, req.user_message)
-            except DomainError:
+                # Check the quota for file copies before a new chat is created and
+                # before an edit deletes turns, so a refused copy leaves no empty
+                # chat and never loses the turns it would replace. A new chat has
+                # no id yet, so every file that another chat holds is a copy.
+                copied = media_copy_bytes(media, req.conversation_id)
+                if copied:
+                    enforce_storage_quota(job_store, current_user.username, copied)
+                # One transaction holds the new chat, the deleted turns and the
+                # new turn. A file deleted before the attach locks it fails the
+                # send and rolls back all of them. The quota measure above
+                # sweeps in its own transaction, so it must run before this one.
+                with Session(job_store.engine) as session:
+                    cid, ttl = _ensure_conversation(
+                        job_store,
+                        req.conversation_id,
+                        current_user.username,
+                        req.user_message,
+                        media[0].filename if media else "",
+                        session=session,
+                    )
+                    carried = None
+                    if req.edit_user_text is not None:
+                        found, carried = _discard_from_user_turn(
+                            job_store, cid, req.edit_user_text, req.edit_user_occurrence, session=session
+                        )
+                        # A retry of an edit the server saved, but whose
+                        # conversation_meta never reached the client, finds no old
+                        # turn. Replace the saved edit only when it is the latest
+                        # turn, so a missing target never deletes another turn.
+                        if not found and req.regenerate:
+                            carried = _discard_latest_turn(
+                                job_store,
+                                cid,
+                                only_if_text=req.user_message,
+                                only_if_media=[row.id for row in media],
+                                session=session,
+                            )
+                    elif req.regenerate:
+                        # A retry of a send refused before it was stored also
+                        # sends regenerate; the text and file check keeps the previous turn.
+                        carried = _discard_latest_turn(
+                            job_store,
+                            cid,
+                            only_if_text=req.user_message,
+                            only_if_media=[row.id for row in media],
+                            session=session,
+                        )
+                    user_message_id = _persist_user_turn(
+                        job_store,
+                        cid,
+                        req.user_message,
+                        compaction=carried,
+                        media=media,
+                        cards=req.media_cards,
+                        replaced=req.edit_user_text is not None or req.regenerate,
+                        copy_bytes=copied,
+                        session=session,
+                    )
+                    # The turn names the chat's own copy of each file, in the
+                    # order of ``media``.
+                    stored = session.get(AgentMessageModel, user_message_id).router_metadata or {}
+                    held = {row.id: item["id"] for row, item in zip(media, stored.get("media", []), strict=True)}
+                    session.commit()
+            except (DomainError, HTTPException):
                 raise
             except Exception:
                 logger.exception("Failed to persist user turn")
-                return None, None
-            return cid, ttl
+                return None, None, None, {}
+            return cid, ttl, user_message_id, held
 
         await asyncio.to_thread(enforce_llm_balance, job_store, current_user.username)
 
         wizard_state: WizardState = {**req.wizard_state}  # type: ignore[typeddict-item]
-        picked = await asyncio.to_thread(engine_agent_model, job_store, current_user.username, req.model)
-        # A cold model catalog builds on the calling thread, so the catalog
-        # reads below run off the event loop (SKY-603).
-        model_config = await asyncio.to_thread(
-            route_local_byok_model, picked, job_store=job_store, username=current_user.username
-        ) or await asyncio.to_thread(route_agent_model, picked)
-        # A CLI takes its own effort ladder, not the catalog's, and with no
-        # pick it runs its own default. The CLI dispatcher drops a level or
-        # fast mode the model does not take.
-        on_cli = model_config.token_source == "subscription"
-        effort = (
-            req.reasoning_effort
-            if on_cli
-            else await asyncio.to_thread(effective_reasoning_effort, model_config.name, req.reasoning_effort)
+        model_config = await _turn_model_config(current_user.username, req.model, req.reasoning_effort, req.fast_mode)
+        window = await asyncio.to_thread(_context_window, model_config.name)
+        if req.media_ids and engine is None:
+            raise HTTPException(status_code=503, detail="Chat media storage is not available.")
+        media = (
+            await asyncio.to_thread(load_owned_media, engine, current_user.username, req.media_ids)
+            if req.media_ids
+            else []
         )
-        if effort:
-            model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
-        model_config = await asyncio.to_thread(with_fast_mode, model_config, req.fast_mode)
+        image_rows, media_references = _split_media(media, await asyncio.to_thread(_sees_images, model_config))
+        images = await asyncio.to_thread(_image_data_uris, engine, image_rows) if image_rows else []
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
-        conversation_id, title = await asyncio.to_thread(_setup_turn)
+        conversation_id, title, user_message_id, held_media = await asyncio.to_thread(_setup_turn)
+        file_runner, file_tools = await asyncio.to_thread(
+            chat_command_tools, engine, current_user.username, conversation_id
+        )
+        agent_message = _with_media_references(
+            rewrite_paths(req.user_message, held_media), media_references, held_media if file_tools else None
+        )
+        # A new chat gets a model title in parallel with the turn. The setup
+        # wizard kickoff has no cut title and gets no model title either.
+        title_task = (
+            _start_title_task(
+                job_store,
+                current_user.username,
+                req.model,
+                conversation_id,
+                # A message with only media files gives the model the file name to title.
+                req.user_message if req.user_message.strip() else title,
+                title,
+            )
+            if conversation_id and title and not req.conversation_id
+            else None
+        )
         usage_sink: list = []
+        auto_review_send = _auto_review_sender(model_config, current_user.username, getattr(job_store, "engine", None))
+        compaction_cents: float | None = None
+        steer_ids: dict[str, int] = {}
+        feedback_target = (
+            FeedbackTarget(
+                engine=engine,
+                username=current_user.username,
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+            )
+            if engine is not None and conversation_id and user_message_id is not None
+            else None
+        )
+
+        def _store_steer(text: str) -> None:
+            """Store a steered user message before the agent reads it.
+
+            The row must exist before the steer reaches the prompt, so a
+            ``send_feedback`` call about the steer keys its report on it.
+
+            Args:
+                text: The steered text the agent receives.
+            """
+            # Clear the target first: if the store fails, a complaint in the
+            # steer must give "not sent", not land on the previous message.
+            if feedback_target is not None:
+                feedback_target.user_message_id = None
+            message_id = _persist_user_turn(job_store, conversation_id, text, steer=True)
+            steer_ids[text] = message_id
+            if feedback_target is not None:
+                feedback_target.user_message_id = message_id
 
         def _github_token() -> str | None:
             """Load the caller's token for the run's repository host, for the coding agent's reads.
@@ -1015,21 +1981,162 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             except DomainError:
                 return None
 
-        source = run_generalist_agent(
-            wizard_state=wizard_state,
-            chat_history=history_for_agent(req.chat_history),
-            user_message=req.user_message,
-            trust_mode=req.trust_mode,
-            auth_header=authorization,
-            approval_owner=current_user.username,
-            locale=req.locale,
-            model_config=model_config,
-            usage_sink=usage_sink,
-            steer_key=req.steer_key,
-            github_token=_github_token,
-        )
+        async def _turn_source() -> AsyncIterator[dict[str, Any]]:
+            """Clear old tool results, then compact, when the prompt nears the context window; then run the turn.
+
+            Yields:
+                The compaction events, if any, then the agent's events.
+            """
+            nonlocal compaction_cents
+            full_history = history_for_agent(req.chat_history)
+            summary = req.compaction_summary
+            history = compaction.clear_tool_results(full_history, req.user_message, summary, window)
+            tokens = compaction.context_tokens(history, req.user_message, summary)
+            cut = 0
+            if compaction.should_compact(tokens, window):
+                cut = compaction.manual_cut(history, compaction.keep_tokens(window))
+                # A summary that frees almost nothing would run again on every
+                # turn of a small window; fit_history below drops turns instead.
+                if not compaction.shrinks_prompt(history, cut):
+                    cut = 0
+            if cut > 0:
+                result: dict[str, Any] = {}
+                anchor_id = req.chat_history[cut].id
+                by_text = _anchor_by_text(req.chat_history, cut, user_message_id) if anchor_id is None else None
+                try:
+                    async for event in _compaction_events(
+                        model_config=model_config,
+                        usage_sink=usage_sink,
+                        turns=req.chat_history[:cut],
+                        previous_summary=summary,
+                        instructions=None,
+                        window=window,
+                        tokens_before=tokens,
+                        kept_history=history[cut:],
+                        user_message=req.user_message,
+                        reason="threshold",
+                        result=result,
+                        save=(
+                            partial(
+                                _save_compaction_safely,
+                                conversation_id,
+                                anchor_id,
+                                username=current_user.username,
+                                by_text=by_text,
+                            )
+                            if conversation_id and job_store is not None
+                            else None
+                        ),
+                    ):
+                        yield event
+                finally:
+                    # The turn's stats include a failed call too; the chat counts it from side_cents.
+                    compaction_cents = result.get("lost_cents")
+                    await _save_side_cents_safely(conversation_id, result, current_user.username, user_message_id)
+                if "summary" in result:
+                    compaction_cents = result["entry"]["cents"]
+                    summary = result["summary"]
+                    # The summary frees room, so the kept turns may get their cleared results back.
+                    history = compaction.clear_tool_results(full_history[cut:], req.user_message, summary, window)
+            if compaction.should_compact(compaction.context_tokens(history, req.user_message, summary), window):
+                # A failed summary, or one large recent turn, would still
+                # overflow the window; the oldest turns go so the turn can run.
+                history = compaction.fit_history(history, req.user_message, summary, window)
+            if media_references:
+                reference_ids = [held_media.get(row.id, row.id) for row in media_references]
+                yield {"event": "media_notice", "data": {"reference_ids": reference_ids}}
+            async for event in run_generalist_agent(
+                wizard_state=wizard_state,
+                chat_history=compaction.history_with_summary(summary, history),
+                user_message=agent_message,
+                trust_mode=req.trust_mode,
+                auth_header=authorization,
+                approval_owner=current_user.username,
+                locale=req.locale,
+                model_config=model_config,
+                usage_sink=usage_sink,
+                steer_key=req.steer_key,
+                github_token=_github_token,
+                feedback_target=feedback_target,
+                on_steer=_store_steer if conversation_id and job_store is not None else None,
+                images=images or None,
+                chat_allowed_tools=req.chat_allowed_tools,
+                auto_review_send=auto_review_send,
+                file_tools=file_tools or None,
+            ):
+                yield event
+
+        async def _charge_sandbox() -> int:
+            """Debit the chat's file workspace for this turn.
+
+            Returns:
+                The cents charged.
+            """
+            if file_runner is None or not conversation_id:
+                return 0
+            return await _finish_in_thread(
+                charge_chat_sandbox,
+                engine,
+                current_user.username,
+                file_runner,
+                settlement_key=f"chat-sandbox:{conversation_id}:{user_message_id}",
+            )
+
+        async def _with_sandbox_charge(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+            """Debit the chat's file workspace after the turn, also when the turn stops early.
+
+            Args:
+                events: The metered turn events.
+
+            Yields:
+                The same events, then a ``turn_stats`` whose cents include the
+                workspace charge, so the shown cost is what gets debited.
+            """
+            stats: dict[str, Any] | None = None
+            charged = False
+            try:
+                async for event in events:
+                    data = event.get("data")
+                    if event.get("event") in ("done", "turn_stats") and isinstance(data, dict):
+                        stats = data.get("stats") if isinstance(data.get("stats"), dict) else stats
+                    yield event
+                charged = True
+                cents = await _charge_sandbox()
+                if cents and stats is not None:
+                    yield {
+                        "event": "turn_stats",
+                        "data": {"stats": {**stats, "cents": (stats.get("cents") or 0) + cents}},
+                    }
+            finally:
+                if not charged:
+                    await _charge_sandbox()
+
+        async def _with_compaction_cents(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+            """Mark the part of the turn's cost that the compaction's summary call took.
+
+            The turn's stats include that call. The chat's cost then counts each
+            compaction once, from its entry, also when the turn stops before
+            ``done``.
+
+            Args:
+                events: The metered turn events.
+
+            Yields:
+                The events; ``done`` and ``turn_stats`` stats gain ``compaction_cents``.
+            """
+            async for event in events:
+                data = event.get("data")
+                stats = data.get("stats") if isinstance(data, dict) else None
+                if (
+                    compaction_cents is not None
+                    and event.get("event") in ("done", "turn_stats")
+                    and isinstance(stats, dict)
+                ):
+                    event = {**event, "data": {**data, "stats": {**stats, "compaction_cents": compaction_cents}}}
+                yield event
+
         metered = stream_with_llm_metering(
-            source,
+            _turn_source(),
             job_store=job_store,
             username=current_user.username,
             description="Agent chat",
@@ -1037,12 +2144,16 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             token_source=metering_token_source(model_config),
         )
         wrapped = _wrap_with_persistence(
-            metered,
+            _with_compaction_cents(_with_sandbox_charge(metered)),
             job_store=job_store,
             conversation_id=conversation_id,
             title=title,
             wizard_state_before=dict(wizard_state),
+            user_message_id=user_message_id,
+            steer_ids=steer_ids,
         )
+        if title_task is not None and conversation_id:
+            wrapped = with_title_event(wrapped, title_task, conversation_id, title or "")
         return StreamingResponse(
             sse_from_events(wrapped),
             media_type="text/event-stream",
@@ -1051,6 +2162,90 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
+        )
+
+    @router.post(
+        "/optimizations/generalist-agent/compact",
+        summary="Stream the compaction of an agent chat",
+    )
+    async def compact_chat(req: CompactChatRequest, current_user: AuthenticatedUserDep) -> StreamingResponse:
+        """Summarize a chat's older turns on request (``/compact``), as SSE.
+
+        Event types: ``compaction_start``, then ``compaction`` or
+        ``compaction_error``, then ``done`` with the call's ``stats``; or one
+        ``error`` with code ``nothing_to_compact`` when the chat is too short.
+
+        Args:
+            req: The chat history after the latest compaction, its summary,
+                the user's focus instructions and the composer's model.
+            current_user: The authenticated caller, who pays for the summary call.
+
+        Returns:
+            A :class:`StreamingResponse` of Server-Sent Events.
+        """
+        await asyncio.to_thread(enforce_llm_balance, job_store, current_user.username)
+        model_config = await _turn_model_config(current_user.username, req.model, req.reasoning_effort, req.fast_mode)
+        window = await asyncio.to_thread(_context_window, model_config.name)
+        usage_sink: list = []
+
+        async def _source() -> AsyncIterator[dict[str, Any]]:
+            """Run the compaction and end the stream with ``done``.
+
+            Yields:
+                The compaction events, then ``done``.
+            """
+            history = history_for_agent(req.chat_history)
+            cut = compaction.manual_cut(history, compaction.keep_tokens(window))
+            if cut == 0:
+                yield {"event": "error", "data": {"code": "nothing_to_compact"}}
+                return
+            result: dict[str, Any] = {}
+            try:
+                async for event in _compaction_events(
+                    model_config=model_config,
+                    usage_sink=usage_sink,
+                    turns=req.chat_history[:cut],
+                    previous_summary=req.compaction_summary,
+                    instructions=req.instructions,
+                    window=window,
+                    tokens_before=compaction.context_tokens(history, "", req.compaction_summary),
+                    kept_history=history[cut:],
+                    user_message="",
+                    reason="manual",
+                    result=result,
+                    save=(
+                        partial(
+                            _save_compaction_safely,
+                            req.conversation_id,
+                            req.chat_history[cut].id,
+                            username=current_user.username,
+                            by_text=(
+                                _anchor_by_text(req.chat_history, cut, None)
+                                if req.chat_history[cut].id is None
+                                else None
+                            ),
+                        )
+                        if req.conversation_id and job_store is not None
+                        else None
+                    ),
+                ):
+                    yield event
+            finally:
+                await _save_side_cents_safely(req.conversation_id, result, current_user.username)
+            yield {"event": "done", "data": {}}
+
+        metered = stream_with_llm_metering(
+            _source(),
+            job_store=job_store,
+            username=current_user.username,
+            description="Agent chat compaction",
+            usage_sink=usage_sink,
+            token_source=metering_token_source(model_config),
+        )
+        return StreamingResponse(
+            sse_from_events(metered),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
     @router.post(
@@ -1076,6 +2271,8 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 it as a UI warning. With a store, an unmatched confirm is
                 persisted for the replica that owns the stream to pick up.
         """
+        # The extras go first, so the waiting tool finds them as soon as the decision lands.
+        post_approval_choice(current_user.username, req.call_id, req.scope, req.note if not req.approved else None)
         resolved = get_approval_registry().resolve_or_persist(
             approval_key(req.call_id, current_user.username), req.approved
         )

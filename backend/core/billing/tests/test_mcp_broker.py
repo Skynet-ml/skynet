@@ -176,7 +176,7 @@ def test_react_listing_uses_scoped_guest_relay(monkeypatch: pytest.MonkeyPatch) 
         return []
 
     monkeypatch.setenv("SKYNET_BUDGET_RELAY_URL", "http://127.0.0.1:9000/v1")
-    monkeypatch.setenv("SKYNET_TOOL_RELAY_TOKEN", "scoped-tool")
+    monkeypatch.setattr(run_react, "_tool_relay_token", "scoped-tool")
     monkeypatch.setattr(run_react, "_list_live_tool_specs", listing)
     assert run_react._list_live_tools("https://original/mcp", None) == []
     assert requests == [("http://127.0.0.1:9000/v1/_mcp", {"Authorization": "Bearer scoped-tool"})]

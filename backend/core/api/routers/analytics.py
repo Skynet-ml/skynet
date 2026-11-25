@@ -44,6 +44,7 @@ from ...models import (
 )
 from ...models.common import OptimizationStatus
 from ...models.results import result_scores
+from ...service_gateway.optimization.blackbox.repo_constraints import MINIMIZE
 from ..auth import AuthenticatedUser, get_authenticated_user, is_admin
 from ..converters import parse_overview
 from ._helpers import build_summary, grant_roles_for
@@ -51,6 +52,23 @@ from ._helpers import build_summary, grant_roles_for
 logger = logging.getLogger(__name__)
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+
+
+def _improvement(result_data: dict[str, Any], baseline: float, optimized: float) -> float:
+    """Return a run's score gain, positive when the run got better.
+
+    A minimize metric gets better when its score drops, so its gain is
+    ``baseline - optimized``. This matches ``build_summary`` (SKY-750).
+
+    Args:
+        result_data: The stored ``result`` mapping, which may carry ``direction``.
+        baseline: The raw baseline score.
+        optimized: The raw optimized score.
+
+    Returns:
+        The signed gain.
+    """
+    return baseline - optimized if result_data.get("direction") == MINIMIZE else optimized - baseline
 
 
 def _scope_analytics_username(current_user: AuthenticatedUser, requested: str | None) -> str | None:
@@ -129,7 +147,7 @@ def _improvement_points(value: float) -> float:
     be aggregated alongside metrics already expressed in points.
 
     Args:
-        value: Raw ``optimized - baseline`` delta.
+        value: The raw metric improvement, positive when the run got better.
 
     Returns:
         The delta in percentage points.
@@ -498,7 +516,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
 
             baseline, optimized = result_scores(result_data)
             if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                improvements.append(optimized - baseline)
+                improvements.append(_improvement(result_data, baseline, optimized))
 
             runtime = result_data.get("runtime_seconds")
             if isinstance(runtime, int | float):
@@ -592,7 +610,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
                 if result_data and isinstance(result_data, dict):
                     baseline, optimized = result_scores(result_data)
                     if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                        stats["improvements"].append(optimized - baseline)
+                        stats["improvements"].append(_improvement(result_data, baseline, optimized))
 
                     runtime = result_data.get("runtime_seconds")
                     if isinstance(runtime, int | float):
@@ -686,7 +704,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
                 if result_data and isinstance(result_data, dict):
                     baseline, optimized = result_scores(result_data)
                     if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                        stats["improvements"].append(optimized - baseline)
+                        stats["improvements"].append(_improvement(result_data, baseline, optimized))
 
         model_items: list[ModelStatsItem] = []
         for model_name, stats in model_data.items():

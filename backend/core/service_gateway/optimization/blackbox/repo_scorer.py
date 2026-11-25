@@ -3,7 +3,8 @@
 The guest that hosts the coding agent never sees the secrets or these boxes:
 it posts each version through the parent's evaluator capability, and the
 parent lays it out on a copy of the already set-up tree, then calls the
-user's ``score(repo_path)`` (or ``score(repo_path, case)``).
+user's ``score(repo_path, case, output=None)``. The older ``score(repo_path)``
+and ``score(repo_path, case)`` forms still work.
 
 Each evaluation gets two fresh boxes (SKY-398). The candidate box C holds
 the prepared tree with the version laid out, and runs the ``[run]`` entry on
@@ -15,23 +16,27 @@ C runs. M gets the metric files and C's output only after C ended, and runs
 the metric files at their repository paths (E41). A check that needs the
 version's code belongs in the ``[run]`` entry: without one, the metric sees
 no version code at all. A run that times out, raises, returns no JSON, is
-killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
-feedback, and the metric is not called. A nonzero exit of a command entry is
-an output like any other. Neither box gets the run's secrets: only the model
-route reaches the box.
+killed by a signal or cannot start has no score (status ``run_failed``,
+SKY-751) with ``Run failed: ...`` as its feedback, and the metric is not
+called. A command entry writes ``{"output": ...}`` to the file that
+``ASCENT_OUTPUT`` names, through OpenAscent's ``call_run``; a nonzero exit,
+no output file or a file in another form fails the run (SKY-757).
+Neither box gets the run's secrets: only the model route reaches the box.
+Both the ``[run]`` entry and the metric run through the tree sandbox session
+API (SKY-785), and the metric box never gets the candidate tree.
 
-A scorer returns a score with its feedback, like any scorer, and may return
-per-case results under ``cases``, a mapping of case name to
-``{"score", "feedback"}``. The run's score stays the top-level number; each
-case becomes a named score that every engine reflects on and keeps on its
-Pareto front.
+A scorer returns one answer object, like any scorer: ``score``, with optional
+``feedback`` and named ``scores`` (SKY-769). The run's score stays the
+top-level number; each named score, such as one per case, is an axis that
+every engine reflects on and keeps on its Pareto front.
 
-A run whose ``optimize.toml`` has ``[target.<name>]`` stages opens one offline
+A run whose ``ascent.toml`` has ``[target.<name>]`` stages opens one offline
 box for each stage for each candidate evaluation, all before the scorer runs
 (E29). The scorer reaches them with ``call(name, input)``: the call is a
 framed line on the scorer's stdout, the parent runs the stage in its box, and
 writes the answer back into the metric box. That relay is the stages' only
-way out (E27).
+way out (E27). A command metric reaches the same stages, the judge model and
+the run log at loopback URLs that the metric box's runner serves (SKY-767).
 
 The same relay carries the metric's requests to the run's ``[services.<name>]``
 that have a url (E45). The parent checks that the calling role lists the
@@ -73,6 +78,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlencode
 
 import httpx
+import openascent
 
 from ....billing.budgets import BudgetError, BudgetInsufficientError
 from ....billing.env_connectors import relay_request
@@ -83,12 +89,13 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.usage_tags import LANE_KEY, box_tag, current_tags
+from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
-from .protocol import STATUS_KEY
-from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
+from .protocol import RUN_FAILED_STATUS, STATUS_KEY
+from .repo_constraints import DEFAULT_METRIC_ENTRY, RoleEnvironment, ServiceSpec, TargetStage
 from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
 from .repo_workspace import (
@@ -102,6 +109,7 @@ from .repo_workspace import (
     MetricBox,
     RepoSetupError,
     RepoWorkspace,
+    absolute_cd,
     redact,
 )
 from .rule_judge import RuleJudge
@@ -113,13 +121,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
 CALLS_DIR = f"{REPO_DIR}/calls"
 METRIC_RUNNER_PATH = f"{METRIC_DIR}/app_runner.py"
 METRIC_CALLS_DIR = f"{METRIC_DIR}/calls"
+# The parent copies its own pinned OpenAscent package here for a command
+# [metric] entry, so the box image needs no install of it (SKY-738). A command
+# [run] entry and a command stage get it next to their runner (SKY-757).
+METRIC_ASCENT_DIR = f"{METRIC_DIR}/openascent"
+RUN_ASCENT_DIR = f"{REPO_DIR}/openascent"
+# The runner's own work around the command (reading the case, writing the
+# answer) runs inside the box's time limit, so the command gets a bit less.
+_COMMAND_TIME_SHARE = 0.9
 # The version's code can write next to the runner and into $HOME, so the
 # runner starts without its own folder, user site-packages or PYTHON* env on
 # its path: a planted json.py or .pth would run before any check (E38, E40).
@@ -138,8 +153,14 @@ _BASE_PYTHON = "/usr/local/bin/python3"
 # The supervisor runs as root, but the box user can rewrite the runner file
 # between the write and the run (a process an earlier case left). So root reads
 # the file once, checks its hash against the parent's copy, and runs those
-# same bytes (SKY-398).
+# same bytes (SKY-398). An image OpenSSL config can name an engine library in
+# a folder that the box user writes. OpenSSL loads its config at its first use
+# in the process, which is the hash, or the runner's ``import ssl`` when the
+# image has no ``_hashlib``. So ``OPENSSL_CONF`` stays ``/dev/null`` for the
+# whole root process. The boot runs in the runner's globals, so
+# ``_box_openssl_conf`` keeps the box's own value for the entry (SKY-737).
 _SUPERVISOR_BOOT = (
+    "import os;_box_openssl_conf=os.environ.get('OPENSSL_CONF');os.environ['OPENSSL_CONF']='/dev/null';"
     "import hashlib,sys;p=sys.argv[1];s=open(p,'rb').read();"
     "hashlib.sha256(s).hexdigest()==sys.argv[2] or sys.exit('The supervisor file changed before it ran.');"
     "sys.argv=[p]+sys.argv[3:];g=sys.modules['__main__'].__dict__;g['__file__']=p;"
@@ -148,6 +169,7 @@ _SUPERVISOR_BOOT = (
 _RUNNER_SHA256 = hashlib.sha256(RUNNER_SOURCE.encode("utf-8")).hexdigest()
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
+_STAGE_ASCENT_DIR = f"{STAGE_DIR}/openascent"
 # Each stage call's folder is ``<this>/<call id>``, relative to the box; a
 # call with a relay gets its answers in a ``relay`` folder inside it.
 _STAGE_CALLS_DIR = f"{STAGE_DIR}/calls"
@@ -200,10 +222,6 @@ _TARGET_ROLE = "target."
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
 RUN_FAILED = "Run failed: "
-# SKY-221: the side info ``status`` of a case whose entry failed. The final run
-# reads it, not the feedback, because pending rule-judge notes go in front of
-# the feedback.
-RUN_FAILED_STATUS = "run_failed"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -220,6 +238,36 @@ _FRAME_FILE = re.compile(r'File "([^"]*)"')
 
 class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
+
+
+# Skynet's own text, never the metric's (SKY-353). It ends with the answer
+# form, so the run stops on it before any version has a score (SKY-769).
+_WRONG_FORM = f"The scorer answer does not have the valid form, so the version has no score. {runner.ANSWER_FORM}"
+# A command metric's failure, by the OpenAscent cause code (SKY-738). Skynet's
+# own text again: the command's stderr stays in the server log.
+_COMMAND_FAILED = {
+    "start_failed": "The metric command could not start, so the version has no score.",
+    "time_limit": "The metric command exceeded its time limit, so the version has no score.",
+    "nonzero_exit": "The metric command exited with a nonzero code{code}, so the version has no score.",
+    "no_output": "The metric command wrote no result file at ASCENT_OUTPUT, so the version has no score.",
+    "bad_output_file": "The metric command's result at ASCENT_OUTPUT is not a plain file, so the version has no score.",
+    "invalid_json": "The metric command's result file is not valid JSON, so the version has no score.",
+    "invalid_form": _WRONG_FORM,
+}
+
+
+@functools.cache
+def _ascent_files(target: str) -> dict[str, str]:
+    """Read the pinned OpenAscent package's modules, to copy into a box.
+
+    Args:
+        target: The package's folder in the box.
+
+    Returns:
+        Each module's text by its box path under ``target``.
+    """
+    folder = Path(openascent.__file__).parent
+    return {f"{target}/{path.name}": path.read_text(encoding="utf-8") for path in folder.glob("*.py")}
 
 
 class _StageSnapshotError(RepoScoreError):
@@ -259,38 +307,14 @@ def _streamed(stack: contextlib.ExitStack, head: bytes, chunks: Iterator[bytes])
             yield chunk
 
 
-def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
-    """Turn the per-case scores a repository scorer returned into named scores.
-
-    Each case becomes a named score, so every engine reflects on it and
-    treats it as its own objective, exactly like ``scores``.
-
-    Args:
-        side_info: Everything the scorer returned besides its score.
-
-    Returns:
-        The side info with ``cases`` folded into ``scores``.
-
-    Raises:
-        RepoScoreError: When ``cases`` is not a mapping of names to a finite
-            score with its feedback.
-    """
-    folded = dict(side_info)
-    cases = folded.pop(CASES_KEY, None)
-    if cases is None:
-        return folded
-    try:
-        named = runner.named_scores(cases)
-    except runner.ScorerError as exc:
-        raise RepoScoreError(f"'{CASES_KEY}' must map each case name to a score and feedback. {exc}") from exc
-    if not all(math.isfinite(entry["score"]) for entry in named.values()):
-        raise RepoScoreError(f"'{CASES_KEY}' must map each case name to a finite score.")
-    folded["scores"] = {**named, **(folded.get("scores") or {})}
-    return folded
-
-
 class RepoScorer:
     """Score one repository version at a time in the parent's workspace box."""
+
+    # Only the judge sets this: it calls dispatch directly and must see a stage
+    # box's temporary provider error raw to store a retryable failure. In a run,
+    # a raw error escapes the model mailbox and fails the whole run, so a run
+    # keeps the 422 answer and the stage snapshot retry.
+    raw_provider_errors = False
 
     def __init__(
         self,
@@ -310,6 +334,7 @@ class RepoScorer:
         mcp_roles: Mapping[str, RoleEnvironment] | None = None,
         run_entry: str | tuple[str, ...] | None = None,
         run_timeout: float = 60.0,
+        metric_entry: str | tuple[str, ...] = DEFAULT_METRIC_ENTRY,
         secret_bindings: Mapping[str, str] | None = None,
         secret_hosts: Mapping[str, str] | None = None,
         secret_allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
@@ -324,13 +349,14 @@ class RepoScorer:
                 or ``score(repo_path, case, output)``.
             timeout_seconds: Longest one scorer call may run, setup excluded.
             rule_judge: The repository's constraints-file enforcement, when it
-                has an ``optimize.toml``: path-rule refusals then get the fixed
+                has an ``ascent.toml``: path-rule refusals then get the fixed
                 illegal-action message, and the watch hook's warnings open
                 the next scoring feedback. It never changes a score.
             gateway: The run's scoped model route from the trusted parent.
                 The scorer's ``llm()`` and the version's own code reach it
-                with ``APP_API_KEY`` and ``APP_MODEL``; the box itself stays
-                offline and talks to the parent through the model mailbox.
+                with ``ASCENT_MODEL_KEY`` and ``ASCENT_MODEL``; the box itself
+                stays offline and talks to the parent through the model
+                mailbox, whose proxy sets ``ASCENT_MODEL_URL``.
             stages: The ``[target.<name>]`` stages the scorer may ``call``;
                 none keeps the scorer as it was.
             stage_runtime: Opens the stage boxes; required with stages.
@@ -350,9 +376,12 @@ class RepoScorer:
             run_entry: The ``[run]`` entry: ``path/file.py:function`` or a
                 command; ``None`` runs no version code before the metric.
             run_timeout: Longest one ``[run]`` call may run.
+            metric_entry: The ``[metric] entry``: ``"path.py:function"``, whose
+                function ``code`` defines, or a command list that the metric box
+                runs through OpenAscent; ``code`` is then unused (SKY-738).
             secret_bindings: ``user`` or ``managed`` for each secret name.
             secret_hosts: The one host each secret may go to, from the
-                repository's ``optimize.toml``.
+                repository's ``ascent.toml``.
             secret_allowed_hosts: Each user secret's ``allowed_hosts`` from
                 the run.
             budget: The run budget, which meters a call with a Skynet key.
@@ -380,6 +409,7 @@ class RepoScorer:
         self._recorder = recorder
         self._run_entry = run_entry
         self._run_timeout = run_timeout
+        self._metric_entry = metric_entry
         self._workspace = workspace
         self._gateway = gateway
         self._code = code
@@ -455,10 +485,22 @@ class RepoScorer:
                     finally:
                         self._unpark(metric_box)
                 if ran is not None and ran.get("error"):
-                    error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
-                    error = error[len(RUN_FAILED) :]
+                    # A function entry's error is its traceback, with the exception at
+                    # its end, so only a command's cause and logs take the command cuts.
+                    if isinstance(self._run_entry, str):
+                        error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
+                        error = error[len(RUN_FAILED) :]
+                    else:
+                        error = runner.command_error(
+                            ran,
+                            lambda text: _scrub(RUN_FAILED + redact(text, secrets), opened.root, self._hidden)[
+                                len(RUN_FAILED) :
+                            ],
+                            secrets,
+                        )
+                    # SKY-751: only the metric makes a score, so a failed run has none.
                     return {
-                        "score": 0.0,
+                        "score": None,
                         "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
                         STATUS_KEY: RUN_FAILED_STATUS,
                     }
@@ -524,8 +566,10 @@ class RepoScorer:
             ``{"score": ..., **side_info}``, secrets redacted.
 
         Raises:
-            RepoScoreError: When the metric files cannot be installed, or the
-                scorer fails or returns no score.
+            RepoScoreError: When the metric files cannot be installed, a stage
+                answer could not be delivered, or the scorer fails or returns no score.
+            Exception: A temporary provider error from a stage answer, raw,
+                only when ``raw_provider_errors`` is set.
             BudgetReached: And the other budget errors, from a stage box or a relayed call.
         """
         try:
@@ -535,15 +579,31 @@ class RepoScorer:
             raise RepoScoreError("The metric files could not be installed, so the version has no score.") from None
         session, root = metric.session, metric.root
         self._root = root
-        session.write_files({METRIC_RUNNER_PATH: RUNNER_SOURCE})
+        # Each write_files call costs several provider requests on Vercel, so
+        # the call's files go up in one write, after the relay opens (SKY-913).
+        files = {METRIC_RUNNER_PATH: RUNNER_SOURCE}
         folder = f"{METRIC_CALLS_DIR}/{call.rsplit('/', 1)[1]}"
         document: dict[str, Any] = {
-            "code": self._code,
             "candidate": metric.repo_path,
             "case": case,
             "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
             runner.METRIC_SITE_PARAM: metric.site_path,
         }
+        if isinstance(self._metric_entry, tuple):
+            files.update(_ascent_files(METRIC_ASCENT_DIR))
+            document[runner.METRIC_ENTRY_PARAM] = list(self._metric_entry)
+            document[runner.METRIC_TIMEOUT_PARAM] = self._timeout_seconds * _COMMAND_TIME_SHARE
+            document[runner.ASCENT_PACKAGE_PARAM] = f"{root}/{METRIC_ASCENT_DIR}"
+            # A Vercel box runs the command under a wrapper shell and ``timeout``,
+            # which stay alive with the command env, and the metric command can
+            # read their /proc/<pid>/environ. So the key goes in a file that the
+            # runner deletes before the metric command starts (SKY-767).
+            if env.get(ENV_API_KEY):
+                files[f"{folder}/{runner.MODEL_KEY_FILE}"] = env[ENV_API_KEY]
+            env = {name: value for name, value in env.items() if name != ENV_API_KEY}
+        else:
+            document["code"] = self._code
+            document[runner.METRIC_FUNCTION_PARAM] = self._metric_entry.rsplit(":", 1)[1]
         if ran is not None:
             document["output"] = ran.get("output")
             elapsed = ran.get(runner.ELAPSED_PARAM)
@@ -552,20 +612,28 @@ class RepoScorer:
         with self._stage_relay(patch, f"{folder}/stages", box=session) as relay:
             if relay is not None:
                 document["stages"] = relay.config(root)
-            session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
+            files[f"{folder}/{runner.INPUT_FILE}"] = json.dumps(document)
+            session.write_files(files)
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
-                result = session.run(
-                    f"cd {shlex.quote(metric.repo_path)} && python3 {_ISOLATED}"
+                # ``exec`` replaces this shell with the runner. A Python metric
+                # runs in the runner and reads the key there anyway.
+                result = metric.box.run(
+                    f"cd {shlex.quote(metric.repo_path)} && exec {shlex.quote(self._workspace.metric_python)} {_ISOLATED}"
                     f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
                     env=env,
                     timeout_seconds=self._timeout_seconds,
                     on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                 )
+        # Before the timeout: a lost answer leaves the scorer waiting until its timeout.
+        if relay is not None and relay.unchecked:
+            # A budget stop whose answer was lost still stops the run.
+            _raise_control({"control": relay.first_control()})
+            if self.raw_provider_errors and relay.failure is not None and is_temporary_provider_error(relay.failure):
+                raise relay.failure
+            raise RepoScoreError("A stage answer could not be delivered, so the version has no score.")
         if result.timed_out:
             raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-        if relay is not None and relay.unchecked:
-            raise RepoScoreError("A stage answer could not be delivered, so the version has no score.")
         text = session.read_file(f"{folder}/{runner.OUTPUT_FILE}")
         # The metric's errors can print or quote its source, so the guest
         # gets only a fixed message; the details stay in the server log (SKY-353).
@@ -581,6 +649,13 @@ class RepoScorer:
         _raise_control({"control": relay.first_control() if relay is not None else None})
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
+            if output.get("cause") in _COMMAND_FAILED:
+                code = output.get("exit_code")
+                shown = f" ({code})" if isinstance(code, int) and not isinstance(code, bool) else ""
+                raise RepoScoreError(_COMMAND_FAILED[output["cause"]].replace("{code}", shown))
+            # The fixed form text lets the run stop before any score (protocol.py); the metric's text stays out.
+            if runner.ANSWER_FORM in str(output["error"]):
+                raise RepoScoreError(_WRONG_FORM)
             raise RepoScoreError("The scorer raised an error, so the version has no score.")
         if output.get("score") is None:
             raise RepoScoreError("The scorer returned no score.")
@@ -589,11 +664,18 @@ class RepoScorer:
         except (TypeError, ValueError):
             # The error text would echo the value, which the metric's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
-        side_info = fold_case_scores(output.get("side_info") or {})
-        # SKY-221: only a crashed [run] entry above sets this status, so the
-        # metric's own ``status`` key cannot mark a scored case as a failure.
-        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
-            del side_info[STATUS_KEY]
+        side_info = output.get("side_info") or {}
+        # The metric's own code can rewrite the runner's output after the runner
+        # checks it, so the parent checks the answer again: only a crashed [run]
+        # entry above adds ``status`` (SKY-221).
+        try:
+            if not isinstance(side_info, dict):
+                raise runner.ScorerError(f"The side info is {type(side_info).__name__}, not an object.")
+            score, side_info = runner.normalize_score({**side_info, "score": score}, own_keys=False)
+        except runner.ScorerError as exc:
+            # The error text can name keys that the metric's code sets (SKY-353).
+            logger.warning("Repository scorer answer refused: %s", exc)
+            raise RepoScoreError(_WRONG_FORM) from None
         return {**side_info, "score": score}
 
     def _run_candidate(
@@ -635,11 +717,16 @@ class RepoScorer:
             "timeout": self._run_timeout,
             "stages": None,
         }
-        session.write_files({RUNNER_PATH: RUNNER_SOURCE})
+        # One write for the call's files, as in the metric box (SKY-913).
+        files = {RUNNER_PATH: RUNNER_SOURCE}
+        if isinstance(self._run_entry, tuple):
+            files.update(_ascent_files(RUN_ASCENT_DIR))
+            payload[runner.ASCENT_PACKAGE_PARAM] = f"{root}/{RUN_ASCENT_DIR}"
         with self._service_relay(_RUN_ROLE, f"{supervisor}/stages", candidate=candidate) as relay:
             if relay is not None:
                 payload["stages"] = relay.config(root)
-            session.write_files({f"{supervisor}/{runner.INPUT_FILE}": json.dumps(payload)})
+            files[f"{supervisor}/{runner.INPUT_FILE}"] = json.dumps(payload)
+            session.write_files(files)
             unstamped = candidate.stamp_before_run()
             if unstamped:
                 raise RepoScoreError(unstamped)
@@ -662,11 +749,13 @@ class RepoScorer:
                 forward(stream, data)
 
             with sandbox_log.event_scope(source="run"):
-                result = session.run(
-                    f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                # A user image box never falls back to the PATH python3, as in _pick_base_python (SKY-737).
+                fallback = "" if self._workspace.user_run_image else '; [ -x "$p" ] || p=python3'
+                result = candidate.box.run(
+                    f"p={shlex.quote(_BASE_PYTHON)}{fallback}"
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.
-                    f'; cd {shlex.quote(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
+                    f'; {absolute_cd(candidate.path, root)} && exec "$p" {_ISOLATED} {_NO_SITE}'
                     f" -c {shlex.quote(_SUPERVISOR_BOOT)} {shlex.quote(f'{root}/{RUNNER_PATH}')} {_RUNNER_SHA256}"
                     f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
@@ -708,13 +797,18 @@ class RepoScorer:
             candidate: The candidate box the version ran in.
 
         Raises:
-            RepoScoreError: When a file changed, or a check could not run.
+            RepoScoreError: When a file changed, or a check or an answer could not run.
+            BudgetReached: When no file changed, an answer was lost, and the
+                run's budget stopped a service or MCP call.
+            Exception: A temporary provider error from a relay answer, raw, only
+                when ``raw_provider_errors`` is set and no file changed.
         """
         judge = self._rule_judge
         unchecked = relay is not None and relay.unchecked
-        # After a failed answer check the answer went in by a file write, which moves
-        # every ctime, so only the checks the answers passed can still name a change.
-        final = () if unchecked else candidate.protected_changes()
+        # After an answer file write the ctimes may have moved, so only the checks
+        # the answers passed can still name a change. A raised check or answer
+        # command writes no file, so the final check still runs after it.
+        final = () if candidate.unstamped else candidate.protected_changes()
         # Each relay answer checks again, so a lasting change would repeat once per answer.
         changes = tuple(dict.fromkeys((*(relay.changes if relay is not None else ()), *final)))
         if changes:
@@ -722,13 +816,17 @@ class RepoScorer:
             reason = redact(" ".join(changes), secrets)
             raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
         if unchecked:
+            # A budget stop whose answer was lost still stops the run; a protected change still wins.
+            _raise_control({"control": relay.first_control()})
+            if self.raw_provider_errors and relay.failure is not None and is_temporary_provider_error(relay.failure):
+                raise relay.failure
             raise RepoScoreError("A relay answer could not be checked or delivered, so the version has no score.")
 
     def _model_env(self) -> dict[str, str]:
         """Return the env that points code in the box at the run's model route.
 
         Returns:
-            ``APP_API_KEY`` and ``APP_MODEL``, or nothing without a route.
+            ``ASCENT_MODEL_KEY`` and ``ASCENT_MODEL``, or nothing without a route.
         """
         gateway = self._gateway
         if gateway is None or not gateway.api_key:
@@ -757,6 +855,8 @@ class RepoScorer:
         Raises:
             RepoScoreError: When a stage box cannot open for a reason other
                 than the budget, or cannot lay out the version.
+            Exception: A temporary provider error from a stage box, raw, only
+                when ``raw_provider_errors`` is set; the stage snapshot stays.
             BudgetReached: When the budget refuses a stage box.
             BudgetError: When a stage box's hold does not fit the budget.
             UsagePendingError: When earlier usage still needs reconciliation.
@@ -801,6 +901,9 @@ class RepoScorer:
                 for a reason other than the budget, or holds no tree.
             RepoScoreError: When an unpacked stage box cannot open for a reason
                 other than the budget, or a box cannot lay out the version.
+            Exception: A temporary provider error (``SandboxTransientError``,
+                or a sandbox API 429 or 5xx) from a box open or layout, raw,
+                only when ``raw_provider_errors`` is set.
             BudgetReached: And the other budget errors, from a stage box.
         """
         evaluation_id = uuid.uuid4().hex
@@ -820,6 +923,11 @@ class RepoScorer:
         except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
             raise
         except Exception as error:
+            # For the judge, a provider refusal for now (429, 5xx) stays raw: as a
+            # RepoScoreError it would store a lasting failure, and as a
+            # _StageSnapshotError it would drop a good snapshot.
+            if self.raw_provider_errors and is_temporary_provider_error(error):
+                raise
             logger.warning("Stage boxes did not open: %s", error)
             failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
             raise failure("The stage boxes could not open, so the version has no score.") from None
@@ -834,6 +942,8 @@ class RepoScorer:
             except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError, _StageSnapshotError):
                 raise
             except Exception as error:
+                if self.raw_provider_errors and is_temporary_provider_error(error):
+                    raise
                 logger.warning("Stage box layout failed: %s", error)
                 laid_out = [False]
             if not all(laid_out):
@@ -992,7 +1102,8 @@ class RepoScorer:
             box: One open stage box.
             patch: The version, hidden paths already dropped.
             restored: The box started from the stage snapshot, which holds the
-                tree and the runner, so only the version is written.
+                tree, the runner and any OpenAscent package, so only the version
+                is written.
 
         Returns:
             Whether the tree and the version are in place.
@@ -1007,6 +1118,8 @@ class RepoScorer:
                 box.write_files({name: chunk})
                 parts.append(name)
             box.write_files({f"{STAGE_DIR}/{RUNNER_PATH.rsplit('/', 1)[1]}": RUNNER_SOURCE})
+            if any(not isinstance(stage.entry, str) for stage in self._stages.values()):
+                box.write_files(_ascent_files(_STAGE_ASCENT_DIR))
         box.write_files({f"{STAGE_DIR}/version.patch": patch})
         if restored:
             unpack = f"test -d {_STAGE_TREE} || exit {_NO_STAGE_TREE_EXIT};"
@@ -1026,14 +1139,17 @@ class RepoScorer:
             )
         return result.ok
 
-    def prepare(self) -> None:
+    def prepare(self, *, skip: tuple[str, ...] = ()) -> None:
         """Set the repository and the metric packages up before any version is sent.
+
+        Args:
+            skip: Roles (``run``, ``metric``) whose setup box does not open (SKY-893).
 
         Raises:
             RepoSetupError: When the repository or the metric packages cannot be set up.
         """
         with self._lock:
-            self._workspace.prepare()
+            self._workspace.prepare(skip=skip)
 
     def dispatch(self, body: Mapping[str, Any]) -> ModelHTTPResult:
         """Answer one guest scoring request through the evaluator capability.
@@ -1057,12 +1173,24 @@ class RepoScorer:
         except RepoScoreError as error:
             # Plain text: the guest's relay client quotes the body in its error.
             return ModelHTTPResult(422, "text/plain; charset=utf-8", _scrub(str(error), self._root).encode())
-        document = _for_proposer(document, self._root, self._hidden)
+        document = self.for_proposer(document)
         notes = self._rule_judge.take_notes() if self._rule_judge is not None else []
         if notes:
             feedback = document.get("feedback")
             document["feedback"] = "\n\n".join([*notes, *([str(feedback)] if feedback else [])])
         return ModelHTTPResult(200, "application/json", json.dumps(document).encode())
+
+    def for_proposer(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        """Return what a proposer may see of one scoring result.
+
+        Args:
+            document: What :meth:`score` returned.
+
+        Returns:
+            The score, the feedback without hidden metric frames or box paths,
+            the status and the named scores (SKY-353).
+        """
+        return _for_proposer(document, self._root, self._hidden)
 
     def close(self) -> None:
         """Delete the workspace's saved states and this scorer's snapshots.
@@ -1367,6 +1495,8 @@ class _StageRelay:
         self.changes: list[str] = []
         # A failed check is not tampering, so it never reaches the rule judge.
         self.unchecked = False
+        # The first error an answer raised; the judge needs it raw to tell a temporary fault apart.
+        self.failure: BaseException | None = None
         # The first budget stop of a service or MCP call: the parent raises it after the call,
         # whatever the box does with its 503.
         self.control: dict[str, str] | None = None
@@ -1993,8 +2123,9 @@ class _StageRelay:
     def _run_in_box(self, name: str, identity: str, value: Any, relay: _StageRelay | None) -> dict[str, Any]:
         """Run one stage call in the stage's box, behind the call's own relay when the stage has one.
 
-        A Python entry runs through the runner's stage mode; a command reads
-        the input on stdin and writes its JSON output on stdout.
+        A Python entry runs through the runner's stage mode, and a command
+        through its command mode, which writes the same ``{"output": ...}``
+        or ``{"error": ...}`` (SKY-757).
 
         Args:
             name: The stage.
@@ -2013,18 +2144,20 @@ class _StageRelay:
             files[f"{folder}/{runner.STAGE_RELAY_FILE}"] = json.dumps(relay.config(_FROM_STAGE_TREE))
         box.write_files(files)
         relative = f"../calls/{identity}"
-        stage_runner = f"python3 ../{RUNNER_PATH.rsplit('/', 1)[1]}"
+        runner_file = f"../{RUNNER_PATH.rsplit('/', 1)[1]}"
+        stage_runner = f"python3 {runner_file}"
         if isinstance(stage.entry, str):
             command = f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_FLAG} {relative} {shlex.quote(stage.entry)}"
-        elif relay is not None:
-            # The runner serves the stage's relay, then runs the command with the same files.
-            command = (
-                f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_COMMAND_FLAG} {relative} {shlex.join(stage.entry)}"
-            )
         else:
+            # The runner serves the stage's relay when it has one, then runs the
+            # command. It needs only the standard library and the copied
+            # OpenAscent package, which the python3 that [setup] put first on
+            # PATH may be too old to load, so it runs on the base interpreter,
+            # as a [run] command does. The command still finds python3 on PATH.
             command = (
-                f"cd {_STAGE_TREE} && {shlex.join(stage.entry)}"
-                f" < {relative}/{runner.INPUT_FILE} > {relative}/{runner.OUTPUT_FILE}"
+                f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                f'; cd {_STAGE_TREE} && "$p" {runner_file} {runner.STAGE_COMMAND_FLAG} {relative} ../openascent'
+                f" {stage.timeout * _COMMAND_TIME_SHARE:g} {shlex.join(stage.entry)}"
             )
         sink = functools.partial(relay.output, source=identity) if relay is not None else sandbox_log.ignore_output
         result = box.run(command, env=self._env, timeout_seconds=stage.timeout, on_output=sink)
@@ -2044,17 +2177,16 @@ class _StageRelay:
             output = json.loads(text) if text else None
         except ValueError:
             output = None
-        if isinstance(stage.entry, str):
-            if isinstance(output, dict) and "output" in output:
-                return {"output": output["output"]}
-            if isinstance(output, dict) and output.get("error"):
+        if isinstance(output, dict) and "output" in output:
+            return {"output": output["output"]}
+        if isinstance(output, dict) and output.get("error"):
+            if isinstance(stage.entry, str):
                 return {"error": f"Stage {name!r} raised {output['error']}"}
-            return {"error": f"Stage {name!r} returned no valid output."}
-        if text is None or not text.strip():
-            return {"error": f"Stage {name!r} returned no output."}
-        if output is None and text.strip() != "null":
-            return {"error": f"Stage {name!r} returned output that is not JSON."}
-        return {"output": output}
+            # A command's error leads with its cause, then log tails that may echo a secret.
+            mask = functools.partial(redact, secrets=self._stage_secrets)
+            tail = runner.command_error(output, mask, self._stage_secrets)[:_STAGE_ERROR_CHARS]
+            return {"error": f"Stage {name!r} failed: {tail}"}
+        return {"error": f"Stage {name!r} returned no valid output."}
 
     def _answer(self, identity: str, response: Mapping[str, Any]) -> bool:
         """Write one answer where the waiting caller reads it: the scorer's ``call`` or a stage's MCP proxy.
@@ -2065,18 +2197,29 @@ class _StageRelay:
                 service's ``{"status", ...}``.
 
         Returns:
-            False when the relay is closed and wrote nothing, so a stream stops.
+            False when the relay is closed and wrote nothing, or when the
+            answer raised, so a stream stops.
         """
         with self._answer_lock:
             if self._closed:
                 return False
-            if self._box is not None or self._candidate is None:
-                # The protected-file check covers the candidate box; the metric
-                # box holds no repository and a stage box only runs the version.
-                if self._box is not None:
-                    self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
-                return True
-            changes = self._candidate.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
+            try:
+                if self._box is not None or self._candidate is None:
+                    # The protected-file check covers the candidate box; the metric
+                    # box holds no repository and a stage box only runs the version.
+                    if self._box is not None:
+                        self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
+                    return True
+                changes = self._candidate.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
+            except Exception as error:
+                # This runs on a pool thread, where a raised error is lost. Only the
+                # type is logged: the message is provider text.
+                logger.warning("A relay answer could not reach the box: %s", type(error).__name__)
+                self.failure = self.failure or error
+                self.unchecked = True
+                # The lost answer may carry a stage call's budget stop, which must still stop the run.
+                self.control = self.control or response.get("control")
+                return False
             if changes is None:
                 # The scorer may wait until its own timeout; either way the version gets no score.
                 self.unchecked = True

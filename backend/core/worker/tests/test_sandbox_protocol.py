@@ -28,6 +28,25 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     10: {"blackbox": "bd713b1948891fa7"},
     11: {"blackbox": "033ae0d643c915f4"},
     12: {"blackbox": "a896ba28b7bdbc7a"},
+    13: {"blackbox": "b5878009b64947bc"},
+    # target.repo.draft_files and draft_base: the setup draft's repository files and their base commit.
+    14: {"blackbox": "6e0761a3f301b387"},
+    # budget.stop_at_score left the request; the stop score is the snapshot's outcome target (SKY-691).
+    15: {"blackbox": "05f352755db27ac1"},
+    # The same request; the image writes the run end verdict of the outcome (SKY-692).
+    16: {"blackbox": "05f352755db27ac1"},
+    # target.repo.contract_source: where the run's ascent.toml comes from (SKY-693).
+    17: {"blackbox": "f9cc6701c073a012"},
+    # proposer.host_cli_auto: a host_cli that local mode filled in (SKY-753).
+    18: {"blackbox": "21df1d4329719130"},
+    # scorer.command_metric: a command [metric] entry needs no metric_code (SKY-738).
+    19: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; the image obeys the snapshot outcome's direction (SKY-750).
+    20: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; the image obeys the snapshot outcome's named-score directions (SKY-775).
+    21: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; every box gets the ASCENT_MODEL* and ASCENT_TASK names (SKY-776).
+    22: {"blackbox": "3e02206ab3dc54ab"},
 }
 
 

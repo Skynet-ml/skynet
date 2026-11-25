@@ -23,6 +23,7 @@ from core.api import preflight_execution as wizard_preflight
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.errors import DomainError
 from core.api.model_billing import normalize_model_token_sources
+from core.api.routers import execution_budgets
 from core.api.routers import submissions as submission_router
 from core.api.routers import wizard_preflight as preflight_router
 from core.api.routers.execution_budgets import create_execution_budgets_router
@@ -37,9 +38,11 @@ from core.config import settings
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
+from core.service_gateway.optimization.blackbox.preflight import verify_anything_in_sandbox
+from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime
 from core.storage.models import Base, BillingCustomerModel, BillingProviderKeyModel
 from core.storage.preflights import PreflightStore, setup_seed
-from core.worker.repo_gate import GateFailure
+from core.worker.repo_gate import GateFailure, check_repository
 
 PAYLOAD = {
     "seed_candidate": "A real starting candidate",
@@ -47,7 +50,11 @@ PAYLOAD = {
     "reflection_model_config": {"name": "fixture/text"},
     "strategy": {"mode": "single", "engine": "gepa"},
     "max_cost_cents": 20,
+    "target": {"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}},
 }
+
+# Kept before the fixture replaces it, for tests that need the real parent check.
+_REAL_VERIFY_ANYTHING = wizard_preflight._verify_anything
 
 
 class _Gateway:
@@ -73,7 +80,15 @@ def _at_cost_markup(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient, object, list]]:
-    """Serve real evidence and ledger tables around one synthetic paid setup adapter."""
+    """Serve real evidence and ledger tables around one synthetic paid setup adapter.
+
+    Args:
+        tmp_path: Holds the SQLite database.
+        monkeypatch: Stands in the paid setup adapter and the app settings.
+
+    Yields:
+        The test client, the database engine, and the setup calls it records.
+    """
     engine = create_engine(f"sqlite:///{tmp_path / 'setup.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as session:
@@ -97,11 +112,30 @@ def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
         )
         return {"checks": [{"key": "scorer", "status": "succeeded"}]}
 
+    def stage(payload: dict, **kwargs) -> tuple[dict, SimpleNamespace]:
+        """Stage no checkout: these scenarios test the paid setup ledger, not the repository."""
+        repo = {**payload["target"]["repo"], "environment": {}}
+        staged = SimpleNamespace(
+            snapshot=SimpleNamespace(archive=tmp_path / "tree.tgz"),
+            secrets={},
+            box_sources={},
+            close_scorers=lambda: None,
+            cleanup=lambda: None,
+        )
+        return {**payload, "target": {**payload["target"], "repo": repo}}, staged
+
+    monkeypatch.setattr(wizard_preflight, "stage_repository", stage)
+    monkeypatch.setattr(wizard_preflight, "check_repository", lambda *args, **kwargs: [])
+    monkeypatch.setattr(wizard_preflight, "infer_repo_setup", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wizard_preflight, "bind_repo_scorer", lambda *args, **kwargs: None)
     monkeypatch.setattr(wizard_preflight, "ModelGateway", _Gateway)
     monkeypatch.setattr(wizard_preflight, "bind_protected_sandbox", lambda *args, **kwargs: None)
     monkeypatch.setattr(wizard_preflight, "_verify_anything", verify)
     monkeypatch.setattr(preflight_router, "enforce_submission_rate", lambda username: None)
     monkeypatch.setattr(wizard_preflight.settings, "openrouter_api_key", SecretStr("test-only"))
+    # These scenarios size budgets in cents to test setup holds, so the one-lease floor of a run
+    # limit, and the lease a check must leave of it, stay out of the way.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
     app = FastAPI()
 
     @app.exception_handler(HTTPException)
@@ -162,6 +196,159 @@ def test_checked_preflight_runs_the_route_check_for_other_callers(setup_client) 
     )
     assert (response.id, response.status, response.may_advance) == (first["id"], "succeeded", True)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("sources", "unchecked", "codes"),
+    [
+        ({}, (), []),
+        ({"run": ("image", "run@sha256:" + "a" * 64)}, ("run",), ["submit.preflight.run_setup_not_checked"]),
+        ({"metric": ("dockerfile", "eval/Dockerfile")}, ("metric",), ["submit.preflight.metric_setup_not_checked"]),
+        (
+            {"metric": ("dockerfile", "eval/Dockerfile"), "run": ("image", "run@sha256:" + "a" * 64)},
+            ("run", "metric"),
+            ["submit.preflight.run_setup_not_checked", "submit.preflight.metric_setup_not_checked"],
+        ),
+    ],
+)
+def test_a_role_with_a_user_image_reports_its_setup_as_not_checked(
+    setup_client, monkeypatch: pytest.MonkeyPatch, sources: dict, unchecked: tuple, codes: list
+) -> None:
+    """Skip only the setup of a role with a user image, and report it as not checked (SKY-893).
+
+    Args:
+        setup_client: The test client, engine and recorded calls.
+        monkeypatch: Pytest fixture that replaces the staging and check steps.
+        sources: The box sources of the staged checkout.
+        unchecked: The roles the check must not set up.
+        codes: The message codes of the skipped setup checks.
+    """
+    client, _engine, _calls = setup_client
+    stage, verify = wizard_preflight.stage_repository, wizard_preflight._verify_anything
+    bound: list[dict] = []
+    verified: list[dict] = []
+
+    def staged_with_sources(payload: dict, **kwargs: Any) -> tuple[dict, SimpleNamespace]:
+        """Stage the fixture checkout with this case's box sources.
+
+        Args:
+            payload: The run request to stage.
+            **kwargs: The other staging arguments.
+
+        Returns:
+            The protected payload and the staged checkout.
+        """
+        protected, staged = stage(payload, **kwargs)
+        staged.box_sources = sources
+        return protected, staged
+
+    def recorded_verify(gateway: Any, payload: dict, **kwargs: Any) -> dict:
+        """Record the roles the guest check skips.
+
+        Args:
+            gateway: The model gateway of the check.
+            payload: The run request to check.
+            **kwargs: The other check arguments, with ``unchecked``.
+
+        Returns:
+            The result of the real check.
+        """
+        verified.append(kwargs)
+        return verify(gateway, payload, **kwargs)
+
+    monkeypatch.setattr(wizard_preflight, "stage_repository", staged_with_sources)
+    monkeypatch.setattr(wizard_preflight, "bind_repo_scorer", lambda *args, **kwargs: bound.append(kwargs))
+    monkeypatch.setattr(wizard_preflight, "_verify_anything", recorded_verify)
+    body = client.post("/wizard/preflight", json=_request(_budget(client)), headers={"Accept-Language": "en"}).json()
+    assert bound[0]["skip_setup"] == unchecked
+    assert verified[0]["unchecked"] == unchecked
+    skipped = [check for check in body["checks"] if check["status"] == "skipped"]
+    assert [(check["key"], check["message_code"]) for check in skipped] == [("setup", code) for code in codes]
+    assert [check["message"] for check in skipped] == [wizard_preflight.SETUP_NOT_CHECKED[role] for role in unchecked]
+    assert (body["status"], body["may_advance"]) == ("succeeded", True)
+
+
+@pytest.mark.parametrize("scope", ["evaluation", "execution"])
+def test_a_check_where_both_roles_use_a_user_image_succeeds_on_its_other_checks(
+    setup_client, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    """Accept an all-image check as passed: the run checks both setups in the images (SKY-893).
+
+    The setups and the sample score are skipped. An execution check still
+    runs the engine and model route checks.
+
+    Args:
+        setup_client: The test client, engine and recorded calls.
+        monkeypatch: Pytest fixture that replaces the staging and sandbox steps.
+        scope: The scope of the check.
+    """
+    client, _engine, _calls = setup_client
+    stage = wizard_preflight.stage_repository
+    routes: list[bool] = []
+
+    def staged_with_images(payload: dict, **kwargs: Any) -> tuple[dict, SimpleNamespace]:
+        """Stage the fixture checkout with a user image for both roles.
+
+        Args:
+            payload: The run request to stage.
+            **kwargs: The other staging arguments.
+
+        Returns:
+            The protected payload and the staged checkout.
+        """
+        protected, staged = stage(payload, **kwargs)
+        staged.box_sources = {"run": ("image", "run@sha256:" + "a" * 64), "metric": ("dockerfile", "eval/Dockerfile")}
+        return protected, staged
+
+    def guest(payload: dict, _artifact_id: str, events: Any, _start_method: str) -> None:
+        """Run the real guest check on the payload the parent sends.
+
+        Args:
+            payload: The guest payload, with its ``_preflight`` settings.
+            _artifact_id: The artifact id, not used.
+            events: The queue that gets the check result.
+            _start_method: The process start method, not used.
+        """
+        preflight = payload.pop("_preflight")
+        result = verify_anything_in_sandbox(
+            payload,
+            scope=preflight["scope"],
+            identity=preflight["identity"],
+            runtime=LocalSubprocessRuntime(),
+            unchecked=tuple(preflight["unchecked"]),
+        )
+        events.put({"type": "preflight_result", "result": result})
+
+    def model_routes(_gateway: Any, *, native: bool) -> list[dict]:
+        """Record that the model routes are checked.
+
+        Args:
+            _gateway: The model gateway, not used.
+            native: Whether the check uses the native engines.
+
+        Returns:
+            One passed model route check.
+        """
+        routes.append(native)
+        return [{"key": "model.optimization", "status": "succeeded"}]
+
+    monkeypatch.setattr(wizard_preflight, "stage_repository", staged_with_images)
+    monkeypatch.setattr(wizard_preflight, "_verify_anything", _REAL_VERIFY_ANYTHING)
+    monkeypatch.setattr(wizard_preflight, "run_vercel_dspy", guest)
+    monkeypatch.setattr(wizard_preflight, "_verify_model_routes", model_routes)
+    monkeypatch.setattr(
+        wizard_preflight, "_engine_readiness", lambda _request: {"key": "optimizer", "status": "succeeded"}
+    )
+    body = client.post("/wizard/preflight", json={**_request(_budget(client)), "scope": scope}).json()
+    performed = [(check["key"], check["status"]) for check in body["checks"]]
+    skipped = [("setup", "skipped"), ("setup", "skipped"), ("scorer", "skipped")]
+    if scope == "evaluation":
+        assert performed == skipped
+        assert routes == []
+    else:
+        assert performed == [*skipped, ("model.optimization", "succeeded"), ("optimizer", "succeeded")]
+        assert routes == [True]
+    assert (body["status"], body["may_advance"]) == ("succeeded", True)
 
 
 @pytest.mark.parametrize(
@@ -451,16 +638,16 @@ def test_unresolved_paid_usage_blocks_stage_advancement(setup_client, monkeypatc
 def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Refuse an unenforceable optimize.toml in the setup check, in the user's language, before the setup model runs."""
+    """Refuse an unenforceable ascent.toml in the setup check, in the user's language, before the setup model runs."""
     client, _engine, calls = setup_client
     archive = tmp_path / "tree.tgz"
     raw = (
-        b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
+        b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
         b'[services.maps]\nurl = "https://maps.example.com"\n'
         b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }\n'
     )
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(raw)
         packed.addfile(info, io.BytesIO(raw))
     cleaned = []
@@ -474,6 +661,7 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
     monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
     monkeypatch.setattr(wizard_preflight, "stage_repository", lambda payload, **kwargs: (payload, staged))
+    monkeypatch.setattr(wizard_preflight, "check_repository", check_repository)
     monkeypatch.setattr(wizard_preflight, "infer_repo_setup", lambda *args: inferred.append(args))
 
     response = client.post("/wizard/preflight", json={**_request(_budget(client)), "locale": "he"})
@@ -490,6 +678,48 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     assert not calls
     assert body["budget"]["setup_spent_cents"] == "0"
     assert cleaned == ["scorers", "tree"]
+
+
+def test_the_rest_setup_check_rewrites_an_mcp_contract_source(
+    setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Stage a client's ``mcp`` contract as ``setup_screen`` in the REST setup check, as ``/blackbox/run`` does."""
+    client, _engine, calls = setup_client
+    archive = tmp_path / "tree.tgz"
+    raw = b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("ascent.toml")
+        info.size = len(raw)
+        packed.addfile(info, io.BytesIO(raw))
+    staged = SimpleNamespace(
+        snapshot=SimpleNamespace(archive=archive), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+    )
+    sources = []
+
+    def stage(payload: dict, **kwargs) -> tuple[dict, SimpleNamespace]:
+        """Record the contract source that reaches staging."""
+        sources.append(payload["target"]["repo"]["contract_source"])
+        return payload, staged
+
+    monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
+    monkeypatch.setattr(wizard_preflight, "stage_repository", stage)
+    monkeypatch.setattr(wizard_preflight, "check_repository", check_repository)
+    repo = {
+        "repository": "example/site",
+        "commit": "0" * 40,
+        "editable_paths": ["src"],
+        "draft_files": {"ascent.toml": "version = 1\n"},
+        "draft_base": "0" * 40,
+        "contract_source": "mcp",
+    }
+    payload = {**PAYLOAD, "target": {"kind": "repo", "repo": repo}}
+
+    response = client.post("/wizard/preflight", json=_request(_budget(client), payload))
+
+    assert response.status_code == 200, response.json()
+    assert sources == ["setup_screen"]
+    assert not calls
 
 
 def test_a_payload_with_no_repository_reaches_the_gate_with_no_bindings(
@@ -524,3 +754,25 @@ def test_a_payload_with_no_repository_reaches_the_gate_with_no_bindings(
     assert [check.get("message_code") for check in body["checks"]] == ["repo_gate.missing_secret"]
     assert [(kwargs["bindings"], kwargs["allowed_hosts"]) for kwargs in seen] == [({}, {})]
     assert not calls
+
+
+def test_setup_check_keeps_no_lease_of_the_limit_or_the_balance(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a setup check spend into the run's first lease, because setup bills only the wallet (SKY-925)."""
+    client, engine, calls = setup_client
+    # The balance and the limit each hold exactly one lease, so any setup charge spends into it.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 20)
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 20
+        session.commit()
+    budget = _budget(client)
+
+    response = client.post("/wizard/preflight", json=_request(budget))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["may_advance"]) == ("succeeded", True)
+    assert body["budget"]["setup_spent_cents"] == "1"
+    assert body["budget"]["available_cents"] == "20"
+    with Session(engine) as session:
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 19
+    assert len(calls) == 1

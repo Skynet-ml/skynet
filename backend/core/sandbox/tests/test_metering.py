@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -11,15 +13,21 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
 from core.billing.budget_amounts import CENT_SCALE
-from core.billing.budgets import MAX_LEASE_SLICES, BudgetConflictError, BudgetInsufficientError, BudgetService
+from core.billing.budgets import (
+    MAX_LEASE_SLICES,
+    AccountFundsError,
+    BudgetConflictError,
+    BudgetService,
+)
 from core.billing.runtime import BudgetRuntime
 from core.billing.vercel_usage import VercelSnapshotReservation, VercelUsage
 from core.config import settings
+from core.sandbox import metering
 from core.sandbox.factory import PROVIDERS
 from core.sandbox.metering import (
-    USAGE_ADAPTERS,
     LeaseExhaustedError,
     PoolLease,
+    usage_adapter,
 )
 from core.storage.models import Base, BillingCustomerModel, ExecutionBudgetModel, ExecutionOperationModel
 
@@ -117,7 +125,23 @@ def test_every_production_provider_has_a_usage_adapter() -> None:
     """Check that no provider may run in production without a meter."""
     for name, entry in PROVIDERS.items():
         if entry.production_allowed:
-            assert name in USAGE_ADAPTERS
+            assert usage_adapter(name) is not None
+
+
+def test_usage_adapter_finds_a_provider_by_its_billing_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check the lookup: Vercel's module, no module, a bad name, and a broken adapter."""
+    assert isinstance(usage_adapter("vercel"), VercelUsage)
+    assert usage_adapter("nope") is None
+    assert usage_adapter("../vercel") is None
+    monkeypatch.setitem(sys.modules, "core.billing.bare_usage", types.ModuleType("core.billing.bare_usage"))
+    assert usage_adapter("bare") is None
+
+    def missing_dependency(name: str) -> None:
+        raise ModuleNotFoundError("No module named 'vendor_sdk'", name="vendor_sdk")
+
+    monkeypatch.setattr(metering.importlib, "import_module", missing_dependency)
+    with pytest.raises(ModuleNotFoundError):
+        usage_adapter("vercel")
 
 
 def test_lease_reserves_all_slices_and_returns_the_untaken_ones(database: Engine) -> None:
@@ -286,11 +310,18 @@ def test_failed_close_can_be_retried(database: Engine, monkeypatch: pytest.Monke
 
 
 def test_lease_that_does_not_fit_reserves_nothing(database: Engine) -> None:
-    """Check that admission refuses the whole lease, not a part of it."""
-    runtime = _runtime(database, limit=1)
+    """Check that admission refuses the whole lease, not a part of it.
+
+    Setup work is bounded by the wallet, not by the run's limit (SKY-925), so
+    a 1-cent balance refuses a lease just above 1 cent.
+    """
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 1
+        session.commit()
+    runtime = _runtime(database)
     per_box = VercelUsage().quote(CREATE).maximum.total
     boxes = int(Decimal(1) / per_box) + 1
-    with pytest.raises(BudgetInsufficientError):
+    with pytest.raises(AccountFundsError):
         PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-f", boxes=boxes)
     assert _reserved_units(runtime) == 0
     assert _states(database) == []

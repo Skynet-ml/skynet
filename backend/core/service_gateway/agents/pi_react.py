@@ -43,6 +43,7 @@ from dspy.adapters.base import _tool_result_content
 from dspy.adapters.types.tool import ToolCalls
 from dspy.utils.exceptions import AdapterParseError, format_error_for_lm
 
+from ...billing.model_dispatch import mark_lm_prompt_cache
 from ..optimization.retrying_react import PARSE_RETRY_ATTEMPTS
 from .agent_program import SUBMIT_TOOL, AgentProgram, AppendOnlyChatAdapter
 from .pi_bridge import PiEventTranslator, ToolOutcome, run_pi_turn, turn_stopped
@@ -344,6 +345,11 @@ class ReactOnPi:
         if not taken or not await asyncio.to_thread(claim_delivery, inbox, taken):
             return
         text = "\n\n".join(message for _, message in taken)
+        if inbox.on_taken is not None:
+            try:
+                await asyncio.to_thread(inbox.on_taken, text)
+            except Exception:
+                logger.exception("Failed to store a steered user message")
         content = self._adapter.format_user_message_content(self._signature, {inbox.input_field: text})
         self._steers.append((anchor, {"role": "user", "content": content}))
         inbox.emit(
@@ -357,7 +363,8 @@ class ReactOnPi:
             tail: Pi's messages after its first user message.
 
         Returns:
-            The chat messages for the model.
+            The chat messages for the model, with prompt-cache breakpoints on
+            a route that takes them.
         """
         messages = list(self._prefix)
         steers = iter(self._steers)
@@ -370,7 +377,7 @@ class ReactOnPi:
                 messages.append(message)
         if self._reminder is not None:
             messages.append(self._reminder)
-        return messages
+        return mark_lm_prompt_cache(str(getattr(self._lm, "model", "")), messages)
 
     def _call_kwargs(self) -> dict[str, Any]:
         """Return the LM kwargs for the next call, forcing ``submit`` at the budget.
@@ -531,7 +538,8 @@ class ReactOnPi:
                     }
                     for index, call in enumerate(calls)
                 ]
-                return output_chunk({"text": "", "tool_calls": wire})
+                reasoning = output.get("reasoning_content") if isinstance(output, dict) else None
+                return output_chunk({"text": "", "reasoning_content": reasoning, "tool_calls": wire})
             problem = "the reply has no tool call"
         raise AgentReplyFormatError(
             f"The model did not answer in the tool-call text protocol after {attempts} attempts: {problem}"

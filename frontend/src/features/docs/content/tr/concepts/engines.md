@@ -68,7 +68,6 @@ Bir kodlama ajanı puanlayıcınızdan gelen geri bildirimi okur ve sürüme yam
 | Ayar                                  | Varsayılan | Aralık                                                          |
 | ------------------------------------- | ---------- | --------------------------------------------------------------- |
 | Maksimum puanlayıcı çalıştırması      | 200        | 1 ila 100000                                    |
-| Şu puanda dur                         | Kapalı     | 0 veya daha fazla                                               |
 | Maks. yineleme                        | Kapalı     | 1 ila 1000. Yalnızca Meta-Harness, AutoSaddler ve ShinkaEvolve. |
 
 Bir puanlayıcı çalıştırması, puanlayıcınızın tek bir vaka üzerinde bir kez çağrılmasıdır. Başlangıç sürümünün ve kazananın son yeniden puanlaması **Maksimum puanlayıcı çalıştırması** sınırına sayılmaz.

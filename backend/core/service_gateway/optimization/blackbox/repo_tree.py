@@ -8,6 +8,7 @@ the agent's workspace and the trusted scorer apply the same rules.
 from __future__ import annotations
 
 import base64
+import logging
 import posixpath
 import re
 import subprocess
@@ -18,6 +19,8 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 # Payload key naming the packed tree. The parent sets it to a file on its own
 # disk; the sandbox supervisor uploads that file and rewrites the key into
 # guest chunk paths. Secrets never ride in a payload, only their names do.
@@ -25,6 +28,17 @@ REPO_SNAPSHOT_KEY = "_repo_snapshot"
 # Uploads are text and capped at 16 MiB per request: 9 MiB of bytes is 12 MiB of base64.
 ARCHIVE_CHUNK_BYTES = 9 * 1024 * 1024
 _GIT_IDENTITY = ["-c", "user.name=app", "-c", "user.email=app@localhost", "-c", "commit.gpgsign=false"]
+# A stored tree may hold a folder shaped as a bare repository (``HEAD``,
+# ``objects/``, ``refs/``, ``config``). Git would read that folder's config, and
+# a filter, hook or fsmonitor in it would run code when git runs there. Every
+# git call in the scorer, workspace, staging and engine runner paths that can
+# run in a tree with no ``.git`` of its own sets this, so git refuses such a
+# folder. The harness shell lines are out of scope: the agent runs its own code
+# in that box anyway. A ``git -C repo`` call on a checkout with its
+# own ``.git`` does not need it: git finds that ``.git`` first. Git reads
+# ``safe.bareRepository`` only from protected config, so a repository's own
+# config cannot turn it off (SKY-812).
+SAFE_GIT = ("-c", "safe.bareRepository=explicit")
 
 # A run with a constraints file answers every refused action with this fixed
 # text, both in the sandbox and in the parent, and logs the reason as a
@@ -34,7 +48,7 @@ ILLEGAL_ACTION_MESSAGE = (
     " because it wastes time."
 )
 RULE_BLOCK_EVENT = "rule.block"
-PATH_RULE = "optimize.toml [paths]"
+PATH_RULE = "ascent.toml [paths]"
 
 
 def rule_block_record(reason: str) -> dict[str, Any]:
@@ -67,11 +81,43 @@ EXPLOITS_DIR = ".optimize/exploits"
 MAX_PATCH_BYTES = 8 * 1024 * 1024
 
 _GITLINK_MODE = "160000"
-_MODE_LINE = re.compile(r"^(?:new file mode|deleted file mode|old mode|new mode) (\d{6})$")
-_INDEX_MODE = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+ (\d{6})$")
-_PATH_PREFIXES = ("rename from ", "rename to ", "copy from ", "copy to ")
+_SYMLINK_MODE = "120000"
+_MODE_PREFIXES = ("new file mode", "deleted file mode", "old mode", "new mode", "index ")
+# ``git apply`` reads a mode as any octal number and ignores what follows a
+# space, so ``0120000`` or ``120644`` also make a link. Git writes only these
+# four modes, so any other mode line is refused as unreadable (SKY-906).
+_MODE_LINE = re.compile(r"^(?:new file mode|deleted file mode|old mode|new mode) (100644|100755|120000|160000)\s*$")
+_INDEX_MODE = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+(?: (100644|100755|120000|160000))?\s*$")
+# ``git apply`` still reads the old ``rename old``/``rename new`` spelling, so
+# a hand-written patch could move a file past every path rule (SKY-906).
+_PATH_PREFIXES = ("rename from ", "rename to ", "rename old ", "rename new ", "copy from ", "copy to ")
 _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+# Git decodes only these escapes in a quoted name (quote.c, unquote_c_style).
+_GIT_QUOTED = re.compile(r'"(?:[^"\\]|\\[abfnrtv"\\]|\\[0-3][0-7]{2})*"')
 _FILE_LINE = re.compile(r'^(?:--- (?:a/|"a/|/dev/null)|\+\+\+ (?:b/|"b/|/dev/null))')
+# A model writes plain diffs and their hunk headers, so the counts are
+# untrusted: the digits are bounded.
+HUNK_HEADER = re.compile(r"^@@ -\d{1,9}(?:,(\d{1,9}))? \+\d{1,9}(?:,(\d{1,9}))? @@", re.MULTILINE)
+# ``git apply`` ends a ``diff --git`` header at the first line it does not
+# know and then reads a later ``---``/``+++`` pair as a plain diff, which cuts
+# a trailing date off the name. Git keeps reading the header only at these
+# lines; ``Binary files`` and ``GIT binary patch`` end it and start the binary
+# part (SKY-906).
+_HEADER_LINES = (
+    "old mode ",
+    "new mode ",
+    "deleted file mode ",
+    "new file mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "index ",
+    "--- ",
+    "+++ ",
+    "Binary files ",
+    "GIT binary patch",
+    "@@ -",
+    *_PATH_PREFIXES,
+)
 
 
 def _unquote(token: str) -> str:
@@ -82,9 +128,20 @@ def _unquote(token: str) -> str:
 
     Returns:
         The path's text.
+
+    Raises:
+        ValueError: A quoted token that git cannot decode.
     """
     if not (len(token) >= 2 and token.startswith('"') and token.endswith('"')):
         return token
+    if not _GIT_QUOTED.fullmatch(token):
+        # Git reads a name with any other escape, such as ``\x73``, as raw text
+        # with its quotes, so Python's wider decode would check another path (SKY-906).
+        raise ValueError(f"git cannot decode the quoted name {token!r}")
+    if any(ord(char) > 127 for char in token):
+        # Git reads raw bytes between the quotes as they are, and the decode
+        # below would read them as Latin-1 (SKY-906).
+        raise ValueError(f"git reads the quoted name {token!r} another way")
     raw = token[1:-1].encode("latin-1", "backslashreplace")
     return raw.decode("unicode_escape").encode("latin-1").decode("utf-8", "replace")
 
@@ -149,6 +206,9 @@ def patch_paths(patch: str) -> list[str]:
 
     Returns:
         The distinct paths in first-seen order.
+
+    Raises:
+        ValueError: A quoted name that git cannot decode.
     """
     found: list[str] = []
     # Hunk bodies can hold lines that look like headers ("--- a/x" is a
@@ -171,6 +231,118 @@ def patch_paths(patch: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _plain_name(value: str) -> bool:
+    """Report whether ``git apply`` reads a header path as all of ``value``.
+
+    Git ends an unquoted name at a carriage return and ignores any text after
+    a quoted name's closing quote, so ``secret.txt\\r`` or ``"secret.txt" x``
+    would move a protected file that the path rules never see (SKY-906).
+
+    Args:
+        value: A rename or copy line after its ``rename from ``-style prefix,
+            or a ``---``/``+++`` name with its ``a/`` or ``b/`` prefix.
+
+    Returns:
+        Whether the whole value is one quoted name, or a bare name with no
+        control characters.
+    """
+    if value.startswith('"'):
+        return len(value) >= 2 and value.endswith('"') and _split_quoted(value) == [value]
+    return not any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def _misread(path: str) -> bool:
+    """Report whether git writes another name than the decoded ``path``.
+
+    A name that is not UTF-8 decodes to U+FFFD, and git ends a quoted name at
+    a ``\\000`` byte. The path rules and the link checks would then test
+    another name than git writes (SKY-906).
+
+    Args:
+        path: A path that :func:`patch_paths` decoded.
+
+    Returns:
+        Whether the path holds U+FFFD or a NUL.
+    """
+    return "\ufffd" in path or "\x00" in path
+
+
+def _plain_header_path(old: str, new: str) -> tuple[str, str] | None:
+    """Read the one path and the mode line of a plain ``---``/``+++`` header pair.
+
+    Args:
+        old: The ``---`` line after its marker.
+        new: The ``+++`` line after its marker.
+
+    Returns:
+        The path and the mode line it needs (empty for a changed file), or
+        ``None`` when the pair names no single ``a/``/``b/`` path.
+    """
+    old, new = old.split("\t", 1)[0], new.split("\t", 1)[0]
+    # git apply drops a CR, end whitespace or a date after a space, which the
+    # path checks keep: a CRLF ``a/p.py\r`` would pass a rule on ``p.py`` and
+    # still change it. So a path with any whitespace gets no repair.
+    if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in old + new):
+        return None
+    before = None if old == "/dev/null" else old[2:] if old.startswith("a/") else ""
+    after = None if new == "/dev/null" else new[2:] if new.startswith("b/") else ""
+    if before is None and after:
+        return after, "new file mode 100644"
+    if after is None and before:
+        # A plain diff gives no mode, so git refuses to delete a link or a
+        # submodule with this line ("wrong type"): that fails safe.
+        return before, "deleted file mode 100644"
+    if before and before == after:
+        return before, ""
+    return None
+
+
+def with_git_headers(patch: str) -> str:
+    """Give each file of a plain unified diff the ``diff --git`` line that the path check needs.
+
+    Models often write ``--- a/X``/``+++ b/X`` with no ``diff --git`` line, and
+    the SKY-353 check refuses any header outside a ``diff --git`` section.
+    Hunk lines are counted, so a hunk line that looks like a header gets none.
+
+    Args:
+        patch: A unified diff.
+
+    Returns:
+        The diff with a ``diff --git`` line (and a mode line for a new or
+        deleted file) before each header pair; unchanged when it already has a
+        ``diff --git`` line, any pair names no single ``a/``/``b/`` path or has
+        no hunk right after it, or a hunk line is broken.
+    """
+    if re.search(r"(?m)^diff --git ", patch):
+        return patch
+    lines = patch.split("\n")
+    out: list[str] = []
+    old = new = 0
+    for index, line in enumerate(lines):
+        if old > 0 or new > 0:
+            tag = line[:1] or " "
+            if tag not in " -+\\":
+                return patch
+            old -= tag in " -"
+            new -= tag in " +"
+        elif line.startswith("--- ") and index + 1 < len(lines) and lines[index + 1].startswith("+++ "):
+            header = _plain_header_path(line[4:], lines[index + 1][4:])
+            # A mode line after the pair would follow the inserted one, and git
+            # takes the last: ``new file mode 120000`` would then make a link.
+            if header is None or index + 2 >= len(lines) or not HUNK_HEADER.match(lines[index + 2]):
+                return patch
+            path, mode = header
+            out.extend([f"diff --git a/{path} b/{path}", *([mode] if mode else [])])
+        # A header with more digits than this regex takes is not a hunk here,
+        # so the repair may mark lines git reads as hunk lines: git then calls
+        # the patch corrupt, and the checker sees every inserted path.
+        elif hunk := HUNK_HEADER.match(line):
+            old = 1 if hunk.group(1) is None else int(hunk.group(1))
+            new = 1 if hunk.group(2) is None else int(hunk.group(2))
+        out.append(line)
+    return "\n".join(out)
+
+
 def _unreadable(patch: str) -> bool:
     """Report whether a patch holds a file header that :func:`patch_paths` cannot read.
 
@@ -178,7 +350,8 @@ def _unreadable(patch: str) -> bool:
     ``---``/``+++`` diffs found between hunks, so a header with other prefixes
     or a header outside a ``diff --git`` section could change a hidden or
     protected file unseen (SKY-353). Hunk lines are counted, because a hunk
-    body can hold lines that look like headers.
+    body can hold lines that look like headers. A header line that git does
+    not know also counts, because git ends the header there.
 
     Args:
         patch: ``git diff`` output.
@@ -190,10 +363,11 @@ def _unreadable(patch: str) -> bool:
     for section in re.split(r"(?m)^(?=diff --git )", patch):
         if section.startswith("diff --git "):
             header = section.split("\n", 1)[0][len("diff --git ") :]
-            renamed = re.search(r"(?m)^(?:rename|copy) (?:from|to) ", section)
+            renamed = re.search(r"(?m)^(?:rename (?:from|to|old|new)|copy (?:from|to)) ", section)
             if not _header_paths(header) and not (header.startswith(("a/", '"a/')) and renamed):
                 return True
-    for line in patch.split("\n"):
+    lines = patch.split("\n")
+    for number, line in enumerate(lines):
         if state == "hunk" and (old > 0 or new > 0):
             tag = line[:1] or " "
             if tag not in " -+\\":
@@ -203,10 +377,22 @@ def _unreadable(patch: str) -> bool:
             continue
         if line.startswith("diff --git "):
             state = "header"
-        elif line.startswith(("--- ", "+++ ")):
-            if state != "header" or not _FILE_LINE.match(line):
+        elif state == "header" and (
+            (not line.startswith(_HEADER_LINES) and (line or number < len(lines) - 1))
+            or (line.startswith("@@") and not _HUNK.match(line))
+        ):
+            # Git also ends the header at a broken ``@@`` line (SKY-906).
+            return True
+        elif state == "header" and (prefix := next((p for p in _PATH_PREFIXES if line.startswith(p)), None)):
+            if not _plain_name(line[len(prefix) :]):
                 return True
-        elif line.startswith("GIT binary patch") and state == "header":
+        elif line.startswith(("--- ", "+++ ")):
+            # Git also ends a bare name here at a carriage return (SKY-906).
+            if state != "header" or not _FILE_LINE.match(line) or not _plain_name(line[4:].split("\t", 1)[0]):
+                return True
+        elif line.startswith(("GIT binary patch", "Binary files ")) and state == "header":
+            # Git ends the header at ``Binary files``, and its own output has
+            # no file line after it (SKY-906).
             state = "binary"
         elif (hunk := _HUNK.match(line)) and state in ("header", "hunk"):
             state, old, new = "hunk", int(hunk.group(1) or 1), int(hunk.group(2) or 1)
@@ -239,6 +425,8 @@ def patch_violations(
     editable paths cover it. So is a file at a parent of it, such as a
     ``.optimize`` file or symlink, because the suite could then not be added
     to the published patch. Case variants count, for case-insensitive disks.
+    A symlink that the patch adds, makes from a file, or retargets is a
+    violation in every folder; deleting one is allowed.
 
     Args:
         patch: ``git diff`` output for one version.
@@ -258,19 +446,41 @@ def patch_violations(
     editable, readonly, protected = list(editable_paths), list(readonly_paths), list(protected_paths)
     exploits = [root.casefold() for root in (EXPLOITS_DIR, *exploit_paths)]
     problems: list[str] = []
-    in_header = False
+    gitlink = symlink = odd_mode = False
+    in_header = old_link = new_mode = False
     for line in patch.split("\n"):
         if line.startswith("diff --git "):
-            in_header = True
+            # With no ``new mode`` line, ``git apply`` gives the new side the old
+            # mode, so ``old mode 120000`` alone retargets or moves a link.
+            symlink = symlink or (old_link and not new_mode)
+            in_header, old_link, new_mode = True, False, False
         elif line.startswith(("@@", "GIT binary patch")):
             in_header = False
-        mode = (_MODE_LINE.match(line) or _INDEX_MODE.match(line)) if in_header else None
-        if mode and mode.group(1) == _GITLINK_MODE:
-            problems.append("Submodules are read-only; the change adds, moves, or updates one.")
-            break
-    if _unreadable(patch):
+        if not in_header or not line.startswith(_MODE_PREFIXES):
+            continue
+        mode = _MODE_LINE.match(line) or _INDEX_MODE.match(line)
+        odd_mode = odd_mode or mode is None
+        gitlink = gitlink or bool(mode and mode.group(1) == _GITLINK_MODE)
+        old_link = old_link or bool(mode and mode.group(1) == _SYMLINK_MODE and line.startswith("old mode"))
+        new_mode = new_mode or line.startswith("new mode")
+        # Only a link's new side can point outside the tree, so deleting a link
+        # or turning one into a file stays allowed (SKY-906). An index line names
+        # the mode only when both sides share it, so 120000 there retargets a link.
+        symlink = symlink or bool(
+            mode and mode.group(1) == _SYMLINK_MODE and not line.startswith(("deleted file mode", "old mode"))
+        )
+    symlink = symlink or (old_link and not new_mode)
+    if gitlink:
+        problems.append("Submodules are read-only; the change adds, moves, or updates one.")
+    if symlink:
+        problems.append("Symlinks are not allowed; the change adds a symlink, turns a file into one, or retargets one.")
+    try:
+        paths: list[str] | None = patch_paths(patch)
+    except ValueError:
+        paths = None
+    if odd_mode or paths is None or _unreadable(patch) or any(map(_misread, paths)):
         problems.append("The change has a file header Skynet cannot read, so it cannot check the files it touches.")
-    for path in patch_paths(patch):
+    for path in paths or []:
         parts = path.split("/")
         if path.startswith("/") or any(part in ("", ".", "..") for part in parts) or ".git" in parts:
             problems.append(f"'{path}' is not a path inside the repository.")
@@ -364,6 +574,27 @@ def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path)
     return destination
 
 
+def extract_folder(archive: Path, folder: str, destination: Path) -> Path:
+    """Unpack one folder of a packed tree, such as a Dockerfile's build context (SKY-737).
+
+    Args:
+        archive: Packed full tree.
+        folder: Repository-relative folder; ``.`` is the whole tree.
+        destination: Empty or missing folder the files go in, at their repository paths.
+
+    Returns:
+        The folder's path under ``destination``.
+    """
+    root = _member_path(folder)
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive) as tree:
+        members = [member for member in tree if inside(_member_path(member.name), (root,))]
+        tree.extractall(destination, members=members, filter="data")
+    target = destination / root
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def linked_hidden_paths(archive: Path, hidden_paths: Iterable[str]) -> list[str]:
     """Find the hidden paths that a link could carry into the agent's tree.
 
@@ -397,6 +628,48 @@ def linked_hidden_paths(archive: Path, hidden_paths: Iterable[str]) -> list[str]
     return [path for path in hidden if fold(path) in linked or inside(fold(path), symlinks)]
 
 
+def archive_links(archive: Path) -> frozenset[str]:
+    """List the symlinks of a packed tree.
+
+    Args:
+        archive: Packed tree.
+
+    Returns:
+        The repository-relative path of every symlink member.
+    """
+    with tarfile.open(archive) as source:
+        return frozenset(_member_path(member.name) for member in source if member.issym())
+
+
+def link_edits(patch: str, links: Iterable[str]) -> list[str]:
+    """List the shipped symlinks that a patch retargets, moves, or copies.
+
+    A section with no mode takes the mode from the checkout, so a plain hunk,
+    a rename or a copy of a shipped link keeps a link, with the new target or
+    at the new name (SKY-906). A section that deletes the link is allowed,
+    and so is a new file at its path: git writes a link that becomes a file
+    as a deletion and a new file, and :func:`patch_violations` already
+    refuses a new link.
+
+    Args:
+        patch: ``git diff`` output that :func:`patch_violations` allows.
+        links: Repository-relative paths of the symlinks in the shipped tree.
+
+    Returns:
+        Each touched symlink path, in first-seen order.
+
+    Raises:
+        ValueError: A quoted name that git cannot decode.
+    """
+    shipped = set(links)
+    found: list[str] = []
+    for section in re.split(r"(?m)^(?=diff --git )", patch):
+        header = re.split(r"(?m)^(?:@@|GIT binary patch)", section, maxsplit=1)[0]
+        if section.startswith("diff --git ") and not re.search(r"(?m)^(?:deleted|new) file mode ", header):
+            found.extend(path for path in patch_paths(section) if path in shipped)
+    return list(dict.fromkeys(found))
+
+
 def drop_paths(patch: str, hidden_paths: Iterable[str]) -> str:
     """Remove the file sections of a patch that touch a hidden path.
 
@@ -409,13 +682,38 @@ def drop_paths(patch: str, hidden_paths: Iterable[str]) -> str:
         hidden_paths: Repository-relative files and folders the version may not change.
 
     Returns:
-        The patch without those sections; unchanged when nothing is hidden.
+        The patch without those sections; unchanged when nothing is hidden;
+        empty when a section deletes a hidden file.
     """
     hidden = list(hidden_paths)
     if not hidden or not patch:
         return patch
     sections = re.split(r"(?m)^(?=diff --git )", patch)
-    return "".join(section for section in sections if not any(inside(path, hidden) for path in patch_paths(section)))
+    dropped = [section for section in sections if _touches(section, hidden)]
+    # ``version_patch`` writes a move as a delete plus a new file, so the new
+    # file can carry the metric's text under a visible name (SKY-906).
+    if any(re.search(r"(?m)^deleted file mode ", section) for section in dropped):
+        logger.warning("Served patch dropped: it deletes a hidden file, so a new file may hold its text")
+        return ""
+    return "".join(section for section in sections if section not in dropped)
+
+
+def _touches(section: str, hidden: list[str]) -> bool:
+    """Report whether one patch section may change a hidden path.
+
+    Args:
+        section: One ``diff --git`` section, or the text before the first one.
+        hidden: Repository-relative files and folders the version may not change.
+
+    Returns:
+        Whether a path of the section lies under ``hidden``, or a quoted name
+        in it is one that git cannot decode, so the section could write any path.
+    """
+    try:
+        paths = patch_paths(section)
+    except ValueError:
+        return True
+    return any(inside(path, hidden) for path in paths)
 
 
 def archive_chunks(archive: Path) -> Iterator[str]:
@@ -446,7 +744,9 @@ def _git(arguments: Sequence[str], cwd: Path) -> str:
     Raises:
         RuntimeError: When git fails.
     """
-    result = subprocess.run(["git", *_GIT_IDENTITY, *arguments], cwd=cwd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["git", *SAFE_GIT, *_GIT_IDENTITY, *arguments], cwd=cwd, capture_output=True, text=True, check=False
+    )
     if result.returncode != 0:
         raise RuntimeError(f"git {arguments[0]} failed: {(result.stderr or result.stdout).strip()[-2000:]}")
     return result.stdout
@@ -519,6 +819,9 @@ def version_patch(checkout: Path) -> str:
     _git(["add", "--all"], checkout)
     # The agent can set git config in its checkout; other path prefixes would
     # hide which files a version touches, so the scorer would refuse it.
+    # A rename entry names no file mode, so a moved link would hide from the
+    # symlink check; ``--no-renames`` writes it as a new 120000 file (SKY-906).
+    # The cost: a moved file now counts twice against MAX_PATCH_BYTES.
     pinned = ["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"]
     return _git(
         [
@@ -528,12 +831,26 @@ def version_patch(checkout: Path) -> str:
             "--binary",
             "--no-color",
             "--no-ext-diff",
+            "--no-renames",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             BASE_REF,
         ],
         checkout,
     )
+
+
+def forget_file_stats(checkout: Path) -> None:
+    """Reload the index from the shipped tree so git hashes every file again.
+
+    Use it after files were replaced in place with the same mtime. Linux can
+    reuse the freed inode, so a same-size edit keeps the stat that git cached,
+    and ``git add`` skips it (SKY-843).
+
+    Args:
+        checkout: Folder made by :func:`unpack_tree`.
+    """
+    _git(["read-tree", BASE_REF], checkout)
 
 
 def reset_tree(checkout: Path) -> None:
@@ -554,12 +871,23 @@ def apply_patch(checkout: Path, patch: str) -> None:
         patch: ``git diff --binary`` output.
 
     Raises:
-        RuntimeError: When the patch does not apply.
+        RuntimeError: When the patch has a header Skynet cannot read, does
+            not apply, or leaves a symlink at a path it touches.
     """
     if not patch.strip():
         return
+    # A hardening fix can be a plain diff, which the header check refuses.
+    patch = with_git_headers(patch)
+    # The check after the apply trusts the paths read here, so a header that
+    # git reads another way must stop the apply first (SKY-906).
+    try:
+        paths = patch_paths(patch)
+    except ValueError as error:
+        raise RuntimeError("The change has a file header Skynet cannot read.") from error
+    if _unreadable(patch) or any(map(_misread, paths)):
+        raise RuntimeError("The change has a file header Skynet cannot read.")
     result = subprocess.run(
-        ["git", "apply", "--binary", "--whitespace=nowarn", "-"],
+        ["git", *SAFE_GIT, "apply", "--binary", "--whitespace=nowarn", "-"],
         cwd=checkout,
         input=patch,
         capture_output=True,
@@ -568,3 +896,11 @@ def apply_patch(checkout: Path, patch: str) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"The change does not apply cleanly: {(result.stderr or result.stdout).strip()[-2000:]}")
+    # A section with no mode takes the mode from the checkout, so a plain hunk
+    # or rename can retarget or move a link the shipped tree already has. Only
+    # the applied tree shows that (SKY-906).
+    linked = [path for path in paths if (checkout / path).is_symlink()]
+    for path in linked:
+        (checkout / path).unlink()
+    if linked:
+        raise RuntimeError(f"Symlinks are not allowed; the change leaves one at {linked[0]!r}.")

@@ -17,12 +17,14 @@ const {
   WIZARD_V2_STEPS,
   deleteWorkspaceFile,
   emptyRepoDraft,
+  fileProposerCommand,
   initialWizardV2State,
   optimizerModelsReady,
   defaultModels,
   presetEngine,
   taskIssue,
   withRepository,
+  withTaskPatch,
   wizardSteps,
   withDefaultModels,
   withLevel,
@@ -288,7 +290,15 @@ test("only extra files can be deleted", () => {
   assert.equal(deleteWorkspaceFile(ws, "run.py"), null);
   assert.equal(deleteWorkspaceFile(ws, "metric.py"), null);
   assert.equal(deleteWorkspaceFile(ws, "nope.py"), null);
-  assert.deepEqual(deleteWorkspaceFile(ws, "helpers.py"), { files: {} });
+  assert.deepEqual(deleteWorkspaceFile(ws, "helpers.py"), { files: {}, filesBase: undefined });
+});
+
+test("deleting the last draft file forgets the commit the drafts were read at", () => {
+  const files = { "a.py": "a = 1\n", "b.py": "b = 1\n" };
+  const ws = { ...initialWizardV2State().workspace, files, filesBase: "c".repeat(40) };
+  assert.deepEqual(deleteWorkspaceFile(ws, "a.py"), { files: { "b.py": "b = 1\n" } });
+  const last = { ...ws, files: { "b.py": "b = 1\n" } };
+  assert.deepEqual(deleteWorkspaceFile(last, "b.py"), { files: {}, filesBase: undefined });
 });
 
 test("a new file's path must be relative, clean, a known suffix and free", () => {
@@ -338,8 +348,87 @@ test("withRepository picks a repository from its default branch", () => {
   assert.equal(withRepository(pinned, "acme/old"), pinned);
 });
 
+test("withTaskPatch drops the draft files when the repository, branch or commit moves", () => {
+  const start = initialWizardV2State();
+  const repo = { ...emptyRepoDraft(), repository: "acme/bot", branch: "main" };
+  const files = { "ascent.toml": "version = 1\n", "src/app.py": "x = 2\n" };
+  const filesBase = "c".repeat(40);
+  const state = {
+    ...start,
+    task: { ...start.task, repo },
+    workspace: { ...start.workspace, files, filesBase },
+  };
+
+  assert.deepEqual(withTaskPatch(state, { objective: "Faster" }).workspace.files, files);
+  assert.equal(withTaskPatch(state, { objective: "Faster" }).workspace.filesBase, filesBase);
+  assert.deepEqual(withTaskPatch(state, { repo: { ...repo, setupCommand: "npm ci" } }).workspace.files, files);
+  for (const moved of [
+    withRepository(repo, "acme/other"),
+    { ...repo, branch: "dev" },
+    { ...repo, commit: "a".repeat(40) },
+    { ...repo, provider: "gitlab" as const },
+  ]) {
+    const next = withTaskPatch(state, { repo: moved });
+    assert.deepEqual(next.workspace.files, {});
+    assert.equal(next.workspace.filesBase, undefined);
+    assert.equal(next.task.repo, moved);
+  }
+});
+
+test("withTaskPatch keeps the draft files for the branch and commit they were read at", () => {
+  const start = initialWizardV2State();
+  const repo = { ...emptyRepoDraft(), repository: "acme/bot", branch: "main" };
+  const files = { "src/app.py": "x = 2\n" };
+  const filesBase = "c0ffee".padEnd(40, "1");
+  const state = {
+    ...start,
+    task: { ...start.task, repo },
+    workspace: { ...start.workspace, files, filesBase },
+  };
+
+  for (const kept of [
+    { ...repo },
+    { ...repo, commit: filesBase },
+    { ...repo, commit: filesBase.slice(0, 7).toUpperCase() },
+    { ...repo, branch: "dev", commit: filesBase },
+  ]) {
+    const next = withTaskPatch(state, { repo: kept });
+    assert.deepEqual(next.workspace.files, files);
+    assert.equal(next.workspace.filesBase, filesBase);
+  }
+  for (const moved of [
+    { ...repo, commit: filesBase.slice(0, 6) },
+    { ...repo, commit: "d".repeat(40) },
+    { ...repo, repository: "acme/other", commit: filesBase },
+  ]) {
+    assert.deepEqual(withTaskPatch(state, { repo: moved }).workspace.files, {});
+  }
+});
+
 test("withRepository clears the created-by-Skynet flag for another repository", () => {
   const created = { ...emptyRepoDraft(), repository: "acme/new", createdBySkynet: true };
   assert.equal(withRepository(created, "acme/other").createdBySkynet, false);
   assert.equal(withRepository(created, "acme/new").createdBySkynet, true);
+});
+
+test("the contract file's proposer runs until the user picks a built-in agent (SKY-771)", () => {
+  const command = ["python", "agent/propose.py"];
+  const { proposer } = initialWizardV2State().optimizer;
+  // A fresh setup picks no agent, so the file's command is selected by default.
+  assert.deepEqual(fileProposerCommand(proposer, command, "autoresearch"), command);
+  assert.deepEqual(fileProposerCommand(proposer, command, "meta_harness"), command);
+  // A picked agent or host CLI replaces the file's command (SKY-753).
+  assert.equal(fileProposerCommand({ ...proposer, harness: "codex" }, command, "autoresearch"), null);
+  assert.equal(fileProposerCommand({ ...proposer, host_cli: "claude" }, command, "autoresearch"), null);
+  // A contract with no command, or no answer yet, keeps today's picker.
+  assert.equal(fileProposerCommand(proposer, null, "autoresearch"), null);
+  assert.equal(fileProposerCommand(proposer, [], "autoresearch"), null);
+});
+
+test("only AutoResearch and Meta-Harness offer the contract file's proposer (SKY-816)", () => {
+  const proposer = initialWizardV2State().optimizer.proposer;
+  const command = ["bash", "propose.sh"];
+  // The server refuses [proposer] entry for every other engine, so the picker keeps its old item.
+  assert.equal(fileProposerCommand(proposer, command, "auto"), null);
+  assert.equal(fileProposerCommand(proposer, command, "autosaddler"), null);
 });

@@ -1,4 +1,7 @@
-"""Tests that a newer next-message suggestion stops the older CLI run and gets its own answer."""
+"""Tests that a newer next-message suggestion stops the older CLI run and gets its own answer.
+
+They also check that a chat title runs in its own pool, which a suggestion never stops.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ from typing import Any
 import pytest
 
 from core.billing import cli_dispatch
-from core.billing.cli_dispatch import NEXT_PROMPT_ROLE, CliDispatcher
+from core.billing.cli_dispatch import CHAT_TITLE_ROLE, NEXT_PROMPT_ROLE, CliDispatcher
 from core.billing.cli_runners import CliCompletion, CliRunError
 from core.billing.tests.test_cli_runners import local_settings
 
@@ -17,13 +20,15 @@ MODEL = "anthropic/claude-haiku-5.5"
 
 
 class _FakeClaude:
-    """A CLI runner whose first call streams until it is stopped and whose later calls answer."""
+    """A CLI runner whose first call streams until it is stopped or released and whose later calls answer."""
 
     def __init__(self) -> None:
         """Set up the sync points."""
         self.first_started = threading.Event()
+        self.release_first = threading.Event()
         self.first_error: list[BaseException] = []
         self.calls = 0
+        self.call_kwargs: list[dict[str, Any]] = []
         self.lock = threading.Lock()
 
     def __call__(self, model_arg: str, prompt: str, schema: Any, settings: Any, cwd: Path, **kwargs: Any) -> Any:
@@ -35,7 +40,7 @@ class _FakeClaude:
             schema: Unused.
             settings: Unused.
             cwd: Unused.
-            **kwargs: ``on_delta`` and ``think``.
+            **kwargs: ``think`` and, for a suggestion, ``on_delta``.
 
         Returns:
             The completion.
@@ -46,13 +51,16 @@ class _FakeClaude:
         with self.lock:
             self.calls += 1
             first = self.calls == 1
-        on_delta = kwargs["on_delta"]
+            self.call_kwargs.append(kwargs)
+        on_delta = kwargs.get("on_delta")
         if first:
             self.first_started.set()
             try:
                 for _ in range(500):
-                    on_delta("content", ".")
-                    threading.Event().wait(0.01)
+                    if on_delta is not None:
+                        on_delta("content", ".")
+                    if self.release_first.wait(0.01):
+                        return CliCompletion(text=prompt, prompt_tokens=1, completion_tokens=1, model_ms=1)
             except CliRunError as error:
                 self.first_error.append(error)
                 raise
@@ -126,3 +134,65 @@ def test_labels_still_fail_at_once_when_their_pool_is_busy(tmp_path: Path, monke
             dispatcher._run_label("claude", "claude-haiku-5-5", "label", None)
     finally:
         slot.release()
+
+
+def _run_in_thread(
+    dispatcher: CliDispatcher, prompt: str, outcome: list[BaseException | CliCompletion]
+) -> threading.Thread:
+    """Start one side call in a thread that keeps its outcome.
+
+    Args:
+        dispatcher: The dispatcher to run.
+        prompt: The prompt, which the fake echoes back.
+        outcome: The list that gets the completion or the error.
+
+    Returns:
+        The started thread.
+    """
+
+    def run() -> None:
+        """Run the call and keep its outcome."""
+        try:
+            outcome.append(dispatcher._run_label("claude", "claude-haiku-5-5", prompt, None))
+        except CliRunError as error:
+            outcome.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def test_suggestion_does_not_stop_a_running_chat_title(fake: tuple[_FakeClaude, CliDispatcher], tmp_path: Path) -> None:
+    """A suggestion that starts while a chat title runs leaves the title alone, and both answer."""
+    runner, suggestion = fake
+    title = CliDispatcher(None, "claude", MODEL, CHAT_TITLE_ROLE, local_settings(tmp_path))
+    outcome: list[BaseException | CliCompletion] = []
+    thread = _run_in_thread(title, "title", outcome)
+    assert runner.first_started.wait(5)
+
+    newer = suggestion._run_label("claude", "claude-haiku-5-5", "suggestion", None)
+    runner.release_first.set()
+    thread.join(5)
+
+    assert newer.text == "suggestion"
+    assert isinstance(outcome[0], CliCompletion)
+    assert outcome[0].text == "title"
+    assert runner.first_error == []
+    assert "on_delta" not in runner.call_kwargs[0]
+
+
+def test_two_chat_titles_run_at_the_same_time(fake: tuple[_FakeClaude, CliDispatcher], tmp_path: Path) -> None:
+    """Two new chats that start together both get a title."""
+    runner, _suggestion = fake
+    title = CliDispatcher(None, "claude", MODEL, CHAT_TITLE_ROLE, local_settings(tmp_path))
+    outcome: list[BaseException | CliCompletion] = []
+    thread = _run_in_thread(title, "first", outcome)
+    assert runner.first_started.wait(5)
+
+    second = title._run_label("claude", "claude-haiku-5-5", "second", None)
+    runner.release_first.set()
+    thread.join(5)
+
+    assert second.text == "second"
+    assert isinstance(outcome[0], CliCompletion)
+    assert outcome[0].text == "first"

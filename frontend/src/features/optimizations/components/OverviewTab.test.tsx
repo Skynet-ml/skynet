@@ -66,6 +66,98 @@ void describe("finished-run Overview fixtures", () => {
     assert.ok(!render({ ...fixture, scorePoints: [] }).includes("overviewtab.4"));
   });
 
+  void it("says no score, never 0, for a finished version with a failed case", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      blackbox_result: {
+        ...fixture.job.blackbox_result!,
+        baseline_score: null,
+        metric_improvement: null,
+      },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes(BASELINE_CARD), "score cards");
+    assert.ok(html.includes("optimization.overview.no_score"), "no score");
+    assert.ok(html.includes(">0.78<"), "the scored version");
+  });
+
+  void it("says no score on both cards when a successful run scored neither version", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      blackbox_result: {
+        ...fixture.job.blackbox_result!,
+        baseline_score: null,
+        best_score: null,
+        metric_improvement: null,
+      },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes(BASELINE_CARD) && html.includes(OPTIMIZED_CARD), "score cards");
+    assert.equal(html.split("optimization.overview.no_score").length - 1, 2, "no score twice");
+  });
+
+  void it("never marks the final stages skipped when a successful run scored neither version", () => {
+    const fixture = overviewFixture("oa-gepa");
+    assert.ok(!render(fixture).includes("pipeline.stage.skipped"), "the scored run skips nothing");
+    const job = {
+      ...fixture.job,
+      blackbox_result: {
+        ...fixture.job.blackbox_result!,
+        baseline_score: null,
+        best_score: null,
+        metric_improvement: null,
+      },
+    };
+    assert.ok(!render({ ...fixture, job }).includes("pipeline.stage.skipped"), "no skipped stage");
+  });
+
+  for (const status of ["failed", "cancelled"] as const) {
+    void it(`shows no score cards for a ${status} run with one partial score`, () => {
+      const fixture = overviewFixture("oa-gepa");
+      const job = {
+        ...fixture.job,
+        status,
+        blackbox_result: { ...fixture.job.blackbox_result!, baseline_score: null, metric_improvement: null },
+      };
+      const html = render({ ...fixture, job });
+      assert.ok(!html.includes(BASELINE_CARD), "no score cards");
+      assert.ok(!html.includes("optimization.overview.no_score"), "no 'no score' label");
+    });
+  }
+
+  void it("SKY-750: says lower is better and counts a lower minimize score as a gain", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      blackbox_result: {
+        ...fixture.job.blackbox_result!,
+        baseline_score: 0.78,
+        best_score: 0.42,
+        metric_improvement: null,
+        direction: "minimize" as const,
+      },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes("optimization.overview.lower_is_better"), "lower is better");
+    assert.ok(html.includes("+0.36"), "the gain is positive");
+    assert.ok(!html.includes("--danger-dim"), "the improvement card is not red");
+    assert.ok(!render(fixture).includes("optimization.overview.lower_is_better"), "maximize");
+  });
+
+  void it("never says no score for a stopped run that missed its final score", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      status: "stopped" as const,
+      blackbox_result: { ...fixture.job.blackbox_result!, best_score: null, metric_improvement: null },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes(BASELINE_CARD), "score cards");
+    assert.ok(!html.includes("optimization.overview.no_score"), "no 'no score' label");
+  });
+
   void it("formats scores raw", () => {
     const html = render(overviewFixture("oa-gepa"));
     assert.ok(html.includes(">0.42<") && html.includes(">0.78<"), "raw black-box scores");

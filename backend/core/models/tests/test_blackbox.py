@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 
 from core.models import blackbox as blackbox_models
 from core.models.blackbox import (
+    TARGET_RETIRED,
     BlackboxRepoSecret,
     BlackboxRepoSource,
     BlackboxRunRequest,
@@ -18,7 +20,7 @@ from core.models.blackbox import (
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:
-    """Build a deterministic blackbox request without executing code.
+    """Build a deterministic single-GEPA repository request without executing code.
 
     Args:
         **overrides: Fields replacing the base request values.
@@ -26,13 +28,7 @@ def _payload(**overrides: Any) -> dict[str, Any]:
     Returns:
         JSON-compatible input for request validation.
     """
-    return {
-        "seed_candidate": "candidate",
-        "scorer": {"kind": "remote", "url": "https://example.com/score"},
-        "reflection_model_config": {"name": "gpt-4o"},
-        "strategy": {"mode": "single", "engine": "gepa"},
-        **overrides,
-    }
+    return _repo_request(**{"strategy": {"mode": "single", "engine": "gepa"}, **overrides})
 
 
 def test_vercel_is_the_only_proposer_runtime() -> None:
@@ -55,92 +51,14 @@ def test_native_engine_normalizes_legacy_runtime_without_requiring_agent_target(
         _payload(strategy={"mode": "single", "engine": engine}, proposer_runtime=runtime)
     )
 
-    assert request.target.kind == "text"
-    assert request.cases is None
+    assert request.target.kind == "repo"
     assert request.model_dump(by_alias=True)["proposer_runtime"] == "vercel"
-
-
-def test_only_gepa_accepts_separate_named_parts() -> None:
-    """Accept the upstream GEPA multipart contract."""
-    request = BlackboxRunRequest.model_validate(_payload(seed_candidate={"prompt": "candidate"}))
-
-    assert request.seed_candidate == {"prompt": "candidate"}
-
-
-def test_autosaddler_accepts_separate_named_parts() -> None:
-    """Accept a multipart seed for AutoSaddler, which the engine catalog advertises."""
-    request = BlackboxRunRequest.model_validate(
-        _payload(seed_candidate={"prompt": "x"}, strategy={"mode": "single", "engine": "autosaddler"})
-    )
-
-    assert request.seed_candidate == {"prompt": "x"}
-
-
-@pytest.mark.parametrize(
-    "strategy",
-    [
-        {"mode": "auto"},
-        {"mode": "single", "engine": "meta_harness"},
-        {"mode": "single", "engine": "autoresearch"},
-        {"mode": "single", "engine": "best_of_n"},
-    ],
-)
-def test_other_upstream_recipes_reject_multipart_seeds(strategy: dict[str, str]) -> None:
-    """Reject multipart seeds when the selected upstream recipe only accepts strings.
-
-    Args:
-        strategy: Recipe without upstream multipart support.
-    """
-    with pytest.raises(ValidationError, match="Multi-part starting points"):
-        BlackboxRunRequest.model_validate(_payload(seed_candidate={"prompt": "candidate"}, strategy=strategy))
-
-
-def test_run_needs_neither_an_objective_nor_a_starting_point() -> None:
-    """The scorer alone drives the climb, so a blank run starts from empty text."""
-    request = BlackboxRunRequest.model_validate(_payload(seed_candidate=None, objective=None))
-    assert request.seed_candidate == ""
-
-
-def test_objective_without_a_starting_point_leaves_the_seed_to_be_drafted() -> None:
-    """With an objective the seed stays unset so the engine can draft one from it."""
-    request = BlackboxRunRequest.model_validate(_payload(seed_candidate=None, objective="Be concise"))
-    assert request.seed_candidate is None
 
 
 def test_unknown_proposer_runtime_is_rejected() -> None:
     """Reject an unsupported runtime rather than silently selecting it."""
     with pytest.raises(ValidationError, match="proposer_runtime"):
         BlackboxRunRequest.model_validate(_payload(proposer_runtime="local"))
-
-
-def test_agent_target_carries_one_matching_billable_task_model() -> None:
-    """Preserve the full task-model billing role while retaining the harness model id."""
-    request = BlackboxRunRequest.model_validate(
-        _payload(
-            cases=[{"task": "fix it"}],
-            target={"kind": "agent", "model": "openrouter/openai/gpt-4o"},
-            task_model_config={
-                "name": "openrouter/openai/gpt-4o",
-                "token_source": "byok",
-                "byok_provider": "openrouter",
-            },
-        )
-    )
-
-    assert request.target.model == request.task_model_settings.name
-    assert request.task_model_settings.token_source == "byok"
-
-
-def test_agent_target_rejects_mismatched_task_model_role() -> None:
-    """Prevent the billed task role from routing a different model than the harness names."""
-    with pytest.raises(ValidationError, match="must identify the same model"):
-        BlackboxRunRequest.model_validate(
-            _payload(
-                cases=[{"task": "fix it"}],
-                target={"kind": "agent", "model": "openrouter/openai/gpt-4o"},
-                task_model_config={"name": "openrouter/anthropic/claude-sonnet-4"},
-            )
-        )
 
 
 @pytest.mark.parametrize(
@@ -174,6 +92,46 @@ def test_iteration_limit_requires_single_meta_harness(strategy: dict[str, str], 
     assert BlackboxRunRequest.model_validate(payload).budget.max_iterations is None
 
 
+@pytest.mark.parametrize("value", [0.9, None])
+def test_a_new_request_with_the_retired_stop_score_names_the_outcome_target(value: float | None) -> None:
+    """A new request that still sends ``budget.stop_at_score``, even as null, gets an error naming the file key."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": value})
+
+    with pytest.raises(ValidationError, match=r"\[outcome\] target in ascent\.toml"):
+        BlackboxRunRequest.model_validate(payload)
+
+
+def test_a_stored_payload_with_the_retired_stop_score_still_loads() -> None:
+    """A stored run keeps its retired stop score privately; the public model and its dump have no such key."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": 0.9})
+
+    request = BlackboxRunRequest.model_validate(payload, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    assert request.budget.max_scorer_runs == 20
+    assert request.budget._legacy_stop_at_score == 0.9
+    assert "stop_at_score" not in request.model_dump()["budget"]
+    assert "stop_at_score" not in request.model_dump(mode="json")["budget"]
+
+
+@pytest.mark.parametrize("value", [None, "0.9", True, float("nan"), float("inf")])
+def test_a_stored_retired_stop_score_that_is_not_a_finite_number_gives_none(value: object) -> None:
+    """A stored null or a value of another type loads with no legacy stop score and no crash."""
+    payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": value})
+
+    request = BlackboxRunRequest.model_validate(payload, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    assert request.budget._legacy_stop_at_score is None
+
+
+def test_a_new_request_has_no_legacy_stop_score_and_the_schema_has_no_stop_score() -> None:
+    """A new request has no legacy stop score, and no JSON schema names the retired key."""
+    request = BlackboxRunRequest.model_validate(_payload(budget={"max_scorer_runs": 20}))
+
+    assert request.budget._legacy_stop_at_score is None
+    assert "stop_at_score" not in blackbox_models.BlackboxBudget.model_json_schema()["properties"]
+    assert "stop_at_score" not in json.dumps(BlackboxRunRequest.model_json_schema())
+
+
 def _repo_request(**overrides: object) -> dict:
     """Build a valid repository run payload, with ``overrides`` applied.
 
@@ -204,6 +162,12 @@ def test_repo_run_starts_from_the_empty_patch() -> None:
     assert request.seed_candidate == ""
     assert request.target.repo is not None
     assert request.target.repo.editable_paths == ["src"]
+
+
+def test_repo_run_refuses_a_task_model() -> None:
+    """A repository run scores the checkout itself, so a task model has nothing to run (SKY-834)."""
+    with pytest.raises(ValidationError, match="does not apply to a repository run"):
+        BlackboxRunRequest.model_validate(_repo_request(task_model_config={"name": "gpt-4o-mini"}))
 
 
 def test_repo_run_accepts_auto_mode() -> None:
@@ -241,6 +205,77 @@ def test_editable_paths_must_stay_inside_the_repository(path: str) -> None:
     """Absolute paths, parent walks, empty segments and .git are refused."""
     with pytest.raises(ValidationError):
         BlackboxRepoSource(repository="octo/hello", editable_paths=[path])
+
+
+@pytest.mark.parametrize("drafts", [{"src": "x", "src/app.py": "y"}, {"a/b": "x", "a/b/c/d.py": "y"}])
+def test_a_draft_file_under_another_draft_file_is_refused(drafts: dict[str, str]) -> None:
+    """A path cannot be both a draft file and a folder of another, as the trusted parent cannot write both."""
+    with pytest.raises(ValidationError, match="lies under another draft file"):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_files=drafts)
+    assert BlackboxRepoSource(
+        repository="octo/hello", editable_paths=["src"], draft_files={"src/a.py": "x", "src/ab.py": "y"}
+    ).draft_files
+
+
+@pytest.mark.parametrize("text", ["", "  \n\t"])
+def test_an_empty_ascent_toml_draft_is_refused(text: str) -> None:
+    """An empty ascent.toml draft would replace the repository's file with one that names no run."""
+    with pytest.raises(ValidationError, match=r"ascent\.toml is empty"):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_files={"ascent.toml": text})
+    assert BlackboxRepoSource(
+        repository="octo/hello", editable_paths=["src"], draft_files={"README.md": ""}
+    ).draft_files == {"README.md": ""}
+
+
+@pytest.mark.parametrize(
+    ("drafts", "sent", "stored"),
+    [
+        ({"ascent.toml": "version = 1\n"}, None, "setup_screen"),
+        ({"ascent.toml": "version = 1\n"}, "repository", "setup_screen"),
+        ({"ascent.toml": "version = 1\n"}, "mcp", "mcp"),
+        ({}, None, "repository"),
+        ({"README.md": "x"}, None, "repository"),
+        ({}, "setup_screen", "repository"),
+        ({}, "mcp", "repository"),
+    ],
+)
+def test_the_run_records_where_its_contract_comes_from(drafts: dict[str, str], sent: str | None, stored: str) -> None:
+    """The server decides the source: no draft contract is the repository's, and only MCP keeps ``mcp``."""
+    source = BlackboxRepoSource(
+        repository="octo/hello", editable_paths=["src"], draft_files=drafts, contract_source=sent
+    )
+    assert source.contract_source == stored
+
+
+def test_a_stored_run_with_the_retired_draft_file_loads_as_one_with_no_draft_contract() -> None:
+    """A run stored before SKY-746 can hold its draft under the old file name; it loads as a plain draft file."""
+    retired = "optimize" + ".toml"  # Built from parts so the tree holds no retired name.
+    source = BlackboxRepoSource.model_validate(
+        {
+            "repository": "octo/hello",
+            "editable_paths": ["src"],
+            "draft_files": {retired: "version = 1\n"},
+            "contract_source": "setup_screen",
+        }
+    )
+    assert source.contract_source == "repository"
+    assert source.draft_files == {retired: "version = 1\n"}
+
+
+def test_a_stored_record_with_no_contract_source_loads_as_repository() -> None:
+    """A run stored before the field existed has no draft contract, so it reads as the repository's."""
+    source = BlackboxRepoSource.model_validate({"repository": "octo/hello", "editable_paths": ["src"]})
+    assert source.contract_source == "repository"
+
+
+@pytest.mark.parametrize("base", ["main", "abc1234", "A" * 40])
+def test_the_draft_base_must_be_a_full_commit_id(base: str) -> None:
+    """The draft base pins a commit, so a branch name or a short or uppercase id is refused."""
+    with pytest.raises(ValidationError):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_base=base)
+    pinned = BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_base="a" * 40)
+    assert pinned.draft_base == "a" * 40
+    assert BlackboxRepoSource(repository="octo/hello", editable_paths=["src"]).draft_base is None
 
 
 def test_editable_paths_are_normalized_and_deduplicated() -> None:
@@ -358,18 +393,16 @@ def test_shinka_accepts_duplicate_rejection() -> None:
     assert settings.novelty is True
 
 
-def test_shinka_run_accepts_named_parts_and_extra_models() -> None:
-    """Accept a multi-part seed, extra optimization models and settings for a single ShinkaEvolve run."""
+def test_shinka_run_accepts_extra_models() -> None:
+    """Accept extra optimization models and settings for a single ShinkaEvolve run."""
     request = BlackboxRunRequest.model_validate(
         _payload(
-            seed_candidate={"system": "a", "user": "b"},
             strategy={"mode": "single", "engine": "shinka_evolve"},
             extra_reflection_model_configs=[{"name": "gpt-4o-mini"}],
             shinka={"num_islands": 3, "meta_notes": False},
         )
     )
 
-    assert request.seed_candidate == {"system": "a", "user": "b"}
     assert [config.name for config in request.extra_reflection_model_settings] == ["gpt-4o-mini"]
     assert request.shinka is not None
     assert request.shinka.num_islands == 3
@@ -406,3 +439,65 @@ def test_shinka_accepts_a_repository_target() -> None:
     """A single ShinkaEvolve run can optimize a repository, starting from the empty patch."""
     request = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "single", "engine": "shinka_evolve"}))
     assert request.seed_candidate == ""
+
+
+_RETIRED_TARGETS = [
+    {"kind": "text"},
+    {"kind": "agent", "model": "openrouter/openai/gpt-4o"},
+]
+
+
+@pytest.mark.parametrize(
+    "target",
+    # The agent target's own harness and model checks must not answer first.
+    [*_RETIRED_TARGETS, {"kind": "agent", "harness": "claude_code", "model": "m"}, {"kind": "agent"}],
+)
+def test_a_new_text_or_agent_request_is_refused(target: dict[str, str]) -> None:
+    """Refuse a new text or agent target, because every run optimizes a repository (SKY-834).
+
+    Args:
+        target: The retired target that a new request names.
+    """
+    payload = {
+        "seed_candidate": "candidate",
+        "scorer": {"kind": "remote", "url": "https://example.com/score"},
+        "reflection_model_config": {"name": "gpt-4o"},
+        "target": target,
+    }
+
+    with pytest.raises(ValidationError) as refused:
+        BlackboxRunRequest.model_validate(payload)
+    assert [error["msg"] for error in refused.value.errors()] == [f"Value error, {TARGET_RETIRED}"]
+    with pytest.raises(ValidationError, match="Every run optimizes a repository"):
+        BlackboxRunRequest.model_validate({key: value for key, value in payload.items() if key != "target"})
+
+
+@pytest.mark.parametrize("target", _RETIRED_TARGETS)
+def test_a_stored_text_or_agent_run_still_loads_for_its_history(target: dict[str, str]) -> None:
+    """Load a stored text or agent run, so its history still shows (SKY-834).
+
+    Args:
+        target: The retired target of the stored run.
+    """
+    payload = {
+        "seed_candidate": "candidate",
+        "scorer": {"kind": "remote", "url": "https://example.com/score"},
+        "reflection_model_config": {"name": "gpt-4o"},
+        "cases": [{"task": "fix it"}],
+        "target": target,
+    }
+
+    request = BlackboxRunRequest.model_validate(payload, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
+
+    assert request.target.kind == target["kind"]
+    assert request.seed_candidate == "candidate"
+
+
+def test_a_command_metric_scorer_needs_no_metric_code() -> None:
+    """A command ``[metric] entry`` runs in the metric box, so the scorer may carry no code (SKY-738)."""
+    request = BlackboxRunRequest.model_validate(_repo_request(scorer={"kind": "python", "command_metric": True}))
+
+    assert request.scorer.command_metric is True
+    assert request.scorer.metric_code is None
+    with pytest.raises(ValidationError, match="needs metric_code"):
+        BlackboxRunRequest.model_validate(_repo_request(scorer={"kind": "python"}))

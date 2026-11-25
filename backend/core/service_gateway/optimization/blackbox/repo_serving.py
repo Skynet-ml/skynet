@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ from typing import Any
 from ....config import settings
 from ....connectors import repo_hosts
 from ....connectors.github_repo import RepoFetchError, fetch_snapshot, github_token
+from ....connectors.repo_drafts import DraftFileError, apply_to_archive
 from ....constants import TOKEN_SOURCE_MANAGED
 from ....models.common import ModelConfig
 from ....worker.repo_staging import hidden_repo_paths
@@ -43,7 +44,7 @@ _OUTPUT_KEY = "output"
 
 # Runs in a fresh child process so serve.py never sees the guest's event
 # nonce or writes into its framed stdout. The runner is loaded by path because
-# it is stdlib-only and gives serve.py the same ``skynet.llm`` helper scorers get.
+# it is stdlib-only and gives serve.py the same ``openascent.llm`` helper scorers get.
 _BOOTSTRAP = """
 import importlib.util, json, sys
 runner_path, request_path, output_path, checkout = sys.argv[1:5]
@@ -115,6 +116,7 @@ def serve_payload(
             "repository": repo["repository"],
             "commit": repo["commit"],
             **repo_hosts.git_kwargs(repo_hosts.provider_of(repo)),
+            **({"draft_files": dict(repo["draft_files"])} if repo.get("draft_files") else {}),
         },
         "patch": patch,
         "inputs": inputs,
@@ -131,7 +133,9 @@ def serve_payload(
 
 
 @contextmanager
-def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) -> Iterator[dict[str, Any]]:
+def staged_snapshot(
+    payload: dict[str, Any], *, engine: Any, owner: str | None, protected_paths: Sequence[str]
+) -> Iterator[dict[str, Any]]:
     """Fetch the pinned tree in the parent and attach it, without the scoring side, for the sandbox upload.
 
     The serving guest runs repository code, so it gets the same stripped tree
@@ -141,16 +145,27 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         payload: Resolved interaction payload from :func:`serve_payload`.
         engine: SQLAlchemy engine holding the owner's GitHub connection, or ``None``.
         owner: The run's owner, whose connection reads a private repository.
+        protected_paths: The protected paths the run recorded when it started.
 
     Yields:
         The payload with the stripped packed tree under ``REPO_SNAPSHOT_KEY``,
-        and the patch without its sections for hidden paths.
+        the patch without its sections for hidden paths, and ``repo`` without
+        its draft files, which the packed tree already holds.
 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
-        ConstraintsError: When the commit's ``optimize.toml`` is invalid, so the hidden list is unknown,
-            or a hidden path is, holds or lies inside a link, so the strip cannot remove it.
+        ConstraintsError: When the run recorded no ``ascent.toml``, so it started under the old file name,
+            or the commit's ``ascent.toml`` is invalid, so the hidden list is unknown,
+            or a hidden path is, holds or lies inside a link, so the strip cannot remove it,
+            or a draft file of the run cannot be written over the tree.
     """
+    # Every run start protects the contract file, so a run without ascent.toml started under the old file name
+    # (SKY-746). Its tree has no ascent.toml, so the hidden list would miss its scoring files.
+    if CONSTRAINTS_FILE not in protected_paths:
+        raise ConstraintsError(
+            f"This run started before the contract file was named {CONSTRAINTS_FILE}, so serving cannot tell"
+            " which scoring files to hide from the guest. Start a new run to serve it."
+        )
     repo = payload["repo"]
     provider = repo_hosts.provider_of(repo)
     token = None
@@ -165,7 +180,15 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
     workdir = Path(tempfile.mkdtemp(prefix="repo-serve-"))
     try:
         snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir, **repo_hosts.git_kwargs(provider))
-        hidden = hidden_repo_paths(read_constraints(snapshot.archive))
+        # The served version was made against the tree with the run's draft files.
+        if drafts := repo.get("draft_files"):
+            try:
+                apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
+            except DraftFileError as error:
+                raise ConstraintsError(str(error)) from None
+        # Only a run that started can be served, maybe from before version was required (SKY-690).
+        # Its contract passed Skynet's older reader, so the forms that reader accepted still read (SKY-760).
+        hidden = hidden_repo_paths(read_constraints(snapshot.archive, require_version=False, legacy_forms=True))
         # Run start refuses these links since SKY-387; a run started before that can still reach serving.
         if linked := linked_hidden_paths(snapshot.archive, hidden):
             raise ConstraintsError(
@@ -175,7 +198,14 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         archive = strip_archive(snapshot.archive, hidden, workdir / "serve-tree.tgz")
         # A best version from an older run can still edit a now-hidden file, which the stripped tree lacks.
         patch = drop_paths(str(payload.get("patch") or ""), hidden)
-        yield {**payload, "patch": patch, REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit}}
+        # The drafts are in the packed tree; as a list they could name a hidden path to the guest.
+        guest_repo = {key: value for key, value in repo.items() if key != "draft_files"}
+        yield {
+            **payload,
+            "repo": guest_repo,
+            "patch": patch,
+            REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit},
+        }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

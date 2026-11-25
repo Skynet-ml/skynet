@@ -528,3 +528,52 @@ def test_auto_budget_stop_evidence_keeps_a_crashed_lane_out_of_strict_json(
     assert next(lane for lane in lanes if lane.engine == crashed).best_score is None
     assert crashed not in {row["engine"] for row in evidence["completed_lanes"]}
     assert evidence["completed_lanes"]
+
+
+def test_auto_budget_stop_evidence_gives_raw_scores_for_a_minimize_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The API shows raw scores, so a minimize run's completed lanes carry raw, not negated, scores (SKY-750).
+
+    Args:
+        tmp_path: Artifact directory.
+        monkeypatch: Patch fixture.
+    """
+    stopping = AUTO_ENGINES[-1]
+
+    class StoppingEngine(FixtureEngine):
+        """Score one case, then stop the budget in one lane."""
+
+        def run(self, task: Any, server: Any, ctx: EngineContext | None = None) -> Any:
+            """Score the version, then return it or stop the budget.
+
+            Args:
+                task: Scheduler-selected task.
+                server: Scoring allowance.
+                ctx: Run accounting context.
+
+            Returns:
+                The version at its engine score.
+
+            Raises:
+                BudgetReached: In the stopping lane.
+            """
+            candidate = f"{task.seed_candidate}:{self.name}"
+            value = server.evaluate(candidate, {"i": 0})[0]
+            if self.name == stopping:
+                raise BudgetReached("budget")
+            return Result(candidate, value, 1)
+
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: StoppingEngine(name))
+    with pytest.raises(BudgetReached) as stopped:
+        auto.run_strategy(
+            BlackboxStrategy(),
+            Task("seed"),
+            EvalServer(score, max_evals=100, direction="minimize"),
+            make_ctx(str(tmp_path)),
+            caps=CAPS,
+        )
+
+    completed = stopped.value.evidence["completed_lanes"]
+    assert completed
+    assert {row["score"] for row in completed} <= {-1.0, -2.0}

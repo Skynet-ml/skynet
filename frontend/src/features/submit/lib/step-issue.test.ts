@@ -74,3 +74,16 @@ test("missing code reads as being written while the agent writes it", () => {
     "submit.v2.metric.agent.writing_metric",
   );
 });
+
+test("a contract that names a metric command passes the Metric step with no wizard code (SKY-770)", () => {
+  const ready = readyState("standard");
+  const noMetric = { ...ready, workspace: { ...ready.workspace, metricCode: "" } };
+  const command = ["cargo", "run", "--bin", "score"];
+  assert.equal(computeStepIssue(noMetric, "metric", null, { metricCommand: command }), null);
+  assert.equal(runBlockedReason(noMetric, null, { metricCommand: command }), null);
+  // A Python entry, or no entry, comes back from the check as null: metric.py stays required.
+  assert.equal(
+    computeStepIssue(noMetric, "metric", null, { metricCommand: null }),
+    "submit.v2.metric.issue.metric_code",
+  );
+});

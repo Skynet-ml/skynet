@@ -8,6 +8,7 @@ import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
 import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
+import { ForkButton } from "./fork-button";
 
 import { autoResizeTextarea } from "./auto-resize";
 import { automaticTurnBody } from "./automatic-turn";
@@ -17,6 +18,9 @@ import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 import { CollapsibleMessage } from "./collapsible-message";
 import { MessageTime } from "./message-actions";
 import { PastedTextCard } from "./pasted-text-card";
+import { TileRow, type MediaAttachment } from "./media-attachments";
+import { FileTile } from "./file-tiles";
+import { SentAttachments } from "./sent-attachments";
 import { joinPastes, shouldAttachPaste, splitPastes, type SplitMessage } from "./pasted-text";
 import { joinLineComments, splitLineComments, type LineComment } from "./line-comments";
 
@@ -79,24 +83,37 @@ interface UserBubbleProps {
   editable?: boolean;
   /** When the message was sent, in epoch ms. */
   createdAt?: number;
+  /** Start a new chat from before this message; no button without it. */
+  onFork?: () => void;
+  /** Images, video and audio sent with the message. */
+  media?: readonly MediaAttachment[];
 }
 
 // The user's turns sit at the end side as bubbles; the agent's answers sit
 // at the start side with no bubble. Logical classes mirror both in RTL.
-export function UserBubble({ content, onEdit, editable = true, createdAt }: UserBubbleProps) {
+export function UserBubble({
+  content,
+  onEdit,
+  editable = true,
+  createdAt,
+  onFork,
+  media,
+}: UserBubbleProps) {
   const automatic = automaticTurnBody(content);
+  // Memoized so the sent file tiles do not parse their text again on every render.
+  const parts = React.useMemo(() => {
+    const { rest, comments } = splitLineComments(content);
+    return { comments, ...splitSent(rest) };
+  }, [content]);
   if (automatic !== null) return <AutomaticBubble body={automatic} createdAt={createdAt} />;
-  const { rest, comments } = splitLineComments(content);
-  const { text, pastes, files } = splitSent(rest);
+  const { comments, text, pastes, files } = parts;
 
   return (
     <div className="flex justify-end group/user">
       <div className="flex max-w-[80%] flex-col items-end gap-1.5">
-        {pastes.length + files.length > 0 && (
+        <SentAttachments media={media} files={files} />
+        {pastes.length > 0 && (
           <div className="flex flex-wrap gap-2">
-            {files.map((file, i) => (
-              <PastedTextCard key={`file-${i}`} name={file.name} text={file.text} />
-            ))}
             {pastes.map((paste, i) => (
               <PastedTextCard key={i} text={paste} />
             ))}
@@ -107,6 +124,7 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
         ))}
         {text && (
           <div
+            data-user-message-bubble
             className="max-w-full rounded-[22px] rounded-ee-[4px] bg-primary-fill text-primary-foreground px-4 py-2.5 text-sm leading-[1.45]"
             dir="auto"
           >
@@ -122,7 +140,7 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
         <div
           className={cn(
             "flex items-center gap-0.5 -me-1",
-            "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
+            "opacity-0 group-hover/user:opacity-100 has-[:focus-visible]:opacity-100 transition-opacity",
             // The global coarse-pointer reveal only matches the unnamed
             // `group-hover:` spelling, so touch screens (iPad) need their own.
             "any-pointer-coarse:opacity-100",
@@ -133,6 +151,7 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
               text={content}
               ariaLabel={msg("shared.agent.copy")}
               copiedAriaLabel={msg("shared.agent.copied")}
+              autoTooltip
             />
             {editable && onEdit && (
               <Button
@@ -140,11 +159,11 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
                 size="icon-xs"
                 onClick={onEdit}
                 aria-label={msg("shared.agent.edit_and_resend")}
-                autoTooltip={false}
               >
                 <PencilSimple className="size-3.5" />
               </Button>
             )}
+            {onFork && <ForkButton onFork={onFork} />}
           </div>
           <MessageTime createdAt={createdAt} />
         </div>
@@ -163,6 +182,7 @@ function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number
     <div className="flex justify-end group/user">
       <div className="flex max-w-[80%] flex-col items-end gap-1.5">
         <div
+          data-user-message-bubble
           className="max-w-full rounded-2xl rounded-ee-[4px] border border-dashed border-border bg-muted/40 px-4 py-2.5 text-sm leading-[1.45] text-foreground"
           dir="auto"
         >
@@ -178,7 +198,7 @@ function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number
         </div>
         <span
           className={cn(
-            "opacity-0 group-hover/user:opacity-100 transition-opacity",
+            "opacity-0 group-hover/user:opacity-100 has-[:focus-visible]:opacity-100 transition-opacity",
             "any-pointer-coarse:opacity-100",
           )}
         >
@@ -217,16 +237,24 @@ export function UserBubbleEditor({
   return (
     <div className="flex justify-end">
       <div className="max-w-[80%] w-full space-y-2">
-        {draft.pastes.length + draft.files.length > 0 && (
+        {draft.files.length > 0 && (
+          <div className="flex pt-2.5">
+            <TileRow>
+              {draft.files.map((file, i) => (
+                <FileTile
+                  key={`file-${i}`}
+                  name={file.name}
+                  text={file.text}
+                  onRemove={() =>
+                    change({ ...draft, files: draft.files.filter((_, j) => j !== i) })
+                  }
+                />
+              ))}
+            </TileRow>
+          </div>
+        )}
+        {draft.pastes.length > 0 && (
           <div className="flex flex-wrap gap-2">
-            {draft.files.map((file, i) => (
-              <PastedTextCard
-                key={`file-${i}`}
-                name={file.name}
-                text={file.text}
-                onRemove={() => change({ ...draft, files: draft.files.filter((_, j) => j !== i) })}
-              />
-            ))}
             {draft.pastes.map((paste, i) => (
               <PastedTextCard
                 key={i}

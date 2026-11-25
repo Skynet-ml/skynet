@@ -78,7 +78,7 @@ export function LibraryDatasetCard({ call, alreadyConfirmed, onConfirm }: Librar
 
   if (phase === "done") {
     return (
-      <div className="flex items-center gap-2 rounded-2xl border border-[#5E7A5E]/25 bg-[#F0F4EC] dark:bg-[#383e31] px-4 py-3 text-[0.8125rem] text-[#2F3E32] dark:text-[#cadccd]">
+      <div className="flex items-center gap-2 rounded-md border border-[#5E7A5E]/25 bg-[#F0F4EC] dark:bg-[#383e31] px-4 py-3 text-[0.8125rem] text-[#2F3E32] dark:text-[#cadccd]">
         <CheckCircle className="size-3.5 shrink-0 text-[#3E5240] dark:text-[#bbd3bd]" aria-hidden="true" />
         <span dir="auto" className="min-w-0 flex-1 truncate">
           {pickedName
@@ -92,7 +92,7 @@ export function LibraryDatasetCard({ call, alreadyConfirmed, onConfirm }: Librar
   }
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-primary-fill/30 bg-background">
+    <div className="overflow-hidden rounded-md border border-primary-fill/30 bg-background">
       <div className="flex items-center gap-2 border-b border-primary-fill/10 px-4 py-2.5 text-[0.8125rem] font-medium text-primary">
         <Database className="size-3.5 text-primary" aria-hidden="true" />
         {msg("auto.features.agent.panel.components.librarydatasetcard.title")}

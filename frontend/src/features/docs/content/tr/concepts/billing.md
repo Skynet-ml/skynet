@@ -7,7 +7,7 @@ Skynet ön ödemeli bir bakiye kullanır. Bakiyeye para eklersiniz. Her çalış
 
 Bakiyeniz ABD doları cinsindendir. Skynet bakiyeyi sent cinsinden tutar.
 
-Skynet varsayılan olarak ücretsiz bir başlangıç bakiyesi vermez. İlk ücretli çalıştırmanızı başlatmadan önce bakiye ekleyin.
+Skynet başlangıç bakiyesi vermez. İlk ücretli çalıştırmanızı başlatmadan önce bakiye ekleyin.
 
 Bakiyeyi **Ayarlar → Faturalandırma** bölümünden eklersiniz. Sabit bir tutar seçebilir veya özel bir tutar girebilirsiniz:
 
@@ -22,7 +22,7 @@ Seçtiğiniz tutar, bakiyenize giren tutardır. Bakiye yükleme ücreti bunun ü
 
 ## Çalıştırma bütçeleri
 
-Her çalıştırmanın bir harcama limiti vardır. Limit, çalıştırmanın harcayabileceği en yüksek tutardır. Kurulumu ve optimizasyonu kapsar.
+Her çalıştırmanın bir harcama limiti vardır. Limit, çalıştırmanın harcayabileceği en yüksek tutardır. Optimizasyonu kapsar. Kurulum kontrolleri bakiyenizden ödenir. Bunları yeni çalıştırmaların limitine saymak için **Ayarlar → Optimizasyon** bölümünde **Kurulumu bakiyemden öde** seçeneğini kapatın. Sürekli planlar kurulumu her zaman döngü bütçesine sayar.
 
 Bir çalıştırmanın başlamadan önce maliyet tahmini yoktur. Limitine kadar harcar, bütçesinde durur ve en iyi sürümünü korur. Skynet'in ne zaman durmaya karar verdiğini görmek için [Çalıştırmalar](/docs/concepts/runs) sayfasını okuyun.
 
@@ -45,7 +45,7 @@ Limit bu tutarın altındayken sihirbaz devam etmenize izin vermez. Bakiyeniz bu
 
 ## Rezervasyonlar
 
-Skynet ücretli bir iş yapmadan önce çalıştırmanın limitinin bir bölümünü ayırır. İş kesinleştiğinde rezervasyonu serbest bırakır ve yalnızca gerçek maliyeti tahsil eder.
+Skynet ücretli bir iş yapmadan önce çalıştırmanın limitinin bir bölümünü ayırır. İş kesinleştiğinde rezervasyonu serbest bırakır ve yalnızca gerçek maliyeti tahsil eder. Kurulum kontrolleri, kurulum limite dahil edilmedikçe bunun yerine bakiyenizden rezerve eder.
 
 Bir bütçede zaten hareket varsa sihirbazdaki **Harcama limiti** kartı hesap dökümünü gösterir:
 
@@ -106,11 +106,11 @@ Depo kodunuz ve puanlayıcınız bir sandbox içinde çalışır. Skynet sandbox
 2. Sandbox bittiğinde Skynet, sandbox sağlayıcısının bildirdiği nihai kullanımı tahsil eder.
 3. Kullanım marjı sandbox işlem gücüne uygulanır.
 
-Sandbox işlem gücü, model çağrıları kendi anahtarınızı kullandığında da çalıştırmanın harcama limitine dahildir.
+Sandbox işlem gücü, model çağrıları kendi anahtarınızı kullandığında da çalıştırmanın harcama limitine dahildir. Kurulum kontrollerindeki sandbox kullanımı, kurulum limite dahil edilmedikçe bakiyenizden ödenir.
 
 ## Sunum
 
-Tamamlanmış bir çalıştırmanın sunum uç noktasına yapılan her çağrı ayrı faturalandırılır. Çağıran, kendi bakiyesinden öder. Tek bir çağrıya üst sınır koymak için istekte `max_cost_cents` ayarlayın. [Sonuçlar](/docs/guides/results) sayfasını okuyun.
+Tamamlanmış bir çalıştırmanın sunum uç noktasına yapılan her çağrı ayrı faturalandırılır. Çağıran, kendi bakiyesinden öder. Bir çağrı için kabul ettiğiniz en yüksek tutarı kaydetmek için istekte `max_cost_cents` ayarlayabilirsiniz. Çağrıyı bakiyeniz sınırlar. [Sonuçlar](/docs/guides/results) sayfasını okuyun.
 
 ## Planlar
 

@@ -95,3 +95,30 @@ def test_a_failed_preflight_names_its_error_type(tmp_path: Path, monkeypatch: py
 
     [event] = [json.loads(line.partition("fixture ")[2]) for line in written if line.strip()]
     assert (event["type"], event["error_type"]) == ("error", "BudgetInsufficientError")
+
+
+def test_a_refused_prctl_stops_the_guest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Linux the guest asks for PR_SET_DUMPABLE 0, and stops when the kernel refuses it (SKY-880).
+
+    Args:
+        monkeypatch: Platform and libc substitutions.
+    """
+    calls: list[tuple[int, ...]] = []
+
+    def prctl(*values: int) -> int:
+        """Record the call and refuse it the way a failed prctl does."""
+        calls.append(values)
+        return -1
+
+    monkeypatch.setattr(isolated_runner.sys, "platform", "linux")
+    monkeypatch.setattr(isolated_runner.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(prctl=prctl))
+    with pytest.raises(RuntimeError, match="non-dumpable"):
+        isolated_runner._block_tracing()
+    assert calls == [(4, 0, 0, 0, 0)]
+
+
+def test_the_guest_entry_point_blocks_tracing_before_main() -> None:
+    """The ``__main__`` block calls ``_block_tracing`` before ``main``, so no command starts first."""
+    source = Path(isolated_runner.__file__).read_text(encoding="utf-8")
+    entry = source.split('if __name__ == "__main__":', 1)[1]
+    assert entry.index("_block_tracing()") < entry.index("main()")

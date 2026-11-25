@@ -19,7 +19,13 @@ from .data_policy import DataPolicy, apply_data_policy
 from .model_batch import BatchCollector
 from .model_terms import excluded_from_managed, managed_model_refusal
 from .openrouter_float import notify_managed_refusal
-from .openrouter_quotes import PricedRequest, fetch_endpoint_prices, price_embedding_request, price_text_request
+from .openrouter_quotes import (
+    PricedRequest,
+    fetch_endpoint_prices,
+    price_decision_request,
+    price_embedding_request,
+    price_text_request,
+)
 from .operation_pricing import (
     ChargePolicy,
     OperationQuote,
@@ -29,7 +35,7 @@ from .operation_pricing import (
     operation_quote,
 )
 from .responses_adapter import price_responses_request, responses_failure, responses_receipt
-from .runtime import BudgetRuntime, PaidResult
+from .runtime import BudgetRuntime, PaidResult, UsagePendingError
 from .usage_tags import BOX_KEY, FOR_BOX_KEY, header_tags
 
 MODEL_ATTEMPT_HEADER = "x-app-model-attempt-id"
@@ -56,7 +62,7 @@ GENERATION_LOOKUP_TIMEOUT_SECONDS = 10.0
 # OpenRouter's /generation accepts only this id shape (API reference,
 # getGeneration). A Responses answer names itself ``resp_...``, so a lookup by
 # that id can never find a bill, and asking again only delays the hold (SKY-664).
-_GENERATION_ID = re.compile(r"gen-[0-9A-Za-z-]{1,124}")
+GENERATION_ID = re.compile(r"gen-[0-9A-Za-z-]{1,124}")
 
 # Responses usage may omit ``is_byok``, and then a cost with an upstream share
 # is ambiguous. This opt-in adds ``openrouter_metadata``, whose ``is_byok`` the
@@ -72,6 +78,15 @@ BYOK_FUNDS_EXHAUSTED = "byok_funds_exhausted"
 # prompt and demos for every example, so marking them turns repeats into reads
 # at a tenth of the input price.
 _EPHEMERAL = {"type": "ephemeral"}
+
+
+class GenerationNotFoundError(UsagePendingError):
+    """Report that OpenRouter's generation lookup answered HTTP 404 for a returned call.
+
+    OpenRouter can answer 404 while it still indexes a bill (SKY-657), so this
+    error releases nothing. The reconciliation sweep gives the hold a shorter
+    grace window that counts from the call's return.
+    """
 
 
 class ByteStream(Protocol):
@@ -253,6 +268,29 @@ def response_complete(body: bytes, content_type: str, finish_reason_ends: bool =
     return False
 
 
+def _has_text(message: Any) -> bool:
+    """Tell whether a chat message can hold a prompt-cache breakpoint.
+
+    Args:
+        message: One chat message.
+
+    Returns:
+        True for a system, user or assistant message whose content is a
+        non-empty string or ends with a text part.
+    """
+    if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content)
+    return (
+        isinstance(content, list)
+        and bool(content)
+        and isinstance(content[-1], dict)
+        and content[-1].get("type") == "text"
+    )
+
+
 def mark_prompt_cache(path: str, body: dict[str, Any]) -> dict[str, Any]:
     """Mark the shared prefix of an Anthropic chat request as cacheable.
 
@@ -303,6 +341,59 @@ def mark_prompt_cache(path: str, body: dict[str, Any]) -> dict[str, Any]:
         ):
             message["content"] = [*content[:-1], {**content[-1], "cache_control": _EPHEMERAL}]
     return {**body, "messages": marked}
+
+
+def mark_lm_prompt_cache(lm_model: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark the shared prefix of a chat call that a LiteLLM LM sends to the managed gateway or OpenRouter.
+
+    The dispatcher marks only the requests it relays. An agent turn's
+    ``dspy.LM`` calls the managed gateway (``litellm_proxy/``) or OpenRouter
+    (``openrouter/``) itself, so it marks its messages here. Every other
+    route, such as a native Anthropic key or a custom endpoint, stays
+    unmarked, as in the dispatcher.
+
+    The breakpoints follow the dispatcher's rule, the last system message
+    and the message before the final turn, with one change: an agent's tool
+    step ends with a text-less tool call and its result, so the second
+    breakpoint goes back to the nearest earlier message with text. Tool
+    messages and text-less messages never get one, and a call never gets
+    more than two, well below Anthropic's limit of four. The dispatcher's
+    own rule stays as it is for its other callers.
+
+    Args:
+        lm_model: The model id as the LM sends it.
+        messages: The chat messages of the call.
+
+    Returns:
+        ``messages``, or a copy with ``cache_control`` breakpoints for an Anthropic model.
+    """
+    model = lm_model.removeprefix("litellm_proxy/").removeprefix("openrouter/")
+    if (
+        model == lm_model
+        or not model.startswith("anthropic/")
+        or any(
+            isinstance(part, dict) and "cache_control" in part
+            for message in messages
+            if isinstance(message, dict) and isinstance(message.get("content"), list)
+            for part in message["content"]
+        )
+    ):
+        return messages
+    systems = [i for i, message in enumerate(messages) if isinstance(message, dict) and message.get("role") == "system"]
+    targets = {systems[-1]} if systems else set()
+    if len(messages) >= 3:
+        turn = next((i for i in range(len(messages) - 2, -1, -1) if _has_text(messages[i])), None)
+        if turn is not None:
+            targets.add(turn)
+    marked = list(messages)
+    for index in targets:
+        if not _has_text(marked[index]):
+            continue
+        content = marked[index]["content"]
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        marked[index] = {**marked[index], "content": [*content[:-1], {**content[-1], "cache_control": _EPHEMERAL}]}
+    return marked
 
 
 def data_policy_refusal(model: str, policy: DataPolicy) -> bytes:
@@ -400,7 +491,7 @@ class ProviderDispatcher:
         """Send one final request only after its physical attempt is fully reserved.
 
         Args:
-            path: Chat completions, Anthropic messages, Responses, or embeddings protocol path.
+            path: Chat completions, Anthropic messages, Responses, embeddings, or managed decisions path.
             request: Fully resolved SDK body including final token and tool settings.
             operation_key: Optional stable physical-attempt identity for a transport replay.
             attempt: Physical retry number within a stable logical operation.
@@ -413,7 +504,7 @@ class ProviderDispatcher:
         if self.embeddings and not self.upstream.embeddings:
             paths = set()
         if not self.embeddings and self.policy.kind == "managed_model" and self.upstream == OPENROUTER:
-            paths.add("/messages")
+            paths.update({"/messages", "/decisions"})
         if path not in paths or request.get("model") != self.model:
             raise UnpricedOperationError(
                 "This scoped route cannot dispatch a different model or API operation.",
@@ -439,7 +530,11 @@ class ProviderDispatcher:
                 routed = mark_prompt_cache(path, routed)
             if self.policy.kind != "byok_model":
                 catalog = fetch_endpoint_prices(self.model, client=self._client)
-                pricer = {"/responses": price_responses_request, "/embeddings": price_embedding_request}
+                pricer = {
+                    "/responses": price_responses_request,
+                    "/embeddings": price_embedding_request,
+                    "/decisions": price_decision_request,
+                }
                 priced = pricer.get(path, price_text_request)(routed, catalog, self.policy)
             else:
                 if routed.get("n", 1) != 1 or routed.get("best_of", 1) != 1:
@@ -524,6 +619,10 @@ class ProviderDispatcher:
             and self.policy.kind == "managed_model"
         )
 
+        # OpenRouter serves the Decisions API under /api/alpha, not the /api/v1
+        # base. Only the managed OpenRouter route admits "/decisions" above.
+        base_url = "https://openrouter.ai/api/alpha" if path == "/decisions" else self.upstream.base_url
+
         def send() -> PaidResult[ModelHTTPResult]:
             """Send exactly once and retain trusted usage even for a provider error response."""
             chunks = []
@@ -533,7 +632,7 @@ class ProviderDispatcher:
                 answer = self._batch.run(priced.body, batch_rates(priced.quote))
                 return settle(answer.status, "application/json", answer.body, answer.interrupted, None)
             with self._client.stream(
-                "POST", f"{self.upstream.base_url}{path}", headers=headers, json=priced.body, follow_redirects=False
+                "POST", f"{base_url}{path}", headers=headers, json=priced.body, follow_redirects=False
             ) as response:
                 content_type = response.headers.get("content-type", "application/json")
                 try:
@@ -549,11 +648,25 @@ class ProviderDispatcher:
         def settle(
             status: int, content_type: str, content: bytes, interrupted: bool, retry_after: str | None
         ) -> PaidResult[ModelHTTPResult]:
-            """Turn a provider answer into its measured charge and the relay's response."""
+            """Turn a provider answer into its measured charge and the relay's response.
+
+            Args:
+                status: The provider's HTTP status.
+                content_type: The provider's response content type.
+                content: The response body as received.
+                interrupted: Whether the body stream broke before its end.
+                retry_after: The provider's ``Retry-After`` header, if any.
+
+            Returns:
+                The measured charge and the response to relay.
+            """
             failure = None
             if path == "/responses":
                 identity, usage, complete = responses_receipt(content, content_type)
-                interrupted = interrupted or not complete
+                # A plain error body is never a response object, so it has no terminal status;
+                # without this it would count as interrupted and could never be a refusal.
+                bare_error = status >= 400 and identity is None and usage is None
+                interrupted = interrupted or not (complete or bare_error)
                 failure = responses_failure(content, content_type)
             else:
                 interrupted = interrupted or not response_complete(
@@ -588,7 +701,7 @@ class ProviderDispatcher:
             if self.policy.kind != "byok_model" and self.upstream == OPENROUTER and amount is None and identity:
                 reconciled, reason, retry = (
                     self._lookup_generation(identity)
-                    if _GENERATION_ID.fullmatch(identity)
+                    if GENERATION_ID.fullmatch(identity)
                     else (None, "nothing, because /generation does not accept this id", False)
                 )
                 for delay in GENERATION_LOOKUP_DELAYS:
@@ -684,12 +797,17 @@ class ProviderDispatcher:
 
         Returns:
             Measured USD and usage-only evidence, or None while the bill is unavailable.
+
+        Raises:
+            GenerationNotFoundError: When the lookup answers HTTP 404.
         """
         reconciled, reason, _ = self._lookup_generation(generation_id)
         if reconciled is None:
             logger.info(
                 "No confirmed cost for %s generation %s yet: the lookup gave %s.", self.model, generation_id, reason
             )
+        if reason == "HTTP 404":
+            raise GenerationNotFoundError(f"OpenRouter does not find generation {generation_id} (HTTP 404).")
         return reconciled
 
     def _lookup_generation(self, generation_id: str) -> tuple[tuple[Decimal, dict[str, Any]] | None, str, bool]:
@@ -704,52 +822,70 @@ class ProviderDispatcher:
         """
         if self.upstream != OPENROUTER:
             return None, "no lookup for this provider", False
-        try:
-            response = self._client.get(
-                "https://openrouter.ai/api/v1/generation",
-                params={"id": generation_id},
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=GENERATION_LOOKUP_TIMEOUT_SECONDS,
-            )
-            status = response.status_code
-            if not response.is_success:
-                return None, f"HTTP {status}", status in {404, 408, 425, 429} or status >= 500
-            record = response.json().get("data")
-        except httpx.HTTPError as error:
-            return None, f"a transport error ({type(error).__name__})", True
-        except ValueError:
-            return None, "a response that is not JSON", False
-        if not isinstance(record, dict):
-            return None, "no generation record", False
-        if record.get("id") != generation_id:
-            return None, "an id mismatch", False
-        if record.get("model") != self.model:
-            return None, f"a model mismatch ({str(record.get('model'))[:128]!r})", False
-        if record.get("total_cost") is None:
-            return None, "no total_cost", True
-        safe = {
-            key: record[key]
-            for key in (
-                "id",
-                "model",
-                "provider_name",
-                "total_cost",
-                "upstream_inference_cost",
-                "native_tokens_prompt",
-                "native_tokens_completion",
-                "native_tokens_reasoning",
-                "num_search_results",
-                "is_byok",
-            )
-            if key in record
-        }
-        try:
-            amount = generation_charge(record)
-        except UnpricedOperationError:
-            return None, "an invalid total_cost", False
-        if amount is None:
-            return None, "an ambiguous billing scope", False
-        return (amount, safe), "a confirmed cost", False
+        return lookup_generation(self._client, self._api_key, generation_id, self.model)
+
+
+def lookup_generation(
+    client: httpx.Client, api_key: str, generation_id: str, model: str
+) -> tuple[tuple[Decimal, dict[str, Any]] | None, str, bool]:
+    """Ask OpenRouter once for a generation's final bill, and say why it gave none.
+
+    Args:
+        client: HTTP client for the lookup.
+        api_key: The OpenRouter key that paid for the generation.
+        generation_id: Identity returned by the original paid request.
+        model: The exact model slug that the generation must name.
+
+    Returns:
+        Measured USD and usage-only evidence, or None; a short reason that
+        holds no secret or prompt text; and whether a later lookup can help.
+    """
+    try:
+        response = client.get(
+            "https://openrouter.ai/api/v1/generation",
+            params={"id": generation_id},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=GENERATION_LOOKUP_TIMEOUT_SECONDS,
+        )
+        status = response.status_code
+        if not response.is_success:
+            return None, f"HTTP {status}", status in {404, 408, 425, 429} or status >= 500
+        record = response.json().get("data")
+    except httpx.HTTPError as error:
+        return None, f"a transport error ({type(error).__name__})", True
+    except ValueError:
+        return None, "a response that is not JSON", False
+    if not isinstance(record, dict):
+        return None, "no generation record", False
+    if record.get("id") != generation_id:
+        return None, "an id mismatch", False
+    if record.get("model") != model:
+        return None, f"a model mismatch ({str(record.get('model'))[:128]!r})", False
+    if record.get("total_cost") is None:
+        return None, "no total_cost", True
+    safe = {
+        key: record[key]
+        for key in (
+            "id",
+            "model",
+            "provider_name",
+            "total_cost",
+            "upstream_inference_cost",
+            "native_tokens_prompt",
+            "native_tokens_completion",
+            "native_tokens_reasoning",
+            "num_search_results",
+            "is_byok",
+        )
+        if key in record
+    }
+    try:
+        amount = generation_charge(record)
+    except UnpricedOperationError:
+        return None, "an invalid total_cost", False
+    if amount is None:
+        return None, "an ambiguous billing scope", False
+    return (amount, safe), "a confirmed cost", False
 
 
 OpenRouterDispatcher = ProviderDispatcher

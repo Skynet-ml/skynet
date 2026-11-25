@@ -16,7 +16,8 @@ import litellm
 import pytest
 from fastapi.routing import APIRoute
 from pydantic import SecretStr
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from core.api.routers.folders import create_folders_router
@@ -25,6 +26,7 @@ from core.service_gateway.agents import docs_tools, pi_bridge, pi_react, web_too
 from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload
 from core.service_gateway.agents.docs_retrieval import DocsCorpus
+from core.service_gateway.agents.feedback import FeedbackTarget
 from core.service_gateway.agents.generalist import (
     AUTOMATIC_TURN_PREFIX,
     CLONE_FOCUS,
@@ -55,7 +57,7 @@ from core.service_gateway.agents.generalist import (
     validate_wizard_patch_order,
     validate_wizard_screen,
 )
-from core.storage.models import Base
+from core.storage.models import AgentConversationModel, AgentFeedbackReportModel, AgentMessageModel, Base
 
 from .test_pi_react import _simulated_pi
 
@@ -81,7 +83,7 @@ _READY: dict[str, Any] = {
     "dataset_ready": True,
     "staged_dataset_id": "ds_1",
     "run_code": "def run(artifact, input):\n    return input['q']\n",
-    "metric_code": "def score(input, output, expected=None):\n    return 1.0, {'feedback': ''}\n",
+    "metric_code": "def score(input, output, expected=None):\n    return {'score': 1.0, 'feedback': ''}\n",
     "reflection_model_config": {"name": "openai/gpt-4o-mini"},
 }
 
@@ -187,6 +189,29 @@ def test_screen_rejects_fields_off_the_visible_screen() -> None:
     assert "task_objective" in err.split("may set only", 1)[1]
 
 
+def test_screen_refusal_names_each_fields_screen() -> None:
+    """The refusal says where each refused field lives, so the agent can tell the user (SKY-744)."""
+    patch = {"spending_limit_usd": 5, "repository": "acme/bot", "nonsense": 1}
+    err = validate_wizard_screen("update_wizard_state", patch, WizardState(wizard_screen="brief"))
+    assert err is not None
+    assert "spending_limit_usd is on the plan or budget screen" in err
+    assert "repository is on the artifact screen" in err
+    assert "nonsense is on no wizard screen" in err
+    assert "nothing was saved" in err
+
+
+def test_screen_refuses_every_write_after_a_move() -> None:
+    """After Continue or Back this turn, even a field of the old screen is refused and the new screen named."""
+    err = validate_wizard_screen(
+        "update_wizard_state", {"task_objective": "x"}, WizardState(wizard_screen="brief"), moved_to="artifact"
+    )
+    assert err is not None
+    assert err.startswith("Not on screen")
+    assert "'artifact'" in err
+    assert "nothing was saved" in err
+    assert "task_objective" in err
+
+
 def test_screen_plan_takes_engine_models_and_budget() -> None:
     """Standard's one plan screen holds the engine, the models and the budget."""
     patch = {
@@ -208,12 +233,11 @@ def test_screen_allows_only_screenless_fields_on_a_screen_without_fields() -> No
     assert validate_wizard_screen("update_wizard_state", {"seed": 1}, state) is not None
 
 
-def test_screen_lets_only_the_code_screens_write_code() -> None:
-    """The Metric and Check screens write run and metric code; earlier screens may not."""
-    code = {"run_code": "x", "metric_code": "y"}
-    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="metric")) is None
-    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="check")) is None
-    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="brief")) is not None
+def test_no_screen_writes_code_through_the_wizard_write() -> None:
+    """metric.py goes only through the file tools, which ask in Ask mode; the wizard write never asks."""
+    for code in ({"run_code": "x"}, {"metric_code": "y"}):
+        for screen in ("metric", "check", "brief"):
+            assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen=screen)) is not None
 
 
 @pytest.mark.asyncio
@@ -226,7 +250,7 @@ async def test_wrap_reports_previous_values_of_a_wizard_write() -> None:
         registry=ApprovalRegistry(),
         emit=events.append,
         outer_loop=asyncio.get_running_loop(),
-        wizard_state=cast(WizardState, {**_READY, "wizard_screen": "metric", "run_code": "old"}),
+        wizard_state=cast(WizardState, {**_READY, "run_code": "old"}),
     )
     await tool.func._async_body(run_code="new", metric_code="score", job_description="Sorts mail")
     end = next(e for e in events if e["event"] == "tool_end")
@@ -281,6 +305,47 @@ async def test_wrap_refuses_off_screen_patch_without_calling_tool() -> None:
     assert result.startswith("Not on screen")
     end = next(e for e in events if e["event"] == "tool_end")
     assert end["data"]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_scoped_tool_refuses_an_off_screen_field_by_name() -> None:
+    """A field the scoped tool does not list reaches the screen check, not dspy's generic error (SKY-744)."""
+    state = cast(WizardState, {**_READY, "wizard_screen": "brief"})
+    fake = _make_fake_tool("update_wizard_state", return_value="should not run")
+    fake.args = {"task_objective": {"type": "string"}, "spending_limit_usd": {"type": "number"}}
+    tool = _wrap_tool_with_approval(
+        scope_wizard_tool(fake, state),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _e: None,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=state,
+    )
+    assert "spending_limit_usd" not in tool.args
+    # pi_react calls tools from a worker thread; the wrapper waits on the loop.
+    result = await asyncio.to_thread(tool, spending_limit_usd=5)
+    assert isinstance(result, str)
+    assert "spending_limit_usd is on the plan or budget screen" in result
+
+
+@pytest.mark.asyncio
+async def test_wrap_refuses_a_write_after_the_screen_moved() -> None:
+    """Once Continue ran this turn, a write for the old screen is refused and never runs (SKY-744)."""
+    flag = _TurnAuthoringFlag()
+    state = cast(WizardState, {**_READY, "wizard_screen": "brief", "next_screen": "artifact"})
+    tool = _wrap_tool_with_approval(
+        _make_fake_tool("update_wizard_state", return_value="should not run"),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _e: None,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=state,
+        authoring_flag=flag,
+    )
+    await _nav_tools(state, flag)["continue_to_next_screen"].acall()
+    result = await tool.func._async_body(task_objective="Sort refunds")
+    assert result.startswith("Not on screen")
+    assert "'artifact'" in result
 
 
 def test_system_prompt_names_the_screen_rule() -> None:
@@ -357,7 +422,19 @@ _FULL_SNAPSHOT: dict[str, Any] = {
         ("optimizer", {"optimizer_choice", "data_mode"}),
         ("models", {"model_config", "model_configured", "optimizer_choice"}),
         ("budget", {"max_cost_cents", "optimizer_choice", "model_config"}),
-        ("metric", {"run_code", "metric_code", "task_objective", "repository", "input_fields"}),
+        (
+            "metric",
+            {
+                "run_code",
+                "metric_code",
+                "task_objective",
+                "task_background",
+                "repository",
+                "data_mode",
+                "dataset_columns",
+                "input_fields",
+            },
+        ),
         ("check", {"run_code", "metric_code", "input_fields"}),
     ],
 )
@@ -496,19 +573,6 @@ def test_screen_prompts_forbid_unconfirmed_claims() -> None:
     assert "the only kind new runs take" not in SCREEN_FOCUS["artifact"]
 
 
-def test_screen_snapshot_names_the_failed_setup_check() -> None:
-    """The snapshot carries the failed setup check's errors, stripped, under a named key."""
-    errors = "Fix these errors:\n- optimize.toml:3 [run] command: required"
-    for extra in ({}, {"cloned_run": True}):
-        state = cast(WizardState, {"wizard_screen": "brief", "setup_check": f"  {errors}\n", **extra})
-        snapshot = screen_snapshot(state)
-        assert snapshot["setup_check_failed"] == errors
-        assert "setup_check" not in snapshot
-    assert "setup_check_failed" not in screen_snapshot(
-        cast(WizardState, {"wizard_screen": "brief", "setup_check": " "})
-    )
-
-
 def test_screen_snapshot_of_a_clone_names_notes_and_what_blocks_continue() -> None:
     """A cloned run keeps its whole setup and still gets the named notes and blocker."""
     state = cast(
@@ -630,7 +694,7 @@ async def test_continue_judges_this_turns_writes() -> None:
     """A field written earlier this turn counts toward the screen being done."""
     turn = _TurnAuthoringFlag()
     turn.wizard_patch["task_objective"] = "Sort tickets"
-    result = await _nav_tools({"wizard_screen": "brief", "screen_issue": "stale"}, turn)[
+    result = await _nav_tools({"wizard_screen": "brief", "screen_issue": "stale", "next_screen": "artifact"}, turn)[
         "continue_to_next_screen"
     ].acall()
     assert result["screen_nav"] == {"action": "continue", "from": "brief"}
@@ -641,24 +705,31 @@ async def test_continue_returns_to_the_screen_a_go_back_left() -> None:
     """After a go-back edit, Continue jumps back once every screen between is done."""
     state = {**_READY, "wizard_screen": "optimizer", "return_screen": "budget"}
     result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "budget"}
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "budget", "jump": True}
+    assert "heads back to the 'budget' screen, or stops earlier" in result["message"]
 
 
 @pytest.mark.asyncio
 async def test_continue_moves_one_screen_when_a_screen_between_is_not_done() -> None:
     """A screen between that still needs work keeps the plain one-screen move."""
-    state = {**_READY, "reflection_model_config": {}, "wizard_screen": "optimizer", "return_screen": "budget"}
+    state = {
+        **_READY,
+        "reflection_model_config": {},
+        "wizard_screen": "optimizer",
+        "return_screen": "budget",
+        "next_screen": "models",
+    }
     result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "optimizer"}
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "models"}
 
 
 @pytest.mark.parametrize("back", ["models", "brief", "nowhere"])
 @pytest.mark.asyncio
 async def test_continue_ignores_a_return_screen_that_is_not_a_jump_ahead(back: str) -> None:
-    """The next screen, an earlier one or an unknown one gives no ``to``."""
-    state = {**_READY, "wizard_screen": "optimizer", "return_screen": back}
+    """The next screen, an earlier one or an unknown one moves to the client's next screen."""
+    state = {**_READY, "wizard_screen": "optimizer", "return_screen": back, "next_screen": "models"}
     result = await _nav_tools(state)["continue_to_next_screen"].acall()
-    assert result["screen_nav"] == {"action": "continue", "from": "optimizer"}
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "models"}
 
 
 def test_snapshot_tells_the_agent_where_continue_returns() -> None:
@@ -671,9 +742,13 @@ def test_snapshot_tells_the_agent_where_continue_returns() -> None:
 @pytest.mark.asyncio
 async def test_continue_moves_on_and_saves_its_note() -> None:
     """A done screen moves on, and the optional note is kept like ``remember_for_later``."""
-    state = {**_READY, "wizard_screen": "brief"}
-    result = await _nav_tools(state)["continue_to_next_screen"].acall(note="keep it cheap")
-    assert result["screen_nav"] == {"action": "continue", "from": "brief"}
+    state = {**_READY, "wizard_screen": "brief", "next_screen": "artifact"}
+    turn = _TurnAuthoringFlag()
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall(note="keep it cheap")
+    assert result["screen_nav"] == {"action": "continue", "from": "brief", "to": "artifact"}
+    assert turn.moved_to == "artifact"
+    assert "'artifact' screen" in result["message"]
+    assert "Set none of its fields now" in result["message"]
     assert result["wizard_state"]["screen_notes"] == [{"screen": "brief", "note": "keep it cheap"}]
 
 
@@ -685,9 +760,46 @@ async def test_continue_never_leaves_the_overview() -> None:
 
 
 @pytest.mark.asyncio
+async def test_continue_after_a_write_this_turn_does_not_name_a_stale_screen() -> None:
+    """A write this turn can change the order (Standard's data mode turns optimizer into plan), so the text names no screen."""
+    turn = _TurnAuthoringFlag()
+    turn.wizard_patch["data_mode"] = "pairs"
+    state = {**_READY, "wizard_screen": "source", "next_screen": "optimizer"}
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "source"}
+    assert "moves on to the next screen" in result["message"]
+    assert "'optimizer'" not in result["message"]
+    assert turn.moved_to == ""
+
+
+@pytest.mark.asyncio
+async def test_continue_to_the_last_screen_names_it() -> None:
+    """From Harden, Continue names the Overview, the last screen (SKY-744)."""
+    state = {**_READY, "wizard_screen": "harden", "next_screen": "overview"}
+    result = await _nav_tools(state)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "harden", "to": "overview"}
+
+
+@pytest.mark.parametrize("sent", [None, "nowhere"])
+@pytest.mark.asyncio
+async def test_continue_without_a_known_next_screen_names_no_screen(sent: str | None) -> None:
+    """A missing or unknown ``next_screen`` still gives ``to``; the client then moves on one screen."""
+    state = {**_READY, "wizard_screen": "brief", **({"next_screen": sent} if sent else {})}
+    turn = _TurnAuthoringFlag()
+    result = await _nav_tools(state, turn)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "brief"}
+    assert "moves on to the next screen" in result["message"]
+    assert turn.moved_to == ""
+    err = validate_wizard_screen("update_wizard_state", {"task_objective": "x"}, cast(WizardState, state), moved_to="")
+    assert err is not None
+    assert "moved to the next screen" in err
+
+
+@pytest.mark.asyncio
 async def test_go_back_only_to_an_earlier_screen() -> None:
     """Going back names an earlier screen and carries the request."""
-    tools = _nav_tools({"wizard_screen": "budget"})
+    turn = _TurnAuthoringFlag()
+    tools = _nav_tools({"wizard_screen": "budget"}, turn)
     result = await tools["go_back_to_screen"].acall(screen_id="brief", request="Make it about refunds")
     assert result["screen_nav"] == {
         "action": "back",
@@ -695,6 +807,9 @@ async def test_go_back_only_to_an_earlier_screen() -> None:
         "screen": "brief",
         "request": "Make it about refunds",
     }
+    assert turn.moved_to == "brief"
+    assert "'brief' screen" in result["message"]
+    assert "takes the next turn" in result["message"]
     assert isinstance(await tools["go_back_to_screen"].acall(screen_id="metric", request="x"), str)
     assert isinstance(await tools["go_back_to_screen"].acall(screen_id="brief", request=" "), str)
 
@@ -713,6 +828,15 @@ def test_source_signature_sets_the_column_roles() -> None:
     """The Data prompt tells the agent to set the column roles, so it fills the roles card."""
     assert "``set_column_roles``" in SCREEN_FOCUS["source"]
     assert SCREEN_FOCUS["source"] in screen_signature("source").instructions
+
+
+def test_agent_infers_the_roles_of_an_uploaded_dataset() -> None:
+    """An upload carries no roles (SKY-742): the agent infers them and states the mapping."""
+    assert "infer which ``dataset_columns`` are the inputs" in SCREEN_FOCUS["source"]
+    assert "tell the user the mapping in one line" in SCREEN_FOCUS["source"]
+    prompt = GENERALIST_SYSTEM_PROMPT or ""
+    assert "The user tags no columns." in prompt
+    assert "the user confirms which" not in prompt
 
 
 def test_screen_signature_names_the_reply_language() -> None:
@@ -794,6 +918,25 @@ def test_scope_wizard_tool_names_only_current_screen_fields() -> None:
     assert set(tool.args) == {"spending_limit_usd", "job_name", "job_description", "is_private"}
     assert "set only spending_limit_usd" in tool.desc
     assert "optimizer_choice" not in tool.desc
+
+
+def test_snapshot_drops_the_next_screen() -> None:
+    """``next_screen`` feeds Continue only; the agent never reads it (SKY-744)."""
+    on_screen = screen_snapshot(cast(WizardState, {**_READY, "wizard_screen": "brief", "next_screen": "artifact"}))
+    cloned = screen_snapshot(
+        cast(WizardState, {**_READY, "wizard_screen": "brief", "next_screen": "artifact", "cloned_run": True})
+    )
+    assert "next_screen" not in on_screen
+    assert "next_screen" not in cloned
+
+
+def test_prompts_forbid_a_saved_claim_after_a_move() -> None:
+    """Both prompts say ``screen_nav`` names the new screen and no field is saved after a move (SKY-744)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+    assert "After a move, write no field this turn, and never say a field is saved" in prompt
+    instructions = " ".join(screen_signature("brief").instructions.split())
+    assert "Never claim a field is saved after a move" in instructions
+    assert "``screen_nav.to`` (Continue, when present) or ``screen_nav.screen`` (Back)" in instructions
 
 
 def test_scope_wizard_tool_unchanged_without_a_screen() -> None:
@@ -1184,7 +1327,7 @@ async def test_continue_after_a_repository_write_ignores_a_stale_artifact_kind()
         authoring_flag=flag,
     )
     assert await update.func._async_body(repository="acme/app") == "ok"
-    result = await _nav_tools(state, flag)["continue_to_next_screen"].acall()
+    result = await _nav_tools({**state, "next_screen": "source"}, flag)["continue_to_next_screen"].acall()
     assert result["screen_nav"] == {"action": "continue", "from": "artifact"}
 
 
@@ -1545,6 +1688,7 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
         "list_models_for_agent",
         "search_docs",
         "request_secret",
+        "ask_user",
         "share_plan",
         "submit",
     ]
@@ -1552,6 +1696,7 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
     assert lm.requests[1]["messages"][: len(first)] == first
     assert events[0]["event"] == "turn_metadata"
     assert events[0]["data"]["allowed_tools"] == [
+        "ask_user",
         "list_models_for_agent",
         "request_secret",
         "search_docs",
@@ -1587,6 +1732,48 @@ class _ThinkingOnlyLM(_ScriptedLM):
             choices=[{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": None}}],
             usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
+
+
+@pytest.mark.asyncio
+async def test_attached_images_reach_the_model_in_the_new_user_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image attached to a turn reaches the model as part of the new user message."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    png = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+        "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    )
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield a fake session with no MCP tools.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+
+        Yields:
+            A fake session with no tools.
+        """
+        yield _FakeSession([])
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    lm = _ScriptedLM([("submit", {"assistant_message": "ok"})])
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(),
+        chat_history=[],
+        user_message="what is this?",
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda event: None,
+        lm=lm,
+        reply_language="English",
+        images=[png],
+    )
+
+    assert reply == "ok"
+    assert png in json.dumps(lm.requests[0]["messages"][-1])
 
 
 @pytest.mark.asyncio
@@ -1670,7 +1857,7 @@ async def test_turn_offers_web_tools_when_firecrawl_is_configured(monkeypatch: p
 
     assert reply == "found it"
     assert events[0]["data"]["allowed_tools"] == sorted(
-        {*web_tools.WEB_TOOLS, "request_secret", "search_docs", "share_plan"}
+        {*web_tools.WEB_TOOLS, "ask_user", "request_secret", "search_docs", "share_plan"}
     )
     assert posted == [("/search", {"query": "dspy gepa", "limit": 5})]
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
@@ -1720,6 +1907,109 @@ async def test_turn_answers_from_the_docs_tool(monkeypatch: pytest.MonkeyPatch, 
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
     assert [(e["tool"], e["status"]) for e in ends] == [("search_docs", "ok")]
     assert "/docs/limits" in json.dumps(lm.requests[1]["messages"])
+
+
+@pytest.mark.asyncio
+async def test_stored_chat_turn_offers_send_feedback_and_stores_one_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored chat's turn on Pi lists ``send_feedback``, and the call stores one report for the turn (SKY-580)."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(AgentConversationModel(id="c1", username="bob", title="t"))
+        session.add(AgentMessageModel(conversation_id="c1", role="user", content="the score is wrong"))
+        session.commit()
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield an empty fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession([])
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    args = {"tool_name": "validate_code", "user_quote": "the score is wrong", "summary": "Expected 1, got 0."}
+    lm = _ScriptedLM([("send_feedback", args), ("submit", {"assistant_message": "I sent your feedback."})])
+    events: list[dict] = []
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(),
+        chat_history=[],
+        user_message="the score is wrong",
+        trust_mode="ask",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        lm=lm,
+        reply_language="English",
+        feedback_target=FeedbackTarget(engine=engine, username="bob", conversation_id="c1", user_message_id=1),
+    )
+
+    assert reply == "I sent your feedback."
+    assert "send_feedback" in events[0]["data"]["allowed_tools"]
+    ends = [e["data"] for e in events if e["event"] == "tool_end"]
+    assert [(e["tool"], e["status"]) for e in ends] == [("send_feedback", "ok")]
+    with Session(engine) as session:
+        [report] = session.scalars(select(AgentFeedbackReportModel)).all()
+    assert (report.conversation_id, report.user_message_id, report.agent, report.tool_name) == (
+        "c1",
+        1,
+        "generalist",
+        "validate_code",
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_without_a_screen_asks_with_choices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chat with no wizard screen offers ``ask_user`` and runs it with no approval, even in Ask mode."""
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield an empty fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession([])
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    options = [{"label": "Tag a dataset", "description": "Open the tagger."}, {"label": "Start a run"}]
+    lm = _ScriptedLM(
+        [
+            ("ask_user", {"question": "What next?", "options_json": json.dumps(options)}),
+            ("submit", {"assistant_message": "What next?"}),
+        ]
+    )
+    events: list[dict] = []
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(),
+        chat_history=[],
+        user_message="hi",
+        trust_mode="ask",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        lm=lm,
+        reply_language="English",
+    )
+
+    assert reply == "What next?"
+    assert "ask_user" in events[0]["data"]["allowed_tools"]
+    assert not [e for e in events if e["event"] == "pending_approval"]
+    ends = [e["data"] for e in events if e["event"] == "tool_end"]
+    assert [(e["tool"], e["status"]) for e in ends] == [("ask_user", "ok")]
+    assert ends[0]["result"] == {
+        "question": "What next?",
+        "options": [
+            {"label": "Tag a dataset", "description": "Open the tagger."},
+            {"label": "Start a run", "description": ""},
+        ],
+    }
 
 
 def test_share_plan_streams_a_plan_event_and_no_tool_row() -> None:
@@ -2136,6 +2426,8 @@ def test_turn_guard_refuses_a_statement_once_on_a_done_screen() -> None:
     assert events[1]["data"]["tool"] == "turn_check"
     assert events[1]["data"]["arguments"] == {"reply": "I saved the goal."}
     assert events[2]["data"]["result"] == {"missing": [], "feedback": refusal}
+    # The panel and the saved chat read any other status as a failed step.
+    assert events[2]["data"]["status"] == "ok"
     assert guard({"assistant_message": "I saved the goal."}) is None
 
 
@@ -2233,32 +2525,40 @@ def test_chat_replay_drops_turn_checks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hand_off_puts_the_coding_agents_optimize_toml_into_the_draft(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hand-off sends the current optimize.toml and puts the returned file into the turn's patch (SKY-184)."""
-    seen: dict[str, Any] = {}
-
-    def fake_coder(context: dict[str, Any], request: str, **_kwargs: Any) -> dict[str, Any]:
-        """Record the context and return a new optimize.toml."""
-        seen.update(context)
-        return {"wizard_state": {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}, "summary": "", "open_questions": []}
-
-    monkeypatch.setattr(generalist_module, "run_coding_agent", fake_coder)
-    state = cast(WizardState, {"wizard_screen": "metric", "optimize_toml": "version = 1\n"})
+async def test_workspace_edit_puts_the_changed_ascent_toml_into_the_draft() -> None:
+    """An edit starts from the draft's ascent.toml and puts the changed file into the turn's patch (SKY-184)."""
+    state = cast(WizardState, {"wizard_screen": "metric", "ascent_toml": "version = 1\n"})
     turn = _TurnAuthoringFlag()
-    (tool,) = generalist_module.coding_agent_tools(state, turn, lm=None, emit=lambda _e: None, github_token=None)
+    tools = {tool.name: tool for tool in generalist_module.workspace_tools(state, turn, github_token=None)}
 
-    await tool.func("Run the tests.")
-
-    assert seen["optimize_toml"] == "version = 1\n"
-    assert turn.wizard_patch == {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}
-
-
-def test_hand_off_desc_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
-    """The setup agent shows the returned optimize.toml in full, so the user sees the file (SKY-184)."""
-    state = cast(WizardState, {"wizard_screen": "metric"})
-    (tool,) = generalist_module.coding_agent_tools(
-        state, _TurnAuthoringFlag(), lm=None, emit=lambda _e: None, github_token=None
+    await tools["edit_workspace_file"].acall(
+        path="ascent.toml", old_text="version = 1\n", new_text="version = 1\n\n[run]\nentry = 'a.py:run'\n"
     )
 
-    assert "show the user the returned optimize_toml in full" in tool.desc
-    assert "Do not write the same code again with update_wizard_state." in tool.desc
+    assert turn.wizard_patch == {"ascent_toml": "version = 1\n\n[run]\nentry = 'a.py:run'\n"}
+
+
+@pytest.mark.asyncio
+async def test_list_repo_folder_without_a_path_lists_the_root() -> None:
+    """A call with no path reads the root, so a model that drops the path gets an answer, not a TypeError."""
+    state = cast(WizardState, {"wizard_screen": "metric"})
+    tools = {
+        tool.name: tool for tool in generalist_module.workspace_tools(state, _TurnAuthoringFlag(), github_token=None)
+    }
+
+    assert await tools["list_repo_folder"].acall() == {"error": "No repository is chosen yet."}
+
+
+def test_metric_focus_tells_the_setup_agent_to_show_the_ascent_toml() -> None:
+    """The setup agent shows the ascent.toml it wrote in full, so the user sees the file (SKY-184)."""
+    assert "When you write ascent.toml, show the user the file in full." in SCREEN_FOCUS["metric"]
+
+
+def test_dataset_prompt_says_the_card_is_a_preview_and_the_run_uses_every_row() -> None:
+    """The dataset comes as a file card in the user's message, and only the run reads every row (SKY-780)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+
+    assert "arrives as an attached file card in the user's message" in prompt
+    assert "only a preview" in prompt
+    assert "The run uses every row" in prompt
+    assert "never ask the user to paste rows" in prompt

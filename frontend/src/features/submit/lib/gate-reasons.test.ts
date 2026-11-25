@@ -9,9 +9,8 @@ import {
 } from "./gate-reasons.ts";
 
 const CATALOG: Record<string, string> = {
-  "repo_gate.unknown_connector":
-    "The service {service} is not a connector. Use one of these names: {known}.",
-  "repo_gate.unenforced_cloud": "optimize.toml sets {key}. Remove it to run.",
+  "repo_gate.missing_secret": "The service {service} needs the secret {secret}.",
+  "repo_gate.unenforced_cloud": "ascent.toml sets {key}. Remove it to run.",
   "repo_gate.secret_host_unlisted": "{secret} has no allowed hosts but goes to {host}.",
   "repo_gate.secret_host_not_allowed": "{secret} may go only to {allowed} but goes to {host}.",
 };
@@ -28,14 +27,14 @@ const refused = (failures: unknown) => ({
 test("each gate failure is worded from its catalog key and parameters", () => {
   const reasons = gateReasons(
     refused([
-      { key: "repo_gate.unknown_connector", params: { service: "jira", known: "github, linear" } },
+      { key: "repo_gate.missing_secret", params: { service: "jira", secret: "JIRA_TOKEN" } },
       { key: "repo_gate.unenforced_cloud", params: { key: "proposer.network" } },
     ]),
     translate,
   );
   assert.deepEqual(reasons, [
-    "The service jira is not a connector. Use one of these names: github, linear.",
-    "optimize.toml sets proposer.network. Remove it to run.",
+    "The service jira needs the secret JIRA_TOKEN.",
+    "ascent.toml sets proposer.network. Remove it to run.",
   ]);
 });
 
@@ -45,12 +44,12 @@ test("a failure with no catalog copy or a bad shape is left out", () => {
       { key: "repo_gate.not_in_catalog", params: {} },
       { params: {} },
       null,
-      "repo_gate.unknown_connector",
+      "repo_gate.missing_secret",
       { key: "repo_gate.unenforced_cloud", params: { key: "metric.files" } },
     ]),
     translate,
   );
-  assert.deepEqual(reasons, ["optimize.toml sets metric.files. Remove it to run."]);
+  assert.deepEqual(reasons, ["ascent.toml sets metric.files. Remove it to run."]);
 });
 
 test("other errors and a refusal from an older server give no reasons", () => {

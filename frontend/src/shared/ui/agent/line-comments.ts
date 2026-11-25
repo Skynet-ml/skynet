@@ -7,6 +7,27 @@
 
 import type { MidTurnQueue } from "./steer-queue";
 
+// A stable id per comment object. An edit or a line move replaces the object,
+// so those carry the old object's id to the new one.
+const commentIds = new WeakMap<LineComment, string>();
+let lastCommentId = 0;
+
+/** Give a comment its stable id, made on first use. */
+export function lineCommentId(comment: LineComment): string {
+  let id = commentIds.get(comment);
+  if (!id) {
+    id = `c${++lastCommentId}`;
+    commentIds.set(comment, id);
+  }
+  return id;
+}
+
+/** Give the comment that replaces another the other's id, and return it. */
+export function carryLineCommentId(from: LineComment, to: LineComment): LineComment {
+  commentIds.set(to, lineCommentId(from));
+  return to;
+}
+
 /** A comment on one line of a file's current text. */
 export interface LineComment {
   path: string;

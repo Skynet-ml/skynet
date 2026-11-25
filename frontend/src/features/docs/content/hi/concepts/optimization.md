@@ -2,26 +2,29 @@ Skynet, Optimize Anything है: हर रन एक रिपॉज़िट�
 
 ## साझा कॉन्ट्रैक्ट
 
-हर रन में एक रिपॉज़िटरी और एक स्कोरर होता है। स्कोरर एक Python फ़ंक्शन है जिसे रिपॉज़िटरी के एक संस्करण का पाथ और एक केस मिलता है।
+हर रन में एक रिपॉज़िटरी, `[run]` entry या `[target.<name>]` स्टेज वाली एक `ascent.toml` फ़ाइल, और एक स्कोरर होता है। `[run]` की `entry` रिपॉज़िटरी के एक संस्करण को एक केस पर चलाती है। स्कोरर एक Python फ़ंक्शन है जिसे entry का आउटपुट और केस मिलता है।
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path` रिपॉज़िटरी के एक संस्करण का फ़ोल्डर है, सेटअप कमांड चलने के बाद।
-- `case` एक dict है। `case["input"]` में एक केस के इनपुट फ़ील्ड होते हैं। `case["expected"]` में अपेक्षित मान होता है, या `None` जब केस में कोई अपेक्षित मान नहीं है।
-- `score` एक जोड़ा लौटाता है: एक संख्या, और `"feedback"` स्ट्रिंग वाला एक dict।
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-रिपॉज़िटरी के रूट में `def serve(input)` वाली एक `serve.py` फ़ाइल है। स्कोरर इसे कॉल कर सकता है, और रन के बाद Skynet सबसे अच्छे संस्करण को सर्व करने के लिए इसका इस्तेमाल करता है।
+- `output` वह है जो `[run]` की `entry` ने केस के लिए लौटाया।
+- `case` एक dict है। `case["input"]` में एक केस के इनपुट फ़ील्ड होते हैं। `case["expected"]` में अपेक्षित मान होता है, या `None` जब केस में कोई अपेक्षित मान नहीं है।
+- `repo_path` एक फ़ोल्डर है जिसमें केवल आपकी मेट्रिक फ़ाइलें होती हैं।
+- `score` एक object लौटाता है: `"score"` के नीचे एक संख्या, और एक वैकल्पिक `"feedback"` स्ट्रिंग।
+
+रिपॉज़िटरी के रूट में `def serve(input)` वाली एक `serve.py` फ़ाइल है। `[run]` की `entry` इसे अपने अलग सैंडबॉक्स बॉक्स में कॉल करती है। रन के बाद Skynet सबसे अच्छे संस्करण को सर्व करने के लिए इसका इस्तेमाल करता है।
+
+स्कोरर एक अलग सैंडबॉक्स बॉक्स में चलता है। उस बॉक्स में केवल आपकी मेट्रिक फ़ाइलें होती हैं और संस्करण का कोई कोड नहीं होता, इसलिए स्कोरर `serve.py` को इम्पोर्ट नहीं कर सकता। वह संस्करण को केवल `output` से, या किसी `[target.<name>]` स्टेज को `call()` से देखता है। `call` को `from openascent import call` से इम्पोर्ट करें। `[run]` entry या `[target.<name>]` स्टेज के बिना, Skynet `ascent.toml` फ़ाइल को अस्वीकार करता है।
 
 > [!NOTE]
 > संस्करण लिखने वाला कोडिंग एजेंट स्कोरर का सोर्स, अपेक्षित मान या रन के सीक्रेट नहीं देख सकता।
@@ -34,9 +37,9 @@ def score(repo_path, case):
 
 | वेरिएबल              | इसमें क्या होता है                                              |
 | -------------------- | --------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | गेटवे URL। `APP_GATEWAY_URL` में भी यही मान होता है।              |
-| `APP_API_KEY`        | सिर्फ़ इस रन के लिए एक टोकन। यह प्रदाता की कुंजी नहीं है।           |
-| `APP_MODEL`          | भेजने के लिए मॉडल का नाम। यह रन का स्कोरर मॉडल है।                |
+| `OPENAI_BASE_URL`    | गेटवे URL। `ASCENT_MODEL_URL` में भी यही मान होता है।             |
+| `ASCENT_MODEL_KEY`   | सिर्फ़ इस रन के लिए एक टोकन। यह प्रदाता की कुंजी नहीं है।           |
+| `ASCENT_MODEL`       | भेजने के लिए मॉडल का नाम। यह रन का स्कोरर मॉडल है।                |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK के लिए गेटवे URL।                                  |
 
 ```python tab="pipeline.py"
@@ -44,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
@@ -58,7 +61,7 @@ def label(message):
 - Skynet की कुंजियों पर हुई कॉल रन के बजट से मापी जाती हैं।
 - आपकी अपनी कुंजी (BYOK) के साथ, कॉल आपके प्रदाता की कुंजी पर जाती है। Skynet कोई मॉडल शुल्क नहीं लेता।
 - गेटवे किसी भी दूसरे मॉडल के अनुरोध अस्वीकार करता है।
-- रन के सीक्रेट आपके कोड और आपके स्कोरर तक एनवायरनमेंट वेरिएबल के रूप में पहुँचते हैं। वेरिएबल का नाम सीक्रेट का नाम है। Skynet आउटपुट में सीक्रेट मान छिपाता है।
+- आपके कोड और आपके स्कोरर को रन के सीक्रेट एनवायरनमेंट वेरिएबल के रूप में नहीं मिलते। कोई सीक्रेट किसी भूमिका तक सिर्फ़ उस `[services.<name>]` टेबल से पहुँचता है जिसे वह भूमिका `[run] services` या `[metric] services` में लिखती है, या उस भूमिका की `mcp` फ़ाइल के किसी सर्वर से। सीक्रेट को टेबल के `headers` में `${NAME}` के रूप में लिखें। Skynet सीक्रेट को सैंडबॉक्स के बाहर जोड़ता है और आउटपुट में सीक्रेट मान छिपाता है।
 
 सैंडबॉक्स के पास कोई दूसरा नेटवर्क एक्सेस नहीं है।
 

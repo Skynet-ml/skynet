@@ -139,6 +139,27 @@ class CatalogModel(BaseModel):
     )
     available: bool = Field(default=False, description="True if backend has an API key for this model.")
     max_input_tokens: int | None = Field(default=None, description="Context window size.")
+    max_output_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Most tokens the model writes in one reply: the provider's live listing "
+            "when probed, else LiteLLM's table. None when neither says."
+        ),
+    )
+    default_temperature: float | None = Field(
+        default=None,
+        description=(
+            "Temperature the provider recommends for this model (OpenRouter's "
+            "default parameters), or None when it recommends none."
+        ),
+    )
+    takes_temperature: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the model accepts a temperature (OpenRouter's supported "
+            "parameters), or None when the listing does not say."
+        ),
+    )
     input_cost_per_token: float | None = Field(
         default=None,
         description=(
@@ -585,7 +606,7 @@ def is_effortless_model(name: str) -> bool:
         # Before the boot prewarm lands, wait for its build (or start one):
         # otherwise a stored effortless pick fails validation once with a 422.
         # Joining the shared refresh thread keeps it to one build at a time.
-        refresh = _kick_background_refresh()
+        refresh = _kick_background_refresh(only_when_cold=True)
         if refresh is not None:
             refresh.join()
     if name in _hidden_effortless_values:
@@ -601,6 +622,11 @@ def is_effortless_model(name: str) -> bool:
 # judge). Only those roles may pick it; every other role keeps it hidden.
 CLASSIFIER_ROLES: frozenset[str] = frozenset({"hook", "judge"})
 CLASSIFIER_ONLY_MODELS: frozenset[str] = frozenset({"openrouter/typesafe/jev-router"})
+# SKY-706: the chat's auto-review asks an OpenRouter Decisions API model. The
+# chat catalog never lists decision models, and only the auto_review role may
+# use this one. The auto-review imports this constant, so the id lives here once.
+AUTO_REVIEW_ROLE = "auto_review"
+AUTO_REVIEW_MODEL = "openrouter/typesafe/jev-1.14"
 
 
 # Featured-model selection over the OpenRouter listing: the agent panels'
@@ -827,6 +853,67 @@ def _probe_item_max_input_tokens(item: dict) -> int | None:
         if isinstance(val, int):
             return val
     return None
+
+
+def _probe_item_max_output_tokens(item: dict) -> int | None:
+    """Read the most tokens one reply may hold from a probe item, if present.
+
+    Args:
+        item: The raw provider item dict (may be empty for string entries).
+
+    Returns:
+        OpenRouter's ``top_provider.max_completion_tokens``, else a top-level
+        ``max_output_tokens``, when it is a positive ``int``; else ``None``.
+    """
+    top = item.get("top_provider")
+    for val in ((top if isinstance(top, dict) else {}).get("max_completion_tokens"), item.get("max_output_tokens")):
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+    return None
+
+
+def _meta_max_output_tokens(meta: dict) -> int | None:
+    """Read LiteLLM's output-token limit for a model.
+
+    Args:
+        meta: The model's LiteLLM ``model_cost`` entry.
+
+    Returns:
+        ``max_output_tokens`` when it is a positive ``int``, else ``None``.
+    """
+    val = meta.get("max_output_tokens")
+    return val if isinstance(val, int) and not isinstance(val, bool) and val > 0 else None
+
+
+def _probe_item_default_temperature(item: dict) -> float | None:
+    """Read the provider's recommended temperature from a probe item.
+
+    Args:
+        item: The raw provider item dict (may be empty for string entries).
+
+    Returns:
+        OpenRouter's ``default_parameters.temperature`` when it is a number
+        from 0 to 2, else ``None``.
+    """
+    params = item.get("default_parameters")
+    val = params.get("temperature") if isinstance(params, dict) else None
+    if isinstance(val, int | float) and not isinstance(val, bool) and 0 <= val <= 2:
+        return float(val)
+    return None
+
+
+def _probe_item_takes_temperature(item: dict) -> bool | None:
+    """Read whether a probe item accepts a temperature.
+
+    Args:
+        item: The raw provider item dict (may be empty for string entries).
+
+    Returns:
+        Whether OpenRouter's ``supported_parameters`` lists ``temperature``,
+        or ``None`` when the item has no such list.
+    """
+    params = item.get("supported_parameters")
+    return "temperature" in params if isinstance(params, list) else None
 
 
 def _probe_item_cost(item: dict, key: str) -> float | None:
@@ -1535,6 +1622,9 @@ def get_catalog() -> ModelCatalogResponse:
                     supports_vision=bool(meta.get("supports_vision")),
                     available=available,
                     max_input_tokens=meta.get("max_input_tokens"),
+                    max_output_tokens=_probe_item_max_output_tokens(probe_item) or _meta_max_output_tokens(meta),
+                    default_temperature=_probe_item_default_temperature(probe_item),
+                    takes_temperature=_probe_item_takes_temperature(probe_item),
                     # The live listing is what the provider bills today; LiteLLM's
                     # static table lags it and only fills in unprobed models.
                     input_cost_per_token=_probe_item_cost(probe_item, "prompt")
@@ -1590,6 +1680,9 @@ def get_catalog() -> ModelCatalogResponse:
                     supports_vision=_probe_item_supports_vision(item),
                     available=True,
                     max_input_tokens=_probe_item_max_input_tokens(item),
+                    max_output_tokens=_probe_item_max_output_tokens(item),
+                    default_temperature=_probe_item_default_temperature(item),
+                    takes_temperature=_probe_item_takes_temperature(item),
                     input_cost_per_token=_probe_item_cost(item, "prompt"),
                     output_cost_per_token=_probe_item_cost(item, "completion"),
                 )
@@ -1810,8 +1903,13 @@ def _refresh_catalog_in_background() -> None:
         )
 
 
-def _kick_background_refresh() -> Thread | None:
+def _kick_background_refresh(*, only_when_cold: bool = False) -> Thread | None:
     """Spawn the background refresh thread if one isn't already running.
+
+    Args:
+        only_when_cold: Start no refresh when the cache already holds a
+            catalog. A cold caller checks the cache without the lock, so a
+            refresh can land before it gets here.
 
     Returns:
         The current refresh thread, read under the cache lock, so it has
@@ -1819,7 +1917,7 @@ def _kick_background_refresh() -> Thread | None:
     """
     global _refresh_in_flight, _refresh_thread
     with _cache_lock:
-        if _refresh_in_flight:
+        if _refresh_in_flight or (only_when_cold and _cached_response is not None):
             return _refresh_thread
         _refresh_in_flight = True
         # Set with the flag, so a caller that sees the flag can join this thread.
@@ -1969,6 +2067,7 @@ def get_byok_catalog() -> ModelCatalogResponse:
                 supports_vision=bool(meta.get("supports_vision")),
                 available=True,
                 max_input_tokens=meta.get("max_input_tokens"),
+                max_output_tokens=_meta_max_output_tokens(meta),
                 input_cost_per_token=_positive_cost(meta, "input_cost_per_token"),
                 output_cost_per_token=_positive_cost(meta, "output_cost_per_token"),
             )
@@ -2103,6 +2202,9 @@ def narrow_models_to_served(
                 supports_vision=_probe_item_supports_vision(item),
                 available=True,
                 max_input_tokens=_probe_item_max_input_tokens(item),
+                max_output_tokens=_probe_item_max_output_tokens(item),
+                default_temperature=_probe_item_default_temperature(item),
+                takes_temperature=_probe_item_takes_temperature(item),
             )
         )
     kept.sort(key=lambda m: m.value)
@@ -2131,13 +2233,15 @@ def require_known_model(model: str | None, *, role: str | None = None) -> None:
     Args:
         model: LiteLLM model id; empty/None passes (the server default runs).
         role: The role the model fills; the classifier roles also accept the
-            classifier-only models.
+            classifier-only models, and the auto-review role its decision model.
 
     Raises:
         DomainError: 422 when the id is not a catalog model.
     """
     name = str(model or "").strip()
     if role in CLASSIFIER_ROLES and name in CLASSIFIER_ONLY_MODELS:
+        return
+    if role == AUTO_REVIEW_ROLE and name == AUTO_REVIEW_MODEL:
         return
     if (
         name

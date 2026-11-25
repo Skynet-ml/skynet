@@ -6,14 +6,19 @@ import base64
 import http.server
 import json
 import os
+import shlex
 import shutil
 import socket
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 from urllib.parse import quote, quote_plus
@@ -32,7 +37,7 @@ from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
 from core.billing.env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS, CONNECTORS_KEY
-from core.billing.guest_model_proxy import MCP_PATH, MCP_TOKEN_ENV, METHOD_HEADER, SERVICES_ENV
+from core.billing.guest_model_proxy import MCP_TOKEN_ENV, METHOD_HEADER, SERVICES_ENV
 from core.billing.mcp_oauth_client import McpOAuthError
 from core.billing.model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
@@ -43,7 +48,7 @@ from core.billing.model_gateway import (
     SHINKA_EMBEDDING_MODEL,
     ModelGateway,
 )
-from core.billing.model_mailbox import ModelMailbox
+from core.billing.model_mailbox import ModelMailbox, mailbox_empty_command, root_empty_command
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from core.billing.protected_credentials import (
     ProtectedCredentialVault,
@@ -61,15 +66,17 @@ from core.billing.usage_tags import (
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from core.exceptions import InfrastructureInterruptionError, ServiceError
-from core.models.blackbox import BlackboxTarget
 from core.provider_registry import BYOK_PROVIDER_SLUGS
-from core.service_gateway.optimization.blackbox import harness_bridge, runner
+from core.sandbox.errors import SandboxRejectedError
+from core.sandbox.providers import vercel
+from core.sandbox.providers.vercel import VercelEnvironment
 from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
-from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
+from core.service_gateway.optimization.blackbox import runner
 from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment, ServiceSpec
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
-from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
+from core.service_gateway.optimization.blackbox.sandbox_broker import ParentSandboxSession, SandboxBroker
+from core.service_gateway.optimization.blackbox.sandbox_runtime import AsyncBridgeSession
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 from core.storage.run_call_store import PostgresRunCallStore
 from core.worker import scoped_relay
@@ -472,12 +479,14 @@ def test_guest_preflight_remembers_custom_reflection_route(
         "shinka": {"novelty": False},
         "strategy": {"mode": "single", "engine": "shinka_evolve"},
         "max_cost_cents": 100,
+        "target": {"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}},
     }
     protected = gateway.protect_payload(payload, managed_key="")
     assert "base_url" not in protected["reflection_model_config"]
     protected["shinka"]["novelty"] = True
+    protected["_skynet_evaluator_route"] = {"token": "route"}
     monkeypatch.setattr(blackbox_preflight, "sandbox_runtime_context", lambda *_: nullcontext())
-    monkeypatch.setattr(blackbox_preflight, "SandboxPythonScorer", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(blackbox_preflight, "RemoteScorer", lambda *args, **kwargs: MagicMock(return_value=(1.0, {})))
     with pytest.raises(DomainError) as error:
         blackbox_preflight.verify_anything_in_sandbox(
             protected, scope="execution", identity="fixture", runtime=MagicMock()
@@ -913,15 +922,12 @@ def test_guest_controls_and_dataset_routes_cannot_replace_parent_authority(gatew
         {
             "model_config": {"name": "fixture/text", "extra": {ROUTE_KEY: forged}},
             "dataset": [{ROUTE_KEY: forged}],
-            "_skynet_target_route": forged,
             "_skynet_tools_route": forged,
             "_budget_gateway_descriptor": forged,
         },
         managed_key="provider-secret",
     )
-    assert not any(
-        key in protected for key in ("_skynet_target_route", "_skynet_tools_route", "_budget_gateway_descriptor")
-    )
+    assert not any(key in protected for key in ("_skynet_tools_route", "_budget_gateway_descriptor"))
     [route] = gateway.model_routes()
     assert route["token"] != "forged"
     assert protected["model_config"]["extra"][ROUTE_KEY] == route
@@ -1030,30 +1036,6 @@ def test_interaction_payload_never_batches_a_managed_economy_model(gateway: Mode
         assert not gateway.batches(config["extra"][ROUTE_KEY]["token"])
         assert "economy_mode" not in config["extra"]
         assert "timeout" not in config["extra"]
-
-
-def test_byok_agent_task_uses_its_scoped_route(gateway: ModelGateway) -> None:
-    """Route the evaluated agent through its own key with the BYOK policy."""
-    protected = gateway.protect_payload(
-        {
-            "token_source": "byok",
-            "target": {"kind": "agent", "model": "openrouter/fixture/text"},
-            "task_model_config": {
-                "name": "openrouter/fixture/text",
-                "token_source": "byok",
-                "byok_provider": "openrouter",
-                "base_url": "https://openrouter.ai/api/v1",
-                "extra": {"api_key": "account-owned-key"},
-            },
-        },
-        managed_key="",
-    )
-
-    route = protected["_skynet_target_route"]
-    assert protected["task_model_config"]["extra"][ROUTE_KEY] == route
-    assert "account-owned-key" not in json.dumps(protected)
-    dispatcher = gateway._routes[route["token"]]
-    assert dispatcher.policy.kind == "byok_model"
 
 
 def test_selected_tools_keep_credentials_outside_guest_and_cannot_call_models(
@@ -2575,191 +2557,6 @@ def test_a_box_uses_its_proposer_mcp_server_through_the_mailbox_relay(
     assert route["token"] not in json.dumps(calls, default=str)
 
 
-# APP_TEST_CODEX can point at the pinned install (npm i @openai/codex@<CODEX_VERSION>).
-_CODEX = os.environ.get("APP_TEST_CODEX") or shutil.which("codex")
-
-
-class _ToolMcpServer:
-    """Serve an MCP streamable HTTP server with one ``lookup`` tool, as a real client expects."""
-
-    def __init__(self) -> None:
-        """Start the server on a free loopback port."""
-        self.methods: list[str] = []
-        mcp = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            """Answer initialize, tools/list and tools/call, and refuse the optional GET stream."""
-
-            def log_message(self, format: str, *args: object) -> None:
-                """Keep the test output quiet."""
-
-            def _reply(self, status: int, payload: dict[str, Any] | None = None) -> None:
-                """Send one JSON answer inside the session.
-
-                Args:
-                    status: HTTP status.
-                    payload: JSON-RPC answer, or ``None`` for an empty body.
-                """
-                body = json.dumps(payload).encode() if payload is not None else b""
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Mcp-Session-Id", "session-1")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def do_POST(self) -> None:
-                """Answer one JSON-RPC message."""
-                message = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
-                method = message.get("method", "")
-                mcp.methods.append(method)
-                if "id" not in message:
-                    self._reply(202)
-                    return
-                if method == "initialize":
-                    result: dict[str, Any] = {
-                        "protocolVersion": message["params"].get("protocolVersion", "2025-06-18"),
-                        "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "search", "version": "1.0.0"},
-                    }
-                elif method == "tools/list":
-                    schema = {"type": "object", "properties": {"query": {"type": "string"}}}
-                    result = {"tools": [{"name": "lookup", "description": "Look a word up.", "inputSchema": schema}]}
-                elif method == "tools/call":
-                    result = {"content": [{"type": "text", "text": "lookup-answer-7"}], "isError": False}
-                else:
-                    result = {}
-                self._reply(200, {"jsonrpc": "2.0", "id": message["id"], "result": result})
-
-            def do_GET(self) -> None:
-                """Refuse the optional server event stream, as the MCP spec permits."""
-                mcp.methods.append("GET")
-                self.send_response(405)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-
-            def do_DELETE(self) -> None:
-                """End the session."""
-                mcp.methods.append("DELETE")
-                self.send_response(204)
-                self.end_headers()
-
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.port = self._server.server_port
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
-
-    def close(self) -> None:
-        """Stop the server."""
-        self._server.shutdown()
-        self._server.server_close()
-
-
-def _responses_turn(body: dict[str, Any]) -> bytes:
-    """Answer one Responses API turn: call the ``lookup`` tool, then finish once its output is back.
-
-    Args:
-        body: The model request Codex sent.
-
-    Returns:
-        The turn as server-sent events.
-    """
-    if any(item.get("type") == "function_call_output" for item in body.get("input", [])):
-        item: dict[str, Any] = {
-            "type": "message",
-            "id": "m1",
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": "done"}],
-        }
-    else:
-        # Newer Codex groups a server's tools under one namespace; older Codex lists each as mcp__<server>__<tool>.
-        tool = next(tool for tool in body.get("tools", []) if "lookup" in json.dumps(tool))
-        item = {"type": "function_call", "id": "f1", "call_id": "c1", "arguments": json.dumps({"query": "word"})}
-        if tool.get("type") == "namespace":
-            item.update(namespace=tool["name"], name="lookup")
-        else:
-            item["name"] = tool["name"]
-    usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-    events = [
-        {"type": "response.created", "response": {"id": "r1"}},
-        {"type": "response.output_item.done", "item": item},
-        {"type": "response.completed", "response": {"id": "r1", "usage": usage}},
-    ]
-    return b"".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode() for event in events)
-
-
-@pytest.mark.skipif(_CODEX is None, reason="codex is not installed")
-def test_installed_codex_lists_and_calls_a_proposer_mcp_tool_through_the_box_relay(
-    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Drive the real Codex in a mailbox box: it lists and calls the [proposer] tool through the relay (SKY-610).
-
-    Args:
-        gateway: Funded real HTTP gateway fixture.
-        monkeypatch: Pins the test host to 127.0.0.1, as DNS would pin a public host.
-        tmp_path: Home for the box's Codex state.
-    """
-    assert _CODEX is not None
-    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
-    server = _ToolMcpServer()
-    store = _record_calls(gateway)
-    route = gateway.bind_mcp_relay(_proposer_relay(server.port))
-    model_requests: list[dict[str, Any]] = []
-
-    def dispatch(token: str, path: str, body: Any, headers: dict[str, str]) -> ModelHTTPResult:
-        """Send MCP paths to the gateway relay, and answer model paths with a scripted Codex turn."""
-        if path.startswith(MCP_PATH):
-            return gateway.dispatch_guest(token, path, body, headers)
-        model_requests.append(body)
-        return ModelHTTPResult(200, "text/event-stream", _responses_turn(body))
-
-    launch = build_launch(
-        BlackboxTarget(kind="agent", harness="codex", model="fake-model"),
-        GatewayConfig(url="http://127.0.0.1:9/v1", api_key="k"),
-        protected=True,
-        mcp_servers=("search",),
-    )
-    driver = (
-        "import json, pathlib, harness_bridge\n"
-        "proposer=json.loads(pathlib.Path('proposer.json').read_text())\n"
-        "outcome=harness_bridge.run_session(proposer, workspace=pathlib.Path('work'), prompt='Look the word up.',"
-        " model='fake-model', session_dir=pathlib.Path('session'), timeout_seconds=120, api_key='k')\n"
-        "print(json.dumps({'code': outcome.returncode, 'stderr': outcome.stderr[-2000:]}))\n"
-    )
-    session = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=150, image=IMAGE))
-    session.write_files(
-        {
-            "harness_bridge.py": Path(harness_bridge.__file__).read_text(),
-            "proposer.json": json.dumps(launch_payload(launch)),
-            "drive.py": driver,
-        }
-    )
-    path = f"{Path(_CODEX).parent}{os.pathsep}{os.environ.get('PATH', '')}"
-    try:
-        result = ModelMailbox(dispatch).run(
-            session,
-            "python3 drive.py",
-            env={MCP_TOKEN_ENV: route["token"], "PATH": path, "HOME": str(tmp_path)},
-            timeout_seconds=140,
-        )
-    finally:
-        session.close()
-        server.close()
-
-    assert result.ok, result.stderr
-    assert json.loads(result.stdout.strip().splitlines()[-1])["code"] == 0
-    assert {"initialize", "tools/list", "tools/call"} <= set(server.methods)
-    outputs = [
-        item["output"]
-        for request in model_requests
-        for item in request.get("input", [])
-        if item.get("type") == "function_call_output"
-    ]
-    assert any("lookup-answer-7" in json.dumps(output) for output in outputs)
-    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
-    assert f"search@{_MCP_HOST}:{server.port}/lookup" in [call["target"] for call in calls]
-    assert _MCP_KEY not in json.dumps(model_requests) + json.dumps(calls, default=str)
-
-
 def test_the_mcp_relay_records_each_call_under_the_run_and_the_tagged_candidate(
     gateway: ModelGateway, mcp_server: _McpServer
 ) -> None:
@@ -3176,7 +2973,7 @@ def test_a_box_calls_its_proposer_service_through_the_mailbox_relay(
         "    def redirect_request(self, *args, **kwargs):\n"
         "        return None\n"
         "opener=urllib.request.build_opener(Keep)\n"
-        "url=os.environ['SKYNET_SERVICE_ECHO_URL']\n"
+        "url=os.environ['ASCENT_SERVICE_ECHO_URL']\n"
         "def call(address, method='GET', data=None):\n"
         "    request=urllib.request.Request(address, data=data, method=method, headers={'X-Custom':'yes'})\n"
         "    try:\n"
@@ -3358,3 +3155,871 @@ def test_the_box_service_variable_matches_the_runner() -> None:
     """The box proxy names each service variable as the runner does, so a role's code reads one name everywhere."""
     for name in ("echo", "geo-coder", "maps.v2"):
         assert guest_model_proxy.service_env_name(name) == runner.service_env_name(name)
+
+
+class _RecordingSession:
+    """Record each mailbox command and file write, in order."""
+
+    def __init__(
+        self,
+        mkdir_code: int = 0,
+        *,
+        root_has_capabilities: bool = True,
+        root_file_writes: bool = True,
+        rm_code: int = 0,
+    ) -> None:
+        """Hold the record and the exit codes of the root mkdir and rm.
+
+        Args:
+            mkdir_code: The exit code the root mkdir returns.
+            root_has_capabilities: Whether the box's root can write any folder, as on Vercel.
+            root_file_writes: Whether the file API writes with root rights, as only on Vercel.
+            rm_code: The exit code the root rm returns.
+        """
+        self.mkdir_code = mkdir_code
+        self.rm_code = rm_code
+        self.root_has_capabilities = root_has_capabilities
+        self.root_file_writes = root_file_writes
+        self.calls: list[tuple[str, Any]] = []
+        self.options: list[dict[str, Any]] = []
+
+    def write_files(self, files: dict[str, str]) -> None:
+        """Record the written paths.
+
+        Args:
+            files: Relative path to content.
+        """
+        self.calls.append(("write", sorted(files)))
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Record the command and whether it runs as root.
+
+        Args:
+            command: The shell command line.
+            **kwargs: The run options; ``calls`` keeps only ``sudo``, ``options`` keeps the rest.
+
+        Returns:
+            A result with the mkdir or rm exit code for those commands, else 0.
+        """
+        self.calls.append(("run", (command, kwargs.get("sudo", False))))
+        self.options.append({key: value for key, value in kwargs.items() if key != "on_output"})
+        if command.startswith("/bin/mkdir"):
+            return CommandResult(exit_code=self.mkdir_code)
+        return CommandResult(exit_code=self.rm_code if "/bin/rm -rf -- " in command else 0)
+
+
+def test_a_root_mailbox_has_root_make_its_folders_before_any_file_write() -> None:
+    """A root proxy's folders belong to root, so the box user cannot swap its answers (SKY-901).
+
+    A Vercel file write makes a missing folder as the box user.
+    """
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    (kind, (mkdir, root)), (write_kind, written), *_ = session.calls
+    folder = written[0].rsplit("/", 1)[0]
+    assert (kind, root, write_kind) == ("run", True, "write")
+    assert mkdir == f"/bin/mkdir -m 0755 {folder} && /bin/mkdir -m 0700 {folder}/responses"
+    assert written == [f"{folder}/config.json", f"{folder}/proxy.py"]
+
+
+def test_a_root_mailbox_keeps_its_answers_out_of_the_box_users_reach() -> None:
+    """A root mailbox lives in sticky /tmp under the provider's root prefix, with a 0700 answer folder (SKY-902).
+
+    The file API writes each answer with all capabilities. In a 0700 root
+    folder the box user cannot open it, and in sticky /tmp it cannot rename
+    the mailbox and put its own in place, as it could in its working folder.
+    """
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    (_, (mkdir, _)), (_, written), *_ = session.calls
+    folder = written[0].rsplit("/", 1)[0]
+    assert folder.startswith(vercel.ROOT_MODEL_PREFIX)
+    assert f"/bin/mkdir -m 0700 {folder}/responses" in mkdir
+
+
+def test_a_root_mailbox_stops_when_root_cannot_make_its_folders() -> None:
+    """A failed root mkdir writes no file and starts no proxy (SKY-901)."""
+    session = _RecordingSession(mkdir_code=1)
+    with pytest.raises(RuntimeError, match="mailbox folders"):
+        ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    assert [kind for kind, _ in session.calls] == ["run", "run"]
+    assert "/bin/rm -rf -- " in session.calls[1][1][0]
+
+
+def test_a_user_mailbox_gets_root_folders_that_the_box_user_cannot_change() -> None:
+    """A guest mailbox on a capable box lives in a root-made /tmp folder, so its answers need no box command (SKY-902).
+
+    The file API writes each answer with all capabilities, so the box user
+    must make no entry in these folders: both are root 0755, not sticky 1777,
+    and the bindings folder is not among them. The guest cannot remove its
+    answers, so root empties the folder when the command ends.
+    """
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true")
+    (kind, (mkdir, root)), (write_kind, written), (run_kind, (_, guest_root)), cleanup = session.calls
+    folder = written[0].rsplit("/", 1)[0]
+    assert (kind, root, write_kind, run_kind, guest_root) == ("run", True, "write", "run", False)
+    assert folder.startswith(vercel.ROOT_MODEL_PREFIX)
+    assert mkdir == f"/bin/mkdir -m 0755 {folder} && /bin/mkdir -m 0755 {folder}/responses"
+    assert written == [f"{folder}/config.json", f"{folder}/proxy.py"]
+    assert cleanup == (
+        "run",
+        (
+            mailbox_empty_command(folder),
+            True,
+        ),
+    )
+
+
+def test_the_mailbox_cleanup_empties_a_real_folder_and_leaves_a_planted_link_alone(tmp_path: Path) -> None:
+    """Root empties only its own real folder, not the target of a box-user link that holds the name (SKY-902).
+
+    The cleanup runs in a real shell. Root's ``-O`` test is the caller's
+    own uid here, which plays root. The kept ``responses`` folder ends empty.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true")
+    folder = session.calls[1][1][0].rsplit("/", 1)[0]
+    cleanup = session.calls[-1][1][0]
+    target = tmp_path / "elsewhere"
+    (target / "responses").mkdir(parents=True)
+    (target / "keep").write_text("x")
+    (target / "responses" / "keep").write_text("x")
+    Path(folder).symlink_to(target)
+    try:
+        subprocess.run(["/bin/sh", "-c", cleanup], check=True)
+        assert ((target / "keep").exists(), (target / "responses" / "keep").exists()) == (True, True)
+    finally:
+        Path(folder).unlink()
+    Path(folder).mkdir()
+    responses = Path(folder) / "responses"
+    try:
+        responses.mkdir()
+        (responses / "answer").write_text("x")
+        (responses / ".late").write_text("x")
+        (Path(folder) / "config.json").write_text("x")
+        (Path(folder) / ".hidden").write_text("x")
+        (Path(folder) / "bindings").mkdir()
+        subprocess.run(["/bin/sh", "-c", cleanup], check=True)
+        assert (list(Path(folder).iterdir()), list(responses.iterdir())) == ([responses], [])
+    finally:
+        shutil.rmtree(folder)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="only root can give a folder to another user")
+def test_the_root_cleanup_leaves_a_folder_that_another_user_owns_alone(tmp_path: Path) -> None:
+    """Root does not empty a box-user folder that holds the name, since the box user could swap it for a link (SKY-902).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    folder = tmp_path / "box-user"
+    folder.mkdir()
+    (folder / "keep").write_text("x")
+    os.chown(folder, 65534, 65534)
+
+    subprocess.run(["/bin/sh", "-c", root_empty_command(shlex.quote(str(folder)))], check=True)
+
+    assert (folder / "keep").exists()
+
+
+def test_a_root_mailbox_empties_its_folder_when_the_command_ends() -> None:
+    """A root proxy's answers go away with its command, so a box snapshot does not keep them (SKY-902)."""
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    folder = session.calls[1][1][0].rsplit("/", 1)[0]
+    assert session.calls[-1] == (
+        "run",
+        (
+            mailbox_empty_command(folder),
+            True,
+        ),
+    )
+
+
+def test_the_root_mailbox_cleanup_empties_the_folder_and_keeps_it(tmp_path: Path) -> None:
+    """The cleanup deletes every answer, hidden ones too, and keeps the root folders (SKY-902).
+
+    The kept folders hold the names, so the box user cannot make its own
+    folder there for a stream write that ends after the cleanup.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    folder = session.calls[1][1][0].rsplit("/", 1)[0]
+    box = tmp_path / "box"
+    (box / "responses").mkdir(parents=True)
+    for name in ("config.json", ".hidden", "..odd", "responses/answer.json", "responses/.late"):
+        (box / name).write_text("x")
+    command = session.calls[-1][1][0].replace(folder, str(box))
+    subprocess.run(["/bin/sh", "-c", command], check=True)
+    assert (list(box.iterdir()), list((box / "responses").iterdir())) == ([box / "responses"], [])
+
+
+def test_the_mailbox_cleanup_empties_more_answers_than_one_command_line_holds(tmp_path: Path) -> None:
+    """A guest proxy cannot remove its answers, so the cleanup must also empty a very full folder (SKY-902).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    box = tmp_path / ("b" * 100)
+    responses = box / "responses"
+    responses.mkdir(parents=True)
+    for index in range(30000):
+        (responses / f"answer-{index:05d}.json").touch()
+
+    subprocess.run(["/bin/sh", "-c", mailbox_empty_command(shlex.quote(str(box)))], check=True)
+
+    assert (list(box.iterdir()), list(responses.iterdir())) == ([responses], [])
+
+
+def test_the_root_cleanup_empties_hidden_answers_in_an_image_with_no_find(tmp_path: Path) -> None:
+    """An image with no ``find`` still gets its root folder emptied, hidden names too (SKY-902).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    folder = tmp_path / "root"
+    folder.mkdir()
+    for name in ("answer", ".hidden", "..odd"):
+        (folder / name).write_text("x")
+    command = root_empty_command(shlex.quote(str(folder))).replace("[ -x /usr/bin/find ]", "false")
+
+    subprocess.run(["/bin/sh", "-c", command], check=True)
+
+    assert (folder.is_dir(), list(folder.iterdir())) == (True, [])
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a folder that it cannot write")
+def test_a_mailbox_cleanup_that_cannot_remove_an_answer_exits_nonzero(tmp_path: Path) -> None:
+    """A failed removal in ``responses`` reaches the exit code, so the caller logs it (SKY-902).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    box = tmp_path / "box"
+    locked = box / "responses" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "answer").write_text("x")
+    locked.chmod(0o500)
+    try:
+        done = subprocess.run(["/bin/sh", "-c", mailbox_empty_command(shlex.quote(str(box)))], check=False)
+    finally:
+        locked.chmod(0o700)
+
+    assert done.returncode != 0
+
+
+def test_a_root_mailbox_empties_its_folder_when_the_command_raises() -> None:
+    """A failed command still empties the root folder, and the caller gets the command's error (SKY-902)."""
+
+    class _FailingSession(_RecordingSession):
+        """Fail the mailbox command after the folders are made."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Raise for the mailbox command, and record every other one.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                The recorded result.
+
+            Raises:
+                SandboxRejectedError: The command is the mailbox command.
+            """
+            if "--noprofile" in command:
+                raise SandboxRejectedError("the box went away")
+            return super().run(command, **kwargs)
+
+    session = _FailingSession()
+    with pytest.raises(SandboxRejectedError, match="went away"):
+        ModelMailbox(MagicMock()).run(session, "true")
+    folder = session.calls[1][1][0].rsplit("/", 1)[0]
+    assert session.calls[-1] == (
+        "run",
+        (
+            mailbox_empty_command(folder),
+            True,
+        ),
+    )
+
+
+def test_a_root_mailbox_empties_its_folder_when_the_first_write_fails() -> None:
+    """A failed write of the proxy files still empties the root folder (SKY-902)."""
+
+    class _NoWriteSession(_RecordingSession):
+        """Refuse every file write."""
+
+        def write_files(self, files: dict[str, str]) -> None:
+            """Refuse the write.
+
+            Args:
+                files: Relative path to content.
+
+            Raises:
+                SandboxRejectedError: Always.
+            """
+            raise SandboxRejectedError("no write")
+
+    session = _NoWriteSession()
+    with pytest.raises(SandboxRejectedError, match="no write"):
+        ModelMailbox(MagicMock()).run(session, "true")
+    (_, (mkdir, _)), cleanup = session.calls
+    folder = mkdir.split()[3]
+    assert cleanup == (
+        "run",
+        (
+            mailbox_empty_command(folder),
+            True,
+        ),
+    )
+
+
+def test_a_failed_mailbox_cleanup_is_logged_and_does_not_hide_the_result(caplog: pytest.LogCaptureFixture) -> None:
+    """A root folder that root cannot empty leaves a warning, and the command's result still returns (SKY-902).
+
+    Args:
+        caplog: Captures the warning.
+    """
+
+    class _NoRemoveSession(_RecordingSession):
+        """Fail the folder cleanup."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Raise for the cleanup, and record every other command.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                The recorded result.
+
+            Raises:
+                SandboxRejectedError: The command is the cleanup.
+            """
+            if "/bin/rm -rf -- " in command:
+                raise SandboxRejectedError("rm hung")
+            return super().run(command, **kwargs)
+
+    result = ModelMailbox(MagicMock()).run(_NoRemoveSession(), "true")
+    assert result.exit_code == 0
+    assert "could not empty the model mailbox folder" in caplog.text
+
+
+def test_a_root_mailbox_empties_its_folder_only_after_a_stream_write_in_flight() -> None:
+    """A stream part that is being written when the command ends lands before root empties the folder (SKY-902).
+
+    A part written after that would stay in the folder, and a box snapshot
+    would keep the answer.
+    """
+    started = threading.Event()
+
+    class _StreamSession(_RecordingSession):
+        """Send one MCP request, and hold the first stream part's write."""
+
+        def __init__(self) -> None:
+            """Start with an empty box."""
+            super().__init__()
+            self.files: dict[str, str] = {}
+
+        def write_files(self, files: dict[str, str]) -> None:
+            """Record the write; hold a stream part's write until the command has ended.
+
+            Args:
+                files: Relative path to content.
+            """
+            self.files.update(files)
+            if any(path.endswith(".1.json") for path in files):
+                started.set()
+                time.sleep(0.3)
+            super().write_files(files)
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Send the MCP request frame and end once its first part is being written.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                The recorded result.
+            """
+            if "--noprofile" in command:
+                config = next(text for path, text in self.files.items() if path.endswith("/config.json"))
+                document = {"id": "c" * 32, "path": guest_model_proxy.MCP_PATH + "s", "body": "", "headers": {}}
+                kwargs["on_output"]("stdout", json.loads(config)["prefix"] + json.dumps(document) + "\n")
+                assert started.wait(5)
+            return super().run(command, **kwargs)
+
+    stream = iter([b"one", b"two"])
+    dispatch = MagicMock(return_value=ModelHTTPResult(200, "text/event-stream", b"", stream=_Closing(stream)))
+    session = _StreamSession()
+    ModelMailbox(dispatch).run(session, "true")
+    (part_kind, part), (last_kind, (last, _)) = session.calls[-2:]
+    assert (part_kind, part) == ("write", [f"{part[0].rsplit('/', 1)[0]}/{'c' * 32}.1.json"])
+    assert (last_kind, "/bin/rm -rf -- " in last) == ("run", True)
+
+
+class _Closing:
+    """Wrap an iterator with the ``close`` an event stream has."""
+
+    def __init__(self, items: Iterator[bytes]) -> None:
+        """Hold the parts.
+
+        Args:
+            items: The stream's parts.
+        """
+        self.items = items
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Return the parts."""
+        return self.items
+
+    def close(self) -> None:
+        """Do nothing, as a closed relay stream does."""
+
+
+def test_a_guest_proxy_keeps_an_answer_that_it_cannot_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A root-made answer folder refuses the guest's unlink; the guest still gets the answer (SKY-902).
+
+    Args:
+        tmp_path: The test folder.
+        monkeypatch: Makes every unlink fail as in a root 0755 folder.
+    """
+    answer = tmp_path / "a.json"
+    answer.write_text(json.dumps({"status": 200}))
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        """Refuse the unlink as a root-owned folder does.
+
+        Args:
+            missing_ok: Unused.
+
+        Raises:
+            PermissionError: Always.
+        """
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert guest_model_proxy._wait(answer, 1.0) == {"status": 200}
+    assert answer.exists()
+
+
+def test_a_guest_proxy_still_removes_an_answer_in_its_own_folder(tmp_path: Path) -> None:
+    """In the working-folder layout the guest removes each answer, as before (SKY-902).
+
+    Args:
+        tmp_path: The test folder.
+    """
+    answer = tmp_path / "a.json"
+    answer.write_text(json.dumps({"status": 200}))
+    assert guest_model_proxy._wait(answer, 1.0) == {"status": 200}
+    assert not answer.exists()
+
+
+def test_a_guest_proxy_keeps_its_bindings_next_to_its_answers_when_it_can(tmp_path: Path) -> None:
+    """In its own mailbox folder the guest makes ``models`` next to ``responses``, as before (SKY-884).
+
+    Args:
+        tmp_path: The test folder.
+    """
+    (tmp_path / "responses").mkdir()
+    assert guest_model_proxy._bindings_folder(tmp_path / "responses") == tmp_path.resolve() / "models"
+
+
+def test_a_guest_proxy_makes_a_private_bindings_folder_in_a_root_mailbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root-made mailbox refuses the guest's ``models`` folder, so the guest makes its own (SKY-902).
+
+    Args:
+        tmp_path: The test folder.
+        monkeypatch: Makes the ``models`` mkdir fail and sends the private folder into ``tmp_path``.
+    """
+    (tmp_path / "mailbox" / "responses").mkdir(parents=True)
+    real_mkdir = Path.mkdir
+
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> None:
+        """Refuse ``models`` as a root-owned folder does, and make every other folder.
+
+        Args:
+            *args: The mkdir arguments.
+            **kwargs: The mkdir options.
+
+        Raises:
+            PermissionError: The folder is ``models``.
+        """
+        if self.name == "models":
+            raise PermissionError(13, "Permission denied", str(self))
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    bindings = guest_model_proxy._bindings_folder(tmp_path / "mailbox" / "responses")
+    assert bindings is not None
+    assert bindings.parent == tmp_path
+    assert bindings.name.startswith(".app-model-bindings-")
+    assert bindings.stat().st_mode & 0o777 == 0o700
+
+
+def test_a_user_mailbox_falls_back_to_its_working_folder_when_root_cannot_make_folders() -> None:
+    """A failed root mkdir does not stop a guest mailbox; it uses its working folder, as before (SKY-902)."""
+    session = _RecordingSession(mkdir_code=1)
+    ModelMailbox(MagicMock()).run(session, "true")
+    assert [kind for kind, _ in session.calls] == ["run", "run", "write", "run"]
+    folder = session.calls[2][1][0].rsplit("/", 1)[0]
+    assert folder.startswith(".app-model-")
+
+
+def test_a_user_mailbox_falls_back_to_its_working_folder_when_the_provider_refuses_sudo() -> None:
+    """A provider that refuses sudo with an error does not stop a guest mailbox (SKY-902)."""
+
+    class _RefusingSession(_RecordingSession):
+        """Refuse every root command with an error, as some providers do."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Raise for a root command, and record every other one.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                The recorded result.
+
+            Raises:
+                SandboxRejectedError: The command runs as root.
+            """
+            if kwargs.get("sudo"):
+                raise SandboxRejectedError("sudo is not available")
+            return super().run(command, **kwargs)
+
+    session = _RefusingSession()
+    ModelMailbox(MagicMock()).run(session, "true")
+    assert [kind for kind, _ in session.calls] == ["write", "run"]
+    assert session.calls[0][1][0].startswith(".app-model-")
+    with pytest.raises(SandboxRejectedError):
+        ModelMailbox(MagicMock()).run(_RefusingSession(), "true", sudo=True)
+
+
+def test_a_guest_proxy_removes_its_private_bindings_folder_when_the_command_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A private bindings folder in /tmp goes away with its command, so guest commands do not fill /tmp (SKY-902).
+
+    Args:
+        tmp_path: The test folder.
+        monkeypatch: Sets the proxy's arguments and its private folder.
+    """
+    private = tmp_path / f"{guest_model_proxy.BINDINGS_TEMP_PREFIX}x"
+    private.mkdir(mode=0o700)
+    (private / "binding").write_text("m")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"prefix": "P:", "response_dir": str(tmp_path / "responses"), "timeout_seconds": 5}))
+    monkeypatch.setattr(guest_model_proxy, "_bindings_folder", lambda _: private)
+    monkeypatch.setattr(guest_model_proxy, "_runs_as_root", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["proxy.py", str(config), "true"])
+    # main sets the variable itself; setenv makes the fixture restore it afterwards.
+    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, "")
+    assert guest_model_proxy.main() == 0
+    assert not private.exists()
+
+
+def test_a_user_mailbox_without_root_capabilities_runs_no_root_command() -> None:
+    """On Docker a guest mailbox leaves its folders to the file write, so the guest owns them (SKY-901)."""
+    session = _RecordingSession(root_has_capabilities=False, root_file_writes=False)
+    ModelMailbox(MagicMock()).run(session, "true")
+    assert [kind for kind, _ in session.calls] == ["write", "run"]
+    assert session.calls[1][1][1] is False
+
+
+def test_a_root_mailbox_without_root_capabilities_has_the_parent_make_its_answer_folder() -> None:
+    """On Docker the file write runs as the box user, so root makes no folder it could not write into."""
+    session = _RecordingSession(root_has_capabilities=False, root_file_writes=False)
+    ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    (write_kind, written), (run_kind, (_, root)) = session.calls
+    folder = written[0].rsplit("/", 1)[0]
+    assert (write_kind, run_kind, root) == ("write", "run", True)
+    assert written == [f"{folder}/config.json", f"{folder}/proxy.py", f"{folder}/responses/.keep"]
+    assert folder.startswith(".app-model-")
+
+
+def test_two_mcp_streams_write_their_parts_at_the_same_time() -> None:
+    """Parallel MCP stage calls do not wait on each other's stream writes (SKY-624, SKY-902)."""
+    meet = threading.Barrier(2, timeout=2)
+    outcomes: list[bool] = []
+    both = threading.Event()
+
+    class _ParallelSession(_RecordingSession):
+        """Send two MCP requests, and have their first parts meet inside the write."""
+
+        def __init__(self) -> None:
+            """Start with an empty box."""
+            super().__init__()
+            self.files: dict[str, str] = {}
+
+        def write_files(self, files: dict[str, str]) -> None:
+            """Record the write; a first stream part waits for the other one inside its write.
+
+            Args:
+                files: Relative path to content.
+            """
+            self.files.update(files)
+            if any(path.endswith(".1.json") for path in files):
+                try:
+                    meet.wait()
+                    outcomes.append(True)
+                except threading.BrokenBarrierError:
+                    outcomes.append(False)
+                if len(outcomes) == 2:
+                    both.set()
+            super().write_files(files)
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Send both MCP request frames and end once both first parts are written.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                The recorded result.
+            """
+            if "--noprofile" in command:
+                config = next(text for path, text in self.files.items() if path.endswith("/config.json"))
+                prefix = json.loads(config)["prefix"]
+                for identity in ("d" * 32, "e" * 32):
+                    document = {"id": identity, "path": guest_model_proxy.MCP_PATH + "s", "body": "", "headers": {}}
+                    kwargs["on_output"]("stdout", prefix + json.dumps(document) + "\n")
+                assert both.wait(5)
+            return super().run(command, **kwargs)
+
+    dispatch = MagicMock(
+        side_effect=lambda *_: ModelHTTPResult(200, "text/event-stream", b"", stream=_Closing(iter([b"one"])))
+    )
+    ModelMailbox(dispatch).run(_ParallelSession(), "true")
+    assert outcomes == [True, True]
+
+
+def test_a_frame_after_the_command_ended_gets_no_answer() -> None:
+    """A model frame that arrives after the command ends is not answered, so no answer lands after root empties the folder (SKY-902)."""
+
+    class _LateSession(_RecordingSession):
+        """Keep the output callback, to send a frame after the command ends."""
+
+        def __init__(self) -> None:
+            """Start with an empty box."""
+            super().__init__()
+            self.files: dict[str, str] = {}
+            self.on_output: Callable[[str, str], None] | None = None
+
+        def write_files(self, files: dict[str, str]) -> None:
+            """Record the write.
+
+            Args:
+                files: Relative path to content.
+            """
+            self.files.update(files)
+            super().write_files(files)
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Keep the mailbox command's output callback.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                The recorded result.
+            """
+            if "--noprofile" in command:
+                self.on_output = kwargs["on_output"]
+            return super().run(command, **kwargs)
+
+    dispatch = MagicMock()
+    session = _LateSession()
+    ModelMailbox(dispatch).run(session, "true")
+    calls = len(session.calls)
+    config = next(text for path, text in session.files.items() if path.endswith("/config.json"))
+    document = {"id": "f" * 32, "path": "/v1/messages", "body": "", "headers": {}}
+    assert session.on_output is not None
+    session.on_output("stdout", json.loads(config)["prefix"] + json.dumps(document) + "\n")
+    dispatch.assert_not_called()
+    assert len(session.calls) == calls
+
+
+def test_a_session_with_no_flags_keeps_a_guest_working_folder_and_gives_a_root_proxy_a_tmp_folder() -> None:
+    """With no flags, a guest mailbox keeps its working folder and a root proxy gets a root /tmp folder (SKY-902)."""
+
+    class _BareSession:
+        """Record each command and file write, with no root rights named."""
+
+        def __init__(self) -> None:
+            """Start with an empty record."""
+            self.calls: list[tuple[str, Any]] = []
+
+        def write_files(self, files: dict[str, str]) -> None:
+            """Record the written paths.
+
+            Args:
+                files: Relative path to content.
+            """
+            self.calls.append(("write", sorted(files)))
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Record the command and whether it runs as root.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                A result with exit code 0.
+            """
+            self.calls.append(("run", (command, kwargs.get("sudo", False))))
+            return CommandResult(exit_code=0)
+
+    session = _BareSession()
+    ModelMailbox(MagicMock()).run(session, "true")
+    assert [kind for kind, _ in session.calls] == ["write", "run"]
+    assert session.calls[0][1][0].startswith(".app-model-")
+    assert session.calls[1][1][1] is False
+
+    root = _BareSession()
+    ModelMailbox(MagicMock()).run(root, "true", sudo=True)
+    kind, (command, as_root) = root.calls[0]
+    # A root proxy must never read answers from a folder the box user can swap (SKY-901).
+    assert kind == "run"
+    assert as_root is True
+    assert "/tmp/.app-root-model-" in command
+
+
+def test_a_mailbox_cleanup_with_a_nonzero_exit_is_logged_and_does_not_hide_the_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An rm that exits non-zero leaves a warning, the result still returns, and the rm has a 30 s limit (SKY-902).
+
+    Args:
+        caplog: Captures the warning.
+    """
+    session = _RecordingSession(rm_code=1)
+    result = ModelMailbox(MagicMock()).run(session, "true")
+    assert result.exit_code == 0
+    assert "could not empty the model mailbox folder: exit 1" in caplog.text
+    (kind, (rm, root)), options = session.calls[-1], session.options[-1]
+    assert (kind, "/bin/rm -rf -- " in rm, root) == ("run", True, True)
+    assert options["timeout_seconds"] == 30
+
+
+def test_a_guest_mailbox_off_vercel_runs_no_root_command(caplog: pytest.LogCaptureFixture) -> None:
+    """A guest mailbox on a provider whose file API is not root keeps its working folder (SKY-902).
+
+    Local and Daytona refuse sudo, and another provider's file API could not
+    write into a root folder. A root proxy there still gets root folders.
+
+    Args:
+        caplog: Captures any warning.
+    """
+    session = _RecordingSession(root_file_writes=False)
+    ModelMailbox(MagicMock()).run(session, "true")
+    assert [kind for kind, _ in session.calls] == ["write", "run"]
+    assert session.calls[0][1][0].startswith(".app-model-")
+    assert session.calls[1][1][1] is False
+    assert "mailbox" not in caplog.text
+    root = _RecordingSession(root_file_writes=False)
+    ModelMailbox(MagicMock()).run(root, "true", sudo=True)
+    (kind, (mkdir, sudo)), *_ = root.calls
+    assert (kind, sudo) == ("run", True)
+    assert mkdir.split()[3].startswith(vercel.ROOT_MODEL_PREFIX)
+
+
+def test_the_bridge_sessions_copy_the_root_file_writes_flag() -> None:
+    """Only a Vercel box tells the mailbox that its file API writes as root (SKY-902)."""
+
+    class _Vercel(VercelEnvironment):
+        """A Vercel provider class with no network setup."""
+
+        def __init__(self) -> None:
+            """Hold only the spec the bridge reads."""
+            self.spec = SimpleNamespace(env={}, tags={})
+
+    class _Other:
+        """A provider that names no ``root_file_writes``."""
+
+        def __init__(self) -> None:
+            """Hold only the spec the bridge reads."""
+            self.spec = SimpleNamespace(env={}, tags={})
+
+    flags = []
+    for environment in (_Vercel(), _Other()):
+        bridge = AsyncBridgeSession(SimpleNamespace(environment=environment))
+        flags.append((bridge.root_file_writes, ParentSandboxSession(bridge, None).root_file_writes))
+    assert flags == [(True, True), (False, False)]
+
+
+def test_a_root_mailbox_empties_its_folder_when_the_mkdir_call_raises() -> None:
+    """A mkdir call that times out after the first folder exists still empties the root folder (SKY-902)."""
+
+    class _RaisingSession(_RecordingSession):
+        """Raise on the root mkdir, as a timeout or a dropped connection does."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Raise for the mkdir and record every command.
+
+            Args:
+                command: The shell command line.
+                **kwargs: The run options.
+
+            Returns:
+                The recorded result.
+
+            Raises:
+                TimeoutError: For the root mkdir.
+            """
+            result = super().run(command, **kwargs)
+            if command.startswith("/bin/mkdir"):
+                raise TimeoutError("mkdir")
+            return result
+
+    for sudo in (False, True):
+        session = _RaisingSession()
+        if sudo:
+            with pytest.raises(TimeoutError, match="mkdir"):
+                ModelMailbox(MagicMock()).run(session, "true", sudo=sudo)
+        else:
+            ModelMailbox(MagicMock()).run(session, "true", sudo=sudo)
+        (_, (mkdir, _)), (kind, (rm, root)), *_ = session.calls
+        folder = mkdir.split()[3]
+        assert (kind, rm, root) == (
+            "run",
+            mailbox_empty_command(folder),
+            True,
+        )
+
+
+def test_a_root_mailbox_empties_its_folder_when_only_the_answer_folder_fails() -> None:
+    """When the first mkdir works and the second fails, root empties the folder and keeps it (SKY-902)."""
+    for sudo in (False, True):
+        session = _RecordingSession(mkdir_code=1)
+        if sudo:
+            with pytest.raises(RuntimeError, match="mailbox folders"):
+                ModelMailbox(MagicMock()).run(session, "true", sudo=sudo)
+        else:
+            ModelMailbox(MagicMock()).run(session, "true", sudo=sudo)
+        (_, (mkdir, _)), (kind, (rm, root)), *_ = session.calls
+        folder = mkdir.split()[3]
+        assert folder.startswith(vercel.ROOT_MODEL_PREFIX)
+        assert (kind, rm, root) == (
+            "run",
+            mailbox_empty_command(folder),
+            True,
+        )
+        assert session.options[1]["timeout_seconds"] == 30

@@ -1,38 +1,27 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from "react";
-import { Code, DotsThree, Eye, File, Folders, MagnifyingGlass } from "@/shared/ui/icons";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Code, Eye } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { Segmented } from "@/shared/ui/segmented";
-import { Input } from "@/shared/ui/primitives/input";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { TOUCH_FIELD_SM } from "@/shared/ui/touch";
 import { RenderedText } from "@/shared/ui/rendered-text";
-import { FileTreeList, type FileTreeRowLook } from "@/shared/ui/file-tree";
+import type { FileTreeRowLook } from "@/shared/ui/file-tree";
 import { getRepositoryFile, getRepositoryTree } from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
-import { CODE_HIGHLIGHT_SPECS } from "@/shared/ui/code-highlight-style";
 import type { RepositoryFileResponse, RepositoryTreeEntry } from "@/shared/types/api";
-import type { CandidateVersion } from "../lib/blackbox-versions";
+import { REMOVED_FG } from "@/shared/ui/repo-files/diff-colors";
+import { fullDiffRows, numberRows } from "@/shared/ui/repo-files/diff-rows";
 import {
-  foldRows,
-  fullDiffRows,
-  mergeLineSpans,
-  numberRows,
-  splitRows,
-  type NumberedRow,
-} from "../lib/blackbox-diff";
+  ChangeCounts,
+  DiffView,
+  FileExplorer,
+  TreeToggle,
+} from "@/shared/ui/repo-files/repo-files";
+import type { CandidateVersion } from "../lib/blackbox-versions";
 import { applyFilePatch, parsePatch, type ApplyResult, type FilePatch } from "../lib/repo-patch";
 import {
   buildRepoTree,
@@ -42,22 +31,6 @@ import {
   type RepoNode,
   type RepoScope,
 } from "../lib/repo-browser";
-import type { HighlightToken } from "../lib/repo-highlight";
-import {
-  ADDED_BG,
-  ADDED_EMPHASIS_BG,
-  ADDED_FG,
-  REMOVED_BG,
-  REMOVED_EMPHASIS_BG,
-  REMOVED_FG,
-} from "./diff-colors";
-
-// Unchanged lines kept on each side of a change when only the changes show.
-const DIFF_CONTEXT_LINES = 3;
-
-// Past this size a file shows as plain source: tokenising it would stall the tab.
-const MAX_HIGHLIGHT_CHARS = 200_000;
-const MAX_HIGHLIGHT_LINES = 5_000;
 
 const EMPTY_ENTRIES: RepositoryTreeEntry[] = [];
 
@@ -93,56 +66,8 @@ function useLoaded<T>(
   return state?.key === key && state.attempt === attempt ? state.value : { status: "loading" };
 }
 
-function useHighlight(path: string, text: string | null): HighlightToken[][] | null {
-  const tooLarge =
-    text == null ||
-    text.length > MAX_HIGHLIGHT_CHARS ||
-    text.split("\n", MAX_HIGHLIGHT_LINES + 1).length > MAX_HIGHLIGHT_LINES;
-  const [state, setState] = useState<{
-    path: string;
-    text: string;
-    lines: HighlightToken[][] | null;
-  } | null>(null);
-  useEffect(() => {
-    if (tooLarge || text == null) return;
-    let cancelled = false;
-    void import("../lib/repo-highlight")
-      .then((m) => m.highlightLines(path, text))
-      .then((lines) => {
-        if (!cancelled) setState({ path, text, lines });
-      })
-      .catch(() => {
-        if (!cancelled) setState({ path, text, lines: null });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [path, text, tooLarge]);
-  return state && state.path === path && state.text === text ? state.lines : null;
-}
-
-const SPEC_STYLE: CSSProperties[] = CODE_HIGHLIGHT_SPECS.map((spec) => ({
-  color: spec.color,
-  fontWeight: spec.fontWeight,
-  fontStyle: spec.fontStyle,
-}));
-
 function trimFinalNewline(text: string): string {
   return text.endsWith("\n") ? text.slice(0, -1) : text;
-}
-
-function ChangeCounts({ added, removed }: { added: number; removed: number }) {
-  return (
-    <span
-      className="shrink-0 font-mono text-[0.625rem] tabular-nums"
-      aria-label={formatMsg("optimization.blackbox.repo.browser.counts_aria", { added, removed })}
-      dir="ltr"
-    >
-      {added > 0 && <span style={{ color: ADDED_FG }}>+{added}</span>}
-      {added > 0 && removed > 0 && " "}
-      {removed > 0 && <span style={{ color: REMOVED_FG }}>−{removed}</span>}
-    </span>
-  );
 }
 
 /* ── Tree ─────────────────────────────────────────────────────────────── */
@@ -191,62 +116,6 @@ function rowLook(node: RepoNode): FileTreeRowLook {
   };
 }
 
-const ALL_FILES = (): boolean => true;
-
-function FileTree({
-  root,
-  selected,
-  onSelect,
-}: {
-  root: RepoNode;
-  selected: string | null;
-  onSelect: (path: string) => void;
-}) {
-  const [filter, setFilter] = useState("");
-  const treeLabel = msg("optimization.blackbox.repo.browser.tree_aria");
-  const baseOpen = useMemo(() => defaultOpen(root, "all"), [root]);
-
-  return (
-    <div className="flex min-h-0 flex-col gap-2">
-      <div className="flex items-center gap-1.5">
-        <div className="relative min-w-0 flex-1">
-          <MagnifyingGlass
-            className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <Input
-            type="search"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape" && filter) {
-                event.stopPropagation();
-                setFilter("");
-              }
-            }}
-            placeholder={msg("optimization.blackbox.repo.browser.filter")}
-            aria-label={msg("optimization.blackbox.repo.browser.filter_aria")}
-            className={cn(TOUCH_FIELD_SM, "ps-8 text-xs md:text-xs")}
-          />
-        </div>
-      </div>
-      <div className="max-h-[22rem] min-h-0 overflow-auto rounded-md @2xl:max-h-[32rem]">
-        <FileTreeList
-          root={root}
-          baseOpen={baseOpen}
-          filter={filter}
-          selected={selected}
-          label={treeLabel}
-          emptyText={msg("optimization.blackbox.repo.browser.no_match")}
-          include={ALL_FILES}
-          look={rowLook}
-          onSelect={onSelect}
-        />
-      </div>
-    </div>
-  );
-}
-
 /* ── File view ────────────────────────────────────────────────────────── */
 
 type Mode = "source" | "rendered";
@@ -268,210 +137,6 @@ function RawPatch({ text }: { text: string }) {
     >
       {text}
     </pre>
-  );
-}
-
-type Tokens = HighlightToken[] | undefined;
-
-/** One diff line: syntax colours where known, change emphasis on top. */
-function StyledLine({ row, tokens }: { row: NumberedRow; tokens: Tokens }) {
-  const emphasis = row.kind === "added" ? ADDED_EMPHASIS_BG : REMOVED_EMPHASIS_BG;
-  const spans =
-    tokens &&
-    (row.kind === "same"
-      ? tokens.map((t) => ({ ...t, changed: false }))
-      : mergeLineSpans(tokens, row.segments));
-  if (spans) {
-    return (
-      <>
-        {spans.map((span, j) => {
-          const style = span.spec == null ? undefined : SPEC_STYLE[span.spec];
-          return span.changed ? (
-            <mark
-              key={j}
-              className="rounded-sm text-inherit"
-              style={{ ...style, background: emphasis }}
-            >
-              {span.text}
-            </mark>
-          ) : (
-            <span key={j} style={style}>
-              {span.text}
-            </span>
-          );
-        })}
-      </>
-    );
-  }
-  return (
-    <>
-      {row.segments.map((seg, j) =>
-        seg.changed ? (
-          <mark key={j} className="rounded-sm text-inherit" style={{ background: emphasis }}>
-            {seg.text}
-          </mark>
-        ) : (
-          <span key={j}>{seg.text}</span>
-        ),
-      )}
-    </>
-  );
-}
-
-/** One side of a split diff line; null pads the side a change has no line on. */
-function DiffCell({
-  row,
-  side,
-  tokens,
-}: {
-  row: NumberedRow | null;
-  side: "old" | "new";
-  tokens: Tokens;
-}) {
-  if (!row) return <div className="min-w-0 bg-muted/60" aria-hidden="true" />;
-  const changed = row.kind !== "same";
-  const style =
-    row.kind === "added"
-      ? { background: ADDED_BG, color: ADDED_FG }
-      : row.kind === "removed"
-        ? { background: REMOVED_BG, color: REMOVED_FG }
-        : undefined;
-  const marker = row.kind === "added" ? "+" : row.kind === "removed" ? "−" : " ";
-  return (
-    <div className="flex min-w-0 pe-3" style={style}>
-      <span
-        className="w-10 shrink-0 select-none pe-2 text-end tabular-nums opacity-50"
-        aria-hidden="true"
-      >
-        {side === "old" ? row.oldLine : row.newLine}
-      </span>
-      <span className="w-4 shrink-0 select-none opacity-70" aria-hidden="true">
-        {marker}
-      </span>
-      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-        {changed && (
-          <span className="sr-only">
-            {msg(
-              row.kind === "added"
-                ? "optimization.blackbox.repo.browser.line_added"
-                : "optimization.blackbox.repo.browser.line_removed",
-            )}
-          </span>
-        )}
-        <StyledLine row={row} tokens={tokens} />
-        {row.segments.every((seg) => seg.text === "") && " "}
-      </span>
-    </div>
-  );
-}
-
-/**
- * The file's changes side by side: the pinned commit's lines on the left,
- * this version's on the right. Long unchanged runs fold away, each opening
- * on click.
- */
-function SplitDiff({
-  path,
-  rows,
-  before,
-  after,
-}: {
-  path: string;
-  rows: NumberedRow[];
-  before: string;
-  after: string;
-}) {
-  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
-  const shown = useMemo(
-    () => splitRows(foldRows(rows, DIFF_CONTEXT_LINES, expanded)),
-    [rows, expanded],
-  );
-  const afterTokens = useHighlight(path, rows.some((row) => row.kind !== "removed") ? after : null);
-  const beforeTokens = useHighlight(path, rows.some((row) => row.kind !== "added") ? before : null);
-
-  // A small edit deep in a long file would otherwise open at line 1, out of view.
-  const scrollRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const box = scrollRef.current;
-    const first = box?.querySelector<HTMLElement>("[data-changed]");
-    if (!box || !first) return;
-    box.scrollTop = Math.max(0, first.offsetTop - 3 * first.offsetHeight);
-  }, [rows]);
-
-  return (
-    <div
-      ref={scrollRef}
-      className="relative max-h-[32rem] overflow-auto rounded-lg border border-border/50 bg-muted/30 py-2 font-mono text-[0.8125rem] leading-relaxed"
-      dir="ltr"
-    >
-      {shown.map((row) => {
-        if ("gap" in row) {
-          const from = rows[row.start]?.newLine;
-          const to = rows[row.start + row.hidden - 1]?.newLine;
-          return (
-            <button
-              key={`gap-${row.start}`}
-              type="button"
-              onClick={() => setExpanded((prev) => new Set(prev).add(row.start))}
-              aria-label={
-                from != null && to != null
-                  ? formatMsg("optimization.blackbox.repo.browser.fold_aria", { from, to })
-                  : undefined
-              }
-              className="my-0.5 flex min-h-8 w-full cursor-pointer items-center gap-2 bg-muted/60 ps-4 pe-3 text-start font-sans text-[0.6875rem] text-foreground/70 transition-colors duration-150 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/45 lg:min-h-6"
-            >
-              <DotsThree className="size-3.5 shrink-0" aria-hidden="true" />
-              <span dir="auto">
-                {formatMsg("optimization.blackbox.repo.browser.folded_lines", {
-                  count: row.hidden,
-                })}
-              </span>
-            </button>
-          );
-        }
-        const { left, right } = row;
-        const changed = left?.kind !== "same" || right?.kind !== "same";
-        return (
-          <div
-            key={`${left?.oldLine ?? "-"}-${right?.newLine ?? "-"}`}
-            className="grid min-h-[1.5em] grid-cols-2 divide-x divide-border/50"
-            data-changed={changed || undefined}
-          >
-            <DiffCell
-              row={left}
-              side="old"
-              tokens={left?.oldLine != null ? beforeTokens?.[left.oldLine - 1] : undefined}
-            />
-            <DiffCell
-              row={right}
-              side="new"
-              tokens={right?.newLine != null ? afterTokens?.[right.newLine - 1] : undefined}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/** An unchanged file's source, one column with line numbers. */
-function SourceView({ path, rows, text }: { path: string; rows: NumberedRow[]; text: string }) {
-  const tokens = useHighlight(path, text);
-  return (
-    <div
-      className="max-h-[32rem] overflow-auto rounded-lg border border-border/50 bg-muted/30 py-2 font-mono text-[0.8125rem] leading-relaxed"
-      dir="ltr"
-    >
-      {rows.map((row) => (
-        <div key={row.newLine} className="min-h-[1.5em]">
-          <DiffCell
-            row={row}
-            side="new"
-            tokens={row.newLine != null ? tokens?.[row.newLine - 1] : undefined}
-          />
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -575,6 +240,15 @@ function baseTextOf(sides: FileSides, base: Loaded<RepositoryFileResponse> | nul
   return { state: "ready", text: base.data.content ?? "" };
 }
 
+/** The numbered diff rows of two texts, kept while the texts stay the same.
+ *  A large file's diff is slow, and the mode and patch toggles re-render the view. */
+function useDiffRows(before: string | null, after: string | null) {
+  return useMemo(
+    () => (before == null || after == null ? null : numberRows(fullDiffRows(before, after))),
+    [before, after],
+  );
+}
+
 function FileView({
   optimizationId,
   path,
@@ -615,10 +289,7 @@ function FileView({
 
   const shownBefore = before.state === "ready" ? trimFinalNewline(before.text) : null;
   const shownAfter = afterText == null ? null : trimFinalNewline(afterText);
-  const rows =
-    shownBefore == null || shownAfter == null
-      ? null
-      : numberRows(fullDiffRows(shownBefore, shownAfter));
+  const rows = useDiffRows(shownBefore, shownAfter);
 
   const change = sides.change;
   const movedTo = sides.removed && change?.status === "renamed" ? change.path : null;
@@ -679,7 +350,7 @@ function FileView({
   } else if (!change && renderable && mode === "rendered") {
     body = <RenderedText text={after.text} kind={kind} title={path} />;
   } else if (!change) {
-    body = <SourceView path={path} rows={rows} text={shownAfter ?? ""} />;
+    body = <DiffView path={path} rows={rows} before={shownAfter ?? ""} after={shownAfter ?? ""} />;
   } else if (renderable && mode === "rendered") {
     body = (
       <RenderedSplit
@@ -690,9 +361,7 @@ function FileView({
       />
     );
   } else {
-    body = (
-      <SplitDiff path={path} rows={rows} before={shownBefore ?? ""} after={shownAfter ?? ""} />
-    );
+    body = <DiffView path={path} rows={rows} before={shownBefore ?? ""} after={shownAfter ?? ""} />;
   }
 
   return (
@@ -728,33 +397,6 @@ function FileView({
   );
 }
 
-/* ── Browser ──────────────────────────────────────────────────────────── */
-
-function TreeToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
-  const label = msg(
-    open
-      ? "optimization.blackbox.repo.browser.hide_files"
-      : "optimization.blackbox.repo.browser.show_files",
-  );
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon-sm"
-      onClick={onToggle}
-      aria-pressed={open}
-      aria-label={label}
-      title={label}
-      className={cn(
-        "rounded-full",
-        open && "bg-primary-fill/10 text-primary hover:bg-primary-fill/15",
-      )}
-    >
-      <Folders aria-hidden="true" />
-    </Button>
-  );
-}
-
 /**
  * A repository version browsed like an editor's explorer: the repository's
  * files on the inline-end side, changed ones marked, and the open file's
@@ -784,9 +426,8 @@ export function RepoVersionBrowser({
   const tree = useLoaded(optimizationId, loadTree);
   const entries = tree?.status === "ready" ? tree.data.entries : EMPTY_ENTRIES;
   const root = useMemo(() => buildRepoTree(entries, files), [entries, files]);
-  const mainRef = useRef<HTMLDivElement>(null);
-  const asideRef = useRef<HTMLElement>(null);
   const [treeOpen, setTreeOpen] = useState(() => readSetting(TREE_OPEN_KEY) !== "0");
+  const baseOpen = useMemo(() => defaultOpen(root, "all"), [root]);
 
   const toggleTree = () => {
     setTreeOpen((open) => {
@@ -807,71 +448,33 @@ export function RepoVersionBrowser({
     if (selected == null) onOpenFile(null);
   }, [selected, onOpenFile]);
 
-  const select = (next: string) => {
-    onPathChange(next);
-    // In the narrow layout the tree sits above the file, so a pick would
-    // otherwise change something out of view and look like it did nothing.
-    const main = mainRef.current;
-    const aside = asideRef.current;
-    if (
-      treeOpen &&
-      main &&
-      aside &&
-      aside.getBoundingClientRect().bottom <= main.getBoundingClientRect().top + 1
-    ) {
-      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      requestAnimationFrame(() =>
-        main.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" }),
-      );
-    }
-  };
-
   const toggle = <TreeToggle open={treeOpen} onToggle={toggleTree} />;
   return (
-    <div className="@container">
-      <div
-        className={cn(
-          "grid gap-y-3 transition-[grid-template-columns] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
-          treeOpen
-            ? "@2xl:grid-cols-[minmax(0,1fr)_15rem] @4xl:grid-cols-[minmax(0,1fr)_17rem]"
-            : "@2xl:grid-cols-[minmax(0,1fr)_0rem]",
-        )}
-      >
-        <div ref={mainRef} className="min-w-0 scroll-mt-4">
-          {selected ? (
-            <FileView
-              key={selected}
-              optimizationId={optimizationId}
-              source={source}
-              path={selected}
-              files={files}
-              onSelect={select}
-              onText={onText}
-              toolbar={toggle}
-            />
-          ) : (
-            <div className="space-y-2">
-              <div className="flex justify-end">{toggle}</div>
-              <Notice>{msg("optimization.blackbox.repo.unchanged")}</Notice>
-            </div>
-          )}
+    <FileExplorer
+      root={root}
+      baseOpen={baseOpen}
+      selected={selected}
+      look={rowLook}
+      open={treeOpen}
+      onSelect={onPathChange}
+    >
+      {selected ? (
+        <FileView
+          key={selected}
+          optimizationId={optimizationId}
+          source={source}
+          path={selected}
+          files={files}
+          onSelect={onPathChange}
+          onText={onText}
+          toolbar={toggle}
+        />
+      ) : (
+        <div className="space-y-2">
+          <div className="flex justify-end">{toggle}</div>
+          <Notice>{msg("optimization.blackbox.repo.unchanged")}</Notice>
         </div>
-        {/* Kept mounted while closed so the column can slide shut; inert keeps
-            the hidden files out of the tab order. */}
-        <aside
-          ref={asideRef}
-          inert={!treeOpen}
-          aria-hidden={!treeOpen || undefined}
-          className={cn(
-            "order-first min-w-0 overflow-hidden transition-opacity duration-500 motion-reduce:transition-none @2xl:order-none",
-            treeOpen ? "opacity-100" : "hidden opacity-0 @2xl:block",
-          )}
-        >
-          <div className="@2xl:ms-3 @2xl:w-[14.25rem] @2xl:border-s @2xl:border-border/50 @2xl:ps-3 @4xl:w-[16.25rem]">
-            <FileTree root={root} selected={selected} onSelect={select} />
-          </div>
-        </aside>
-      </div>
-    </div>
+      )}
+    </FileExplorer>
   );
 }

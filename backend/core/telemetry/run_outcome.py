@@ -87,13 +87,17 @@ def score_facts(result: Mapping[str, Any] | None) -> dict[str, Any]:
 
     Returns:
         ``baseline``, ``optimized``, ``lift`` (``None`` unless both scores
-        exist), ``held_out`` and ``held_out_rows``.
+        exist; positive when the run got better, also for a
+        ``direction = "minimize"`` run, SKY-750), ``held_out`` and
+        ``held_out_rows``.
     """
     if not isinstance(result, Mapping):
         return {"baseline": None, "optimized": None, "lift": None, "held_out": False, "held_out_rows": None}
     baseline_raw, optimized_raw = result_scores(dict(result))
     baseline, optimized = _number(baseline_raw), _number(optimized_raw)
-    lift = optimized - baseline if baseline is not None and optimized is not None else None
+    lift = None
+    if baseline is not None and optimized is not None:
+        lift = baseline - optimized if result.get("direction") == "minimize" else optimized - baseline
     split = result.get("split_counts")
     return {
         "baseline": baseline,

@@ -16,11 +16,21 @@ registerHooks({
   },
 });
 
-const { initialWizardV2State, emptyRepoDraft, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
+const { initialWizardV2State, emptyRepoDraft, fileProposerCommand, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { finishedHardeningJobId, repoRunRequest } = await import("./repo-run.ts");
+const {
+  LITELLM_TO_BYOK_PROVIDER,
+  contractMissing,
+  contractText,
+  finishedHardeningJobId,
+  metricCommandText,
+  repoBaseText,
+  repoRunRequest,
+} = await import("./repo-run.ts");
+const { BYOK_PROVIDERS, litellmProviderForByok } = await import("../../billing/lib/byok.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
+const { HARNESS_DEFAULT_PICK, harnessPickerValue, pickHarness, proposerHeader } = await import("./engine-contract.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
 
@@ -64,6 +74,19 @@ test("a repository run submits its repo, commit, paths and setup command", () =>
   assert.equal(request.task_model_config, null);
 });
 
+test("a repository run never sends the retired stop score, also from a clone or a restored setup", () => {
+  for (const stop of [0.9, null]) {
+    const state = repoState();
+    state.optimizer.budget = { max_scorer_runs: 8, max_iterations: 4, stop_at_score: stop } as typeof state.optimizer.budget;
+    const request = repoRunRequest(state, options);
+    assert.ok(request);
+    assert.deepEqual(request.budget, { max_scorer_runs: 8, max_iterations: 4 });
+  }
+  const fresh = repoRunRequest(repoState(), options);
+  assert.ok(fresh);
+  assert.equal("stop_at_score" in fresh.budget, false);
+});
+
 test("a repository run sends the chosen sandbox provider and omits it when none is chosen", () => {
   const unset = repoRunRequest(repoState(), options);
   assert.ok(unset);
@@ -77,6 +100,65 @@ test("a repository run sends the chosen sandbox provider and omits it when none 
   const older = repoState();
   delete older.optimizer.sandboxProvider;
   assert.equal("sandbox_provider" in repoRunRequest(older, options)!, false);
+});
+
+test("a repository run sends no harness until the user picks one (SKY-753)", () => {
+  const fresh = repoRunRequest(repoState(), options);
+  assert.ok(fresh?.proposer);
+  assert.equal("harness" in fresh.proposer, false);
+  assert.equal(fresh.proposer.max_tool_calls, 100);
+
+  const state = repoState();
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
+});
+
+test("the contract file's proposer sends no agent; a picked agent is sent (SKY-771)", () => {
+  const state = repoState();
+  assert.notEqual(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"], "autoresearch"), null);
+  const fromFile = repoRunRequest(state, options)!.proposer!;
+  assert.equal("harness" in fromFile, false);
+  assert.equal("run_command" in fromFile, false);
+  assert.equal("install_command" in fromFile, false);
+
+  state.optimizer.proposer = pickHarness(state.optimizer.proposer, "pi");
+  assert.equal(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"], "autoresearch"), null);
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
+});
+
+test("the harness picker starts empty, so picking Codex sends Codex (SKY-753)", () => {
+  const state = repoState();
+  // Radix fires onValueChange only for a new value, so the unset picker must not hold "codex".
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "");
+
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "codex" };
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "codex");
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "codex");
+});
+
+test("the default harness item drops the picked harness and host CLI again (SKY-753)", () => {
+  const state = repoState();
+  state.optimizer.proposer = pickHarness({ ...state.optimizer.proposer, host_cli: "claude" }, "pi");
+  assert.equal(state.optimizer.proposer.harness, "pi");
+
+  state.optimizer.proposer = pickHarness(state.optimizer.proposer, HARNESS_DEFAULT_PICK);
+  assert.equal("harness" in state.optimizer.proposer, false);
+  assert.equal("host_cli" in state.optimizer.proposer, false);
+  assert.equal(state.optimizer.proposer.max_tool_calls, 100);
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "");
+  // With no harness, the repository's [proposer] entry runs again.
+  assert.equal("harness" in repoRunRequest(state, options)!.proposer!, false);
+});
+
+test("the closed proposer header shows the server default until the user picks a harness (SKY-753)", () => {
+  const state = repoState();
+  // The request sends no harness yet, so the header must not claim Codex.
+  assert.deepEqual(proposerHeader(state.optimizer.proposer), {
+    labelKey: "submit.v2.optimizer.proposer.harness_default",
+  });
+
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
+  assert.deepEqual(proposerHeader(state.optimizer.proposer), { harness: "pi" });
 });
 
 test("a repository Skynet created is flagged in the run request", () => {
@@ -295,6 +377,17 @@ test("a hosted run sends no hardening job id", async () => {
   assert.equal(reads, 0);
 });
 
+test("a run whose contract names a metric command sends no hardening job id (SKY-770)", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads += 1;
+    return { id: "job-1", status: "done" } as never;
+  };
+  // The job hardened metric.py, which the run does not use.
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read, ["node", "score.js"]), null);
+  assert.equal(reads, 0);
+});
+
 test("a repository run sends each secret with its allowed hosts as a list", () => {
   const state = repoState();
   state.task.repo = {
@@ -330,7 +423,7 @@ const SERVICES_TOML = [
 
 test("a repository run sends the saved secrets its services name, by id, to their host only", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [{ name: "SEARCH_KEY", value: "typed", allowedHosts: "api.search.example" }] };
   const savedSecrets = [
     { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["maps.googleapis.com"] },
@@ -349,7 +442,7 @@ test("a repository run sends the saved secrets its services name, by id, to thei
 
 test("a saved secret goes only to a host its owner approved, never to the host an edited toml names", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const savedSecrets = [
     // Approved for another host: an agent pointed the toml elsewhere.
@@ -367,7 +460,7 @@ test("a saved secret goes only to a host its owner approved, never to the host a
 
 test("a saved secret approved for a *.suffix goes to a host under it with that approved entry", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const savedSecrets = [
     { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["*.googleapis.com"] },
@@ -383,7 +476,7 @@ test("a saved secret approved for a *.suffix goes to a host under it with that a
 
 test("a repository run with no saved secret for its services sends only the typed ones", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const request = repoRunRequest(state, { ...options, savedSecrets: [{ id: "x", name: "UNUSED_KEY" }] });
   assert.ok(request);
@@ -452,4 +545,104 @@ test("a draft with a blank secret value still gives the metric step its reposito
 
 test("allowed hosts lose every trailing dot, as the server's rstrip does", () => {
   assert.deepEqual(parseAllowedHosts("api.example.com.., *.Example.COM."), ["api.example.com", "*.example.com"]);
+});
+
+test("a repository run sends the draft's repository files and omits them when there are none", () => {
+  const none = repoRunRequest(repoState(), options);
+  assert.ok(none);
+  assert.equal("draft_files" in none.target.repo, false);
+
+  const state = repoState();
+  state.workspace.files = { "src/app.py": "x = 2\n", "ascent.toml": "version = 1\n" };
+  assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, {
+    "src/app.py": "x = 2\n",
+    "ascent.toml": "version = 1\n",
+  });
+});
+
+test("a repository run sends the drafts' base commit only with the drafts", () => {
+  const base = "c".repeat(40);
+  const state = repoState();
+  state.workspace.filesBase = base;
+  assert.equal("draft_base" in repoRunRequest(state, options)!.target.repo, false);
+
+  state.workspace.files = { "src/app.py": "x = 2\n" };
+  assert.equal(repoRunRequest(state, options)?.target.repo.draft_base, base);
+
+  // Older drafts recorded no base; the run then skips the check.
+  state.workspace.filesBase = undefined;
+  assert.equal("draft_base" in repoRunRequest(state, options)!.target.repo, false);
+});
+
+test("a repository run never sends an empty ascent.toml draft", () => {
+  const state = repoState();
+  state.workspace.files = { "ascent.toml": " \n", "src/app.py": "x = 2\n" };
+  assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, { "src/app.py": "x = 2\n" });
+
+  state.workspace.files = { "ascent.toml": "" };
+  assert.equal("draft_files" in repoRunRequest(state, options)!.target.repo, false);
+});
+
+test("the Metric screen holds only when neither the draft nor the repository has ascent.toml", () => {
+  assert.equal(contractMissing("", ""), true);
+  assert.equal(contractMissing(undefined, "  \n"), true);
+  assert.equal(contractMissing("version = 1\n", ""), false);
+  assert.equal(contractMissing("", "version = 1\n"), false);
+  // A read still loading, or no pane to read it: the server decides.
+  assert.equal(contractMissing("", undefined), false);
+});
+
+test("only a repository read that found no ascent.toml holds the Metric screen", () => {
+  const holds = (result: { text: string } | { issue: string } | null) =>
+    contractMissing("", repoBaseText("ascent.toml", result));
+  assert.equal(holds({ issue: "missing" }), true);
+  assert.equal(holds({ issue: "binary" }), false);
+  assert.equal(holds({ issue: "too_large" }), false);
+  assert.equal(holds(null), false);
+  assert.equal(holds({ text: "version = 1\n" }), false);
+  // Other files keep an empty base, so the Changes pane does not change.
+  assert.equal(repoBaseText("src/a.py", null), "");
+});
+
+test("the contract text is the draft ascent.toml, else the repository's file (SKY-770)", () => {
+  const repo = 'version = 1\n[metric]\nentry = ["node", "eval/score.js"]\n';
+  assert.equal(contractText("version = 1\n", repo), "version = 1\n");
+  assert.equal(contractText("  \n", repo), repo);
+  assert.equal(contractText(undefined, repo), repo);
+  assert.equal(contractText(undefined, undefined), "");
+});
+
+test("the metric command reads as one line, with odd words quoted (SKY-770)", () => {
+  assert.equal(metricCommandText(["cargo", "run", "--bin", "score"]), "cargo run --bin score");
+  assert.equal(metricCommandText(["sh", "-c", "go run ./eval"]), 'sh -c "go run ./eval"');
+});
+
+test("a run whose contract names a metric command sends no metric code (SKY-770)", () => {
+  const state = repoState();
+  state.workspace.metricCode = "";
+  assert.equal(repoRunRequest(state, options), null);
+  const command = ["cargo", "run", "--bin", "score"];
+  const request = repoRunRequest(state, { ...options, metricCommand: command });
+  assert.deepEqual(request?.scorer, {
+    kind: "python",
+    command_metric: true,
+    timeout_seconds: state.workspace.metricTimeoutSeconds,
+  });
+  // The contract's command wins over wizard code, so the run scores with one metric.
+  const withCode = repoRunRequest(repoState(), { ...options, metricCommand: command });
+  assert.equal(withCode?.scorer.metric_code, undefined);
+  assert.equal(withCode?.scorer.command_metric, true);
+  // No command (a Python entry, or none) sends metric.py as today.
+  const python = repoRunRequest(repoState(), { ...options, metricCommand: null });
+  assert.equal(python?.scorer.command_metric, undefined);
+  assert.ok(python?.scorer.metric_code);
+});
+
+test("the LiteLLM to BYOK map is the exact reverse of the billing bridge", () => {
+  const reverse = Object.fromEntries(
+    BYOK_PROVIDERS.map((p) => [litellmProviderForByok(p.slug), p.slug]).filter(
+      ([prefix, slug]) => prefix !== slug,
+    ),
+  );
+  assert.deepEqual({ ...LITELLM_TO_BYOK_PROVIDER }, reverse);
 });

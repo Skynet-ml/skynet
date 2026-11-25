@@ -11,7 +11,7 @@ Ogni esecuzione ottimizza un repository. Puoi iniziare in due modi:
 
 Il codice nel repository può essere qualsiasi cosa: un'applicazione, un servizio, uno script o una libreria. Può usare qualsiasi libreria.
 
-Ogni esecuzione usa lo stesso contratto. Il tuo scorer definisce `score(repo_path, case)`. Restituisce un punteggio e un feedback scritto. L'ottimizzatore legge il feedback per migliorare la versione successiva.
+Ogni esecuzione usa lo stesso contratto. Il tuo scorer definisce `score(repo_path, case, output=None)`. Lo scorer legge `output`, cioè ciò che la entry `[run]` ha restituito per il caso. Non gira nella cartella della versione e non importa codice dal repository. Restituisce un punteggio e un feedback scritto. L'ottimizzatore legge il feedback per migliorare la versione successiva.
 
 > [!NOTE]
 > Ogni versione gira in una sandbox. L'agente di programmazione che scrive le versioni non può vedere il sorgente dello scorer né i valori attesi.

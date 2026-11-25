@@ -43,7 +43,7 @@ import type { InterviewOption } from "@/shared/lib/api";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
 import { liveEffort } from "@/shared/lib/effort-slider";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
-import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
+import { ModelConfigModal } from "@/features/submit";
 import { ModelChip } from "@/shared/ui/model-chip";
 import { formatCentsUsd } from "@/features/billing";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
@@ -285,6 +285,8 @@ export function TaggerInterview({
             disabled={!busy && messages.length === 0}
             streaming={busy}
             midTurn={midTurn}
+            // The interview agent has no tool that reads a file, so a card would give it only a name (SKY-781).
+            attachments={false}
             suggest={{ messages, model: interviewComposerModel(assist) }}
             placeholder={msg("tagger.assist.interview.placeholder")}
             modelMenu={
@@ -562,10 +564,6 @@ function RubricCard({
     window.setTimeout(confirm, SUBMIT_SPLASH_HOLD_MS);
   };
 
-  // The same recents the submit wizard's model dialog keeps — one shared
-  // localStorage list across every model-config surface.
-  const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
-
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <Rise className="shrink-0">
@@ -739,13 +737,10 @@ function RubricCard({
                 onOpenChange={setModelDialogOpen}
                 config={modelConfig}
                 onSave={(cfg) => {
-                  saveToRecent(cfg);
                   onSetModel(cfg);
                 }}
                 roleLabel={msg("tagger.assist.model.title")}
                 catalogModels={catalogModels ?? undefined}
-                recentConfigs={recentConfigs}
-                onRemoveRecent={removeRecentConfig}
                 byokOnlyLocally
               />
             </CardContent>

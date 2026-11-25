@@ -85,12 +85,13 @@ def _unsent(run: Callable[[], dict]) -> ToolCall:
     return ToolCall(lambda _call: run())
 
 
-def _runtime(tmp_path: Path, budget_cents: int) -> Iterator[BudgetRuntime]:
+def _runtime(tmp_path: Path, budget_cents: int, balance_cents: int = 50) -> Iterator[BudgetRuntime]:
     """Open a funded setup-phase run budget on a private SQLite ledger.
 
     Args:
         tmp_path: Directory for the ledger file.
         budget_cents: Run budget size.
+        balance_cents: The account's wallet balance.
 
     Yields:
         The runtime that pays for connector calls.
@@ -99,7 +100,9 @@ def _runtime(tmp_path: Path, budget_cents: int) -> Iterator[BudgetRuntime]:
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         session.add(
-            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=50, grant_remaining=0)
+            BillingCustomerModel(
+                username="alice", stripe_customer_id="fixture", balance_cents=balance_cents, grant_remaining=0
+            )
         )
         session.commit()
     ledger = BudgetService(engine=engine)
@@ -116,8 +119,11 @@ def runtime(tmp_path: Path) -> Iterator[BudgetRuntime]:
 
 @pytest.fixture
 def tight_runtime(tmp_path: Path) -> Iterator[BudgetRuntime]:
-    """Provide a run budget too small for one Maps call."""
-    yield from _runtime(tmp_path, 1)
+    """Provide a setup budget whose wallet is too small for one Maps call.
+
+    Setup work is bounded by the wallet, not by the run's limit (SKY-925).
+    """
+    yield from _runtime(tmp_path, 1, balance_cents=1)
 
 
 def test_catalog_lists_three_hosted_connectors_with_prices() -> None:

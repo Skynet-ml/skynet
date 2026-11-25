@@ -8,7 +8,10 @@
  * first calls and the calibration that prices the rest. One call's hold
  * (its prompt bytes plus its output cap at list price) is usually a few
  * cents, so a dollar of spare covers it; a model whose single call holds more
- * raises the spare to that hold.
+ * raises the spare to that hold. Outside local mode the limit is also at
+ * least one budget lease, because submit refuses a run without it (SKY-923).
+ * The setup check bills the balance, not the limit, so it needs no lease on
+ * top (SKY-925).
  */
 
 import { python } from "@codemirror/lang-python";
@@ -20,6 +23,9 @@ import type { OptimizerSlice } from "./wizard-v2";
 
 /** Spare room above the boxes' opening holds, in cents. */
 export const RUN_SPARE_CENTS = 100;
+
+/** One budget lease, in cents; the server's `CHUNK_CENTS`. */
+export const RUN_LEASE_CENTS = 100;
 
 /** The limit a fresh budget starts at, unless the floor is higher. */
 export const DEFAULT_LIMIT_CENTS = 500;
@@ -45,7 +51,7 @@ export interface RunFloor {
   unpriced: boolean;
 }
 
-/** Add the boxes' opening holds to the spare the first calls need. */
+/** Add the boxes' opening holds to the spare the first calls need, and keep at least one lease. */
 export function runFloor({
   boxHoldCents,
   callHoldCents,
@@ -53,8 +59,14 @@ export function runFloor({
   unknownModel,
 }: RunFloorInput): RunFloor {
   const boxes = Math.ceil(Math.max(0, boxHoldCents ?? 0));
+  const lease = isLocalMode() ? 0 : RUN_LEASE_CENTS;
   if (tokenSource === "subscription")
-    return { boxHoldCents: boxes, spareCents: 0, floorCents: boxes, unpriced: !!unknownModel };
+    return {
+      boxHoldCents: boxes,
+      spareCents: 0,
+      floorCents: Math.max(boxes, lease),
+      unpriced: !!unknownModel,
+    };
   const dearestCall = callHoldCents.reduce<number>(
     (max, hold) => (typeof hold === "number" && hold > max ? hold : max),
     0,
@@ -63,7 +75,7 @@ export function runFloor({
   return {
     boxHoldCents: boxes,
     spareCents: spare,
-    floorCents: boxes + spare,
+    floorCents: Math.max(boxes + spare, lease),
     unpriced: !!unknownModel || callHoldCents.some((hold) => hold === null),
   };
 }
@@ -212,7 +224,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       if (
         statement?.name !== "ImportStatement" ||
         tryBody.length !== 1 ||
-        !/^from\s+skynet\s+import\s+llm\s*$/.test(
+        !/^from\s+openascent\s+import\s+llm\s*$/.test(
           code
             .slice(statement.from, statement.to)
             .replace(/\\\r?\n/g, " ")
@@ -325,10 +337,10 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
           const match = part.trim().match(/^(\w+|\*)(?:\s+as\s+(\w+))?$/);
           if (!match) continue;
           const binding = match[2] ?? match[1];
-          if (from[1] === "skynet" && match[1] === "llm") {
+          if (from[1] === "openascent" && match[1] === "llm") {
             aliases.add(binding!);
             imported = true;
-          } else if (from[1] === "skynet" && match[1] === "*") {
+          } else if (from[1] === "openascent" && match[1] === "*") {
             aliases.add("llm");
           } else if (binding && binding !== "*") bindings.add(binding);
         }
@@ -338,7 +350,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
           const match = part.trim().match(/^([\w.]+)(?:\s+as\s+(\w+))?$/);
           if (!match) continue;
           const binding = match[2] ?? match[1]!.split(".")[0];
-          if (match[1] === "skynet") modules.add(binding!);
+          if (match[1] === "openascent") modules.add(binding!);
           else if (binding) bindings.add(binding);
         }
       }
@@ -440,7 +452,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
         current.getChild("[") &&
         indirectBase?.name === "MemberExpression" &&
         code.slice(indirectBase.from, indirectBase.to) === "sys.modules" &&
-        literal(current.getChild("[")?.nextSibling ?? current) === "skynet"
+        literal(current.getChild("[")?.nextSibling ?? current) === "openascent"
       ) {
         uses = true;
         unsafe = true;
@@ -512,7 +524,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       const functionName = code.slice(called.from, called.to);
       if (
         first &&
-        literal(first) === "skynet" &&
+        literal(first) === "openascent" &&
         (["__import__", "import_module"].includes(functionName) ||
           (called.name === "MemberExpression" &&
             called.firstChild?.name === "VariableName" &&

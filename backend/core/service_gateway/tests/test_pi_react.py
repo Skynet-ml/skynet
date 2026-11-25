@@ -285,6 +285,29 @@ async def test_prompt_is_the_programs_own_with_pis_tail_and_tools() -> None:
     assert "tool_choice" not in first
 
 
+async def test_turn_on_the_managed_gateway_marks_its_prompt_cache() -> None:
+    """Each model call of a gateway Anthropic turn caches the program prompt and the steps before the last one."""
+    lm = _ScriptedLM([("_lookup", {"name": "a"}), ("submit", {_REPLY: "done"})])
+    lm.model = "litellm_proxy/anthropic/claude-test"
+    handlers, _ = await _run(lm)
+
+    assert handlers.reply == "done"
+    first, second = lm.requests
+    for request in (first, second):
+        assert request["messages"][0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # The tool step ends with a text-less call and its result: the user message holds the breakpoint.
+    assert second["messages"][1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert second["messages"][3]["content"] == "value of a"
+
+
+async def test_turn_on_other_routes_sends_plain_messages() -> None:
+    """A model the dispatcher would not mark gets the prompt as plain text."""
+    lm = _ScriptedLM([("submit", {_REPLY: "done"})])
+    await _run(lm)
+
+    assert all(isinstance(message["content"], str) for message in lm.requests[0]["messages"])
+
+
 async def test_tool_results_errors_and_unknown_tools() -> None:
     """A dict result travels as JSON; a failing or unknown tool is an error result the model reads."""
     handlers, _ = _handlers(_ScriptedLM([]))
@@ -678,6 +701,38 @@ async def test_steer_joins_the_prompt_from_the_second_call() -> None:
     assert events == [{"event": STEER_APPLIED_EVENT, "data": {"ids": ["s1"], "text": "Use the cheaper model."}}]
 
 
+async def test_steer_hook_runs_before_the_steer_reaches_the_prompt() -> None:
+    """The inbox hook gets the steer text before the next model call; a failing hook still delivers the steer."""
+    lm = _ScriptedLM([("_lookup", {"name": "a"}), ("submit", {_REPLY: "ok"}), ("submit", {_REPLY: "unused"})])
+    calls: list[tuple[str, int]] = []
+
+    def on_taken(text: str) -> None:
+        """Record the text and how many model calls ran so far, then fail.
+
+        Args:
+            text: The steered text.
+
+        Raises:
+            RuntimeError: Always, to check that a hook failure does not drop the steer.
+        """
+        calls.append((text, len(lm.requests)))
+        raise RuntimeError("store down")
+
+    inbox = SteerInbox(
+        owner="u",
+        steer_key="k",
+        input_field="user_message",
+        emit=lambda event: None,
+        store=cast(Any, _SteerStore()),
+        on_taken=on_taken,
+    )
+    handlers, _ = await _run(lm, inbox=inbox)
+
+    assert handlers.reply == "ok"
+    assert calls == [("Use the cheaper model.", 1)]
+    assert lm.requests[1]["messages"][-1]["content"] == "[[ ## user_message ## ]]\nUse the cheaper model."
+
+
 def _stream_chunks(tool: str, args: dict[str, Any]) -> list[ModelResponseStream]:
     """Build a provider stream that calls one tool and reports usage.
 
@@ -990,11 +1045,12 @@ async def test_setup_turn_without_an_answer_fails(monkeypatch: pytest.MonkeyPatc
 class _TextLM(dspy.BaseLM):
     """An LM without native tool calls, like a subscription CLI route, that answers with fixed texts."""
 
-    def __init__(self, replies: list[str]) -> None:
+    def __init__(self, replies: list[str | tuple[str, str]]) -> None:
         """Store the replies.
 
         Args:
-            replies: One raw assistant text per expected LM call.
+            replies: One raw assistant text, or a ``(text, reasoning)`` pair,
+                per expected LM call.
         """
         super().__init__(model="scripted")
         self._replies = list(replies)
@@ -1017,7 +1073,9 @@ class _TextLM(dspy.BaseLM):
             An OpenAI-shaped text response.
         """
         self.requests.append({"messages": messages, **kwargs})
-        message = {"role": "assistant", "content": self._replies.pop(0)}
+        reply = self._replies.pop(0)
+        text, reasoning = reply if isinstance(reply, tuple) else (reply, None)
+        message = {"role": "assistant", "content": text, "reasoning_content": reasoning}
         return litellm.ModelResponse(
             model="scripted",
             choices=[{"index": 0, "finish_reason": "stop", "message": message}],
@@ -1053,6 +1111,37 @@ async def test_cli_reply_becomes_one_native_tool_call_chunk() -> None:
     request = cast(_TextLM, handlers._lm).requests[0]
     assert "tools" not in request
     assert "tool_calls" in request["messages"][-1]["content"]
+
+
+async def test_cli_reply_hands_pi_the_model_reasoning() -> None:
+    """A text-protocol reply's reasoning reaches Pi with its parsed tool call, so the chat shows it (SKY-774)."""
+    handlers, _ = _handlers(_TextLM([(_text_calls(("_lookup", {"name": "a"})), "I need a.")]))
+
+    (chunk,) = [json.loads(chunk) async for chunk in handlers.complete({"messages": [], "tools": []})]
+
+    delta = chunk["choices"][0]["delta"]
+    assert delta["reasoning_content"] == "I need a."
+    (call,) = delta["tool_calls"]
+    assert call["function"]["name"] == "_lookup"
+    assert json.loads(call["function"]["arguments"]) == {"name": "a"}
+
+
+async def test_cli_reply_after_a_parse_retry_hands_pi_only_the_used_reasoning() -> None:
+    """The reasoning of a reply that did not parse never reaches Pi; the resampled reply's does."""
+    lm = _TextLM(
+        [
+            ("Sure, here is my answer.\n\n[[ ## completed ## ]]", "Wrong path."),
+            (_text_calls(("_lookup", {"name": "a"})), "Right path."),
+        ]
+    )
+    handlers, _ = _handlers(lm)
+
+    chunks = [json.loads(chunk) async for chunk in handlers.complete({"messages": [], "tools": []})]
+
+    assert len(lm.requests) == 2
+    reasoning = [chunk["choices"][0]["delta"].get("reasoning_content") for chunk in chunks]
+    assert reasoning == ["Right path."]
+    assert _merge(chunks)["tool_calls"][0]["function"]["name"] == "_lookup"
 
 
 async def test_cli_turn_runs_tools_and_answers_through_header_less_replies() -> None:

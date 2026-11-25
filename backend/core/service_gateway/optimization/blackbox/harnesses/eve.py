@@ -124,7 +124,7 @@ let server;
 try {
   server = startServer();
   await waitForServer(server);
-  const prompt = await readFile(process.env.APP_PROMPT_FILE, "utf8");
+  const prompt = await readFile(process.env.ASCENT_TASK, "utf8");
   const require = createRequire(join(projectDir, "package.json"));
   const { Client } = await import(pathToFileURL(require.resolve("eve/client")).href);
   const client = new Client({ baseUrl: serverUrl, auth: { bearer: runnerToken } });
@@ -246,23 +246,21 @@ async function stopServer(child) {
 # ``EVE_WORKSPACE``; it only starts there. When the run has hidden paths, the
 # bridge sets ``APP_GUARD_EVE``, and every tool call asks the shared guard
 # check first, so a call that names a hidden path fails. The eve server must
-# keep APP_API_KEY (agent.ts reads it) and EVE_RUNNER_TOKEN (the channel reads
-# it), so the provider removes them, with the project paths, only from the env
-# of the commands it starts. ``with_legacy_env`` also copies APP_API_KEY to
-# SKYNET_API_KEY, so the provider removes that legacy twin too. The box
-# process can also hold the tool relay, package relay, candidate and host
-# agent tokens, the task and metric keys and the ShinkaEvolve route keys, so
-# the provider removes them and their SKYNET_ twins. The native runtime also
-# puts the gateway key in ANTHROPIC_AUTH_TOKEN, so the provider removes it too. eve's
-# contract says ``bash -lc``, but a login shell reads /etc/profile, which
-# resets PATH and drops the Node 24 directory that the launch adds. The
-# image's ENV PATH already holds the venv, so ``bash -c`` keeps the server
-# PATH and every image tool. Each command starts detached, in its own session
-# and process group, so an abort or ``kill()`` stops the whole group. The
-# bridge's stop sweep finds these groups through the process tree; on Linux
-# the bridge starts the harness shell under a reaper process that is a child
-# subreaper, so a background job that a finished command left behind stays in
-# that tree.
+# keep ASCENT_MODEL_KEY (agent.ts reads it) and EVE_RUNNER_TOKEN (the channel
+# reads it), so the provider removes them, with the project paths, only from
+# the env of the commands it starts. The box process can also hold the tool
+# relay, package relay, candidate and host agent tokens, the task and metric
+# keys and the ShinkaEvolve route keys, so the provider removes them and their
+# SKYNET_ twins. The native runtime also puts the gateway key in
+# ANTHROPIC_AUTH_TOKEN, so the provider removes it too. eve's contract says
+# ``bash -lc``, but a login shell reads /etc/profile, which resets PATH and
+# drops the Node 24 directory that the launch adds. The image's ENV PATH
+# already holds the venv, so ``bash -c`` keeps the server PATH and every image
+# tool. Each command starts detached, in its own session and process group, so
+# an abort or ``kill()`` stops the whole group. The bridge's stop sweep finds
+# these groups through the process tree; on Linux the bridge starts the harness
+# shell under a reaper process that is a child subreaper, so a background job
+# that a finished command left behind stays in that tree.
 EVE_SANDBOX = r"""import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
@@ -272,8 +270,7 @@ import { defineSandbox } from "eve/sandbox";
 import { defineSandboxProvider, SANDBOX_AGENT_ENV } from "eve/sandbox/provider";
 
 const DROPPED_ENV = [
-  "APP_API_KEY",
-  "SKYNET_API_KEY",
+  "ASCENT_MODEL_KEY",
   "APP_CANDIDATE_TOKEN",
   "SKYNET_CANDIDATE_TOKEN",
   "APP_HOST_AGENT_TOKEN",
@@ -481,7 +478,7 @@ def _agent_source(model: str, gateway: GatewayConfig, reasoning: str | None = No
         "const gateway = createOpenAICompatible({\n"
         f"  name: {json.dumps(PROVIDER)},\n"
         f"  baseURL: {json.dumps(gateway.url)},\n"
-        "  apiKey: process.env.APP_API_KEY,\n"
+        "  apiKey: process.env.ASCENT_MODEL_KEY,\n"
         "  includeUsage: true,\n"
         "});\n\n"
         f"export default defineAgent({{ {options} }});\n"

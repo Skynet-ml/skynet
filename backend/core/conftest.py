@@ -12,13 +12,14 @@ import os
 import statistics
 import sys
 import zlib
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from core.api import interview_model
-from core.billing import openrouter_prices
+from core.billing import mcp_oauth_client, openrouter_prices
 from core.config import app_env
 
 _DURATION_FILE = Path(__file__).with_name("test_durations.json")
@@ -182,6 +183,20 @@ def _offline_interview_model(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch: Pytest's patch fixture.
     """
     monkeypatch.setattr(interview_model, "_kick_refresh", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _unbind_mcp_connections() -> Iterator[None]:
+    """Unbind the MCP connection engine after each test.
+
+    ``create_app()`` binds the module-level engine, often to a mock store's
+    engine, and nothing else unbinds it, so a later test would see it (SKY-445).
+
+    Yields:
+        Control to the test.
+    """
+    yield
+    mcp_oauth_client.configure_mcp_connections(None)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

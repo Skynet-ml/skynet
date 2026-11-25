@@ -7,7 +7,7 @@ Skynet uses a prepaid balance. You add funds to the balance. Each run has a spen
 
 Your balance is in US dollars. Skynet keeps it in cents.
 
-Skynet gives no free starting balance by default. Add funds before you start your first paid run.
+Skynet gives no starting balance. Add funds before you start your first paid run.
 
 You add funds in **Settings → Billing**. You can pick a fixed amount or enter a custom amount:
 
@@ -22,7 +22,7 @@ The amount you choose is the amount that goes into your balance. The top-up fee 
 
 ## Run budgets
 
-Each run has a spending limit. The limit is the most the run may spend. It covers setup and optimization.
+Each run has a spending limit. The limit is the most the run may spend. It covers the optimization. Setup checks are paid from your balance. To count them in the limit of new runs, turn off **Bill setup from my wallet** in **Settings → Optimization**. Continuous plans always count setup in the cycle budget.
 
 A run has no cost estimate before it starts. It spends up to its limit, stops at the budget, and keeps its best version. Read [Runs](/docs/concepts/runs) to see how Skynet decides when to stop.
 
@@ -45,7 +45,7 @@ The wizard does not let you continue when the limit is below this amount. It als
 
 ## Reservations
 
-Before Skynet does paid work, it reserves part of the run's limit. Skynet releases the reservation when the work settles and charges only the real cost.
+Before Skynet does paid work, it reserves part of the run's limit. Skynet releases the reservation when the work settles and charges only the real cost. Setup checks reserve from your balance instead, unless setup counts in the limit.
 
 When a budget already has activity, the **Spending limit** card in the wizard shows its ledger:
 
@@ -106,11 +106,11 @@ Your repository code and your scorer run in a sandbox. Skynet meters sandbox com
 2. When the sandbox finishes, Skynet charges the final usage that the sandbox provider reports.
 3. The usage markup applies to sandbox compute.
 
-Sandbox compute is part of the run's spending limit, also when the model calls use your own key.
+Sandbox compute is part of the run's spending limit, also when the model calls use your own key. Sandbox use in setup checks is paid from your balance, unless setup counts in the limit.
 
 ## Serving
 
-Each call to the serve endpoint of a finished run is billed on its own. The caller pays from the caller's balance. Set `max_cost_cents` in the request to cap one call. Read [Results](/docs/guides/results).
+Each call to the serve endpoint of a finished run is billed on its own. The caller pays from the caller's balance. You can set `max_cost_cents` in the request to record the most you accept for one call. Your balance bounds the call. Read [Results](/docs/guides/results).
 
 ## Plans
 

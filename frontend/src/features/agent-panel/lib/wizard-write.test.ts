@@ -19,16 +19,18 @@ const {
   fieldValueText,
   isLongText,
   isWizardWrite,
+  isWizardWriteStep,
   listChange,
   liveValues,
   lockedCodeFiles,
+  mergedPatch,
   rolesFields,
   wizardWriteChanges,
   writeSummary,
   writingFields,
 } = await import(wizardWriteUrl);
 
-const call = (status: "running" | "done", result?: unknown) => ({
+const call = (status: "running" | "done" | "error", result?: unknown) => ({
   id: "1",
   tool: "update_wizard_state",
   reason: "",
@@ -129,8 +131,8 @@ test("the form's value when the write landed wins over the turn-start one", () =
 });
 
 test("a running turn on the code screens locks every code file; otherwise only the ones being written", () => {
-  assert.deepEqual(lockedCodeFiles(true, []), ["run.py", "metric.py", "optimize.toml"]);
-  assert.deepEqual(lockedCodeFiles(false, ["optimize_toml"]), ["optimize.toml"]);
+  assert.deepEqual(lockedCodeFiles(true, []), ["run.py", "metric.py", "ascent.toml"]);
+  assert.deepEqual(lockedCodeFiles(false, ["ascent_toml"]), ["ascent.toml"]);
   assert.deepEqual(lockedCodeFiles(false, ["metric_code"]), ["metric.py"]);
   assert.deepEqual(lockedCodeFiles(false, ["task_objective"]), []);
 });
@@ -177,4 +179,31 @@ test("a column-role write shows the roles card's old and new values", () => {
     { field: "input_fields", before: ["a"], after: ["q"] },
     { field: "expected_field", before: "q", after: "a" },
   ]);
+});
+
+test("a file tool's patch merges its file over the files the state holds", () => {
+  const state = { workspace_files: { "src/a.py": "a = 1\n", "src/b.py": "b = 1\n" } };
+  assert.deepEqual(mergedPatch(state, { workspace_files: { "src/b.py": "b = 2\n" } }), {
+    workspace_files: { "src/a.py": "a = 1\n", "src/b.py": "b = 2\n" },
+  });
+  const plain = { metric_code: "x = 1\n" };
+  assert.equal(mergedPatch(state, plain), plain);
+});
+
+// SKY-743: a finished write keeps its place in its group as a step row; only
+// one with nothing to show turns into an (empty) card.
+test("a wizard write stays a step unless it finished with no change", () => {
+  const changed = call("done", { previous: { task_objective: "Old goal" } });
+  assert.equal(isWizardWriteStep(changed), true, "a finished write with changes stays a step");
+  assert.equal(isWizardWriteStep(call("running")), true, "a running write is a step");
+  assert.equal(isWizardWriteStep(call("error", "boom")), true, "a failed write is a step");
+  const same = call("done", {
+    previous: { task_objective: "Sort tickets", screen_notes: null, metric_code: "def m(): ..." },
+  });
+  assert.equal(isWizardWriteStep(same), false, "a finished write with no change is no step");
+  // The form's live values win, as on the card itself.
+  assert.equal(
+    isWizardWriteStep(changed, { task_objective: "Sort tickets", metric_code: "def m(): ..." }),
+    false,
+  );
 });

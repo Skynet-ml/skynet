@@ -27,7 +27,14 @@ from core.config import app_env
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_REJECTED
 from core.service_gateway.optimization.blackbox.feedback import emit_candidate
 from core.storage.base import JobStore
-from core.storage.models import Base, JobModel, ProgressEventModel, RunCallModel, RunCandidateModel
+from core.storage.models import (
+    AgentConversationModel,
+    Base,
+    JobModel,
+    ProgressEventModel,
+    RunCallModel,
+    RunCandidateModel,
+)
 from core.storage.remote import RemoteDBJobStore
 from core.storage.run_call_store import (
     BODY_CAP_BYTES,
@@ -461,6 +468,7 @@ def postgres() -> Iterator[Engine]:
         Base.metadata.create_all(
             engine,
             tables=[
+                AgentConversationModel.__table__,
                 JobModel.__table__,
                 ProgressEventModel.__table__,
                 RunCallModel.__table__,

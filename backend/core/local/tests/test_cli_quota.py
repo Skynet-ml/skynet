@@ -391,7 +391,7 @@ def test_tier_plan(plan: str | None, tier: str | None, expected: str | None) -> 
 
 
 def test_codex_reads_model_limits_and_credits(tmp_path: Path) -> None:
-    """Other limit ids become model limits; the balance and free resets become credits."""
+    """Other limit ids become model limits; the balance and limit resets become credits."""
     answer = {
         "rateLimits": {
             **CODEX_LIMITS,

@@ -17,6 +17,8 @@ The tools:
 | `repo_draft_set_repository` | Sets the repository, its branch or commit, and the paths the run may change. | Free |
 | `repo_draft_set_data` | Sets the cases the scorer runs on. Optional. | Free |
 | `repo_draft_set_scorer` | Sets the Python scorer that grades each version. | Free |
+| `repo_draft_contract_guide` | Returns the `ascent.toml` format guide and an example file. | Free |
+| `repo_draft_set_contract` | Saves the run's `ascent.toml` contract. Required when the repository has none. | Free |
 | `repo_draft_set_models` | Sets the model of the coding agent and who pays for its calls. | Free |
 | `repo_draft_set_engine` | Sets the optimization engine. | Free |
 | `repo_draft_set_budget` | Sets how many scorer runs the search can use. Optional. | Free |
@@ -54,16 +56,27 @@ change their plan. Then call `next_tool`.
 4. **Set the data** (optional). Call `repo_draft_set_data` with `cases`.
    The candidate code gets only `input`. The scorer gets the whole case.
    Skip this step when the scorer needs no cases.
-5. **Set the scorer.** Write Python that defines one of:
-   - `score(repo_path)`: the run has no cases;
-   - `score(repo_path, case)`: the scorer runs once for each case;
-   - `score(repo_path, case, output=None)`: `output` is what the
-     repository's `optimize.toml` `[run]` entry returned for the case, and
-     `None` when nothing ran.
-   Return `(score, "<short feedback>")` or
-   `{"score": <number>, "feedback": "<short text>"}`. Higher is better.
-   Skynet refuses a bare number, because the engines learn from the
-   feedback. Call `repo_draft_set_scorer` with the code as `metric_code`.
+5. **Set the scorer.** Write Python that defines
+   `score(repo_path, case, output=None)`. `output` is what the `[run]` entry
+   of the repository's `ascent.toml` returned for the case. With
+   `[target.<name>]` stages, the scorer calls each stage with
+   `call("<name>", input)`, imported by `from openascent import call, StageError`.
+   The scorer runs in its own box that holds only the metric files and no
+   version code, so it never imports the repository's code. With no cases, the entry runs once with no
+   input. Return one object: `{"score": <number>, "feedback": "<short text>"}`.
+   Higher is better, unless `ascent.toml` sets `direction = "minimize"`
+   under `[metric]`. Only `score` is required. Give the feedback: the
+   engines learn from it. Named scores go under
+   `"scores": {"<name>": {"score": <number>}}`. Skynet refuses a bare
+   number, a pair and any other key. Call `repo_draft_set_scorer` with the code as `metric_code`.
+   Then set the contract. Every new run needs an `ascent.toml`, in the
+   draft or in the repository. When the repository has none, call
+   `repo_draft_contract_guide`, write the file from its guide (start with
+   `version = 1`), and call `repo_draft_set_contract` with the text. The file
+   needs a `[run]` section, for example `entry = "serve.py:serve"`, or a
+   `[target.<name>]` stage. The parser refuses a file with neither. Fix each
+   parser issue in the answer and call it again. When the repository has
+   the file, skip this unless the user wants to change it.
 6. **Set the models.** Call `repo_draft_set_models` with the
    `reflection_model` that the user names. It is the model of the coding
    agent that writes each version. Keep `token_source` at `managed` unless
@@ -147,10 +160,10 @@ A ticket classifier in `acme/support-bot`, in `classifier/`:
    ```python
    def score(repo_path, case, output=None):
        ok = output == case["expected"]
-       return (1.0 if ok else 0.0), "correct" if ok else f"expected {case['expected']}, got {output}"
+       return {"score": 1.0 if ok else 0.0, "feedback": "correct" if ok else f"expected {case['expected']}, got {output}"}
    ```
 
-   The repository's `optimize.toml` `[run]` entry runs the classifier on
+   The repository's `ascent.toml` `[run]` entry runs the classifier on
    each case's input.
 5. `repo_draft_set_models`, `repo_draft_set_engine`, `repo_draft_review`,
    the user's agreement, then `repo_draft_submit`.

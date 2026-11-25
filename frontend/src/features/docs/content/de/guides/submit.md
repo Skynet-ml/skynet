@@ -81,7 +81,6 @@ Der Assistent listet nur die Optimierer auf, die zu Ihrer Aufgabe und Ihren Eing
 Legen Sie fest, wie lange der Durchlauf weiter versuchen darf und wie viel er ausgeben darf:
 
 - **Max. Bewertungsläufe** (Geführt: **Max. Versuche**): die höchste Anzahl an Kandidaten, die Skynet bewertet. Einige Optimierer benötigen eine Mindestanzahl.
-- **Stoppen bei Bewertung** (Geführt: **Früh stoppen, sobald die Bewertung erreicht**): Der Durchlauf stoppt, wenn eine Version diesen Score erreicht.
 - **Max. Iterationen** (Geführt: **Max. Runden**): wird für Optimierer angezeigt, die das unterstützen.
 - **Ausgabenlimit**: der Höchstbetrag, den der Durchlauf ausgeben darf. Der Standard ist 5 $ oder der Betrag **Zum Start nötig**, wenn dieser höher ist. Sie können auch **Kein Limit** wählen.
 
@@ -91,13 +90,13 @@ Der Assistent lässt Sie nicht weitermachen, wenn das Limit oder Ihr Guthaben un
 
 ### Scorer
 
-Schreiben Sie `scorer.py`. Die Datei definiert `score(repo_path, case)` und gibt einen Score mit Feedback zurück. Der Assistent kann sie für Sie schreiben. Lesen Sie [Metriken und Scorer](/docs/concepts/scorers).
+Schreiben Sie `scorer.py`. Die Datei definiert `score(repo_path, case, output=None)` und gibt einen Score mit Feedback zurück. Der Scorer liest `output`: das, was der `[run]`-Eintrag für den Fall zurückgegeben hat. Er läuft nicht im Ordner der Version und importiert keinen Code aus dem Repository. Der Assistent kann sie für Sie schreiben. Lesen Sie [Metriken und Scorer](/docs/concepts/scorers).
 
 Das Repository kann eine Datei `serve.py` mit `def serve(input)` haben. Skynet stellt damit nach dem Durchlauf die beste Version bereit. Lesen Sie [Ergebnisse lesen](/docs/guides/results).
 
 ### Secrets
 
-Fügen Sie Secrets hinzu, zum Beispiel API-Schlüssel, die Ihr Code braucht. Jedes Secret erreicht Ihren Code und Ihren Scorer als Umgebungsvariable mit demselben Namen. Der Coding-Agent kann sie nicht sehen. Skynet verbirgt ihre Werte in den Logs.
+Fügen Sie Secrets hinzu, zum Beispiel API-Schlüssel, die Ihr Code braucht. Ihr Code und Ihr Scorer erhalten keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht eine Rolle nur über eine Tabelle `[services.<name>]`, die die Rolle in `[run] services` oder `[metric] services` nennt, oder über einen Server in der `mcp`-Datei der Rolle. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Der Coding-Agent kann sie nicht sehen. Skynet verbirgt ihre Werte in den Logs.
 
 ### Prüfung
 

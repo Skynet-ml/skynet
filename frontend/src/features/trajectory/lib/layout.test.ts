@@ -5,6 +5,7 @@ import {
   collapseGhosts,
   interpolateLayout,
   layoutTrajectory,
+  minimizesRun,
   TRAJECTORY_LAYOUT,
 } from "./layout.ts";
 import type { CandidateMetrics, RejectedMetrics } from "./types.ts";
@@ -90,5 +91,39 @@ describe("rejected toggle morph", () => {
     const mid = interpolateLayout(full, collapsed, 0.5);
     assert.equal(mid.width, (full.width + collapsed.width) / 2);
     assert.equal(mid.ghosts[0]?.x, ((full.ghosts[0]?.x ?? 0) + (collapsed.ghosts[0]?.x ?? 0)) / 2);
+  });
+});
+
+describe("SKY-750 metric direction", () => {
+  const candidates = [candidate("5", null, null), candidate("3", "5", 1), candidate("7", "5", 2)];
+
+  it("marks the highest score as the winner by default", () => {
+    assert.equal(layoutTrajectory(candidates).winnerId, "7");
+  });
+
+  it("marks the lowest score as the winner of a minimize run", () => {
+    const layout = layoutTrajectory(candidates, [], true);
+    assert.equal(layout.winnerId, "3");
+    assert.deepEqual([...layout.spineIds].sort(), ["3", "5"]);
+  });
+
+  it("reads the direction from the result or from a candidate event", () => {
+    assert.equal(minimizesRun({ blackbox_result: null, progress_events: [] }), false);
+    assert.equal(
+      minimizesRun({
+        blackbox_result: null,
+        progress_events: [
+          { timestamp: "", event: "candidate", metrics: { direction: "minimize" } },
+        ],
+      }),
+      true,
+    );
+    assert.equal(
+      minimizesRun({
+        blackbox_result: { direction: "minimize" } as never,
+        progress_events: [],
+      }),
+      true,
+    );
   });
 });

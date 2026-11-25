@@ -41,6 +41,7 @@ from .operation_pricing import ChargePolicy, UnpricedOperationError, operation_q
 from .runtime import BudgetRuntime, PaidResult
 
 __all__ = [
+    "CHAT_TITLE_ROLE",
     "NEXT_PROMPT_ROLE",
     "THINKING_LABEL_ROLE",
     "CliDispatcher",
@@ -78,6 +79,12 @@ _NEXT_PROMPT_CLI_TIMEOUT_SECONDS = 25.0
 # a stale run's CLI start.
 _NEXT_PROMPT_POOL_SIZE = 2
 _NEXT_PROMPT_SLOT_WAIT_SECONDS = 5.0
+# A chat title is a side call too, with the suggestion's longer limit for the
+# same reason. It has its own pool, because a newer suggestion must not stop
+# it, and two new chats that start together must both get a title.
+CHAT_TITLE_ROLE = "chat_title"
+_CHAT_TITLE_POOL_SIZE = 2
+_SIDE_CALL_ROLES = (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE, CHAT_TITLE_ROLE)
 _latest_suggestion_lock = threading.Lock()
 _latest_suggestion: dict[str, threading.Event] = {}
 # Seams for tests: the back-off sleep and the price lookup.
@@ -599,7 +606,7 @@ class CliDispatcher:
         """
         if not settings.local_mode:
             raise UnpricedOperationError("Subscription models run only in local mode.")
-        internal = role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE)
+        internal = role in _SIDE_CALL_ROLES
         try:
             cli_model_arg(cli, model, internal=internal)
         except ValueError as error:
@@ -712,14 +719,14 @@ class CliDispatcher:
         ran: str | None = None
         capped_runs: list[str] = []
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
+        # A non-stream chat answer carries the CLI's thinking whole (SKY-774).
+        reasoning: list[str] | None = [] if stream is None and path != _MESSAGES_PATH else None
         for provider in self._providers():
             if stream is not None and stream.started:
                 # The client already has one CLI's text; another CLI's would mix into it.
                 break
             try:
-                model_arg = cli_model_arg(
-                    provider, self.model, internal=self.role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE)
-                )  # type: ignore[arg-type]
+                model_arg = cli_model_arg(provider, self.model, internal=self.role in _SIDE_CALL_ROLES)  # type: ignore[arg-type]
             except ValueError:
                 continue
             reset = _future_reset(self.settings, provider)
@@ -731,7 +738,7 @@ class CliDispatcher:
             started = time.monotonic()
             ran = provider
             try:
-                completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast)
+                completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast, reasoning)
             except SubscriptionRateLimitedError as error:
                 capped = error
                 capped_runs.append(provider)
@@ -759,7 +766,7 @@ class CliDispatcher:
             )
             if path == _MESSAGES_PATH:
                 return self._message(request, completion.text, usage), evidence
-            return self._success(request, completion.text, usage, stream), evidence
+            return self._success(request, completion.text, usage, stream, "".join(reasoning or [])), evidence
         assert capped is not None or not self._providers() or (stream is not None and stream.started)
         provider = capped.provider if capped else self.cli
         reset_at = capped.reset_at.isoformat() if capped and capped.reset_at else None
@@ -785,6 +792,7 @@ class CliDispatcher:
         prefix: str = "",
         effort: Any = None,
         fast: bool = False,
+        reasoning: list[str] | None = None,
     ) -> CliCompletion:
         """Run one CLI call, retrying transient failures with jittered back-off.
 
@@ -807,6 +815,9 @@ class CliDispatcher:
             fast: Whether the request asks for fast mode. A side call ignores
                 it, and a model without fast mode on ``provider``
                 (:func:`cli_fast`) drops it.
+            reasoning: For a call with no ``stream``, the list that gets the
+                pieces of the CLI's thinking, or ``None``. Each attempt
+                clears it first, so it holds only the last attempt's thinking.
 
         Returns:
             The completion.
@@ -816,7 +827,7 @@ class CliDispatcher:
             CliRunError: When the call still fails after the last retry.
         """
         runner = RUNNERS[provider]
-        if self.role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE):
+        if self.role in _SIDE_CALL_ROLES:
             return self._run_label(provider, model_arg, prompt, schema)
         slots = _semaphore(provider, self.settings.cli_max_concurrency)
         # Only claude takes a cache mark from the caller.
@@ -830,13 +841,22 @@ class CliDispatcher:
             runner_kwargs["effort"] = effort
         if fast and cli_fast(provider, self.model):
             runner_kwargs["fast"] = True
+
+        def keep(kind: str, text: str) -> None:
+            """Keep one piece of thinking; drop answer text, which the completion holds whole."""
+            if kind == "reasoning" and reasoning is not None:
+                reasoning.append(text)
+
+        on_delta = stream if stream is not None or reasoning is None else keep
         for retry in range(len(_RETRY_DELAYS_SECONDS) + 1):
             if stream is not None and not stream.started:
                 # Held text of a failed attempt must not prefix the next one's.
                 stream.content = stream.sent = ""
+            if reasoning is not None:
+                reasoning.clear()
             try:
                 with slots:
-                    return runner(model_arg, prompt, schema, self.settings, _step_cwd(), stream, **runner_kwargs)
+                    return runner(model_arg, prompt, schema, self.settings, _step_cwd(), on_delta, **runner_kwargs)
             except CliRunError as error:
                 streamed = stream is not None and stream.started
                 if not error.transient or streamed or retry == len(_RETRY_DELAYS_SECONDS):
@@ -845,7 +865,10 @@ class CliDispatcher:
         raise AssertionError("unreachable")
 
     def _run_label(self, provider: str, model_arg: str, prompt: str, schema: dict[str, Any] | None) -> CliCompletion:
-        """Run one side call (label or suggestion) in its role's pool, or fail at once when it is busy.
+        """Run one side call (label, suggestion or chat title) in its role's pool.
+
+        A label fails at once when its pool is busy. A suggestion or a chat
+        title waits a short time for a slot.
 
         Args:
             provider: The CLI.
@@ -858,9 +881,19 @@ class CliDispatcher:
 
         Raises:
             SubscriptionRateLimitedError: When the subscription is capped.
-            CliRunError: When another call of this role runs on this CLI, or the call fails or times out.
+            CliRunError: When no slot of this role's pool frees in time, or the call fails or times out.
         """
         pool = f"{provider}:{self.role}"
+        if self.role == CHAT_TITLE_ROLE:
+            slot = _semaphore(pool, _CHAT_TITLE_POOL_SIZE)
+            if not slot.acquire(timeout=_NEXT_PROMPT_SLOT_WAIT_SECONDS):
+                raise CliRunError(
+                    provider, f"{provider} is still running older chat titles", transient=False, started=False
+                )
+            try:
+                return self._run_side_call(provider, model_arg, prompt, schema, _NEXT_PROMPT_CLI_TIMEOUT_SECONDS, {})
+            finally:
+                slot.release()
         if self.role != NEXT_PROMPT_ROLE:
             slot = _semaphore(pool, 1)
             if not slot.acquire(blocking=False):
@@ -950,7 +983,12 @@ class CliDispatcher:
         }
 
     def _success(
-        self, request: Mapping[str, Any], text: str, usage: dict[str, Any], stream: _ChatStream | None = None
+        self,
+        request: Mapping[str, Any],
+        text: str,
+        usage: dict[str, Any],
+        stream: _ChatStream | None = None,
+        reasoning: str = "",
     ) -> ModelHTTPResult:
         """Build the chat completion answer, as JSON or as SSE.
 
@@ -960,6 +998,7 @@ class CliDispatcher:
             usage: The usage block.
             stream: The live chat stream; when it already sent text, the SSE
                 carries only the rest of the answer, in the same stream identity.
+            reasoning: The CLI's thinking, for a JSON answer, or ``""``.
 
         Returns:
             The answer. Tool calls the CLI wrote as JSON text come back as
@@ -978,6 +1017,8 @@ class CliDispatcher:
             message: dict[str, Any] = {"role": "assistant", "content": content}
             if tool_calls:
                 message = {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
+            if reasoning:
+                message["reasoning_content"] = reasoning
             body = {
                 "id": identity,
                 "object": "chat.completion",

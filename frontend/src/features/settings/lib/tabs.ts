@@ -8,6 +8,7 @@
 
 import {
   Bell,
+  BracketsCurly,
   Code,
   CreditCard,
   Gauge,
@@ -30,6 +31,7 @@ const SETTINGS_TAB_ORDER = [
   "wizard",
   "account",
   "notifications",
+  "code",
   "security",
   "privacy",
   "billing",
@@ -68,6 +70,12 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     icon: Bell,
     labelKey: "settings.tab.notifications",
     keywordsKey: "app.shell.search.kw.notifications",
+    group: "preferences",
+  },
+  code: {
+    icon: BracketsCurly,
+    labelKey: "settings.tab.code",
+    keywordsKey: "app.shell.search.kw.code",
     group: "preferences",
   },
   security: {

@@ -122,6 +122,20 @@ def test_lifespan_calls_get_worker(mock_worker, mock_job_store):
             gw_mock.assert_called_once()
 
 
+def test_lifespan_drains_judge_scores_before_it_stops_the_worker(mock_worker, mock_job_store):
+    """Shutdown waits for the background judge scores before it stops the worker."""
+    order: list[str] = []
+    mock_worker.stop.side_effect = lambda: order.append("stop")
+    with (
+        patch("core.api.app.get_job_store", return_value=mock_job_store),
+        patch("core.api.app.get_worker", return_value=mock_worker),
+        patch("core.api.app.drain_judge_scores", side_effect=lambda: order.append("drain") or 0),
+        TestClient(create_app(registry=ServiceRegistry()), raise_server_exceptions=False),
+    ):
+        pass
+    assert order == ["drain", "stop"]
+
+
 def test_lifespan_requeues_pending_jobs(mock_worker):
     """Pending jobs surfaced by the store are forwarded to the worker."""
     pending = ["job-aaa", "job-bbb"]

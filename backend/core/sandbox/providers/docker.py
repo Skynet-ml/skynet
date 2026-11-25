@@ -15,11 +15,16 @@ image), and ``docker_egress_proxy.py`` is already hardened and tested.
 Open egress is refused: Docker has no edge policy, and its default bridge
 reaches services that listen only on the host's loopback. A box is offline,
 or it reaches only its allowlisted hosts on port 443 through the proxy.
+
+A box image is a local image, or a registry image pinned by digest
+(SKY-889). Docker pulls only a digest image that this machine does not
+have, before any box object exists; ``docker run`` itself never pulls.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import codecs
 import contextlib
 import io
@@ -85,6 +90,21 @@ _TMPFS_MOUNTS = (
 )
 _PIDS_LIMIT = 1024
 _CLI_TIMEOUT_SECONDS = 60.0
+# A first pull of a large user image can take many minutes.
+_PULL_TIMEOUT_SECONDS = 1800.0
+_HOST_PATTERN = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*(?::[0-9]+)?"
+_PATH_PATTERN = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+# Only a reference pinned by digest is pulled: a mutable tag can change under a
+# run. The strict grammar refuses a leading ``-`` (a CLI option) and any ``@``
+# or user info before the digest.
+_DIGEST_IMAGE = re.compile(rf"(?:{_HOST_PATTERN}/)?{_PATH_PATTERN}(?:/{_PATH_PATTERN})*@sha256:[0-9a-f]{{64}}")
+# Docker's global options that take their value as the next argument.
+_GLOBAL_VALUE_OPTIONS = frozenset(
+    {"--config", "-c", "--context", "-H", "--host", "-l", "--log-level", "--tlscacert", "--tlscert", "--tlskey"}
+)
+_DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
+# Docker's own key for Docker Hub in a config file's ``auths``.
+_DOCKER_HUB_AUTH = "https://index.docker.io/v1/"
 _KILL_GRACE_SECONDS = 15
 _GROUP_KILL_SECONDS = 10.0
 _TIMEOUT_EXIT_CODE = 124
@@ -204,7 +224,12 @@ async def _kill(process: asyncio.subprocess.Process) -> None:
 
 
 async def _docker(
-    docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None, cli_seconds: float = _CLI_TIMEOUT_SECONDS
+    docker_bin: str,
+    args: Sequence[str],
+    *,
+    stdin: bytes | None = None,
+    cli_seconds: float = _CLI_TIMEOUT_SECONDS,
+    kill_on_cancel: bool = False,
 ) -> _CliResult:
     """Run one Docker CLI command and capture its output.
 
@@ -213,6 +238,8 @@ async def _docker(
         args: The CLI arguments.
         stdin: Bytes for the command's stdin, or ``None`` for no input.
         cli_seconds: Kill the CLI after this many seconds.
+        kill_on_cancel: Kill the CLI at once on a cancel, instead of waiting
+            for it to end. Only for a call that creates no container.
 
     Returns:
         The exit code and the captured output.
@@ -242,6 +269,8 @@ async def _docker(
             await asyncio.wait({communication}, timeout=deadline - loop.time())
         except asyncio.CancelledError as error:
             cancelled = error
+            if kill_on_cancel:
+                break
     if not communication.done():
         communication.cancel()
         await _kill(process)
@@ -249,11 +278,30 @@ async def _docker(
             await communication
         if cancelled is not None:
             raise cancelled
-        raise SandboxInfraError(f"docker {args[0]} did not finish in {cli_seconds:.0f}s.")
+        raise SandboxInfraError(f"docker {_subcommand(args)} did not finish in {cli_seconds:.0f}s.")
     if cancelled is not None:
         raise cancelled
     stdout, stderr = communication.result()
     return _CliResult(process.returncode or 0, stdout, stderr)
+
+
+def _subcommand(args: Sequence[str]) -> str:
+    """Return the Docker subcommand of a CLI call, past its global options.
+
+    Args:
+        args: The CLI arguments.
+
+    Returns:
+        The first argument that is not a global option or its value, or an
+        empty string when there is none.
+    """
+    rest = iter(args)
+    for arg in rest:
+        if arg in _GLOBAL_VALUE_OPTIONS:
+            next(rest, None)
+        elif not arg.startswith("-"):
+            return arg
+    return ""
 
 
 async def _remove(docker_bin: str, args: Sequence[str], missing: bytes) -> None:
@@ -271,6 +319,67 @@ async def _remove(docker_bin: str, args: Sequence[str], missing: bytes) -> None:
         return
     if result.returncode != 0 and missing not in result.stderr:
         logger.warning("Could not remove the Docker sandbox object %s: %s", args[-1], result.error_line)
+
+
+def digest_image(image: str) -> bool:
+    """Tell whether an image reference is a registry image pinned by digest.
+
+    Args:
+        image: The image reference.
+
+    Returns:
+        True for ``[host/]path@sha256:<64 hex>`` in the strict reference grammar.
+    """
+    return _DIGEST_IMAGE.fullmatch(image) is not None
+
+
+def in_repository(image: str, repository: str) -> bool:
+    """Tell whether a digest image lies in an owner's image repository.
+
+    Args:
+        image: The image reference.
+        repository: The owner's repository, for example
+            ``registry.example.com/users/alice``.
+
+    Returns:
+        True when ``image`` is a strict digest reference whose name is
+        ``repository`` or lies under it. An empty repository holds no image.
+    """
+    prefix = repository.rstrip("/")
+    if not prefix or not digest_image(image):
+        return False
+    name = image.partition("@")[0]
+    return name == prefix or name.startswith(prefix + "/")
+
+
+def registry_host(image: str) -> str:
+    """Return the registry host of an image reference.
+
+    Args:
+        image: The image reference.
+
+    Returns:
+        The lowercase host part, or ``docker.io`` for Docker Hub: a reference
+        with no host, or one of Docker Hub's own host names.
+    """
+    first, _, rest = image.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        host = first.lower()
+        return "docker.io" if host in _DOCKER_HUB_HOSTS else host
+    return "docker.io"
+
+
+def _auth_key(image: str) -> str:
+    """Return the key that Docker reads an image's credentials under.
+
+    Args:
+        image: The image reference.
+
+    Returns:
+        The registry host, or Docker's own key for Docker Hub.
+    """
+    host = registry_host(image)
+    return _DOCKER_HUB_AUTH if host == "docker.io" else host
 
 
 def _label_args(labels: Mapping[str, str]) -> list[str]:
@@ -382,6 +491,10 @@ class DockerEnvironment(SandboxEnvironment):
     """
 
     capabilities = DOCKER_CAPABILITIES
+    # ``--cap-drop ALL`` leaves ``sudo`` a root with no capability: it cannot
+    # read the box user's private files or switch to that user. So the
+    # protected-file check runs as the box user here (TS-1).
+    root_has_capabilities = False
 
     def __init__(
         self,
@@ -390,16 +503,20 @@ class DockerEnvironment(SandboxEnvironment):
         image: str | None = None,
         docker_bin: str = DEFAULT_DOCKER_BIN,
         recorder: CallRecorder | None = None,
+        pull_credentials: tuple[str, str] | None = None,
     ) -> None:
         """Check the spec and choose the image.
 
         Args:
             spec: The sandbox to open.
-            image: The local image to boot when the spec names none. Docker
-                never pulls it; it must already be on this machine.
+            image: The image to boot when the spec names none. A local image
+                must already be on this machine; Docker pulls only a registry
+                image pinned by digest that is missing here.
             docker_bin: The Docker CLI path; OrbStack works through the same CLI.
             recorder: Writes each egress proxy request into the run record,
                 or None outside a run.
+            pull_credentials: The (username, password) that read a registry
+                image, or None for a public image.
 
         Raises:
             SandboxSpecError: The spec breaks a provider rule or names no image.
@@ -410,6 +527,7 @@ class DockerEnvironment(SandboxEnvironment):
             raise SandboxSpecError("The Docker sandbox needs an image in the spec or the provider.")
         self._docker_bin = docker_bin
         self._recorder = recorder
+        self._pull_credentials = pull_credentials
         self._name: str | None = None
         self._egress: _Egress | None = None
         self._egress_up = False
@@ -433,10 +551,11 @@ class DockerEnvironment(SandboxEnvironment):
 
         Raises:
             RuntimeError: The sandbox was already started.
-            SandboxInfraError: Docker cannot start the box or its proxy.
+            SandboxInfraError: Docker cannot pull the image, or start the box or its proxy.
         """
         if self._name is not None:
             raise RuntimeError("The Docker sandbox was already started.")
+        await self._pull_missing_image()
         self._name = _unique_name(self.spec.name)
         self._egress = _Egress(network=f"{self._name}-net", proxy=f"{self._name}-egress")
         self._started_at = time.monotonic()
@@ -814,10 +933,55 @@ class DockerEnvironment(SandboxEnvironment):
         """
         return max(1, math.ceil(self.spec.lifetime_seconds - (time.monotonic() - self._started_at)))
 
+    async def _pull_missing_image(self) -> None:
+        """Pull a registry image pinned by digest when this machine does not have it.
+
+        The credentials go into a private Docker config folder for the pull
+        alone, so they never reach a command line or the user's own config.
+
+        Raises:
+            SandboxInfraError: The pull failed.
+        """
+        image = str(self._image)
+        if not digest_image(image):
+            return
+        # None of these calls creates a container, so a cancel kills them at once.
+        present = await _docker(
+            self._docker_bin, ["image", "inspect", "--format", "{{.Id}}", image], kill_on_cancel=True
+        )
+        if present.returncode == 0:
+            return
+        if self._pull_credentials is None:
+            pulled = await _docker(
+                self._docker_bin, ["pull", image], cli_seconds=_PULL_TIMEOUT_SECONDS, kill_on_cancel=True
+            )
+        else:
+            # A config folder of its own drops the user's contexts too, so the
+            # pull names the current daemon itself.
+            context = await _docker(
+                self._docker_bin, ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], kill_on_cancel=True
+            )
+            host = context.stdout.decode(errors="replace").strip()
+            if context.returncode != 0 or not host:
+                raise SandboxInfraError(f"Could not find the Docker daemon to pull {image}: {context.error_line}")
+            username, password = self._pull_credentials
+            auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+            with tempfile.TemporaryDirectory() as config:
+                config_file = Path(config) / "config.json"
+                config_file.write_text(json.dumps({"auths": {_auth_key(image): {"auth": auth}}}))
+                pulled = await _docker(
+                    self._docker_bin,
+                    ["--config", config, "-H", host, "pull", image],
+                    cli_seconds=_PULL_TIMEOUT_SECONDS,
+                    kill_on_cancel=True,
+                )
+        if pulled.returncode != 0:
+            raise SandboxInfraError(f"Could not pull the image {image}: {pulled.error_line}")
+
     async def _run_box(self) -> None:
         """Start the box container.
 
-        Docker never pulls the image; a missing image fails the start.
+        ``docker run`` never pulls the image; a missing image fails the start.
 
         Raises:
             SandboxInfraError: Docker cannot start the container.

@@ -121,7 +121,7 @@ function yesNo(v: boolean): string {
     : msg("auto.features.optimizations.components.configtab.literal.15");
 }
 
-type ConfigRow = { label: ReactNode; value: string; icon: ReactNode };
+type ConfigRow = { label: ReactNode; value: ReactNode; icon: ReactNode };
 
 function MiniGrid({ rows }: { rows: ConfigRow[] }) {
   if (rows.length === 0) return null;
@@ -132,6 +132,71 @@ function MiniGrid({ rows }: { rows: ConfigRow[] }) {
       ))}
     </div>
   );
+}
+
+/**
+ * The harness a run's proposer uses. A stored run omits a harness it did not
+ * choose (SKY-753), so this is Codex, or "custom" when the stored environment
+ * record names the contract file's `[proposer] entry` command. Before staging,
+ * a repository run may still get that command, so it shows no harness yet.
+ */
+export function runProposerHarness(
+  proposer: Partial<BlackboxProposer> | null,
+  target: Partial<BlackboxTarget>,
+): string | null {
+  if (!proposer) return null;
+  if (proposer.harness) return proposer.harness;
+  if (target.repo?.environment?.proposer_entry) return "custom";
+  return target.repo && !target.repo.environment ? null : "codex";
+}
+
+// Marks where the command goes in the translated row text.
+const COMMAND_SLOT = "\u0000";
+
+/** Join a command's parts the way Python's `shlex.join` does, as the run-record note shows them. */
+export function shellJoin(parts: readonly string[]): string {
+  return parts
+    .map((part) =>
+      part && !/[^\w@%+=:,./-]/.test(part) ? part : `'${part.replaceAll("'", `'"'"'`)}'`,
+    )
+    .join(" ");
+}
+
+/**
+ * The proposer row's text: the contract file's command when the run uses it,
+ * else the harness name. The command is left-to-right text, so in Hebrew a
+ * command such as `./run.sh --fast` keeps its punctuation in order.
+ */
+export function runProposerLabel(
+  proposer: Partial<BlackboxProposer> | null,
+  target: Partial<BlackboxTarget>,
+): ReactNode {
+  const harness = runProposerHarness(proposer, target);
+  if (!proposer || !harness) return null;
+  const entry = target.repo?.environment?.proposer_entry;
+  if (!entry || proposer.harness) return harnessLabel(harness);
+  const [before, ...after] = formatMsg("submit.blackbox.review.proposer_file", {
+    command: COMMAND_SLOT,
+  }).split(COMMAND_SLOT);
+  return (
+    <>
+      {before}
+      <bdi dir="ltr">{shellJoin(entry)}</bdi>
+      {after.join("")}
+    </>
+  );
+}
+
+/**
+ * The score that stops a run's search: `[outcome] target` from ascent.toml
+ * (SKY-691), or the retired `budget.stop_at_score` that runs stored before it carry.
+ */
+export function runStopScore(
+  budget: Partial<BlackboxBudget>,
+  target: Partial<BlackboxTarget>,
+): number | null {
+  const legacy = (budget as { stop_at_score?: number | null }).stop_at_score;
+  return target.repo?.environment?.outcome?.target ?? legacy ?? null;
 }
 
 /**
@@ -158,6 +223,7 @@ export function BlackboxConfigCard({
   // A single ShinkaEvolve run has no coding-agent proposer; its proposer block
   // only carries the agent editor's tool-call cap.
   const shinkaRun = strategy.mode === "single" && strategy.engine === "shinka_evolve";
+  const proposerLabel = runProposerLabel(proposer, target);
   const reflectionCard = toModelCard(payload.reflection_model_config);
   const taskCard = toModelCard(payload.task_model_config);
   const scorerModelCard = toModelCard(scorer.model);
@@ -298,10 +364,11 @@ export function BlackboxConfigCard({
       icon: <Repeat />,
     });
   }
-  if (budget.stop_at_score != null) {
+  const stopScore = runStopScore(budget, target);
+  if (stopScore != null) {
     optimizationRows.push({
       label: msg("optimization.blackbox.config.budget_stop_label"),
-      value: String(budget.stop_at_score),
+      value: String(stopScore),
       icon: <Target />,
     });
   }
@@ -323,16 +390,18 @@ export function BlackboxConfigCard({
     value: String(calls),
     icon: <Wrench />,
   });
-  if (proposer?.harness && !shinkaRun) {
-    optimizationRows.push({
-      label: (
-        <HelpTip text={tip("submit.blackbox.proposer")}>
-          {msg("submit.blackbox.review.proposer")}
-        </HelpTip>
-      ),
-      value: harnessLabel(proposer.harness),
-      icon: <Robot />,
-    });
+  if (proposer && !shinkaRun) {
+    if (proposerLabel) {
+      optimizationRows.push({
+        label: (
+          <HelpTip text={tip("submit.blackbox.proposer")}>
+            {msg("submit.blackbox.review.proposer")}
+          </HelpTip>
+        ),
+        value: proposerLabel,
+        icon: <Robot />,
+      });
+    }
     if (proposer.max_candidates_per_iter != null) {
       optimizationRows.push({
         label: (

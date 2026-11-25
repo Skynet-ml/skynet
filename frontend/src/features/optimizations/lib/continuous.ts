@@ -75,6 +75,14 @@ export function scoreGain(cycle: ContinuousCycle): number | null {
   return (shown(cycle.candidate_score) - shown(cycle.incumbent_score)) / 1000;
 }
 
+/**
+ * Whether a nonzero score change is an improvement. The shown change stays the
+ * raw candidate minus incumbent; a minimize run improves when its score drops.
+ */
+export function gainIsBetter(gain: number, minimize: boolean): boolean {
+  return minimize ? gain < 0 : gain > 0;
+}
+
 /** Only a validated candidate waits for the owner's approve or reject. */
 export function canReview(cycle: ContinuousCycle): boolean {
   return cycle.status === "awaiting_review" && !!cycle.optimization_id;

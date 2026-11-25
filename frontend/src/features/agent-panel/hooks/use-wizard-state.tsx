@@ -3,12 +3,12 @@
 import * as React from "react";
 
 import { storedOptimizerChoice, type DataMode } from "@/shared/types/unified-run";
-import type { LineComment } from "@/shared/ui/agent/line-comments";
+import { carryLineCommentId, type LineComment } from "@/shared/ui/agent/line-comments";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
 import { nextReturnScreen, reachedReturnScreen, runScreenNav } from "../lib/screen-agent";
 import type { FileEdit } from "../lib/turn-edits";
-import { rolesFields } from "../lib/wizard-write";
+import { mergedPatch, rolesFields } from "../lib/wizard-write";
 import type { ScreenNote, WizardState } from "../lib/types";
 
 type WizardKey = keyof WizardState;
@@ -44,6 +44,9 @@ interface WizardStateContextValue {
   /** What the Continue button refuses on the screen on view; null when it is open. */
   screenIssue: string | null;
   setScreenIssue: (issue: string | null) => void;
+  /** The screen the wizard's Continue shows next; null on the last screen or off the wizard. */
+  nextScreen: string | null;
+  setNextScreen: (screen: string | null) => void;
   /** The wizard frame registers its own Continue / Back handlers here. */
   setScreenNavigator: (navigator: ScreenNavigator | null) => void;
   /**
@@ -86,18 +89,24 @@ interface WizardStateContextValue {
   noteWriteBefore: (callId: string, before: Record<string, unknown>) => void;
   /** Bring back the before-states a reopened chat kept, so its edits show again. */
   restoreWriteBefore: (ledger: Readonly<Record<string, Record<string, unknown>>>) => void;
-  /** The files the newest turn that edited any changed, for the Changes pane's "Last turn". */
-  lastTurnEdits: readonly FileEdit[];
-  setLastTurnEdits: (edits: readonly FileEdit[]) => void;
-  /** Opens the Changes pane, at one file when given; null while no pane is mounted. */
-  viewChanges: ((path?: string) => void) | null;
-  setViewChanges: (open: ((path?: string) => void) | null) => void;
+  /**
+   * Opens the Changes pane, at one file when given; `paths` marks one turn's
+   * files there. Null while no pane is mounted.
+   */
+  viewChanges: ViewChanges | null;
+  setViewChanges: (open: ViewChanges | null) => void;
+  /** The chat header's Changes button: whether the pane is open, and its toggle. Null with no pane beside the chat. */
+  changesToggle: ChangesToggle | null;
+  setChangesToggle: (toggle: ChangesToggle | null) => void;
   /** The repository's text of the setup draft's files, by path; null while no Changes pane is mounted. */
   repoBase: ReadonlyMap<string, string> | null;
   setRepoBase: (base: ReadonlyMap<string, string> | null) => void;
-  /** A failed setup check the composer offers to send to the agent; null when there is none. */
-  setupCheckIssue: SetupCheckIssue | null;
-  setSetupCheckIssue: (issue: SetupCheckIssue | null) => void;
+  /** The repository's file paths, for the composer's @file mentions; null while no Changes pane is mounted. */
+  repoPaths: readonly string[] | null;
+  setRepoPaths: (paths: readonly string[] | null) => void;
+  /** Set while the chat floats over the full-view Changes pane; null while it is docked. */
+  chatFloat: ChatFloat | null;
+  setChatFloat: (float: ChatFloat | null) => void;
   /** The draft's files as the Changes pane holds them; null while no pane is mounted. */
   draftFiles: DraftFiles | null;
   setDraftFiles: (files: DraftFiles | null) => void;
@@ -105,6 +114,10 @@ interface WizardStateContextValue {
   lineComments: readonly LineComment[];
   addLineComment: (comment: LineComment) => void;
   removeLineComment: (comment: LineComment) => void;
+  /** Change a comment's text in place, so it keeps its place and its id. */
+  updateLineComment: (comment: LineComment, text: string) => void;
+  /** Move a file's comments to new line numbers after a write moves its lines. */
+  moveLineComments: (path: string, to: (line: number) => number) => void;
   clearLineComments: () => void;
 }
 
@@ -116,10 +129,23 @@ export interface DraftFiles {
   write: (edits: readonly FileEdit[], side: "before" | "after") => boolean;
 }
 
-/** A failed setup check: how many errors it found, and the message that asks the agent to fix them. */
-export interface SetupCheckIssue {
-  count: number;
-  feedback: string;
+/**
+ * Open the Changes pane at `path`, marking `paths` (one turn's files) when given.
+ * `comment`, a line comment's id, scrolls the diff to that comment.
+ */
+export type ViewChanges = (path?: string, paths?: readonly string[], comment?: string) => void;
+
+/** The Changes pane's open state and its toggle, for the chat header's button. */
+export interface ChangesToggle {
+  open: boolean;
+  toggle: () => void;
+}
+
+/** The full view's floating chat: whether its thread shows, and its bar's actions. */
+export interface ChatFloat {
+  expanded: boolean;
+  onExpand: (expanded: boolean) => void;
+  onDock: () => void;
 }
 
 /** A message the wizard sends its agent without the user typing it. */
@@ -144,6 +170,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const agentWrittenRef = React.useRef<Set<string>>(new Set());
   const [wizardScreen, setWizardScreen] = React.useState<string | null>(null);
   const [screenIssue, setScreenIssue] = React.useState<string | null>(null);
+  const [nextScreen, setNextScreen] = React.useState<string | null>(null);
   const [reopenedScreen, setReopenedScreen] = React.useState<string | null>(null);
   const [restoredSetup, setRestoredSetup] = React.useState(false);
   const [agentBusy, setAgentBusy] = React.useState(false);
@@ -172,23 +199,15 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     },
     [],
   );
-  const [lastTurnEdits, setLastTurnEditsState] = React.useState<readonly FileEdit[]>([]);
-  // The panel recomputes the list on each streamed token; only a new list is a change.
-  const setLastTurnEdits = React.useCallback((edits: readonly FileEdit[]) => {
-    setLastTurnEditsState((prev) => (JSON.stringify(prev) === JSON.stringify(edits) ? prev : edits));
-  }, []);
-  const [viewChanges, setViewChangesState] = React.useState<((path?: string) => void) | null>(null);
+  const [viewChanges, setViewChangesState] = React.useState<ViewChanges | null>(null);
   // A function in state must go through the updater form, or React calls it.
-  const setViewChanges = React.useCallback((open: ((path?: string) => void) | null) => {
+  const setViewChanges = React.useCallback((open: ViewChanges | null) => {
     setViewChangesState(() => open);
   }, []);
+  const [changesToggle, setChangesToggle] = React.useState<ChangesToggle | null>(null);
   const [repoBase, setRepoBase] = React.useState<ReadonlyMap<string, string> | null>(null);
-  const [setupCheckIssue, setSetupCheckIssueState] = React.useState<SetupCheckIssue | null>(null);
-  const setSetupCheckIssue = React.useCallback((issue: SetupCheckIssue | null) => {
-    setSetupCheckIssueState((prev) =>
-      prev?.count === issue?.count && prev?.feedback === issue?.feedback ? prev : issue,
-    );
-  }, []);
+  const [repoPaths, setRepoPaths] = React.useState<readonly string[] | null>(null);
+  const [chatFloat, setChatFloat] = React.useState<ChatFloat | null>(null);
   const [draftFiles, setDraftFiles] = React.useState<DraftFiles | null>(null);
   const [lineComments, setLineComments] = React.useState<readonly LineComment[]>([]);
   const addLineComment = React.useCallback((comment: LineComment) => {
@@ -196,6 +215,22 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   }, []);
   const removeLineComment = React.useCallback((comment: LineComment) => {
     setLineComments((prev) => prev.filter((c) => c !== comment));
+  }, []);
+  const updateLineComment = React.useCallback((comment: LineComment, text: string) => {
+    setLineComments((prev) =>
+      prev.map((c) => (c === comment ? carryLineCommentId(c, { ...c, text }) : c)),
+    );
+  }, []);
+  const moveLineComments = React.useCallback((path: string, to: (line: number) => number) => {
+    setLineComments((prev) =>
+      prev.some((c) => c.path === path && to(c.line) !== c.line)
+        ? prev.map((c) =>
+            c.path === path && to(c.line) !== c.line
+              ? carryLineCommentId(c, { ...c, line: to(c.line) })
+              : c,
+          )
+        : prev,
+    );
   }, []);
   const clearLineComments = React.useCallback(() => setLineComments([]), []);
   // A ref, not state: the frame re-registers on every render that changes its
@@ -263,8 +298,9 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     setState((prev) => {
       let changed = false;
       const next = { ...prev };
+      const merged = mergedPatch(prev, patch);
       for (const k of keys) {
-        const v = patch[k];
+        const v = merged[k];
         if (v !== undefined && prev[k] !== v) {
           (next as Record<string, unknown>)[k] = v;
           changed = true;
@@ -313,11 +349,9 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     setPulseKeys([]);
     setAutoFeedback(null);
     setWriteBefore({});
-    setLastTurnEdits([]);
-    setSetupCheckIssue(null);
     setLineComments([]);
     setReturnScreen(null);
-  }, [setLastTurnEdits, setSetupCheckIssue]);
+  }, []);
 
   const overriddenFields = React.useMemo(() => Array.from(overridden).sort(), [overridden]);
 
@@ -335,6 +369,8 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setWizardScreen,
       screenIssue,
       setScreenIssue,
+      nextScreen,
+      setNextScreen,
       setScreenNavigator,
       navigateScreen,
       returnScreen,
@@ -353,19 +389,23 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       writeBefore,
       noteWriteBefore,
       restoreWriteBefore,
-      lastTurnEdits,
-      setLastTurnEdits,
       viewChanges,
       setViewChanges,
+      changesToggle,
+      setChangesToggle,
       repoBase,
       setRepoBase,
-      setupCheckIssue,
-      setSetupCheckIssue,
+      repoPaths,
+      setRepoPaths,
+      chatFloat,
+      setChatFloat,
       draftFiles,
       setDraftFiles,
       lineComments,
       addLineComment,
       removeLineComment,
+      updateLineComment,
+      moveLineComments,
       clearLineComments,
     }),
     [
@@ -379,6 +419,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       reset,
       wizardScreen,
       screenIssue,
+      nextScreen,
       setScreenNavigator,
       navigateScreen,
       returnScreen,
@@ -393,18 +434,19 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       writeBefore,
       noteWriteBefore,
       restoreWriteBefore,
-      lastTurnEdits,
-      setLastTurnEdits,
       viewChanges,
+      changesToggle,
       setViewChanges,
       repoBase,
       setRepoBase,
-      setupCheckIssue,
-      setSetupCheckIssue,
+      repoPaths,
+      chatFloat,
       draftFiles,
       lineComments,
       addLineComment,
       removeLineComment,
+      updateLineComment,
+      moveLineComments,
       clearLineComments,
     ],
   );
@@ -418,7 +460,9 @@ export function useWizardStateOptional(): WizardStateContextValue | null {
 }
 
 /** Whether a running agent write is changing this wizard field (or any of these), so the form holds it. */
-export function useAgentFieldLock(field: keyof WizardState | ReadonlyArray<keyof WizardState>): boolean {
+export function useAgentFieldLock(
+  field: keyof WizardState | ReadonlyArray<keyof WizardState>,
+): boolean {
   const writing = React.useContext(Ctx)?.agentWritingFields ?? [];
   const fields: readonly string[] = typeof field === "string" ? [field] : field;
   return fields.some((f) => writing.includes(f));
@@ -470,12 +514,24 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
     "optimizer_name",
     "run_code",
     "metric_code",
-    "optimize_toml",
+    "ascent_toml",
   ] as const) {
     if (typeof wrap[key] === "string") patch[key] = wrap[key] as string;
   }
-  for (const key of ["staged_dataset_id", "source_dataset_id", "expected_field", "repository"] as const) {
+  for (const key of [
+    "staged_dataset_id",
+    "source_dataset_id",
+    "expected_field",
+    "repository",
+    "workspace_base",
+  ] as const) {
     if (typeof wrap[key] === "string" && wrap[key]) patch[key] = wrap[key] as string;
+  }
+  if (isRecord(wrap.workspace_files)) {
+    const files = Object.entries(wrap.workspace_files).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    );
+    if (files.length > 0) patch.workspace_files = Object.fromEntries(files);
   }
   if (isStringList(wrap.dataset_columns)) patch.dataset_columns = wrap.dataset_columns;
   const notes = parseScreenNotes(wrap.screen_notes);

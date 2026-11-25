@@ -20,28 +20,34 @@ import json
 import threading
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, delete
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ...constants import TOKEN_SOURCE_MANAGED, TOKEN_SOURCE_SUBSCRIPTION
+from ...models import ModelConfig
+from ...service_gateway.agents.feedback import FEEDBACK_NOT_SENT, send_feedback_tool
 from ...service_gateway.agents.generalist import ApprovalRegistry, approval_key
 from ...storage.models import (
     AgentConversationModel,
+    AgentFeedbackReportModel,
     AgentMessageModel,
     Base,
     BillingCustomerModel,
+    ChatMediaModel,
     UserModel,
 )
+from ...storage.usage import UNSENT_MEDIA_RETENTION, StorageUsage, compute_user_storage
 from .. import auth as auth_mod
 from .. import model_catalog
 from ..routers import generalist_agent as agent_mod
@@ -111,6 +117,29 @@ class _StubStore:
             engine: The SQLite engine backing the stub job-store.
         """
         self.engine = engine
+        self.quota = 1 << 40
+
+    def get_effective_user_storage_quota(self, username: str) -> int:
+        """Return the storage quota that a test sets.
+
+        Args:
+            username: The user (unused).
+
+        Returns:
+            The quota in bytes.
+        """
+        return self.quota
+
+    def compute_user_storage(self, username: str) -> StorageUsage:
+        """Measure the user's storage with the real query.
+
+        Args:
+            username: The user to measure.
+
+        Returns:
+            The user's storage usage.
+        """
+        return compute_user_storage(self.engine, username)
 
 
 @pytest.fixture
@@ -145,7 +174,7 @@ def persistence_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, Eng
 def _fund(engine: Engine) -> None:
     """Give the test identity a purchased balance to pass the 402 balance gate.
 
-    There is no free allowance, so any turn that should stream must be backed by
+    There is no starting balance, so any turn that should stream must be backed by
     an explicitly funded account.
     """
     with Session(engine) as session:
@@ -403,6 +432,55 @@ def test_edit_and_resend_replaces_the_edited_turn_and_later_rows(
 
     assert edited.status_code == 200
     assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
+
+
+def _store_compaction(engine: Engine, content: str, entry: dict[str, Any]) -> None:
+    """Store ``entry`` as the compaction of the user row with ``content``, as a /compact save does."""
+    with Session(engine) as session:
+        row = session.query(AgentMessageModel).filter_by(role="user", content=content).one()
+        row.router_metadata = {**(row.router_metadata or {}), "compaction": entry}
+        session.commit()
+
+
+def _user_compactions(engine: Engine) -> list[tuple[str, Any]]:
+    """Return each stored user row's text and compaction entry, in insertion order."""
+    with Session(engine) as session:
+        rows = session.query(AgentMessageModel).filter_by(role="user").order_by(AgentMessageModel.id).all()
+        return [(row.content, (row.router_metadata or {}).get("compaction")) for row in rows]
+
+
+def test_regenerate_keeps_the_compaction_of_the_replaced_turn(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """A /compact that kept only the latest turn stays, with its cost, when that turn is regenerated."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+    entry = {"summary": "s", "cents": 3.0, "kept_turns": 2}
+    _store_compaction(engine, "second", entry)
+
+    assert _post_turn(client, "second", token, conversation_id=conversation_id, regenerate=True).status_code == 200
+
+    assert _user_compactions(engine) == [("first", None), ("second", entry)]
+
+
+def test_edit_keeps_the_compaction_of_the_edited_turn_only(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """The edited turn's summary covers only earlier turns, so it stays; a later turn's summary goes with its turns."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second", "third"])
+    entry = {"summary": "s2", "cents": 2.0, "kept_turns": 4}
+    _store_compaction(engine, "second", entry)
+    _store_compaction(engine, "third", {"summary": "s3", "cents": 1.0, "kept_turns": 2})
+
+    edited = _post_turn(client, "second, edited", token, conversation_id=conversation_id, edit_user_text="second")
+
+    assert edited.status_code == 200
+    assert _user_compactions(engine) == [("first", None), ("second, edited", entry)]
 
 
 def test_unsaved_turn_streams_the_reply_and_stores_nothing(
@@ -1024,21 +1102,44 @@ def test_history_for_agent_attaches_tool_trace_to_assistant_turns() -> None:
     ]
 
 
-def test_history_for_agent_bounds_turns_text_and_tool_results() -> None:
-    """A long conversation is clipped to the newest turns, with each field capped."""
-    calls = [ChatToolCall(tool=f"t{i}", status="done", result="r" * 5000) for i in range(50)]
-    turns = [ChatTurn(role="user", content=f"m{i}") for i in range(agent_mod.HISTORY_MAX_TURNS + 5)]
-    turns.append(ChatTurn(role="assistant", content="x" * (agent_mod.HISTORY_TURN_MAX_CHARS + 50), tool_calls=calls))
+def test_history_for_agent_names_each_file_of_a_user_turn() -> None:
+    """A user turn's files reach the agent as short notes; a turn with only files is not empty."""
+    turns = [
+        ChatTurn(role="user", content="see this", media=[{"name": "shot.png", "kind": "image"}]),
+        ChatTurn(role="assistant", content="ok"),
+        ChatTurn(
+            role="user", content="", media=[{"name": "a.mp4", "kind": "video"}, {"name": "b.mp3", "kind": "audio"}]
+        ),
+    ]
 
     history = history_for_agent(turns)
 
-    assert len(history) == agent_mod.HISTORY_MAX_TURNS
-    assert history[0]["content"] == "m6"
+    assert history[0]["content"] == "see this\n[image: shot.png]"
+    assert history[1]["content"] == "ok"
+    assert history[2]["content"] == "[video: a.mp4] [audio: b.mp3]"
+
+
+def test_title_falls_back_to_the_first_media_file_name() -> None:
+    """A message with no text is titled from its first media file; typed text still wins."""
+    assert agent_mod._derive_title("", "screenshot.png") == "screenshot.png"
+    assert agent_mod._derive_title("Fix the chart", "screenshot.png") == "Fix the chart"
+    assert agent_mod._derive_title("") == ""
+
+
+def test_history_for_agent_keeps_every_turn_and_tool_result_in_full() -> None:
+    """No turn, tool call or result is cut: compaction alone bounds the history."""
+    calls = [ChatToolCall(tool=f"t{i}", status="done", result="r" * 5000) for i in range(50)]
+    turns = [ChatTurn(role="user", content=f"m{i}") for i in range(30)]
+    turns.append(ChatTurn(role="assistant", content="x" * 9000, tool_calls=calls))
+
+    history = history_for_agent(turns)
+
+    assert len(history) == 31
+    assert history[0]["content"] == "m0"
     last = history[-1]
-    assert len(last["content"]) == agent_mod.HISTORY_TURN_MAX_CHARS
-    assert len(last["tools"]) == agent_mod.HISTORY_MAX_TOOL_CALLS
-    assert last["tools"][-1]["tool"] == "t49"
-    assert all(len(call["result"]) == agent_mod.HISTORY_TOOL_RESULT_MAX_CHARS for call in last["tools"])
+    assert len(last["content"]) == 9000
+    assert [call["tool"] for call in last["tools"]] == [f"t{i}" for i in range(50)]
+    assert all(len(call["result"]) == 5000 for call in last["tools"])
 
 
 def test_title_skips_attached_file_and_pasted_text_blocks() -> None:
@@ -1052,6 +1153,9 @@ def test_title_skips_attached_file_and_pasted_text_blocks() -> None:
     only_file = '<attached_file name="report.pdf">\nPage 1\nQuarterly revenue\n</attached_file>'
     assert agent_mod._derive_title(only_file) == "report.pdf"
     assert agent_mod._derive_title("<pasted_text>\nlong paste\n</pasted_text>") == ""
+    with_id = '<attached_file name="report.pdf" id="c-1">\nPage 1\n</attached_file>'
+    assert agent_mod._derive_title(with_id) == "report.pdf"
+    assert agent_mod._derive_title("Read it " + with_id) == "Read it"
 
 
 def test_title_skips_the_setup_wizard_hidden_turns() -> None:
@@ -1189,3 +1293,704 @@ def test_turn_does_not_block_the_event_loop_on_a_cold_catalog(
     assert resp.status_code == 200, resp.text
     assert builds
     assert all(builds)
+
+
+def test_steer_is_stored_before_the_agent_reads_it_and_feedback_keys_on_it(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The steer hook stores the steer row once and points the feedback target at it (SKY-580)."""
+    client, engine = persistence_client
+    _fund(engine)
+    seen: dict[str, Any] = {}
+
+    async def steer_stream(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Take one steer the way the agent loop does, then finish the turn.
+
+        Args:
+            **kwargs: The router's arguments for the turn.
+
+        Yields:
+            The steer event and the terminal ``done`` event.
+        """
+        first_id = kwargs["feedback_target"].user_message_id
+        await asyncio.to_thread(kwargs["on_steer"], "also the score is wrong")
+        seen.update(kwargs, first_id=first_id)
+        yield {"event": "steer_applied", "data": {"ids": ["s1"], "text": "also the score is wrong"}}
+        yield {"event": "done", "data": {"assistant_message": "ok", "model": "m"}}
+
+    monkeypatch.setattr(agent_mod, "run_generalist_agent", steer_stream)
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={"user_message": "hi", "chat_history": [], "wizard_state": {}, "trust_mode": "ask"},
+        headers={"Authorization": f"Bearer {_session_token()}"},
+    )
+
+    assert resp.status_code == 200
+    assert _stored_contents(engine) == ["hi", "also the score is wrong", "ok"]
+    with Session(engine) as session:
+        ids = {m.content: m.id for m in session.query(AgentMessageModel).all()}
+    assert seen["first_id"] == ids["hi"]
+    assert seen["feedback_target"].user_message_id == ids["also the score is wrong"]
+
+
+def test_failed_steer_store_gives_feedback_not_sent(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A steer whose store fails gives "not sent", not a report on the first message (SKY-580)."""
+    client, engine = persistence_client
+    _fund(engine)
+    persist = agent_mod._persist_user_turn
+    seen: dict[str, Any] = {}
+
+    def failing_persist(job_store: Any, conversation_id: str, text: str, **kwargs: Any) -> int:
+        """Store the first message, and fail on the steer.
+
+        Args:
+            job_store: The router's store.
+            conversation_id: The chat.
+            text: The user text.
+            **kwargs: The store options, such as ``steer``.
+
+        Returns:
+            The stored message id.
+
+        Raises:
+            RuntimeError: The text is the steer.
+        """
+        if text == "also the score is wrong":
+            raise RuntimeError("store down")
+        return persist(job_store, conversation_id, text, **kwargs)
+
+    async def steer_stream(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Take one steer whose store fails, then send feedback about it.
+
+        Args:
+            **kwargs: The router's arguments for the turn.
+
+        Yields:
+            The terminal ``done`` event.
+        """
+        with pytest.raises(RuntimeError):
+            await asyncio.to_thread(kwargs["on_steer"], "also the score is wrong")
+        tool = send_feedback_tool(kwargs["feedback_target"], agent="generalist")
+        seen["result"] = await tool.func(tool_name="t", user_quote="also the score is wrong", summary="s")
+        yield {"event": "done", "data": {"assistant_message": "ok", "model": "m"}}
+
+    monkeypatch.setattr(agent_mod, "_persist_user_turn", failing_persist)
+    monkeypatch.setattr(agent_mod, "run_generalist_agent", steer_stream)
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={"user_message": "hi", "chat_history": [], "wizard_state": {}, "trust_mode": "ask"},
+        headers={"Authorization": f"Bearer {_session_token()}"},
+    )
+
+    assert resp.status_code == 200
+    assert seen["result"] == FEEDBACK_NOT_SENT
+    with Session(engine) as session:
+        assert session.query(AgentFeedbackReportModel).count() == 0
+
+
+def _add_media(engine: Engine, media_id: str, kind: str, owner: str = "alice@example.com") -> None:
+    """Store one chat media row.
+
+    Args:
+        engine: The SQLite engine.
+        media_id: The row id.
+        kind: ``image``, ``video``, ``audio`` or ``document``.
+        owner: The username that owns the row.
+    """
+    mime = {"image": "image/png", "video": "video/mp4", "audio": "audio/mpeg", "document": "application/pdf"}[kind]
+    with Session(engine) as session:
+        session.add(
+            ChatMediaModel(
+                id=media_id,
+                username=owner,
+                filename=f"{media_id}.bin",
+                kind=kind,
+                mime_type=mime,
+                byte_size=3,
+                data=b"abc",
+            )
+        )
+        session.commit()
+
+
+def _media_turn(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    media_ids: list[str],
+    *,
+    vision: bool,
+    persist: bool = False,
+    **fields: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Run one turn with media on a catalog model that does or does not accept images.
+
+    Args:
+        client: Bound test client.
+        monkeypatch: Pytest fixture used to stub the catalog and the agent.
+        media_ids: The media ids the turn sends.
+        vision: Whether the catalog marks the model as a vision model.
+        persist: Whether the server stores the turn.
+        **fields: More request fields, such as ``conversation_id``.
+
+    Returns:
+        The response and the arguments the agent received.
+    """
+    seen: dict[str, Any] = {}
+
+    async def capture_stream(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Record the forwarded kwargs and finish in one turn."""
+        seen.update(kwargs)
+        yield {"event": "done", "data": {"assistant_message": "ok", "model": "m"}}
+
+    entry = SimpleNamespace(
+        value="openai/gpt-test",
+        supports_thinking=False,
+        reasoning_efforts=None,
+        supports_vision=vision,
+        max_input_tokens=None,
+    )
+    monkeypatch.setattr(agent_mod, "run_generalist_agent", capture_stream)
+    monkeypatch.setattr(model_catalog, "get_catalog_cached", lambda: SimpleNamespace(models=[entry]))
+    monkeypatch.setattr(agent_mod, "catalog_snapshot", lambda: SimpleNamespace(models=[entry]))
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={
+            "user_message": "look",
+            "chat_history": [],
+            "wizard_state": {},
+            "trust_mode": "ask",
+            "model": "openai/gpt-test",
+            "persist": persist,
+            "media_ids": media_ids,
+            **fields,
+        },
+        headers={"Authorization": f"Bearer {_session_token()}"},
+    )
+    return resp, seen
+
+
+def test_vision_model_gets_images_and_video_stays_a_reference(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vision model sees the image as a data URI; the video is only named, with a notice."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _add_media(engine, "vid-1", "video")
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1", "vid-1"], vision=True)
+
+    assert resp.status_code == 200
+    assert seen["images"] == [f"data:image/png;base64,{base64.b64encode(b'abc').decode()}"]
+    assert seen["user_message"].startswith("look")
+    assert "vid-1.bin" in seen["user_message"]
+    assert "img-1.bin" not in seen["user_message"]
+    assert 'event: media_notice\ndata: {"reference_ids": ["vid-1"]}' in resp.text
+
+
+def test_model_without_vision_names_the_image_as_a_reference(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model with no image input gets no images, and the image becomes a named reference."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1"], vision=False)
+
+    assert resp.status_code == 200
+    assert seen["images"] is None
+    assert "img-1.bin" in seen["user_message"]
+    assert "cannot view" in seen["user_message"]
+    assert '"reference_ids": ["img-1"]' in resp.text
+
+
+def test_stored_turn_names_its_media_and_moves_it_to_the_chat(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored user turn names its files for a reload, and the files belong to the chat."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _add_media(engine, "vid-1", "video")
+
+    resp, _ = _media_turn(client, monkeypatch, ["img-1", "vid-1"], vision=True, persist=True)
+
+    assert resp.status_code == 200
+    with Session(engine) as session:
+        turn = session.query(AgentMessageModel).filter(AgentMessageModel.role == "user").one()
+        assert turn.content == "look"
+        assert turn.router_metadata["media"] == [
+            {"id": "img-1", "name": "img-1.bin", "kind": "image"},
+            {"id": "vid-1", "name": "vid-1.bin", "kind": "video"},
+        ]
+        owners = {row.id: row.conversation_id for row in session.query(ChatMediaModel)}
+    assert owners == {"img-1": turn.conversation_id, "vid-1": turn.conversation_id}
+
+
+def test_stored_turn_links_each_document_original_to_its_file_block(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document original keeps its file block's id as ``card``; other media gets none."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "doc-1", "document")
+    _add_media(engine, "doc-2", "document")
+    _add_media(engine, "img-1", "image")
+
+    resp, _ = _media_turn(
+        client,
+        monkeypatch,
+        ["doc-1", "doc-2", "img-1"],
+        vision=True,
+        persist=True,
+        media_cards={"doc-1": "card-a", "img-1": "card-x"},
+    )
+
+    assert resp.status_code == 200
+    with Session(engine) as session:
+        turn = session.query(AgentMessageModel).filter(AgentMessageModel.role == "user").one()
+        assert turn.router_metadata["media"] == [
+            {"id": "doc-1", "name": "doc-1.bin", "kind": "document", "card": "card-a"},
+            {"id": "doc-2", "name": "doc-2.bin", "kind": "document"},
+            {"id": "img-1", "name": "img-1.bin", "kind": "image"},
+        ]
+
+
+@pytest.mark.parametrize(
+    "cards",
+    [{"doc-2": "card-a"}, {"doc-1": "bad card"}, {"doc-1": ""}, {"doc-1": "a" * 65}, {"doc-1": '"><x'}],
+)
+def test_turn_refuses_a_bad_media_card_link(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+    cards: dict[str, str],
+) -> None:
+    """A card link for a file the turn does not send, or a card id that is not plain, is a 422."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "doc-1", "document")
+
+    resp, _ = _media_turn(client, monkeypatch, ["doc-1"], vision=True, persist=True, media_cards=cards)
+
+    assert resp.status_code == 422
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).count() == 0
+
+
+@pytest.mark.parametrize("text", ["", "same"])
+def test_regenerate_retry_keeps_a_previous_turn_with_other_files(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+) -> None:
+    """A retry with equal text but other files keeps the previous turn and its file.
+
+    A refused send stores nothing, so its ``regenerate`` retry finds the
+    previous turn last. Equal text alone (empty for messages with only
+    files) must not let the retry delete that turn.
+    """
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-a", "image")
+    _add_media(engine, "img-b", "image")
+    first, _ = _media_turn(client, monkeypatch, ["img-a"], vision=True, persist=True, user_message=text)
+    assert first.status_code == 200
+    with Session(engine) as session:
+        cid = session.query(AgentConversationModel).one().id
+
+    retried, _ = _media_turn(
+        client,
+        monkeypatch,
+        ["img-b"],
+        vision=True,
+        persist=True,
+        user_message=text,
+        conversation_id=cid,
+        regenerate=True,
+    )
+
+    assert retried.status_code == 200
+    with Session(engine) as session:
+        turns = (
+            session.query(AgentMessageModel)
+            .filter(AgentMessageModel.role == "user")
+            .order_by(AgentMessageModel.id)
+            .all()
+        )
+        assert [[item["id"] for item in turn.router_metadata["media"]] for turn in turns] == [["img-a"], ["img-b"]]
+        assert {row.id for row in session.query(ChatMediaModel)} == {"img-a", "img-b"}
+
+
+def test_regenerate_retry_with_the_same_files_replaces_the_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry with the same text and files replaces the saved turn and keeps its file."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-a", "image")
+    first, _ = _media_turn(client, monkeypatch, ["img-a"], vision=True, persist=True, user_message="")
+    assert first.status_code == 200
+    with Session(engine) as session:
+        cid = session.query(AgentConversationModel).one().id
+
+    retried, _ = _media_turn(
+        client, monkeypatch, ["img-a"], vision=True, persist=True, user_message="", conversation_id=cid, regenerate=True
+    )
+
+    assert retried.status_code == 200
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).filter(AgentMessageModel.role == "user").count() == 1
+        assert session.get(ChatMediaModel, "img-a").conversation_id == cid
+
+
+def test_media_only_first_turn_titles_the_chat_from_the_file_name(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first turn with files and no text names the chat after the first file, and the title task sees it."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    titled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        agent_mod,
+        "_start_title_task",
+        lambda _store, _user, _model, _cid, message, cut: titled.append((message, cut)),
+    )
+
+    resp, _ = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True, user_message="")
+
+    assert resp.status_code == 200
+    with Session(engine) as session:
+        assert session.query(AgentConversationModel).one().title == "img-1.bin"
+    assert titled == [("img-1.bin", "img-1.bin")]
+
+
+def test_turn_in_another_chat_copies_media_and_leaves_the_source_in_place(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file that another chat holds stays there; the new chat stores its own copy.
+
+    The model cannot see images, so the notice names the file by the copy's id.
+    """
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        session.add(
+            AgentConversationModel(
+                id="src", username="alice@example.com", title="src", pinned=False, created_at=now, updated_at=now
+            )
+        )
+        session.flush()
+        session.get(ChatMediaModel, "img-1").conversation_id = "src"
+        session.commit()
+
+    resp, _ = _media_turn(client, monkeypatch, ["img-1"], vision=False, persist=True)
+
+    assert resp.status_code == 200
+    with Session(engine) as session:
+        turn = session.query(AgentMessageModel).filter(AgentMessageModel.role == "user").one()
+        copy_id = turn.router_metadata["media"][0]["id"]
+        assert copy_id != "img-1"
+        assert session.get(ChatMediaModel, "img-1").conversation_id == "src"
+        copy = session.get(ChatMediaModel, copy_id)
+        assert (copy.conversation_id, copy.data, copy.filename) == (turn.conversation_id, b"abc", "img-1.bin")
+        assert copy.created_at is not None
+    assert f'"reference_ids": ["{copy_id}"]' in resp.text
+
+
+def test_edit_deletes_the_files_that_only_the_old_turn_named(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit that sends other files deletes the old turn's files from the chat."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _add_media(engine, "img-2", "image")
+    _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+    with Session(engine) as session:
+        cid = session.query(AgentConversationModel).one().id
+
+    resp, _ = _media_turn(
+        client, monkeypatch, ["img-2"], vision=True, persist=True, conversation_id=cid, edit_user_text="look"
+    )
+
+    assert resp.status_code == 200
+    with Session(engine) as session:
+        owners = {row.id: row.conversation_id for row in session.query(ChatMediaModel)}
+    assert owners == {"img-2": cid}
+
+
+def test_send_refuses_a_file_copy_over_the_storage_quota(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that must copy another chat's file over the quota gets the upload's 409 and makes no chat."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        session.add(
+            AgentConversationModel(
+                id="src", username="alice@example.com", title="src", pinned=False, created_at=now, updated_at=now
+            )
+        )
+        session.flush()
+        session.get(ChatMediaModel, "img-1").conversation_id = "src"
+        session.commit()
+    client.app.state.job_store.quota = 0
+
+    resp, _ = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+
+    assert resp.status_code == 409
+    with Session(engine) as session:
+        assert [row.id for row in session.query(ChatMediaModel)] == ["img-1"]
+        assert session.query(AgentMessageModel).count() == 0
+        assert [row.id for row in session.query(AgentConversationModel)] == ["src"]
+
+
+def test_stale_unsent_media_is_a_404_and_stores_nothing(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send that names a stale unsent file fails before the turn is stored."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    with Session(engine) as session:
+        session.get(ChatMediaModel, "img-1").created_at = (
+            datetime.now(UTC) - UNSENT_MEDIA_RETENTION - timedelta(hours=1)
+        )
+        session.commit()
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+
+    assert resp.status_code == 404
+    assert seen == {}
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).count() == 0
+
+
+def test_attach_failure_fails_the_send_instead_of_dropping_the_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file that goes away while the turn is stored fails the send; the turn is never silently lost."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+
+    def gone(*_args: Any) -> dict[str, str]:
+        """Fail as attach_media_to_chat does when a file is deleted under it."""
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+
+    monkeypatch.setattr(agent_mod, "attach_media_to_chat", gone)
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+
+    assert resp.status_code == 404
+    assert seen == {}
+    with Session(engine) as session:
+        assert session.query(AgentMessageModel).count() == 0
+
+
+def _delete_before_attach(monkeypatch: pytest.MonkeyPatch, media_id: str) -> None:
+    """Delete a file inside the send's transaction, just before the attach reads it.
+
+    This stands for a delete that commits after the quota check and before
+    the attach locks the rows.
+
+    Args:
+        monkeypatch: Pytest fixture used to wrap the attach.
+        media_id: The file to delete.
+    """
+    real = agent_mod.attach_media_to_chat
+
+    def attach(session: Session, *args: Any) -> dict[str, str]:
+        """Delete the file in the send's session, then attach as usual."""
+        session.execute(delete(ChatMediaModel).where(ChatMediaModel.id == media_id))
+        return real(session, *args)
+
+    monkeypatch.setattr(agent_mod, "attach_media_to_chat", attach)
+
+
+def test_file_deleted_during_a_new_chat_send_leaves_no_chat(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file deleted after the quota check fails the send and rolls back the new chat."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _delete_before_attach(monkeypatch, "img-1")
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+
+    assert resp.status_code == 404
+    assert seen == {}
+    with Session(engine) as session:
+        assert session.query(AgentConversationModel).count() == 0
+        assert session.query(AgentMessageModel).count() == 0
+        assert [row.id for row in session.query(ChatMediaModel)] == ["img-1"]
+
+
+def test_file_deleted_during_an_edit_keeps_the_old_turns(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file deleted after the quota check fails an edit; the turns it would replace stay."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _add_media(engine, "img-2", "image")
+    _media_turn(client, monkeypatch, ["img-1"], vision=True, persist=True)
+    with Session(engine) as session:
+        cid = session.query(AgentConversationModel).one().id
+        before = [(row.role, row.content) for row in session.query(AgentMessageModel).order_by(AgentMessageModel.id)]
+    _delete_before_attach(monkeypatch, "img-2")
+
+    resp, _ = _media_turn(
+        client, monkeypatch, ["img-2"], vision=True, persist=True, conversation_id=cid, edit_user_text="look"
+    )
+
+    assert resp.status_code == 404
+    with Session(engine) as session:
+        after = [(row.role, row.content) for row in session.query(AgentMessageModel).order_by(AgentMessageModel.id)]
+        owners = {row.id: row.conversation_id for row in session.query(ChatMediaModel)}
+    assert after == before
+    assert owners == {"img-1": cid, "img-2": None}
+
+
+def test_send_loads_bytes_only_for_the_images_the_model_sees(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Video and reference files keep their bytes in the database during the turn."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-1", "image")
+    _add_media(engine, "vid-1", "video")
+    read: list[list[str]] = []
+    real = agent_mod.load_media_data
+    monkeypatch.setattr(agent_mod, "load_media_data", lambda eng, ids: read.append(ids) or real(eng, ids))
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-1", "vid-1"], vision=True)
+
+    assert resp.status_code == 200
+    assert read == [["img-1"]]
+    assert len(seen["images"]) == 1
+
+
+def test_split_media_sends_images_only_up_to_the_turn_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Images past the turn's image budget become named references."""
+    monkeypatch.setattr(agent_mod, "MAX_MODEL_IMAGE_BYTES", 5)
+    rows = [
+        ChatMediaModel(id=f"img-{n}", filename="f.png", kind="image", mime_type="image/png", byte_size=3, data=b"abc")
+        for n in (1, 2)
+    ]
+
+    images, references = agent_mod._split_media(rows, sees_images=True)
+
+    assert [row.id for row in images] == ["img-1"]
+    assert [row.id for row in references] == ["img-2"]
+
+
+def test_split_media_leaves_document_originals_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A document original is neither model input nor a reference note: the message holds its text."""
+    rows = [
+        ChatMediaModel(id="doc-1", filename="a.pdf", kind="document", mime_type="application/pdf", byte_size=3),
+        ChatMediaModel(id="vid-1", filename="v.mp4", kind="video", mime_type="video/mp4", byte_size=3),
+    ]
+
+    images, references = agent_mod._split_media(rows, sees_images=True)
+
+    assert images == []
+    assert [row.id for row in references] == ["vid-1"]
+
+
+def test_history_names_media_but_not_document_originals() -> None:
+    """A past turn's media gets a short note; its document original gets none."""
+    turn = agent_mod.ChatTurn(
+        role="user",
+        content="see",
+        media=[{"name": "a.pdf", "kind": "document"}, {"name": "v.mp4", "kind": "video"}],
+    )
+    only_document = agent_mod.ChatTurn(role="user", content="read", media=[{"name": "a.pdf", "kind": "document"}])
+
+    history = history_for_agent([turn, only_document])
+
+    assert history[0]["content"] == "see\n[video: v.mp4]"
+    assert history[1]["content"] == "read"
+
+
+def test_turn_without_media_keeps_the_message(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn with no media sends the text as it is and emits no notice."""
+    client, engine = persistence_client
+    _fund(engine)
+
+    resp, seen = _media_turn(client, monkeypatch, [], vision=True)
+
+    assert resp.status_code == 200
+    assert seen["user_message"] == "look"
+    assert seen["images"] is None
+    assert "media_notice" not in resp.text
+
+
+def test_turn_refuses_another_users_media(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A media id that another user owns gets a 404, and the agent never runs."""
+    client, engine = persistence_client
+    _fund(engine)
+    _add_media(engine, "img-m", "image", owner="mallory@example.com")
+
+    resp, seen = _media_turn(client, monkeypatch, ["img-m"], vision=True)
+
+    assert resp.status_code == 404
+    assert seen == {}
+
+
+@pytest.mark.parametrize(
+    ("token_source", "vision", "expected"),
+    [
+        (TOKEN_SOURCE_MANAGED, True, True),
+        (TOKEN_SOURCE_MANAGED, False, False),
+        (TOKEN_SOURCE_SUBSCRIPTION, True, False),
+    ],
+)
+def test_sees_images_follows_the_catalog_and_the_route(
+    monkeypatch: pytest.MonkeyPatch, token_source: str, vision: bool, expected: bool
+) -> None:
+    """Only a catalog vision model on a native route gets image input."""
+    entry = SimpleNamespace(value="openai/gpt-test", supports_vision=vision)
+    monkeypatch.setattr(agent_mod, "catalog_snapshot", lambda: SimpleNamespace(models=[entry]))
+    cli = {"cli_provider": "claude"} if token_source == TOKEN_SOURCE_SUBSCRIPTION else {}
+    config = ModelConfig(name="openai/gpt-test", token_source=token_source, **cli)
+
+    assert agent_mod._sees_images(config) is expected
+
+
+def test_sees_images_is_false_before_the_catalog_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no catalog yet, the turn treats every image as a reference."""
+    monkeypatch.setattr(agent_mod, "catalog_snapshot", lambda: None)
+
+    assert agent_mod._sees_images(ModelConfig(name="openai/gpt-test")) is False

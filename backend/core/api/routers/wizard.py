@@ -7,23 +7,29 @@ validated against a narrow whitelist and echoed back in a
 wizard. The keys follow the wizard's four steps: task and artifact,
 inputs, optimizer (with models and budget), and the metric/code workspace.
 
-``POST /wizard/optimize-toml/check`` runs the repository parser on the text
-of an ``optimize.toml`` from the setup draft and returns each error with the
-section and key that caused it, so the editor can show it there.
+``POST /wizard/ascent-toml/check`` runs the repository parser on the text
+of an ``ascent.toml`` from the setup draft and returns each error with the
+section and key that caused it, so the editor can show it there. It also
+returns the command that ``[metric] entry`` names, so the wizard asks for no
+``metric.py`` without a TOML parser of its own (SKY-770), and the command that
+``[proposer] entry`` names, so the agent picker offers it first (SKY-771).
 
 Hidden from the public Scalar reference (not in ``_SCALAR_PUBLIC_PATHS``).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, Literal, get_args
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...models import DataMode, OptimizerChoice, optimizers_for
+from ...config import settings
+from ...models import DataMode, ModelConfig, OptimizerChoice, optimizers_for
 from ...models.blackbox import BlackboxCandidate
-from ...service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
+from ...service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, Diagnostic, parse_constraints
+from .. import model_catalog
 from ..errors import DomainError
 
 
@@ -94,12 +100,18 @@ class WizardUpdateRequest(BaseModel):
     primary_model: dict[str, Any] | None = Field(
         default=None,
         alias="model_config",
-        description="Optimizer step: task model config dict (name required, other fields optional).",
+        description=(
+            "Optimizer step: task model config dict (name required, other fields optional). "
+            "Put the reasoning level in extra.reasoning_effort. A level the model does not support returns a 422 that lists its levels."
+        ),
     )
     reflection_model: dict[str, Any] | None = Field(
         default=None,
         alias="reflection_model_config",
-        description="Optimizer step: reflection model config dict, the model that proposes new versions.",
+        description=(
+            "Optimizer step: reflection model config dict, the model that proposes new versions. "
+            "Put the reasoning level in extra.reasoning_effort. A level the model does not support returns a 422 that lists its levels."
+        ),
     )
     spending_limit_usd: float | None = Field(
         default=None,
@@ -124,13 +136,20 @@ class WizardUpdateResponse(BaseModel):
     wizard_state: dict[str, Any]
 
 
-# The text of an optimize.toml to check. No class docstring: it would enter the OpenAPI contract.
-class OptimizeTomlCheckRequest(BaseModel):
-    text: str = Field(description="The whole optimize.toml file as text.")
+# The text of an ascent.toml to check. No class docstring: it would enter the OpenAPI contract.
+class AscentTomlCheckRequest(BaseModel):
+    text: str = Field(description="The whole ascent.toml file as text.")
 
 
-# One parser error and the place in the file that caused it.
-class OptimizeTomlError(BaseModel):
+# One parser diagnostic and the place in the file that caused it (SKY-763).
+class AscentTomlError(BaseModel):
+    level: Literal["error", "warning"] = Field(
+        default="error", description="'error' blocks the run before it starts; 'warning' blocks nothing."
+    )
+    line: int | None = Field(
+        default=None,
+        description="The line of the key, else of its section header. Null when the section is absent too.",
+    )
     section: str | None = Field(
         default=None,
         description="The table, such as 'paths' or 'target.planner'. Null for a top-level key or the whole file.",
@@ -141,10 +160,66 @@ class OptimizeTomlError(BaseModel):
     message: str = Field(description="The parser's reason, which names the setting.")
 
 
-# The parser stops at the first error, so ``errors`` holds at most one item.
-class OptimizeTomlCheckResponse(BaseModel):
+# ``errors`` holds every error and warning of one check, in the parser's order; ``ok`` is false only for an error.
+class AscentTomlCheckResponse(BaseModel):
     ok: bool
-    errors: list[OptimizeTomlError]
+    errors: list[AscentTomlError]
+    hidden: int = Field(default=0, description="The errors past the parser's cap, which errors does not list.")
+    metric_command: list[str] | None = Field(
+        default=None,
+        description="The command that [metric] entry names. Null for a Python entry, no entry, or a file with an error.",
+    )
+    proposer_command: list[str] | None = Field(
+        default=None,
+        description="The command that [proposer] entry names. Null for no entry or a file with an error.",
+    )
+
+
+def _diagnostics(items: Iterable[Diagnostic]) -> list[AscentTomlError]:
+    """Turn the parser's diagnostics into the check route's items, in the same order.
+
+    Args:
+        items: The errors of a failed check, or the warnings of a passed one.
+
+    Returns:
+        One item for each diagnostic, with its level, line, section, key and message.
+    """
+    return [
+        AscentTomlError(level=item.level, line=item.line, section=item.section, key=item.key, message=item.message)
+        for item in items
+    ]
+
+
+def _check_reasoning_effort(extra: dict[str, Any], name: str | None, field_name: str) -> None:
+    """Refuse an ``extra.reasoning_effort`` level that the model's catalog entry does not list.
+
+    Args:
+        extra: The validated ``extra`` dict.
+        name: The model name in the same dict, or ``None`` when the patch sets no name.
+        field_name: Field label used in error messages.
+
+    Raises:
+        DomainError: 422 when the catalog lists levels for ``name`` and the level is not one of them.
+    """
+    effort = extra.get("reasoning_effort")
+    if effort is None or name is None:
+        return
+    try:
+        models = model_catalog.get_catalog_cached().models
+    except Exception:
+        # An unavailable catalog keeps today's behavior: the level is saved unchecked.
+        return
+    entry = next((m for m in models if m.value == name), None)
+    levels = entry.reasoning_efforts if entry is not None else None
+    if levels and effort not in levels:
+        raise DomainError(
+            "wizard.model_reasoning_effort_unsupported",
+            status=422,
+            field=field_name,
+            effort=effort,
+            name=name,
+            levels=", ".join(levels),
+        )
 
 
 def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
@@ -163,10 +238,23 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
 
     Raises:
         DomainError: 422 with a wizard-prefixed key when the input is not
-            a JSON object or any field fails type validation.
+            a JSON object, has a key that ``ModelConfig`` does not define,
+            names a subscription model that this build or its CLI cannot run,
+            or any field fails type validation.
     """
     if not isinstance(v, dict):
         raise DomainError("wizard.model_not_json_object", status=422, field=field_name)
+    # SKY-747: an unknown key (an agent's top-level reasoning_effort) was dropped
+    # silently. Refuse it so the agent retries with the right key.
+    unknown = sorted(set(v) - set(ModelConfig.model_fields))
+    if unknown:
+        raise DomainError(
+            "wizard.model_unknown_key",
+            status=422,
+            field=field_name,
+            key=", ".join(unknown),
+            allowed=", ".join(ModelConfig.model_fields),
+        )
     out: dict[str, Any] = {}
     name = v.get("name")
     if name is not None:
@@ -183,6 +271,29 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
                 name=cleaned,
             )
         out["name"] = cleaned
+    for key in ("token_source", "byok_provider", "cli_provider"):
+        value = v.get(key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise DomainError("wizard.model_field_not_string", status=422, field=field_name, key=key)
+            # A Literal field allows only its listed values; a plain ``str | None`` field yields none here.
+            allowed = [a for arg in get_args(ModelConfig.model_fields[key].annotation) for a in get_args(arg)]
+            if allowed and value not in allowed:
+                raise DomainError(
+                    "wizard.model_field_not_allowed",
+                    status=422,
+                    field=field_name,
+                    key=key,
+                    value=value,
+                    allowed=", ".join(allowed),
+                )
+            out[key] = value
+    # Submit refuses these pairs; refuse them here so the agent sees the error, not the user.
+    if out.get("token_source") == "subscription":
+        if not settings.local_mode:
+            raise DomainError("wizard.model_subscription_local_only", status=422, field=field_name)
+        if "cli_provider" not in out:
+            raise DomainError("wizard.model_subscription_needs_cli", status=422, field=field_name)
     base_url = v.get("base_url")
     if base_url is not None:
         if not isinstance(base_url, str):
@@ -207,6 +318,7 @@ def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
     if extra is not None:
         if not isinstance(extra, dict):
             raise DomainError("wizard.model_extra_not_object", status=422, field=field_name)
+        _check_reasoning_effort(extra, out.get("name"), field_name)
         out["extra"] = extra
     return out
 
@@ -215,7 +327,7 @@ def create_wizard_router() -> APIRouter:
     """Build the wizard-state router.
 
     Returns:
-        A FastAPI ``APIRouter`` exposing ``POST /wizard/update`` and ``POST /wizard/optimize-toml/check``.
+        A FastAPI ``APIRouter`` exposing ``POST /wizard/update`` and ``POST /wizard/ascent-toml/check``.
     """
     router = APIRouter()
 
@@ -344,14 +456,14 @@ def create_wizard_router() -> APIRouter:
         return WizardUpdateResponse(wizard_state=patch)
 
     @router.post(
-        "/wizard/optimize-toml/check",
-        response_model=OptimizeTomlCheckResponse,
+        "/wizard/ascent-toml/check",
+        response_model=AscentTomlCheckResponse,
         status_code=200,
-        operation_id="check_optimize_toml",
-        summary="Check the text of an optimize.toml with the repository parser",
+        operation_id="check_ascent_toml",
+        summary="Check the text of an ascent.toml with the repository parser",
     )
-    def check_optimize_toml(req: OptimizeTomlCheckRequest) -> OptimizeTomlCheckResponse:
-        """Parse an ``optimize.toml`` text the way a run reads it, and return the first error.
+    def check_ascent_toml(req: AscentTomlCheckRequest) -> AscentTomlCheckResponse:
+        """Parse an ``ascent.toml`` text the way a run reads it, and return every error and warning.
 
         It checks only the text. It does not read the files the text names
         (rule, instructions, ``.mcp.json``, cases or compose files), and it
@@ -361,16 +473,26 @@ def create_wizard_router() -> APIRouter:
             req: The file text.
 
         Returns:
-            ``ok`` true with no errors, or ``ok`` false with the error and its section and key.
+            ``ok`` true with the warnings, if any, and the ``[metric] entry``
+            and ``[proposer] entry`` commands, if any; or ``ok`` false with
+            each error, each with its level, line, section and key, and the
+            count of errors past the parser's cap.
         """
         try:
             # A lone surrogate from JSON cannot encode as UTF-8; let the parser refuse it instead of a 500.
-            parse_constraints(req.text.encode("utf-8", "surrogatepass"))
+            constraints = parse_constraints(req.text.encode("utf-8", "surrogatepass"))
         except ConstraintsError as error:
-            return OptimizeTomlCheckResponse(
-                ok=False,
-                errors=[OptimizeTomlError(section=error.section, key=error.key, message=str(error))],
-            )
-        return OptimizeTomlCheckResponse(ok=True, errors=[])
+            # Past its cap the parser adds one summary item; the client counts the hidden errors itself.
+            shown = error.errors[:-1] if error.hidden else error.errors
+            return AscentTomlCheckResponse(ok=False, errors=_diagnostics(shown), hidden=error.hidden)
+        # A command entry needs no metric.py; a Python entry still runs the wizard's metric code (SKY-770).
+        entry = constraints.metric.entry
+        proposer = constraints.proposer_entry
+        return AscentTomlCheckResponse(
+            ok=True,
+            errors=_diagnostics(constraints.warnings),
+            metric_command=list(entry) if isinstance(entry, tuple) else None,
+            proposer_command=list(proposer) if proposer is not None else None,
+        )
 
     return router

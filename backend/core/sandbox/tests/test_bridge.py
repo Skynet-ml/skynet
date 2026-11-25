@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,20 +16,24 @@ from pydantic import SecretStr
 
 from core.api import preflight_execution
 from core.billing.budgets import BudgetError
-from core.billing.operation_pricing import json_fingerprint
+from core.billing.operation_pricing import ChargePolicy, image_copy_usd, json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP
 from core.config import Settings
 from core.config import settings as global_settings
+from core.exceptions import ServiceError
 from core.sandbox import bridge
 from core.sandbox.errors import SandboxFatalError
 from core.sandbox.factory import PROVIDERS, ProviderEntry
-from core.sandbox.metering import USAGE_ADAPTERS
+from core.sandbox.image_registry import RegistryCredentials
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import vercel as vercel_provider
 from core.sandbox.providers.vercel import VercelEnvironment
-from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeUsage, readback
+from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeCopier, FakeUsage, make_env, readback
+from core.sandbox.vcr_copy import VcrCopier
 from core.service_gateway.optimization.blackbox import sandbox_runtime
-from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec, UserImage
+from core.worker import repo_staging
 
 _DIGEST = "registry.example/skynet@sha256:" + "a" * 64
 _LOCAL_IMAGE = "sha256:" + "c" * 64
@@ -182,6 +191,24 @@ def test_async_vercel_runtime_is_protected_and_funded() -> None:
     assert runtime.billable
     assert not runtime.injects_headers
     assert runtime._options == {"budget": _BUDGET}
+
+
+def test_hosted_vercel_runtime_copies_user_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the hosted Vercel runtime meters the VCR copier, so it accepts user images (SKY-898)."""
+    metered: list[Any] = []
+    monkeypatch.setattr(bridge, "metered_copier", lambda copy_image, budget: metered.append(copy_image) or copy_image)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
+    assert runtime.accepts_user_images
+    assert len(metered) == 1
+    assert isinstance(metered[0], VcrCopier)
+    assert metered[0]._token == "token"
+
+
+def test_vercel_runtime_without_credentials_has_no_copier() -> None:
+    """Check that a Vercel runtime with no Vercel credentials refuses user images."""
+    runtime = bridge.protected_runtime(_settings(), image=_DIGEST, budget=_BUDGET, provider=None)
+    assert runtime.provider == "vercel"
+    assert not runtime.accepts_user_images
 
 
 def test_async_docker_runtime_is_free_and_unfunded() -> None:
@@ -437,7 +464,7 @@ def test_preflight_reports_pending_when_the_async_settle_stays_pending(monkeypat
         request,  # type: ignore[arg-type]
         SimpleNamespace(username="user"),
         None,  # type: ignore[arg-type]
-        SimpleNamespace(id="budget-1", generation=3),
+        SimpleNamespace(id="budget-1", generation=3, setup_in_total=False),
         {"id": "preflight-1"},
         attempt=1,
         engine=None,
@@ -526,7 +553,7 @@ def test_a_provider_appears_once_it_is_metered_and_allowed_in_production(
         ProviderEntry("core.sandbox.tests.fake_provider", "InMemorySandbox", None, production_allowed),
     )
     if metered:
-        monkeypatch.setitem(USAGE_ADAPTERS, "fake", USAGE_ADAPTERS["vercel"])
+        monkeypatch.setitem(sys.modules, "core.billing.fake_usage", SimpleNamespace(USAGE=usage_adapter("vercel")))
 
     assert ("fake" in _offered_ids(_hosted())) is offered
     assert bridge.provider_offered(_hosted(), "fake") is offered
@@ -556,3 +583,544 @@ def test_gate_passes_the_stored_default_provider_without_credentials(monkeypatch
     assert bridge.offered_providers(_hosted()) == []
     assert bridge.provider_offered(_hosted(), "vercel")
     assert not bridge.provider_offered(_hosted(), "docker")
+
+
+_USER_IMAGE = "registry.example/users/u1@sha256:" + "d" * 64
+
+
+class _StopError(Exception):
+    """End a box start once the fake factory has its options."""
+
+
+class _Options:
+    """Record the provider options of each box start, then stop it."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch the bridge's environment factory.
+
+        Args:
+            monkeypatch: Pytest fixture.
+        """
+        self.calls: list[tuple[str, Any, dict[str, Any]]] = []
+        monkeypatch.setattr(sandbox_runtime, "create_environment", self.create)
+
+    def create(self, name: str, spec: Any, **options: Any) -> Any:
+        """Record one box start.
+
+        Args:
+            name: The provider name.
+            spec: The async spec.
+            **options: The constructor options from the bridge runtime.
+
+        Raises:
+            _StopError: Always, so no box starts.
+        """
+        self.calls.append((name, spec, options))
+        raise _StopError
+
+
+async def _copier(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+    """Copy nothing and return a pinned copy.
+
+    Args:
+        source_image: The user image.
+        pull_credentials: The pull credentials.
+
+    Returns:
+        The copy's reference.
+    """
+    return "vercel.example/copy@sha256:" + "e" * 64
+
+
+def _user_image(credentials: Any = lambda: ("AWS", "pull-token")) -> UserImage:
+    """Build a user image in the owner's repository.
+
+    Args:
+        credentials: The pull credentials callable.
+
+    Returns:
+        The user image.
+    """
+    return UserImage(_USER_IMAGE, repository="registry.example/users/u1", credentials=credentials)
+
+
+def test_vercel_box_gets_the_source_image_the_repository_and_a_metered_copier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass the user image, the owner's repository and fresh credentials to the Vercel copy step (SKY-891)."""
+    options = _Options(monkeypatch)
+    runtime = bridge.ProtectedBridgeRuntime("vercel", budget=_BUDGET, copy_image=_copier)
+
+    assert runtime.accepts_user_images
+    assert runtime.copies_user_images
+    with pytest.raises(_StopError):
+        runtime.open(_spec(image=_USER_IMAGE, user_image=_user_image()))
+
+    ((name, spec, values),) = options.calls
+    assert name == "vercel"
+    assert spec.image == _USER_IMAGE
+    assert values["budget"] is _BUDGET
+    assert values["pull_credentials"] == ("AWS", "pull-token")
+    assert values["source_image"] == _USER_IMAGE
+    assert values["user_image_repository"] == "registry.example/users/u1"
+    # The billable runtime meters the copy, so the raw copier never reaches the provider.
+    assert values["copy_image"] is not _copier
+    assert callable(values["copy_image"])
+
+
+def test_vercel_without_a_copier_refuses_a_user_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse a user image on Vercel with no copier, so no box runs Skynet's image in its place (SKY-891)."""
+    options = _Options(monkeypatch)
+    runtime = bridge.ProtectedBridgeRuntime("vercel", budget=_BUDGET)
+
+    assert not runtime.accepts_user_images
+    with pytest.raises(ServiceError, match="cannot start a box from a user image"):
+        runtime.open(_spec(image=_USER_IMAGE, user_image=_user_image()))
+    assert options.calls == []
+
+
+def test_docker_box_pulls_the_user_image_with_its_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the Docker pull only the credentials, with no copy step (SKY-891)."""
+    options = _Options(monkeypatch)
+    runtime = bridge.ProtectedBridgeRuntime("docker", budget=_BUDGET, image=_LOCAL_IMAGE, docker_bin="dk")
+
+    assert runtime.accepts_user_images
+    assert not runtime.copies_user_images
+    with pytest.raises(_StopError):
+        runtime.open(_spec(image=_USER_IMAGE, user_image=_user_image()))
+
+    ((name, spec, values),) = options.calls
+    assert name == "docker"
+    assert spec.image == _USER_IMAGE
+    assert values == {"docker_bin": "dk", "image": _LOCAL_IMAGE, "pull_credentials": ("AWS", "pull-token")}
+
+
+def test_docker_box_with_a_public_user_image_pulls_with_no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pull an image outside Skynet's registry with no credentials (SKY-891)."""
+    options = _Options(monkeypatch)
+    runtime = bridge.ProtectedBridgeRuntime("docker", budget=_BUDGET, image=_LOCAL_IMAGE, docker_bin="dk")
+
+    with pytest.raises(_StopError):
+        runtime.open(_spec(image="python:3.12", user_image=UserImage("python:3.12")))
+
+    ((_, _, values),) = options.calls
+    assert values["pull_credentials"] is None
+
+
+def test_box_with_no_user_image_starts_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give a box with no user image none of the user image options (SKY-891)."""
+    options = _Options(monkeypatch)
+    vercel = bridge.ProtectedBridgeRuntime("vercel", budget=_BUDGET, copy_image=_copier)
+    docker = bridge.ProtectedBridgeRuntime("docker", budget=_BUDGET, image=_LOCAL_IMAGE, docker_bin="dk")
+
+    for runtime in (vercel, docker):
+        with pytest.raises(_StopError):
+            runtime.open(_spec())
+
+    assert [values for _, _, values in options.calls] == [
+        {"budget": _BUDGET},
+        {"docker_bin": "dk", "image": _LOCAL_IMAGE},
+    ]
+
+
+def test_a_failed_credentials_call_names_only_the_error_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a registry message out of the box start error, because it can echo a token (SKY-891)."""
+    options = _Options(monkeypatch)
+    runtime = bridge.ProtectedBridgeRuntime("docker", budget=_BUDGET, image=_LOCAL_IMAGE, docker_bin="dk")
+
+    def leak() -> tuple[str, str]:
+        """Fail with a secret in the message.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("token=secret-value")
+
+    with pytest.raises(ServiceError) as caught:
+        runtime.open(_spec(image=_USER_IMAGE, user_image=_user_image(leak)))
+
+    assert "RuntimeError" in str(caught.value)
+    assert "secret-value" not in str(caught.value)
+    assert options.calls == []
+
+
+class _CopyBudget:
+    """Record each paid operation and settle it, like the budget runtime."""
+
+    def __init__(self, *, refuse: bool = False) -> None:
+        """Start with no operations.
+
+        Args:
+            refuse: Whether the budget refuses each reservation.
+        """
+        self.refuse = refuse
+        self.reserved: list[Any] = []
+        self.settled: list[Any] = []
+        self.keys: list[str] = []
+
+    def execute(self, quote: Any, policy: Any, dispatch: Any, *, operation_key: str, cost_kind: str) -> Any:
+        """Reserve the quote, dispatch once, and settle the result.
+
+        Args:
+            quote: The operation quote.
+            policy: The charge policy.
+            dispatch: The paid call.
+            operation_key: The operation key.
+            cost_kind: The cost kind.
+
+        Returns:
+            The dispatch value.
+
+        Raises:
+            BudgetError: The budget refuses the reservation.
+        """
+        assert cost_kind == "sandbox"
+        if self.refuse:
+            raise BudgetError("no funds")
+        self.reserved.append(quote)
+        self.keys.append(operation_key)
+        result = dispatch()
+        self.settled.append(result)
+        return result.value
+
+
+def test_metered_copier_reserves_the_time_limit_and_settles_the_started_minutes() -> None:
+    """Reserve the copy's time limit before the copy, and settle each copy once on its own key (SKY-891)."""
+    budget = _CopyBudget()
+    calls: list[tuple[str, Any]] = []
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Record the copy.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        calls.append((source_image, pull_credentials))
+        return "vercel.example/copy@sha256:" + "e" * 64
+
+    metered = bridge.metered_copier(copy, budget)
+
+    async def run() -> list[str]:
+        """Copy twice.
+
+        Returns:
+            The two copy references.
+        """
+        return [await metered(_USER_IMAGE, ("AWS", "t")), await metered(_USER_IMAGE, None)]
+
+    assert asyncio.run(run()) == ["vercel.example/copy@sha256:" + "e" * 64] * 2
+    assert calls == [(_USER_IMAGE, ("AWS", "t")), (_USER_IMAGE, None)]
+    reserve = ChargePolicy("sandbox").convert(image_copy_usd(bridge.COPY_RESERVE_SECONDS))
+    assert [quote.maximum for quote in budget.reserved] == [reserve] * 2
+    assert [result.provider_usd for result in budget.settled] == [image_copy_usd(0.0001)] * 2
+    assert len(set(budget.keys)) == 2
+
+
+def test_metered_copier_settles_a_failed_copy_and_raises_its_error() -> None:
+    """Charge a failed copy for its started minutes and give its error to the caller (SKY-891)."""
+    budget = _CopyBudget()
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Fail the copy.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("copy failed")
+
+    with pytest.raises(OSError, match="copy failed"):
+        asyncio.run(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+    (result,) = budget.settled
+    assert result.provider_usd == image_copy_usd(0.0001)
+
+
+def test_metered_copier_settles_a_copy_past_its_time_limit_at_the_reserved_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settle a copy that runs past the reserved time limit at that limit, never above it (SKY-891)."""
+    budget = _CopyBudget()
+    clock = iter([0.0, bridge.COPY_RESERVE_SECONDS + 65])
+    monkeypatch.setattr(bridge, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Return the copy.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        return source_image
+
+    asyncio.run(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+    (quote,) = budget.reserved
+    (result,) = budget.settled
+    assert image_copy_usd(bridge.COPY_RESERVE_SECONDS + 65) > image_copy_usd(bridge.COPY_RESERVE_SECONDS)
+    assert result.provider_usd == image_copy_usd(bridge.COPY_RESERVE_SECONDS)
+    assert ChargePolicy("sandbox").convert(result.provider_usd) == quote.maximum
+
+
+def test_metered_copier_starts_no_copy_when_the_budget_refuses() -> None:
+    """Start no copy that the run cannot fund (SKY-891)."""
+    budget = _CopyBudget(refuse=True)
+    calls: list[str] = []
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Record the copy.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        calls.append(source_image)
+        return source_image
+
+    with pytest.raises(BudgetError):
+        asyncio.run(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+    assert calls == []
+
+
+def test_metered_copier_holds_no_default_pool_thread() -> None:
+    """Keep the default thread pool free while a copy runs, so other settlements still run (SKY-891)."""
+    budget = _CopyBudget()
+
+    async def run() -> tuple[str, str]:
+        """Run a copy with a one-thread default pool, and use that pool while the copy waits.
+
+        Returns:
+            The pool call's result and the copy's reference.
+        """
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        release = asyncio.Event()
+
+        async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+            """Wait until the test releases the copy.
+
+            Args:
+                source_image: The user image.
+                pull_credentials: The pull credentials.
+
+            Returns:
+                The copy's reference.
+            """
+            await release.wait()
+            return source_image
+
+        copying = asyncio.create_task(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+        await asyncio.sleep(0)
+        free = await asyncio.wait_for(asyncio.to_thread(lambda: "free"), timeout=5)
+        release.set()
+        return free, await copying
+
+    assert asyncio.run(run()) == ("free", _USER_IMAGE)
+
+
+class _HeldCopyBudget(_CopyBudget):
+    """Hold each reservation until the test releases it, so a cancel can come before the copy starts."""
+
+    def __init__(self) -> None:
+        """Start with the reservation held."""
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def execute(self, quote: Any, policy: Any, dispatch: Any, *, operation_key: str, cost_kind: str) -> Any:
+        """Wait for the release, then reserve, dispatch and settle.
+
+        Args:
+            quote: The operation quote.
+            policy: The charge policy.
+            dispatch: The paid call.
+            operation_key: The operation key.
+            cost_kind: The cost kind.
+
+        Returns:
+            The dispatch value.
+        """
+        self.entered.set()
+        assert self.release.wait(timeout=5)
+        return super().execute(quote, policy, dispatch, operation_key=operation_key, cost_kind=cost_kind)
+
+
+def test_metered_copier_settles_nothing_for_a_copy_cancelled_before_it_starts() -> None:
+    """A copy that a cancel stops before it starts settles at $0, not at one minute (SKY-891)."""
+    budget = _HeldCopyBudget()
+    calls: list[str] = []
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Record the copy.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        calls.append(source_image)
+        return source_image
+
+    async def run() -> None:
+        """Cancel the copy while its reservation is held, then release the reservation."""
+        copying = asyncio.create_task(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+        assert await asyncio.to_thread(budget.entered.wait, 5)
+        copying.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        budget.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await copying
+
+    asyncio.run(run())
+    assert calls == []
+    (result,) = budget.settled
+    assert result.provider_usd == image_copy_usd(0) == 0
+
+
+def test_vercel_copy_step_lets_a_budget_stop_through() -> None:
+    """Give a budget stop of the metered copier to the run as it is, not as a failed copy (SKY-891)."""
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Refuse the copy for its budget.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Raises:
+            BudgetError: Always.
+        """
+        raise BudgetError("no funds")
+
+    with pytest.raises(BudgetError):
+        asyncio.run(vercel_provider._copy_image_once(copy, _USER_IMAGE, None))
+
+
+@pytest.mark.parametrize(
+    ("seconds", "usd"), [(0, "0"), (-5, "0"), (1, "0.01"), (60, "0.01"), (61, "0.02"), (3600, "0.60")]
+)
+def test_image_copy_usd_charges_each_started_minute(seconds: float, usd: str) -> None:
+    """Charge each started minute of a copy (SKY-891).
+
+    Args:
+        seconds: The copy time.
+        usd: The expected charge.
+    """
+    assert image_copy_usd(seconds) == Decimal(usd)
+
+
+class _TokenRegistry:
+    """Hand out one-hour pull tokens and count them, like the user image registry (SKY-891)."""
+
+    def __init__(self, left: timedelta = timedelta(hours=1)) -> None:
+        """Start with no tokens.
+
+        Args:
+            left: The time each new token has before it ends.
+        """
+        self.left = left
+        self.pulls = 0
+
+    def repository_uri(self, owner: str) -> str:
+        """Return the owner's repository.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            The repository of :data:`_USER_IMAGE`.
+        """
+        return "registry.example/users/u1"
+
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return a new token each call, as AssumeRole and GetAuthorizationToken do.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            A token with a new password.
+        """
+        self.pulls += 1
+        return RegistryCredentials(
+            server="registry.example",
+            username="AWS",
+            password=f"token-{self.pulls}",
+            expires_at=datetime.now(UTC) + self.left,
+        )
+
+
+def test_two_vercel_boxes_of_one_user_image_get_one_token_and_one_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box starts reuse one pull token, so the copy cache hits and the image is copied once (SKY-891).
+
+    Args:
+        monkeypatch: Pytest fixture.
+    """
+    monkeypatch.setattr(vercel_provider, "_COPIED", {})
+    monkeypatch.setattr(vercel_provider, "_COPYING", {})
+    registry = _TokenRegistry()
+    image = repo_staging._user_image(registry, "alice", "run", _USER_IMAGE)
+    log: list[str] = []
+    client, copier = FakeClient(log), FakeCopier(log)
+
+    async def start_two_boxes() -> None:
+        """Start and stop two boxes from the user image, as two box opens do."""
+        for _ in range(2):
+            env = make_env(
+                client,
+                log,
+                image=None,
+                options={
+                    "source_image": image.reference,
+                    "copy_image": copier,
+                    "user_image_repository": image.repository,
+                    "pull_credentials": image.credentials(),
+                },
+            )
+            await env.start()
+            await env.stop()
+
+    asyncio.run(start_two_boxes())
+
+    assert registry.pulls == 1
+    assert copier.calls == [(_USER_IMAGE, ("AWS", "token-1"))]
+
+
+def test_boxes_on_many_threads_share_one_pull_token() -> None:
+    """Boxes that open on several threads at once ask the registry for one token (SKY-891)."""
+    registry = _TokenRegistry()
+    image = repo_staging._user_image(registry, "alice", "run", _USER_IMAGE)
+    assert image.credentials is not None
+    tokens: list[tuple[str, str]] = []
+    threads = [threading.Thread(target=lambda: tokens.append(image.credentials())) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert registry.pulls == 1
+    assert set(tokens) == {("AWS", "token-1")}
+
+
+def test_a_pull_token_near_its_end_is_renewed() -> None:
+    """A token with 15 minutes or less left is replaced, so a box start never pulls with a dying token (SKY-891)."""
+    registry = _TokenRegistry(left=timedelta(minutes=15))
+    image = repo_staging._user_image(registry, "alice", "run", _USER_IMAGE)
+    assert image.credentials is not None
+
+    assert image.credentials() == ("AWS", "token-1")
+    assert image.credentials() == ("AWS", "token-2")
+    assert registry.pulls == 2

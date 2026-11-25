@@ -62,7 +62,6 @@ import { SETUP_SETTING_EVENT, type SetupSettingDetail } from "@/features/experie
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { useLinkedAccount } from "@/shared/hooks/use-linked-account";
 import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
-import { SharedChatsSection } from "./SharedChatsSection";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { accountDeletionConfirmed } from "../lib/account-delete-confirmation";
 
@@ -362,14 +361,6 @@ export function PrivacyTab() {
       </div>
 
       <Separator />
-
-      {/* Chat links open hosted Skynet, so only signed-in hosted users share chats. */}
-      {!local && !signedOut && (
-        <>
-          <SharedChatsSection />
-          <Separator />
-        </>
-      )}
 
       <div className="space-y-1">
         <SettingsRow

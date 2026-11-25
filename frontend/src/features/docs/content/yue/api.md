@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 重要欄位：
 
 - `target.repo.repository` 係 GitHub 倉庫，格式係 `owner/name`。請先喺 **設定 → 連接器** 連接 GitHub。
 - `target.repo.editable_paths` 列出優化器可以改嘅檔案同資料夾。`"."` 即係成個倉庫。
 - `target.repo.commit` 係可選嘅。佢係一個 40 個字元嘅 SHA。如果冇設定，Skynet 會用個分支上面最新嘅 commit。
-- `target.repo.secrets` 係可選嘅。每個密鑰都有 `name` 同 `value`。佢會以環境變數嘅形式去到你嘅程式碼同評分器。
-- `scorer.metric_code` 定義 `score(repo_path, case)`。`scorer.model` 係你嘅程式碼同評分器可以經模型閘道呼叫嘅模型。
+- `target.repo.secrets` 係可選嘅。每個密鑰都有 `name` 同 `value`。佢只會經 `[services.<name>]` 嘅標頭，或者角色個 `mcp` 檔案入面嘅伺服器，去到你嘅程式碼或者評分器，永遠唔會以環境變數嘅形式去到。
+- `scorer.metric_code` 定義 `score(repo_path, case, output=None)`。`output` 係 `[run]` 入口為個案例返回嘅值。`ascent.toml` 分頁顯示示例倉庫嘅 `[run]` 入口。`scorer.model` 係你嘅程式碼同評分器可以經模型閘道呼叫嘅模型。
 - `strategy.mode` 係 `auto`（預設）或者 `single`。用 `single` 嘅話，將 `strategy.engine` 設做 `GET /blackbox/engines` 入面其中一個引擎名稱。
 - `max_cost_cents` 係呢次運行嘅花費上限，單位係美仙。
 - `is_private` 預設係 `false`。設做 `true` 就可以將運行保持私人。

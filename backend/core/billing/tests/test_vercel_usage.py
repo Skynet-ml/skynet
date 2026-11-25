@@ -18,9 +18,11 @@ from core.billing import vercel_usage
 from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
+from core.billing.vercel_reconciliation import VercelUsageReconciler
 from core.billing.vercel_usage import (
     PROPOSER_REGISTRY_HOSTS,
     SANDBOX_NETWORK_BYTES_CAP,
+    SessionNotStoppedError,
     VercelUsageReservation,
     proposer_hosts,
     quote_vercel_sandbox,
@@ -110,6 +112,22 @@ def _create_request() -> httpx.Request:
         A POST request to the Vercel sandbox create endpoint.
     """
     return httpx.Request("POST", "https://vercel.com/api/v3/sandboxes")
+
+
+def test_settle_of_a_hold_settled_elsewhere_keeps_quiet_and_charges_once(database: Engine) -> None:
+    """Accept a hold that another reader settled, even though this hold's own receipt still shows it running."""
+    runtime = _runtime(database)
+    reservation = VercelUsageReservation(runtime, CREATE, operation_key="builder")
+    created = httpx.Response(200, json={"session": {**RECEIPT, "status": "running"}}, request=_create_request())
+    reservation.capture_response(created)
+    with pytest.raises(SessionNotStoppedError):
+        reservation.settle()
+    VercelUsageReconciler(runtime.service, lambda session_id: RECEIPT).reconcile(reservation.operation.id, "alice")
+    billed = runtime.service.get(runtime.budget_id, "alice").billed_cents
+    reservation.settle()
+    assert runtime.service.get_operation(reservation.operation.id, "alice").state == "settled"
+    assert runtime.service.get(runtime.budget_id, "alice").billed_cents == billed
+    assert reservation.operation.id not in runtime._pinned
 
 
 def test_lost_creation_response_keeps_the_hold_and_refuses_a_replay(database: Engine) -> None:

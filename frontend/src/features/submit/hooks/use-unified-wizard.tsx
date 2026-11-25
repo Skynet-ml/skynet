@@ -16,7 +16,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 
-import { flushSetupChat, useWizardStateOptional } from "@/features/agent-panel";
+import {
+  SETUP_CHAT_KEY,
+  flushSetupChat,
+  runSetupChatId,
+  useWizardStateOptional,
+} from "@/features/agent-panel";
 import { useConnectors } from "@/features/connectors";
 import { usePricingTerms } from "@/features/billing";
 import {
@@ -33,6 +38,7 @@ import {
   getOptimizerCatalog,
   getLatestHardeningJob,
   getStagedDataset,
+  checkAscentToml,
   hostedRunsAvailable,
   webPicked,
   isInsufficientFundsError,
@@ -61,7 +67,7 @@ import type { ColumnRole } from "@/shared/ui/column-role-row";
 import { SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 
 import { emptyModelConfig } from "../constants";
-import { restoreSavedLimit } from "../lib/budget-limit";
+import { limitCleared as isLimitCleared, restoreSavedLimit } from "../lib/budget-limit";
 import { cloneToSlices } from "../lib/clone-payload";
 import {
   aggregateTokenSource,
@@ -77,12 +83,13 @@ import {
   inputsFromRoles,
   inputsWithRoles,
   rolesFromFields,
+  stagedDatasetRoles,
   rowsToCases,
   singleInputCase,
   type Row,
 } from "../lib/inputs-mode";
 import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate-reasons";
-import { finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
+import { contractText, finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
 import {
   WIZARD_HARDENING_KEY,
   WIZARD_SESSION_KEY,
@@ -108,6 +115,7 @@ import {
   initialWizardV2State,
   presetEngine,
   withRepository,
+  withTaskPatch,
   type InputsSlice,
   type MetaSlice,
   type OptimizerSlice,
@@ -131,8 +139,26 @@ import {
   useSandboxProviders,
 } from "./use-submit-wizard-data";
 
-// A repository run's optimize.toml; the coding agent writes it into the draft (SKY-184).
-const OPTIMIZE_TOML = "optimize.toml";
+// A repository run's ascent.toml; the coding agent writes it into the draft (SKY-184).
+const ASCENT_TOML = "ascent.toml";
+// The contract check waits this long after the last edit, so typing sends one check.
+const CONTRACT_CHECK_DELAY_MS = 400;
+
+/** The draft's repository files other than ascent.toml, or undefined when there are none. */
+function otherFiles(files: Readonly<Record<string, string>>): Record<string, string> | undefined {
+  const rest = Object.entries(files).filter(([path]) => path !== ASCENT_TOML);
+  return rest.length > 0 ? Object.fromEntries(rest) : undefined;
+}
+
+function isTextMap(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Whether two path-to-text maps hold the same files, in any key order. */
+function sameTextMap(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+}
 
 export type SubmitPhase = "idle" | "sending" | "splash" | "done";
 
@@ -156,6 +182,8 @@ export interface WizardV2Shell extends WizardV2Context {
   retryHostedCatalog: () => void;
   /** The sandbox providers of the server in `runSource`. */
   sandboxProviders: SandboxProviders;
+  /** The user cleared a capped run's spending limit (`limitCleared`). */
+  limitCleared: boolean;
 }
 
 type HostedCatalogState = "ready" | "loading" | "failed";
@@ -234,6 +262,7 @@ function reducer(state: WizardV2State, action: Action): WizardV2State {
   if (action.slice === "optimizer") {
     return { ...state, optimizer: withOptimizerPatch(state.optimizer, action.patch) };
   }
+  if (action.slice === "task") return withTaskPatch(state, action.patch);
   return { ...state, [action.slice]: { ...state[action.slice], ...action.patch } };
 }
 
@@ -405,7 +434,7 @@ export function WizardV2Provider({
   const modelCatalog = useModelCatalog(runSource);
   const sandboxProviders = useSandboxProviders(runSource);
   // Names and ids only. A repository run sends the saved secrets its
-  // optimize.toml names, so a secret saved once serves every run (SKY-641).
+  // ascent.toml names, so a secret saved once serves every run (SKY-641).
   const [savedSecrets, setSavedSecrets] = useState<SavedSecret[]>([]);
   useEffect(() => {
     let live = true;
@@ -449,22 +478,74 @@ export function WizardV2Provider({
     return () => controller.abort();
   }, [mode, runSource, catalogLoads]);
 
+  // A contract whose [metric] entry is a command needs no metric.py, and one
+  // whose [proposer] entry names a command offers it in the agent picker. The
+  // server's parser names both; the wizard parses no TOML (SKY-770, SKY-771).
+  const repoContract = useWizardStateOptional()?.repoBase?.get(ASCENT_TOML);
+  const contract = state.task.repo
+    ? contractText(state.workspace.files[ASCENT_TOML], repoContract)
+    : "";
+  const [checkedContract, setCheckedContract] = useState<{
+    text: string;
+    command: readonly string[] | null;
+    proposer: readonly string[] | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!contract.trim()) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      checkAscentToml(contract, controller.signal)
+        .then((result) => {
+          if (controller.signal.aborted) return;
+          const command = result.ok ? (result.metric_command ?? null) : null;
+          const proposer = result.ok ? (result.proposer_command ?? null) : null;
+          setCheckedContract({
+            text: contract,
+            command: command?.length ? command : null,
+            proposer: proposer?.length ? proposer : null,
+          });
+        })
+        // With no answer the wizard asks for metric.py, as for a contract with no command.
+        .catch(() => {});
+    }, CONTRACT_CHECK_DELAY_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [contract]);
+  // An answer counts only for the text it checked, so an edit never keeps a stale command.
+  const metricCommand =
+    contract.trim() && checkedContract?.text === contract ? checkedContract.command : null;
+  const proposerCommand =
+    contract.trim() && checkedContract?.text === contract ? checkedContract.proposer : null;
   const stepIssue = useCallback(
-    (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog),
-    [state, optimizerCatalog],
+    (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog, { metricCommand }),
+    [state, optimizerCatalog, metricCommand],
   );
 
   // The Optimizer step is blocked only once it has a setup to judge; before
   // that, Guided's flow must not flash the step in and out.
   const optimizerBlocked =
     Boolean(mode) && computeStepIssue(state, "optimizer", optimizerCatalog) !== null;
-  const steps = useMemo(() => wizardSteps(state, optimizerBlocked), [state, optimizerBlocked]);
+  const baseSteps = useMemo(() => wizardSteps(state, optimizerBlocked), [state, optimizerBlocked]);
+  // A cleared limit fails the hardening Start and the run with `budget.invalid`,
+  // so Guided keeps its Optimizer step, where the limit is set, until it is fixed (SKY-450).
+  const [limitSeen, setLimitSeen] = useState(false);
+  if (!limitSeen && budget.maxCostCents != null) setLimitSeen(true);
+  const limitCleared = isLimitCleared(
+    { uncapped: budget.budgetUncapped, limit: budget.maxCostCents },
+    limitSeen,
+    baseSteps,
+    state.furthestStep,
+  );
+  const holdOptimizer = optimizerBlocked || limitCleared;
+  const steps = useMemo(() => wizardSteps(state, holdOptimizer), [state, holdOptimizer]);
   // Until the account's level loads it reads as the Guided placeholder, and
   // applying that would move a reopened Standard setup off the Optimizer step
   // Guided skips; the real level arriving next never moves it back.
   // Reads the blocked flag of the render the level changed in.
   useEffect(() => {
-    if (levelLoaded) dispatch({ type: "level", level, optimizerBlocked });
+    if (levelLoaded) dispatch({ type: "level", level, optimizerBlocked: holdOptimizer });
   }, [level, levelLoaded]);
 
   // The tracker drops repeats, so a re-render or a level change on the same
@@ -517,8 +598,8 @@ export function WizardV2Provider({
   // While the wizard's agent works, missing code reads as being written.
   const agentWriting = useWizardStateOptional()?.agentBusy ?? false;
   const runBlockedReason = useMemo(
-    () => blockedReason(state, optimizerCatalog, { agentWriting }),
-    [state, optimizerCatalog, agentWriting],
+    () => blockedReason(state, optimizerCatalog, { agentWriting, metricCommand }),
+    [state, optimizerCatalog, agentWriting, metricCommand],
   );
 
   const metricCallsModel = scorerCallsModel(state.workspace.metricCode);
@@ -597,9 +678,20 @@ export function WizardV2Provider({
         maxCostCents: budgetUncapped ? null : maxCostCents,
         // The ids belong to this app's server; a web run from the Mac cannot resolve them.
         savedSecrets: runSource === "local" ? savedSecrets : [],
+        metricCommand,
       },
     );
-  }, [state, username, tokenSource, budgetUncapped, maxCostCents, sandboxProviders, runSource, savedSecrets]);
+  }, [
+    state,
+    username,
+    tokenSource,
+    budgetUncapped,
+    maxCostCents,
+    sandboxProviders,
+    runSource,
+    savedSecrets,
+    metricCommand,
+  ]);
   const exposedCatalog = optimizerCatalog && optimizerCatalog.data_mode === mode ? optimizerCatalog : null;
   const hostedBlock =
     runOn === "hosted"
@@ -635,7 +727,7 @@ export function WizardV2Provider({
 
   const firstBlockedStep = (): WizardStepId | null => {
     for (const step of WIZARD_V2_STEPS) {
-      if (computeStepIssue(state, step, optimizerCatalog)) return step;
+      if (computeStepIssue(state, step, optimizerCatalog, { metricCommand })) return step;
     }
     return null;
   };
@@ -695,9 +787,15 @@ export function WizardV2Provider({
         runOn,
         readSessionValue(WIZARD_HARDENING_KEY),
         getLatestHardeningJob,
+        metricCommand,
       );
+      const conversationId = runSetupChatId(readSessionValue(SETUP_CHAT_KEY), runOn);
       const result = await submitRepoRun(
-        hardeningJobId ? { ...request, hardening_job_id: hardeningJobId } : request,
+        {
+          ...request,
+          ...(hardeningJobId ? { hardening_job_id: hardeningJobId } : {}),
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        },
         undefined,
         runOn,
       );
@@ -877,7 +975,7 @@ export function WizardV2Provider({
   // A table the agent panel staged reaches the wizard by event while it is
   // open, or through the session key when it mounts later.
   useEffect(() => {
-    const adopt = (detail: unknown) => {
+    const adopt = (detail: unknown, fromSession = false) => {
       if (!detail || typeof detail !== "object") return;
       const d = detail as Record<string, unknown>;
       if (!Array.isArray(d.dataset) || d.dataset.length === 0) return;
@@ -889,17 +987,18 @@ export function WizardV2Provider({
           : Object.keys(rows[0] ?? {});
       const label = typeof d.dataset_filename === "string" ? d.dataset_filename : "dataset.json";
       const stagedId = typeof d.staged_dataset_id === "string" ? d.staged_dataset_id : null;
-      const roles =
-        ws.column_roles && typeof ws.column_roles === "object"
-          ? (ws.column_roles as Record<string, ColumnRole>)
-          : null;
+      const roles = stagedDatasetRoles(
+        ws,
+        columns,
+        fromSession ? wizardCtxRef.current?.state : undefined,
+      );
       patchInputs(inputsFromRows(rows, columns, label, stagedId, roles));
     };
     try {
       const raw = window.sessionStorage.getItem(STAGED_HANDOFF_KEY);
       if (raw) {
         window.sessionStorage.removeItem(STAGED_HANDOFF_KEY);
-        adopt(JSON.parse(raw));
+        adopt(JSON.parse(raw), true);
       }
     } catch {
       try {
@@ -998,9 +1097,18 @@ export function WizardV2Provider({
           if (typeof shared.metric_code === "string")
             patchWorkspace({ metricCode: shared.metric_code });
           break;
-        case "optimize_toml":
-          if (typeof shared.optimize_toml === "string")
-            setWorkspaceFile(OPTIMIZE_TOML, shared.optimize_toml);
+        case "ascent_toml":
+          if (typeof shared.ascent_toml === "string")
+            setWorkspaceFile(ASCENT_TOML, shared.ascent_toml);
+          break;
+        case "workspace_files":
+          for (const [path, text] of Object.entries(shared.workspace_files ?? {}))
+            if (typeof text === "string" && state.workspace.files[path] !== text)
+              setWorkspaceFile(path, text);
+          break;
+        case "workspace_base":
+          if (typeof shared.workspace_base === "string")
+            patchWorkspace({ filesBase: shared.workspace_base });
           break;
         case "staged_dataset_id": {
           const stagedId = shared.staged_dataset_id;
@@ -1053,13 +1161,20 @@ export function WizardV2Provider({
       task_background: task.background || undefined,
       repository: task.repo.repository.trim() || undefined,
       repo_provider: task.repo.provider ?? "github",
+      // The agent reads the tree the run starts from: the pinned commit, else the branch.
+      repo_branch: task.repo.commit.trim() || task.repo.branch.trim() || undefined,
       github_connected: githubConnected,
       data_mode: inputs.mode ?? undefined,
       staged_dataset_id: inputs.stagedDatasetId ?? undefined,
       optimizer_choice: optimizer.choice,
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
-      optimize_toml: workspace.files[OPTIMIZE_TOML] || undefined,
+      ascent_toml: workspace.files[ASCENT_TOML] || undefined,
+      // ascent.toml has its own field; the agent sees the other repo files here.
+      workspace_files: otherFiles(workspace.files),
+      // Only while drafts exist: the agent pins the first new draft to the commit it reads then.
+      workspace_base:
+        Object.keys(workspace.files).length > 0 ? workspace.filesBase || undefined : undefined,
       dataset_columns: inputs.columns.length > 0 ? inputs.columns : undefined,
       input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
       expected_field: inputs.expectedField ?? undefined,
@@ -1073,7 +1188,9 @@ export function WizardV2Provider({
       const same =
         Array.isArray(value) && Array.isArray(held)
           ? value.length === held.length && value.every((v, i) => v === held[i])
-          : held === value;
+          : isTextMap(value) && isTextMap(held)
+            ? sameTextMap(value, held)
+            : held === value;
       if (same) continue;
       if (value === undefined) wizardCtx.clearField(key);
       else wizardCtx.setField(key, value, "user");
@@ -1111,6 +1228,8 @@ export function WizardV2Provider({
     optimizerCatalog: exposedCatalog,
     optimizerCatalogLoading,
     runBlockedReason,
+    metricCommand,
+    proposerCommand,
     ensureBudget,
     submit,
     submitting: submitPhase !== "idle",
@@ -1130,6 +1249,7 @@ export function WizardV2Provider({
     hostedBlock,
     retryHostedCatalog,
     sandboxProviders,
+    limitCleared,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

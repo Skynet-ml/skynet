@@ -5,12 +5,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import posixpath
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +23,8 @@ from typing import Any
 
 import httpx
 import pytest
-from vercel.sandbox import SandboxApiError
+from pydantic import SecretStr
+from vercel.sandbox import SandboxApiError, SandboxPathNotFoundError
 from vercel.sandbox._internal.recovery import execute_with_sandbox_recovery
 
 from core.billing.model_dispatch import ModelHTTPResult
@@ -29,17 +35,38 @@ from core.exceptions import DETERMINISTIC_FAILURE
 from core.sandbox import egress_record, sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
-from core.sandbox.errors import SandboxInfraError
+from core.sandbox.errors import SandboxFatalError, SandboxInfraError, SandboxRejectedError
+from core.sandbox.grants import METRIC_BOX_GRANTS, Grant, resolve_grants
 from core.sandbox.pacing import SYSTEM_CLOCK
 from core.sandbox.providers import vercel
-from core.sandbox.providers.vercel import VercelEnvironment, box_name, policy_confirmed
+from core.sandbox.providers.vercel import ImageCopyError, VercelEnvironment, box_name, policy_confirmed
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.services import ComposeService, ServicesTooLargeError
 from core.sandbox.telemetry import use_output_sink
 from core.service_gateway.optimization.blackbox import remote_sandbox
 from core.worker.scoped_relay import CallRecorder
 
-_PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); echo \$\? > (\S+)$")
+_PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); (?:code=\$\?; )?echo \$\S+ > (\S+)(?:; exit \$code)?$")
+
+
+def _wrapper_status(script: str, code: int) -> int:
+    """Run the wrapper's own end in a real local shell, after a command that exits with ``code``.
+
+    A real box's ``process.wait()`` gives the status of the wrapper shell, not
+    of the inner command, so the fake must give the same.
+
+    Args:
+        script: The wrapper script.
+        code: The inner command's exit code.
+
+    Returns:
+        The wrapper shell's exit status.
+    """
+    found = _PATHS.search(script)
+    trailer = script[found.end(2) :].replace(found.group(3), "/dev/null")
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"(exit {code}){trailer}"], timeout=30, check=False
+    ).returncode
 
 
 def _gone() -> SandboxApiError:
@@ -78,6 +105,49 @@ class FakeClock:
         await asyncio.sleep(0)
 
 
+class FakeFsBatch:
+    """Hold batched writes until the batch ends, as the SDK sends them in one request."""
+
+    def __init__(self, fs: FakeFs, cwd: str) -> None:
+        """Start an empty batch.
+
+        Args:
+            fs: The fake file system that gets the files.
+            cwd: The working directory.
+        """
+        self.fs = fs
+        self.cwd = cwd
+        self.files: dict[str, str] = {}
+
+    async def __aenter__(self) -> FakeFsBatch:
+        """Open the batch.
+
+        Returns:
+            The batch.
+        """
+        return self
+
+    async def __aexit__(self, kind: type[BaseException] | None, *_: object) -> None:
+        """Write the batched files through ``write_text`` when no error ended the batch.
+
+        Args:
+            kind: The type of the error that ended the batch, or ``None``.
+        """
+        if kind is None:
+            self.fs.batches.append(list(self.files))
+            for path, text in self.files.items():
+                await self.fs.write_text(path, text, cwd=self.cwd)
+
+    def write_text(self, path: str, text: str) -> None:
+        """Add one file to the batch.
+
+        Args:
+            path: The file path.
+            text: The file text.
+        """
+        self.files[path] = text
+
+
 class FakeFs:
     """Keep sandbox files in a dict."""
 
@@ -86,6 +156,19 @@ class FakeFs:
         self.files: dict[str, str | bytes] = {}
         self.dirs: list[str] = []
         self.stopped = False
+        self.exists_calls: list[str] = []
+        self.batches: list[list[str]] = []
+
+    def batch(self, *, cwd: str) -> FakeFsBatch:
+        """Start a batch of writes.
+
+        Args:
+            cwd: The working directory.
+
+        Returns:
+            The batch.
+        """
+        return FakeFsBatch(self, cwd)
 
     def _check(self) -> None:
         """Answer 410 after the session stops.
@@ -97,7 +180,10 @@ class FakeFs:
             raise _gone()
 
     async def exists(self, path: str, *, cwd: str) -> bool:
-        """Tell whether a file exists.
+        """Tell whether a file exists, and record the call.
+
+        The real SDK answers ``exists`` with a bare ``sh`` box command, so a
+        test can check that the provider never calls it.
 
         Args:
             path: The file path.
@@ -107,6 +193,7 @@ class FakeFs:
             True when the file exists.
         """
         self._check()
+        self.exists_calls.append(path)
         return path in self.files
 
     async def read_text(self, path: str, *, cwd: str, errors: str = "strict") -> str:
@@ -119,8 +206,15 @@ class FakeFs:
 
         Returns:
             The file text.
+
+        Raises:
+            SandboxPathNotFoundError: The file does not exist, as the SDK HTTP read answers.
         """
         self._check()
+        if path not in self.files:
+            raise SandboxPathNotFoundError(
+                path, operation="read_text", cwd=cwd, cause=SandboxApiError(httpx.Response(404), "missing")
+            )
         value = self.files[path]
         return value.decode(errors=errors) if isinstance(value, bytes) else value
 
@@ -156,10 +250,12 @@ class FakeProcess:
         Args:
             fs: The box file system.
             script: The wrapper script.
-            outcomes: Exceptions to raise, then an exit code.
+            outcomes: Exceptions to raise, then an exit code. A callable
+                outcome runs during the wait and returns the outcome.
             block: Wait until terminate or kill when True.
         """
         self.fs = fs
+        self.script = script
         self.out, self.err, self.sentinel = _PATHS.search(script).groups()
         self.outcomes = list(outcomes)
         self.block = block
@@ -179,11 +275,13 @@ class FakeProcess:
             await self.released.wait()
             return 143
         outcome = self.outcomes.pop(0)
+        if callable(outcome):
+            outcome = outcome()
         if isinstance(outcome, BaseException):
             raise outcome
         self.fs.files[self.out] = "hello\n"
         self.fs.files[self.sentinel] = f"{outcome}\n"
-        return outcome
+        return _wrapper_status(self.script, outcome)
 
     async def terminate(self) -> None:
         """Count the terminate call and release a blocked wait."""
@@ -216,8 +314,14 @@ class FakeSession:
         self.log: list[str] | None = None
         self.box: FakeBox | None = None
         self.tail_reads = 0
+        self.tail_sudo: list[bool] = []
         self.scripts: list[str] = []
         self.script_answers: list[tuple[int, str]] = []
+        self.launchers: list[list[str]] = []
+        self.uploads: list[dict[str, Any]] = []
+        self.stage_steps: list[tuple[str, bool]] = []
+        self.upload_code = 0
+        self.stage_errors: list[BaseException] = []
 
     @property
     def fs(self) -> FakeFs:
@@ -247,13 +351,16 @@ class FakeSession:
         return await self.box.create_process(command, args, **kwargs)
 
     async def run_process(self, command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
-        """Answer the output tail read, or give the next planned answer to any other script.
+        """Answer the output tail read, write an upload, or give the next planned answer to any other script.
 
-        The tail read gets one base64 line for each ``start path`` pair.
+        The tail read gets one base64 line for each ``start path`` pair. An
+        upload copy moves each staged file to its path unless ``upload_code``
+        fails it; the stage's root ``mkdir`` and ``rm`` are only recorded, or
+        raise the next ``stage_errors`` entry, and ``rm`` drops the staged files.
 
         Args:
             command: The program.
-            args: The shell flags, the script, ``$0``, then the pairs.
+            args: The launcher flags, ``/bin/bash``, the shell flags, the script, ``$0``, then the pairs.
             kwargs: The other SDK arguments.
 
         Returns:
@@ -264,12 +371,30 @@ class FakeSession:
         """
         if self.stops:
             raise _gone()
-        if args[3] != vercel.TAIL_SCRIPT:
-            self.scripts.append(args[3])
+        script = args.index("-c") + 1
+        self.launchers.append([command, *args[: script - len(vercel.SHELL_FLAGS)]])
+        if args[script] == vercel.UPLOAD_SCRIPT:
+            stage, *paths = args[script + 2 :]
+            self.uploads.append({"launcher": self.launchers[-1], "stage": stage, "paths": paths, **kwargs})
+            if self.upload_code == 0:
+                for index, path in enumerate(paths):
+                    self.fs.files[path] = self.fs.files[f"{stage}/{index}"]
+            return SimpleNamespace(returncode=self.upload_code, stdout="", stderr="")
+        if vercel.ROOT_UPLOAD_PREFIX in args[script]:
+            self.stage_steps.append((args[script], kwargs.get("sudo", False)))
+            if self.stage_errors:
+                raise self.stage_errors.pop(0)
+            if "/bin/rm" in args[script]:
+                stage = re.search(r"\[ -d (\S+) \]", args[script]).group(1)
+                self.fs.files = {path: text for path, text in self.fs.files.items() if not path.startswith(stage)}
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[script] not in (vercel.TAIL_SCRIPT, f"export PATH={vercel.ROOT_PATH}; {vercel.TAIL_SCRIPT}"):
+            self.scripts.append(args[script])
             code, stdout = self.script_answers.pop(0) if self.script_answers else (0, "")
             return SimpleNamespace(returncode=code, stdout=stdout, stderr="")
         self.tail_reads += 1
-        pairs = args[5:]
+        self.tail_sudo.append(kwargs.get("sudo", False))
+        pairs = args[script + 2 :]
         lines = []
         for start, path in zip(pairs[::2], pairs[1::2], strict=True):
             value = self.fs.files.get(path, "")
@@ -635,6 +760,7 @@ def make_env(
     clock: FakeClock | None = None,
     services: tuple[ComposeService, ...] = (),
     recorder: CallRecorder | None = None,
+    options: dict[str, Any] | None = None,
     **spec_fields: Any,
 ) -> VercelEnvironment:
     """Make a provider wired to the fakes.
@@ -647,13 +773,15 @@ def make_env(
         clock: The fake clock.
         services: The compose services.
         recorder: The run's call recorder, or ``None``.
-        spec_fields: Other spec fields.
+        options: Other provider keyword arguments.
+        spec_fields: Other spec fields; the image defaults to ``python:3.12``.
 
     Returns:
         The provider.
     """
     spec_fields.setdefault("operation_key", "op-1")
-    spec = SandboxSpec(lifetime_seconds=lifetime, image="python:3.12", **spec_fields)
+    spec_fields.setdefault("image", "python:3.12")
+    spec = SandboxSpec(lifetime_seconds=lifetime, **spec_fields)
     budget = SimpleNamespace(budget_id="budget-1", generation=3) if protected else None
 
     def usage_factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
@@ -689,6 +817,7 @@ def make_env(
         clock=clock or FakeClock(),
         services=services,
         recorder=recorder,
+        **(options or {}),
     )
 
 
@@ -730,9 +859,255 @@ async def test_a_planted_shell_profile_never_runs_in_a_box_command(client: FakeC
     await env.start()
     await env.exec("echo hello")
     call = client.boxes[env.name].create_calls[0]
-    assert call["command"] == "bash"
+    shell = len(vercel.UNPRIVILEGED) - 1
+    assert [call["command"], *call["args"][: shell + 4]] == [
+        *vercel.UNPRIVILEGED,
+        "/bin/bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+    ]
+    assert call["args"][-1].startswith("/bin/bash --noprofile --norc -c ")
+    await env.stop()
+
+
+@pytest.mark.parametrize("timeout_sec", [None, 30])
+async def test_a_command_without_sudo_starts_under_no_new_privs_and_no_capabilities(
+    client: FakeClient, log: list[str], timeout_sec: float | None
+) -> None:
+    """Check that a non-root command, its timeout wrapper and its children never reach root or a capability.
+
+    Vercel gives every command all capabilities in its ambient set, so the
+    box user could write root-owned files without the drop (SKY-901).
+    """
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=timeout_sec)
+    call = client.boxes[env.name].create_calls[0]
+    assert call["command"] == "/usr/bin/setpriv"
+    assert call["args"][:4] == ["--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all", "/bin/bash"]
+    assert "export PATH=" not in call["args"][-1]
+    assert call["sudo"] is False
+    await env.stop()
+
+
+async def test_a_sudo_command_starts_without_no_new_privs(client: FakeClient, log: list[str]) -> None:
+    """Check that the parent's own root command runs /bin/bash directly with a PATH the box user cannot write."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=30, sudo=True)
+    call = client.boxes[env.name].create_calls[0]
+    assert call["command"] == "/bin/bash"
     assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
-    assert call["args"][-1].startswith("bash --noprofile --norc -c ")
+    assert len(call["args"]) == 4
+    assert re.match(
+        rf"export PATH={re.escape(vercel.ROOT_PATH)}; /bin/mkdir -m 0755 \S+ \|\| exit 1;"
+        r" /usr/bin/timeout --signal=KILL 30s /bin/bash ",
+        call["args"][-1],
+    )
+    assert "/app/.venv" not in vercel.ROOT_PATH
+    assert "setpriv" not in call["args"][-1]
+    assert call["sudo"] is True
+    await env.stop()
+
+
+def _planted_tools(folder: Path, marker: Path, *names: str) -> None:
+    """Write fake tools that print a forged line, like a ``[run]`` entry that writes into ``/app/.venv/bin``.
+
+    Args:
+        folder: A new folder under the test's tmp_path that goes first on PATH.
+        marker: A file under the test's tmp_path that each fake tool creates.
+        names: The tool names to plant.
+    """
+    folder.mkdir()
+    for name in names:
+        tool = folder / name
+        tool.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\necho forged\n")
+        tool.chmod(0o755)
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+async def test_the_command_wrapper_names_its_programs_by_absolute_path(
+    client: FakeClient, log: list[str], sudo: bool
+) -> None:
+    """Check that the timeout wrapper and the inner shell never come from a PATH lookup (PRE-1)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=30, sudo=sudo)
+    script = client.boxes[env.name].create_calls[0]["args"][-1]
+    assert re.search(r"(^|; )/usr/bin/timeout --signal=KILL 30s /bin/bash --noprofile --norc -c ", script)
+    await env.stop()
+
+
+async def test_a_root_command_writes_its_files_into_a_folder_that_root_makes_first(
+    client: FakeClient, log: list[str]
+) -> None:
+    """Make root's output folder with no ``-p`` before the command, and stop when the name is taken (TU-1)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", sudo=True)
+    script = client.boxes[env.name].create_calls[0]["args"][-1]
+    await env.stop()
+    found = re.search(r"; /bin/mkdir -m 0755 (/tmp/\.app-root-output-[0-9a-f]{32}) \|\| exit 1; /bin/bash ", script)
+    assert found
+    folder = found.group(1)
+    assert _PATHS.search(script).groups() == (f"{folder}/output.out", f"{folder}/output.err", f"{folder}/exit")
+
+
+async def test_a_non_root_command_keeps_its_output_names(client: FakeClient, log: list[str]) -> None:
+    """Keep the box user's own output files at their ``/tmp`` names, with no folder (TU-1)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    script = client.boxes[env.name].create_calls[0]["args"][-1]
+    await env.stop()
+    token = re.search(r"/tmp/\.app-exit-([0-9a-f]{32})", script).group(1)
+    assert script == (
+        f"/bin/bash --noprofile --norc -c 'echo hello' > /tmp/.app-output-{token}.out"
+        f" 2> /tmp/.app-output-{token}.err; code=$?; echo $code > /tmp/.app-exit-{token}; exit $code"
+    )
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+@pytest.mark.parametrize("code", [0, 3, 124, 137])
+def test_the_wrapper_shell_exits_with_the_command_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sudo: bool, code: int
+) -> None:
+    """Run the real wrapper in a local shell: its own status and the exit file hold the command's code.
+
+    A real box's ``process.wait()`` gives the wrapper shell's status. A wrapper
+    that ends with its ``echo`` exits 0, so every failed command looked
+    successful, and the exit file was read only after many wait errors.
+    """
+    monkeypatch.setattr(vercel, "OUTPUT_PREFIX", f"{tmp_path}/output-")
+    monkeypatch.setattr(vercel, "EXIT_PREFIX", f"{tmp_path}/exit-")
+    monkeypatch.setattr(vercel, "ROOT_OUTPUT_PREFIX", f"{tmp_path}/root-output-")
+    inner = f"/bin/bash --noprofile --norc -c {shlex.quote(f'echo hello; exit {code}')}"
+    script, out_path, _, sentinel = vercel._wrapper(inner, uuid.uuid4().hex, sudo=sudo)
+    done = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script], timeout=30, check=False)
+    assert done.returncode == code
+    assert Path(sentinel).read_text() == f"{code}\n"
+    assert Path(out_path).read_text() == "hello\n"
+
+
+def test_the_root_wrapper_still_stops_when_its_folder_name_is_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 1 before the command runs when the root output folder already exists (TU-1)."""
+    monkeypatch.setattr(vercel, "ROOT_OUTPUT_PREFIX", f"{tmp_path}/root-output-")
+    marker = tmp_path / "ran"
+    token = uuid.uuid4().hex
+    (tmp_path / f"root-output-{token}").mkdir()
+    script, *_ = vercel._wrapper(f"/usr/bin/touch {marker}", token, sudo=True)
+    done = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script], capture_output=True, timeout=30, check=False
+    )
+    assert done.returncode == 1
+    assert not marker.exists()
+
+
+async def test_a_non_root_command_wrapper_ignores_a_bash_planted_on_path(
+    client: FakeClient, log: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run the real wrapper script in a local shell with a planted ``bash`` first on PATH (PRE-1).
+
+    The box user can write ``/app/.venv/bin``, which is on the box PATH, so a
+    wrapper that finds ``bash`` there would let a ``[run]`` entry forge the
+    output of the parent's later checks.
+    """
+    monkeypatch.setattr(vercel, "OUTPUT_PREFIX", f"{tmp_path}/output-")
+    monkeypatch.setattr(vercel, "EXIT_PREFIX", f"{tmp_path}/exit-")
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    call = client.boxes[env.name].create_calls[0]
+    await env.stop()
+    shell = len(vercel.UNPRIVILEGED) - 1
+    assert call["args"][shell] == "/bin/bash"
+    _run_with_planted_tools(call["args"][shell:], tmp_path)
+
+
+def _run_with_planted_tools(args: list[str], tmp_path: Path) -> None:
+    """Run one wrapper with a planted ``bash`` and ``timeout`` first on PATH, and check that the real ones ran.
+
+    Args:
+        args: The wrapper's command line, from ``/bin/bash`` on.
+        tmp_path: The test's scratch folder; the wrapper's files are under it.
+    """
+    marker = tmp_path / "planted-tool-ran"
+    _planted_tools(tmp_path / "planted", marker, "bash", "timeout")
+    subprocess.run(args, env={"PATH": f"{tmp_path / 'planted'}:/usr/bin:/bin"}, check=True, timeout=30)
+    found = _PATHS.search(args[-1])
+    assert found
+    assert Path(found.group(1)).read_text() == "hello\n"
+    assert Path(found.group(3)).read_text() == "0\n"
+    assert not marker.exists()
+
+
+async def test_every_box_script_and_tail_read_starts_under_no_new_privs(client: FakeClient, log: list[str]) -> None:
+    """Check that the egress proxy start and the output polls run under no_new_privs, as exec does."""
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Run until the provider reads the output once.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "hello\n"
+        await _until_read(session, 1)
+        return 0
+
+    await env._run_box_script(session, "true")
+    _guest(client.boxes[env.name], run)
+    await asyncio.wait_for(env.exec("guest", on_output=lambda stream, text: None), 5)
+    assert session.scripts == ["true"]
+    assert session.tail_reads >= 1
+    assert all(launcher == [*vercel.UNPRIVILEGED, "/bin/bash"] for launcher in session.launchers)
+    await env.stop()
+
+
+@pytest.mark.parametrize(("sudo", "launcher"), [(False, [*vercel.UNPRIVILEGED, "/bin/bash"]), (True, ["/bin/bash"])])
+async def test_the_output_polls_run_as_the_command_user(
+    client: FakeClient, log: list[str], sudo: bool, launcher: list[str]
+) -> None:
+    """Read a root command's output as root, and a box-user command's output as the box user (PRE-1).
+
+    A box-user poll of the root ``[run]`` supervisor could be traced by the
+    entry and forge a result frame. A root poll of a box-user command could
+    follow a link that the command plants into a root-only file.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Run until the provider reads the output once.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "hello\n"
+        await _until_read(session, 1)
+        return 0
+
+    _guest(client.boxes[env.name], run)
+    chunks: list[tuple[str, str]] = []
+    await asyncio.wait_for(env.exec("guest", on_output=lambda *chunk: chunks.append(chunk), sudo=sudo), 5)
+    assert chunks == [("stdout", "hello\n")]
+    assert session.tail_sudo
+    assert set(session.tail_sudo) == {sudo}
+    assert all(read == launcher for read in session.launchers)
     await env.stop()
 
 
@@ -1470,6 +1845,160 @@ def test_policy_confirmed_rules() -> None:
     assert not policy_confirmed(open_policy, readback("deny-all"))
 
 
+GRANT_TOKEN = "Bearer fake-token-not-a-secret"
+GRANT_REGISTRY = {
+    "api.github.example": {"/": {"Authorization": GRANT_TOKEN}},
+    "mcp.example.com": {
+        "/team": {"Authorization": "Bearer fake-team"},
+        "/team-web": {"Authorization": "Bearer fake-web"},
+    },
+}
+
+
+def _granted(*grants: Grant) -> dict[str, Any]:
+    """Resolve grants against the test registry into spec fields.
+
+    Args:
+        grants: The grants of the box.
+
+    Returns:
+        The egress fields of a spec that the resolved policy set.
+    """
+    spec = resolve_grants(grants, GRANT_REGISTRY).apply(SandboxSpec(lifetime_seconds=300))
+    return {
+        "network_disabled": spec.network_disabled,
+        "allowed_hosts": spec.allowed_hosts,
+        "inject_headers": spec.inject_headers,
+    }
+
+
+async def test_a_box_with_no_grants_is_created_with_no_network(client: FakeClient, log: list[str]) -> None:
+    """Check that the metric-box default grants create a deny-all box."""
+    client.readback = readback("deny-all")
+    env = make_env(client, log, **_granted(*METRIC_BOX_GRANTS))
+    await env.start()
+    assert client.create_kwargs[0]["network_policy"].mode == "deny-all"
+    assert env.usage.request["network_disabled"] is True
+    await env.stop()
+
+
+async def test_granted_headers_reach_only_the_credential_host(client: FakeClient, log: list[str]) -> None:
+    """Check that the create policy allows the granted hosts and injects only the credential."""
+    hosts = ("api.github.example", "files.example.org")
+    client.readback = readback("custom", hosts)
+    env = make_env(
+        client,
+        log,
+        protected=False,
+        **_granted(Grant("api.github.example", credential=True), Grant("files.example.org")),
+    )
+    await env.start()
+    policy = client.create_kwargs[0]["network_policy"]
+    assert policy.mode == "custom"
+    assert set(policy.allow) == set(hosts)
+    assert policy.allow["files.example.org"] == ()
+    (rule,) = policy.allow["api.github.example"]
+    assert [dict(transform.headers) for transform in rule.transform] == [{"Authorization": GRANT_TOKEN}]
+    await env.stop()
+
+
+def _edge_headers(rules: Sequence[Any], path: str) -> list[dict[str, str]]:
+    """Apply a host's SDK rules to one request path as the edge does, and return the headers it adds.
+
+    Args:
+        rules: The host's ``NetworkPolicyRule`` values.
+        path: The request path.
+
+    Returns:
+        The headers of each rule that matches the path.
+    """
+    added = []
+    for rule in rules:
+        matcher = rule.match.path if rule.match is not None else None
+        if (
+            matcher is None
+            or (matcher.kind == "exact" and path == matcher.value)
+            or (matcher.kind == "starts_with" and path.startswith(matcher.value))
+            or (matcher.kind == "regex" and re.search(matcher.value, path) is not None)
+        ):
+            added += [dict(transform.headers) for transform in rule.transform]
+    return added
+
+
+async def test_granted_headers_reach_only_their_server_path(client: FakeClient, log: list[str]) -> None:
+    """Check that a server's headers reach its path and the paths below it, and no other path (SKY-833)."""
+    client.readback = readback("custom", ("mcp.example.com",))
+    env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
+    await env.start()
+    rules = client.create_kwargs[0]["network_policy"].allow["mcp.example.com"]
+    assert [rule.match.path.kind for rule in rules] == ["regex"]
+    team = [{"Authorization": "Bearer fake-team"}]
+    for path in ("/team", "/team/", "/team/sse", "/team/v1/.well-known", "/team/a.b/c"):
+        assert _edge_headers(rules, path) == team
+    for other in ("/team-web/messages", "/teams", "/", "/admin"):
+        assert _edge_headers(rules, other) == []
+    await env.stop()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/team/../admin",
+        "/team/./sse",
+        "/team/..",
+        "/team//admin",
+        "/team/%2e%2e/admin",
+        "/team/%2E%2E/admin",
+        "/team/.%2e/admin",
+        "/team/%2fadmin",
+        "/team/..%5cadmin",
+        "/team/x/../../admin",
+        "/team\\..\\admin",
+        "/team/..;/admin",
+        "/team/.;/admin",
+        "/team/%2e%2e;/admin",
+        "/team/..;x=1/admin",
+        "/team/..,x/admin",
+        "/team/..=x/admin",
+        "/team/sse;jsessionid=1",
+    ],
+)
+async def test_granted_headers_skip_a_path_that_leaves_the_prefix(
+    path: str, client: FakeClient, log: list[str]
+) -> None:
+    """Check that a dot, empty, percent-encoded, backslash or path-parameter segment gets no headers (SKY-728).
+
+    Args:
+        path: A raw request path that a normalizing server could serve outside ``/team``.
+        client: The fake Vercel client.
+        log: The provider log.
+    """
+    client.readback = readback("custom", ("mcp.example.com",))
+    env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
+    await env.start()
+
+    assert _edge_headers(client.create_kwargs[0]["network_policy"].allow["mcp.example.com"], path) == []
+    await env.stop()
+
+
+def test_a_protected_box_refuses_a_credential_grant(client: FakeClient, log: list[str]) -> None:
+    """Check that a protected box still injects no headers, even when a grant asks for one."""
+    with pytest.raises(SandboxSpecError, match="inject egress headers"):
+        make_env(client, log, **_granted(Grant("api.github.example", credential=True)))
+    assert client.create_kwargs == []
+
+
+async def test_a_protected_box_with_plain_grants_injects_no_header(client: FakeClient, log: list[str]) -> None:
+    """Check that a protected box opens its plain grant hosts with no header rule."""
+    client.readback = readback("custom", ("api.github.example",))
+    env = make_env(client, log, **_granted(Grant("api.github.example")))
+    await env.start()
+    policy = client.create_kwargs[0]["network_policy"]
+    assert dict(policy.allow) == {"api.github.example": ()}
+    assert env.usage.request["allowed_hosts"] == ["api.github.example"]
+    await env.stop()
+
+
 async def test_phase_timings_recorded_per_box(client: FakeClient, log: list[str]) -> None:
     """Check that create, run and stop record timings under the box name."""
     env = make_env(client, log)
@@ -1493,13 +2022,52 @@ async def test_output_goes_to_context_sink(client: FakeClient, log: list[str]) -
     await env.stop()
 
 
-async def test_timeout_codes_mark_timed_out(client: FakeClient, log: list[str]) -> None:
-    """Check that the kill code marks a command with a limit as timed out."""
+def _code_after(clock: FakeClock, seconds: float, code: int) -> Callable[[], int]:
+    """Make a wait outcome that takes some fake time and then exits.
+
+    Args:
+        clock: The environment clock.
+        seconds: The fake time the command runs.
+        code: The exit code.
+
+    Returns:
+        The outcome for ``FakeProcess.wait``.
+    """
+
+    def outcome() -> int:
+        """Move the clock forward and return the code.
+
+        Returns:
+            The exit code.
+        """
+        clock.now += seconds
+        return code
+
+    return outcome
+
+
+@pytest.mark.parametrize("seconds", [2.0, 2.5])
+async def test_kill_at_the_limit_marks_timed_out(client: FakeClient, log: list[str], seconds: float) -> None:
+    """Check that the kill code at or after the rounded-up limit marks the command as timed out."""
     env = make_env(client, log)
     await env.start()
-    client.boxes[env.name].outcomes = [137]
-    result = await env.exec("sleep 100", timeout_sec=1)
+    client.boxes[env.name].outcomes = [_code_after(env._clock, seconds, 137)]
+    result = await env.exec("sleep 100", timeout_sec=1.5)
     assert result.timed_out
+    assert result.exit_code == 137
+    assert client.boxes[env.name].processes[0].waits == 1
+    await env.stop()
+
+
+@pytest.mark.parametrize(("seconds", "code"), [(1.0, 124), (5.0, 124), (1.9, 137)])
+async def test_own_exit_code_is_not_a_timeout(client: FakeClient, log: list[str], seconds: float, code: int) -> None:
+    """Check that a command's own 124, or a kill before the limit (an OOM kill), keeps its code and is no timeout."""
+    env = make_env(client, log)
+    await env.start()
+    client.boxes[env.name].outcomes = [_code_after(env._clock, seconds, code)]
+    result = await env.exec("timeout 1 ./fetch.sh", timeout_sec=1.5)
+    assert not result.timed_out
+    assert result.exit_code == code
     await env.stop()
 
 
@@ -1515,13 +2083,473 @@ async def test_unprotected_box_gets_full_lifetime(client: FakeClient, log: list[
 
 
 async def test_upload_and_download(client: FakeClient, log: list[str]) -> None:
-    """Check text file transfer and the missing-file answer."""
+    """Check text file transfer, the missing-file answer, and that an upload makes no folder itself.
+
+    The SDK's ``fs.mkdir`` gives the folder to uid 1000, which an image user
+    with another uid cannot write (SKY-901).
+    """
     env = make_env(client, log)
     await env.start()
     await env.upload_files({"/work/a.txt": "data"})
     assert await env.download_file("/work/a.txt") == "data"
     assert await env.download_file("/work/none.txt") is None
-    assert client.boxes[env.name].fs.dirs == ["/work"]
+    assert client.boxes[env.name].fs.dirs == []
+    await env.stop()
+
+
+async def test_an_upload_stages_in_a_root_folder_and_copies_as_the_box_user(client: FakeClient, log: list[str]) -> None:
+    """Check that the file API writes only into a root-made stage, and the box user copies from there.
+
+    The file API writes with all capabilities and follows a link that the box
+    user plants, so it could write into /usr/local/lib (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    session = box.current_session
+    writes: list[str] = []
+    real_write = box.fs.write_text
+
+    async def record_write(path: str, text: str, *, cwd: str) -> None:
+        """Record one file API write, then do it.
+
+        Args:
+            path: The file path.
+            text: The file text.
+            cwd: The working directory.
+        """
+        writes.append(path)
+        await real_write(path, text, cwd=cwd)
+
+    box.fs.write_text = record_write
+    await env.upload_files({"own/link/evil.txt": "data", "/work/b.txt": "more"})
+    [upload] = session.uploads
+    stage = upload["stage"]
+    assert re.fullmatch(f"{re.escape(vercel.ROOT_UPLOAD_PREFIX)}[0-9a-f]{{32}}", stage)
+    assert writes == [f"{stage}/0", f"{stage}/1"]
+    assert box.fs.batches == [[f"{stage}/0", f"{stage}/1"]]
+    root = f"export PATH={vercel.ROOT_PATH}; "
+    assert session.stage_steps == [
+        (f"{root}/bin/mkdir -m 0755 -- {stage}", True),
+        (
+            f"{root}if [ -d {stage} ] && [ ! -L {stage} ] && [ -O {stage} ]; then "
+            f"if [ -x /usr/bin/find ]; then /usr/bin/find {stage} -mindepth 1 -maxdepth 1 -exec /bin/rm -rf -- {{}} +; "
+            f"else /bin/rm -rf -- {stage}/* {stage}/.[!.]* {stage}/..?*; fi; fi",
+            True,
+        ),
+    ]
+    assert upload["launcher"] == [*vercel.UNPRIVILEGED, "/bin/bash"]
+    assert upload["paths"] == ["own/link/evil.txt", "/work/b.txt"]
+    assert upload["kill_after"] == vercel.UPLOAD_KILL_AFTER
+    assert box.fs.files == {"own/link/evil.txt": "data", "/work/b.txt": "more"}
+    await env.stop()
+
+
+@pytest.mark.parametrize(
+    ("path", "file_api"),
+    [
+        (f"{vercel.ROOT_MODEL_PREFIX}1/responses/a.json", True),
+        (f"{vercel.ROOT_UPLOAD_PREFIX}1/0", False),
+        (f"{vercel.ROOT_MODEL_PREFIX}1/../../usr/local/lib/evil.txt", False),
+        ("/tmp/.app-root-other/evil.txt", False),
+        ("/tmp/.app-rooted/evil.txt", False),
+    ],
+)
+async def test_only_a_root_folder_upload_skips_the_copy(
+    client: FakeClient, log: list[str], path: str, file_api: bool
+) -> None:
+    """Check that the file API writes a path itself only in a root-made /tmp folder.
+
+    The box user cannot plant a link in such a folder; a ``..`` part must not
+    lead the file API out of it (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        path: The upload path.
+        file_api: Whether the file API must write the path itself.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    await env.upload_files({path: "data"})
+    uploads = [upload["paths"] for upload in box.current_session.uploads]
+    if file_api:
+        assert uploads == []
+        assert box.fs.files == {posixpath.normpath(path): "data"}
+        assert box.fs.batches == [[posixpath.normpath(path)]]
+    else:
+        assert uploads == [[path]]
+    await env.stop()
+
+
+async def test_a_root_folder_write_that_never_answers_times_out(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a file API write that hangs ends at its limit, so a mailbox can still empty its folder.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        monkeypatch: Sets the write limit and slows the write.
+    """
+    env = make_env(client, log)
+    await env.start()
+
+    async def stalled(*_: object) -> None:
+        """Never answer, as a stalled SDK write."""
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(vercel, "WRITE_BATCH_TIMEOUT", 0.05)
+    monkeypatch.setattr(FakeFsBatch, "__aexit__", stalled)
+    with pytest.raises(TimeoutError):
+        await env.upload_files({f"{vercel.ROOT_MODEL_PREFIX}1/responses/a.json": "data"})
+    monkeypatch.undo()
+    await env.stop()
+
+
+async def test_a_slow_staged_upload_has_no_write_limit(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that only mailbox writes get the write limit, so a large staged upload may take longer.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        monkeypatch: Sets the write limit and slows the write.
+    """
+    env = make_env(client, log)
+    await env.start()
+    finish = FakeFsBatch.__aexit__
+
+    async def slow(self: FakeFsBatch, *args: Any) -> None:
+        """Answer after the patched limit, as a large upload on a slow link.
+
+        Args:
+            self: The batch.
+            *args: The exit arguments.
+        """
+        await asyncio.sleep(0.2)
+        await finish(self, *args)
+
+    monkeypatch.setattr(vercel, "WRITE_BATCH_TIMEOUT", 0.05)
+    monkeypatch.setattr(FakeFsBatch, "__aexit__", slow)
+    await env.upload_files({"a.txt": "data"})
+    monkeypatch.undo()
+    assert client.boxes[env.name].current_session.stage_steps
+    await env.stop()
+
+
+async def test_a_refused_upload_raises_and_empties_the_stage(client: FakeClient, log: list[str]) -> None:
+    """Check that a copy that the box user cannot write fails the call, and root still empties the stage.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    session = box.current_session
+    session.upload_code = 1
+    with pytest.raises(SandboxRejectedError, match="upload step exited with 1"):
+        await env.upload_files({"/usr/local/lib/evil.txt": "data"})
+    assert box.fs.files == {}
+    assert [step.split("; ", 1)[1].split(" ", 1)[0] for step, _ in session.stage_steps] == ["/bin/mkdir", "if"]
+    await env.stop()
+
+
+async def test_a_stage_mkdir_that_times_out_still_empties_the_stage(client: FakeClient, log: list[str]) -> None:
+    """Check that root empties the stage when the stage's mkdir answer times out (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.stage_errors = [TimeoutError()]
+    with pytest.raises(TimeoutError):
+        await env.upload_files({"/usr/local/lib/evil.txt": "data"})
+    assert [step.split("; ", 1)[1].split(" ", 1)[0] for step, _ in session.stage_steps] == ["/bin/mkdir", "if"]
+    await env.stop()
+
+
+async def test_a_copy_killed_at_its_deadline_is_a_rejected_upload(client: FakeClient, log: list[str]) -> None:
+    """Check that a copy that a planted FIFO holds ends after a short deadline as a rejected upload (SKY-902).
+
+    The same upload fails the same way in a fresh box, so the error must not
+    look like a dead box, which the callers retry in a new paid box.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.upload_code = vercel.TIMEOUT_CODE
+    with pytest.raises(SandboxRejectedError, match=f"exited with {vercel.TIMEOUT_CODE}"):
+        await env.upload_files({"/work/fifo": "data"})
+    await env.stop()
+
+
+async def test_a_failed_stage_cleanup_logs_and_keeps_the_upload_error(
+    client: FakeClient, log: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Check that a failed ``rm`` of the stage logs a warning and the copy's own error still reaches the caller.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        caplog: The log capture.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.upload_code = 1
+    calls = 0
+    real_run = session.run_process
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Fail the stage removal, and run every other command.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            **kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+
+        Raises:
+            RuntimeError: The command is the stage removal.
+        """
+        nonlocal calls
+        calls += 1
+        if "/bin/rm -rf -- " in args[args.index("-c") + 1]:
+            raise RuntimeError("rm broke")
+        return await real_run(command, args, **kwargs)
+
+    session.run_process = run_process
+    with caplog.at_level("WARNING", logger=vercel.__name__), pytest.raises(SandboxRejectedError, match="exited with 1"):
+        await env.upload_files({"/work/a.txt": "data"})
+    assert calls == 3
+    assert [record.getMessage() for record in caplog.records if record.levelname == "WARNING"] == [
+        f"Sandbox {env.name} could not empty the upload stage {session.uploads[0]['stage']}."
+    ]
+    await env.stop()
+
+
+async def test_an_upload_tool_missing_from_the_image_names_the_tools(client: FakeClient, log: list[str]) -> None:
+    """Check that exit code 127 names the fixed tool paths that the upload needs (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    client.boxes[env.name].current_session.upload_code = 127
+    with pytest.raises(
+        SandboxRejectedError, match=r"exited with 127: The image must have /usr/bin/timeout, /usr/bin/setpriv"
+    ):
+        await env.upload_files({"/work/a.txt": "data"})
+    await env.stop()
+
+
+async def test_the_stage_cleanup_after_a_failed_upload_gets_one_attempt_limit(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a removal that keeps failing to connect stops at one attempt's limit, not three (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        monkeypatch: Shortens the step limit.
+    """
+    monkeypatch.setattr(vercel, "UPLOAD_KILL_AFTER", 0.05)
+    monkeypatch.setattr(vercel, "POLL_SLACK", 0.0)
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.upload_code = 1
+    removals = 0
+    real_run = session.run_process
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Make each stage removal fail to connect after a short wait, and run every other command.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            **kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+
+        Raises:
+            Exception: The connect error of a stage removal.
+        """
+        nonlocal removals
+        if "/bin/rm -rf -- " in args[args.index("-c") + 1]:
+            removals += 1
+            await asyncio.sleep(0.04)
+            raise vercel._CONNECT_ERRORS[0]("no route")
+        return await real_run(command, args, **kwargs)
+
+    session.run_process = run_process
+    with pytest.raises(SandboxRejectedError, match="exited with 1"):
+        await env.upload_files({"/work/a.txt": "data"})
+    assert 1 <= removals < vercel.EXEC_ATTEMPTS
+    await env.stop()
+
+
+async def test_a_failed_stage_cleanup_after_a_good_copy_fails_the_upload(client: FakeClient, log: list[str]) -> None:
+    """Check that a stage that stays after a good copy fails the upload, because the box user can read it.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    real_run = session.run_process
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Fail the stage removal, and run every other command.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            **kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+        """
+        if "/bin/rm -rf -- " in args[args.index("-c") + 1]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="busy")
+        return await real_run(command, args, **kwargs)
+
+    session.run_process = run_process
+    with pytest.raises(SandboxInfraError, match="exited with 1: busy"):
+        await env.upload_files({"/work/a.txt": "data"})
+    await env.stop()
+
+
+async def test_an_upload_step_that_never_reached_the_box_is_sent_again(client: FakeClient, log: list[str]) -> None:
+    """Check that a connect error on a stage step is retried, and the upload still lands.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    session = box.current_session
+    session.stage_errors = [httpx.ConnectError("down")]
+    await env.upload_files({"/work/a.txt": "data"})
+    assert [step.split("; ", 1)[1].split(" ", 1)[0] for step, _ in session.stage_steps] == [
+        "/bin/mkdir",
+        "/bin/mkdir",
+        "if",
+    ]
+    assert box.fs.files == {"/work/a.txt": "data"}
+    session.stage_errors = [httpx.ConnectError("down")] * vercel.EXEC_ATTEMPTS
+    with pytest.raises(httpx.ConnectError):
+        await env.upload_files({"/work/b.txt": "more"})
+    await env.stop()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only folder")
+@pytest.mark.skipif(not Path("/usr/bin/timeout").exists(), reason="the script uses the box's /usr/bin/timeout")
+def test_the_upload_script_copies_each_staged_file_to_its_path(tmp_path: Path) -> None:
+    """Run the real upload script in bash: index ``i`` goes to the ``i``-th path, missing folders are made.
+
+    A path whose parent links to a read-only folder makes the script exit
+    non-zero, so the provider reports the refused write. A read-only file
+    that the box user owns and an empty folder are replaced, as the file API did.
+
+    Args:
+        tmp_path: The test folder.
+    """
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "0").write_text("first")
+    (stage / "1").write_text("second")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (tmp_path / "link").symlink_to(locked)
+    bash = ["bash", "--noprofile", "--norc", "-c", vercel.UPLOAD_SCRIPT, "upload", str(stage)]
+    done = subprocess.run([*bash, "a.txt", "deep/er/b.txt"], cwd=tmp_path, capture_output=True, check=False)
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "a.txt").read_text() == "first"
+    assert (tmp_path / "deep" / "er" / "b.txt").read_text() == "second"
+    locked.chmod(0o555)
+    try:
+        refused = subprocess.run([*bash, "link/evil.txt"], cwd=tmp_path, capture_output=True, check=False)
+    finally:
+        locked.chmod(0o755)
+    assert refused.returncode != 0
+    assert not (locked / "evil.txt").exists()
+    (tmp_path / "a.txt").chmod(0o444)
+    (tmp_path / "empty").mkdir()
+    replaced = subprocess.run([*bash, "a.txt", "empty"], cwd=tmp_path, capture_output=True, check=False)
+    assert replaced.returncode == 0, replaced.stderr
+    assert (tmp_path / "a.txt").read_text() == "first"
+    assert (tmp_path / "empty").read_text() == "second"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a file in a read-only folder")
+@pytest.mark.skipif(not Path("/usr/bin/timeout").exists(), reason="the script uses the box's /usr/bin/timeout")
+def test_the_upload_script_ends_a_copy_into_a_fifo_at_its_deadline(tmp_path: Path) -> None:
+    """Run the real upload script in bash: a copy into a planted FIFO ends with the kill code (SKY-902).
+
+    The FIFO is in a read-only folder, so the copy cannot remove it first.
+    The test shortens the copy deadline, so it does not wait the real one.
+
+    Args:
+        tmp_path: The test folder.
+    """
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "0").write_text("data")
+    held = tmp_path / "held"
+    held.mkdir()
+    os.mkfifo(held / "fifo")
+    script = vercel.UPLOAD_SCRIPT.replace(f" {vercel.UPLOAD_COPY_DEADLINE}s ", " 1s ")
+    assert script != vercel.UPLOAD_SCRIPT
+    bash = ["bash", "--noprofile", "--norc", "-c", script, "upload", str(stage), "held/fifo"]
+    held.chmod(0o555)
+    try:
+        done = subprocess.run(bash, cwd=tmp_path, capture_output=True, check=False, timeout=30)
+    finally:
+        held.chmod(0o755)
+    assert done.returncode == vercel.TIMEOUT_CODE
+
+
+async def test_an_output_read_runs_no_box_command(client: FakeClient, log: list[str]) -> None:
+    """Check that an optional read uses only the HTTP read, never the SDK ``exists``.
+
+    The SDK runs ``exists`` as a bare ``sh`` in the box, found by PATH lookup,
+    and a version can control that PATH.
+    """
+    env = make_env(client, log)
+    await env.start()
+    fs = client.boxes[env.name].fs
+    fs.files["/work/out.txt"] = "text"
+    session = env._require_session()
+    assert await env._read_optional(session, "/work/none.txt") is None
+    assert await env._read_optional(session, "/work/out.txt") == "text"
+    assert await env.download_file("/work/none.txt") is None
+    assert fs.exists_calls == []
     await env.stop()
 
 
@@ -1805,6 +2833,92 @@ async def test_delete_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.Mo
     assert builder.destroys == 1
 
 
+async def test_delete_snapshot_reads_the_builder_session_by_id_before_the_destroy(
+    monkeypatch: pytest.MonkeyPatch, log: list[str]
+) -> None:
+    """Check that an owned client has no capture hook, and the builder hold settles by id and unpins first."""
+    client = SnapshotQueryClient(log)
+    builder = client.boxes["builder"] = FakeBox("builder", FakeSession())
+    service = object()
+    usage = SimpleNamespace(
+        operation=SimpleNamespace(id="op-builder"),
+        runtime=SimpleNamespace(service=service, username="alice", unpin=lambda op: log.append(f"unpin:{op}")),
+    )
+    captures: list[Any] = []
+    readers: list[tuple[str, str]] = []
+
+    def make_client(capture: Any) -> SnapshotQueryClient:
+        """Return the fake client and keep its response capture.
+
+        Args:
+            capture: The response capture hook.
+
+        Returns:
+            The fake client.
+        """
+        captures.append(capture)
+        return client
+
+    def make_reader(token: str, team_id: str) -> str:
+        """Keep the settings the reader is built from.
+
+        Args:
+            token: The Vercel token.
+            team_id: The Vercel team id.
+
+        Returns:
+            A stand-in reader.
+        """
+        readers.append((token, team_id))
+        return "reader"
+
+    class FakeReconciler:
+        """Record the exact-id reconcile of the builder hold."""
+
+        def __init__(self, ledger: Any, reader: Any) -> None:
+            """Check the ledger and the reader.
+
+            Args:
+                ledger: The hold's budget service.
+                reader: The session reader.
+            """
+            assert (ledger, reader) == (service, "reader")
+
+        def reconcile(self, operation_id: str, username: str) -> Any:
+            """Log the reconcile and report a settled hold.
+
+            Args:
+                operation_id: The hold's operation id.
+                username: The hold's owner.
+
+            Returns:
+                A settled operation.
+            """
+            log.append(f"reconcile:{operation_id}:{username}")
+            return SimpleNamespace(state="settled")
+
+    async def destroy(*, delete_orphan_snapshots: bool = False) -> None:
+        """Log the destroy.
+
+        Args:
+            delete_orphan_snapshots: Unused.
+        """
+        log.append("builder-destroy")
+
+    builder.destroy = destroy
+    monkeypatch.setattr(vercel.settings, "vercel_token", SecretStr("test-token"))
+    monkeypatch.setattr(vercel.settings, "vercel_team_id", "team-test")
+    monkeypatch.setattr(vercel, "VercelSessionUsageClient", make_reader)
+    monkeypatch.setattr(vercel, "VercelUsageReconciler", FakeReconciler)
+    monkeypatch.setattr(vercel, "STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(make_client))
+    built = vercel.BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", builder_usage=usage)
+    await asyncio.wait_for(VercelEnvironment.delete_snapshot(built), 5)
+    assert captures == [None]
+    assert readers == [("test-token", "team-test")]
+    assert log == ["reconcile:op-builder:alice", "unpin:op-builder", "builder-destroy"]
+
+
 class GrowingProcess:
     """Write output while it runs, like a guest that waits for the parent."""
 
@@ -1817,6 +2931,7 @@ class GrowingProcess:
             run: An async callable ``run(fs, out_path)`` that returns the exit code.
         """
         self.fs = fs
+        self.script = script
         self.out, self.err, self.sentinel = _PATHS.search(script).groups()
         self.run = run
 
@@ -1828,7 +2943,7 @@ class GrowingProcess:
         """
         code = await self.run(self.fs, self.out)
         self.fs.files[self.sentinel] = f"{code}\n"
-        return code
+        return _wrapper_status(self.script, code)
 
     async def terminate(self) -> None:
         """Accept a terminate call."""
@@ -2288,6 +3403,28 @@ def test_tail_script_reads_at_most_the_cap_per_poll(tmp_path: Path) -> None:
     assert base64.b64decode(completed.stdout.split("\n")[0]) == b"xxxxx"
 
 
+def test_tail_script_ignores_tools_planted_on_path(tmp_path: Path) -> None:
+    """Read the real bytes when fake ``tail``, ``head``, ``base64`` and ``tr`` come first on PATH (PRE-1).
+
+    The tail read runs as the box user while the ``[run]`` entry runs, and the
+    parent takes the supervisor's result frame from what it prints.
+    """
+    out = tmp_path / "out"
+    out.write_bytes(b"real frame\n")
+    marker = tmp_path / "planted-tool-ran"
+    _planted_tools(tmp_path / "planted", marker, "tail", "head", "base64", "tr")
+    completed = subprocess.run(
+        ["/bin/bash", *vercel.SHELL_FLAGS, vercel.TAIL_SCRIPT, "tail", "1", str(out)],
+        env={"PATH": f"{tmp_path / 'planted'}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert base64.b64decode(completed.stdout.split("\n")[0]) == b"real frame\n"
+    assert not marker.exists()
+
+
 def test_model_mailbox_round_trip_through_the_vercel_provider(client: FakeClient, log: list[str]) -> None:
     """Check that a guest model frame gets its response while the guest still runs (SKY-529)."""
     env = make_env(client, log, protected=False, clock=SYSTEM_CLOCK)
@@ -2390,7 +3527,7 @@ async def test_a_recorded_box_routes_commands_through_the_in_box_proxy(client: F
     box = client.boxes[env.name]
     [start] = box.current_session.scripts
     [script] = [path for path, text in box.fs.files.items() if text == egress_record.PROXY_SOURCE]
-    assert f"python3 -I {script} {vercel.EGRESS_PROXY_PORT}" in start
+    assert f"python3 -I -c {shlex.quote(vercel.PROXY_LAUNCHER)} {script} {vercel.EGRESS_PROXY_PORT}" in start
     assert "'*'" in start
     await env.exec("pip download x")
     proxy_env = box.create_calls[-1]["env"]
@@ -2418,6 +3555,80 @@ async def test_stop_records_the_in_box_proxy_requests_as_cooperative(client: Fak
     # The store masks each box env secret in the row.
     assert _BOX_VALUE in call["secrets"]
     assert json.loads(call["request"])["source"] == egress_record.VERCEL_SOURCE
+
+
+# A stand-in for ctypes: its prctl appends its arguments to the shared log and returns PRCTL_RESULT.
+_FAKE_CTYPES = """import os
+
+
+class _Lib:
+    def prctl(self, *args):
+        with open(os.environ["LAUNCH_LOG"], "a") as log:
+            log.write(f"prctl {args}\\n")
+        return int(os.environ["PRCTL_RESULT"])
+
+
+def CDLL(name, use_errno=False):
+    return _Lib()
+"""
+# A stand-in for the proxy file: it appends its argv to the shared log when it starts to serve.
+_FAKE_PROXY = """import os, sys
+
+if __name__ == "__main__":
+    with open(os.environ["LAUNCH_LOG"], "a") as log:
+        log.write(f"serve {sys.argv[1:]}\\n")
+"""
+
+
+@pytest.mark.parametrize(("result", "served"), [(0, True), (-1, False)], ids=["prctl-ok", "prctl-fails"])
+def test_the_proxy_launcher_makes_the_proxy_non_dumpable_before_it_serves(
+    tmp_path: Path, result: int, served: bool
+) -> None:
+    """Call prctl(PR_SET_DUMPABLE, 0) before the proxy runs, and start no proxy when the call fails (SKY-732).
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake ctypes, the fake proxy and the shared log.
+        result: The return value of the fake prctl.
+        served: The proxy runs after the prctl call.
+    """
+    (tmp_path / "ctypes.py").write_text(_FAKE_CTYPES)
+    proxy = tmp_path / "proxy.py"
+    proxy.write_text(_FAKE_PROXY)
+    log = tmp_path / "launch.log"
+    # No -I here, so PYTHONPATH can put the fake ctypes first; the box runs the same code with -I.
+    done = subprocess.run(
+        [sys.executable, "-c", vercel.PROXY_LAUNCHER, str(proxy), "18443", "60", "*"],
+        env={"PYTHONPATH": str(tmp_path), "LAUNCH_LOG": str(log), "PRCTL_RESULT": str(result)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    lines = log.read_text().splitlines()
+    assert lines[0] == "prctl (4, 0, 0, 0, 0)"
+    if served:
+        assert done.returncode == 0
+        assert lines[1:] == ["serve ['18443', '60', '*']"]
+    else:
+        assert done.returncode != 0
+        assert lines[1:] == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="prctl exists only on Linux")
+def test_the_proxy_launcher_runs_the_proxy_not_dumpable_on_linux(tmp_path: Path) -> None:
+    """On a Linux host the real prctl runs, and the proxy reads PR_GET_DUMPABLE (3) as 0.
+
+    Args:
+        tmp_path: Scratch folder; it holds the stand-in proxy and its output.
+    """
+    out = tmp_path / "dumpable.txt"
+    proxy = tmp_path / "proxy.py"
+    proxy.write_text(
+        f"import ctypes, sys\nopen({str(out)!r}, 'w').write(str(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)))\n"
+    )
+    done = subprocess.run([sys.executable, "-I", "-c", vercel.PROXY_LAUNCHER, str(proxy)], timeout=30, check=False)
+    assert done.returncode == 0
+    assert out.read_text() == "0"
 
 
 def _run_start_script(start: str, tools: Path, python: str | None, missing: str | None = None) -> tuple[int, float]:
@@ -2493,7 +3704,9 @@ async def test_the_proxy_start_launches_the_proxy_when_every_tool_is_present(
     await env.start()
     [start] = client.boxes[env.name].current_session.scripts
     await env.stop()
-    python = f"#!/bin/sh\necho {egress_record.READY_MARKER}\n"
+    # A real proxy keeps running after its ready line. A stub that exits right after the line
+    # can end between the script's `grep` and its `kill -0`, and the script then answers 1.
+    python = f"#!/bin/sh\necho {egress_record.READY_MARKER}\nsleep 5\n"
     code, _ = await asyncio.to_thread(_run_start_script, start, tmp_path / "bin", python)
     assert code == 0
     assert (tmp_path / "launched").read_text().split() == ["setsid", "nohup"]
@@ -2560,3 +3773,379 @@ async def test_a_box_without_a_recorder_starts_no_proxy(client: FakeClient, log:
     assert box.current_session.scripts == []
     assert box.create_calls[-1]["env"] is None
     await env.stop()
+
+
+_USER_IMAGE = "ghcr.io/acme/repo@sha256:" + "c" * 64
+_VCR_IMAGE = "vcr.vercel.com/team/project/repo@sha256:" + "d" * 64
+_OWNER_REPOSITORY = "ghcr.io/acme"
+
+
+class FakeCopier:
+    """Stand in for the copy into Vercel's registry, and log each call."""
+
+    def __init__(self, log: list[str], result: str = _VCR_IMAGE, error: BaseException | None = None) -> None:
+        """Plan the copy's answer.
+
+        Args:
+            log: The shared call log.
+            result: The reference the copy returns.
+            error: An error the copy raises instead, or ``None``.
+        """
+        self.log = log
+        self.result = result
+        self.error = error
+        self.calls: list[tuple[str, tuple[str, str] | None]] = []
+
+    async def __call__(self, source: str, credentials: tuple[str, str] | None) -> str:
+        """Record the copy, then return the planned reference or raise.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            The planned reference.
+        """
+        self.calls.append((source, credentials))
+        self.log.append("copy")
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def fresh_copies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start each test with no kept image copies, so one test's copy never serves another.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(vercel, "_COPIED", {})
+    monkeypatch.setattr(vercel, "_COPYING", {})
+
+
+class HangingCopier(FakeCopier):
+    """Stand in for a copy that never ends until it is cancelled."""
+
+    def __init__(self, log: list[str]) -> None:
+        """Prepare the event that tells the test the copy began.
+
+        Args:
+            log: The shared call log.
+        """
+        super().__init__(log)
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+
+    async def __call__(self, source: str, credentials: tuple[str, str] | None) -> str:
+        """Record the copy, then wait until a cancel.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            Never returns.
+        """
+        self.calls.append((source, credentials))
+        self.log.append("copy")
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.stopped.set()
+        raise AssertionError("unreachable")
+
+
+def _user_env(client: FakeClient, log: list[str], copier: Any, **options: Any) -> VercelEnvironment:
+    """Make a protected provider that starts from the user image.
+
+    Args:
+        client: The fake client.
+        log: The shared call log.
+        copier: The image copier.
+        **options: Other provider keyword arguments.
+
+    Returns:
+        The provider.
+    """
+    options.setdefault("user_image_repository", _OWNER_REPOSITORY)
+    return make_env(client, log, image=None, options={"source_image": _USER_IMAGE, "copy_image": copier, **options})
+
+
+async def test_a_user_image_is_copied_before_the_box_is_reserved_and_created(
+    client: FakeClient, log: list[str]
+) -> None:
+    """Check that the copy runs first, gets the credentials, and the box starts and is priced from the copy."""
+    copier = FakeCopier(log)
+    env = _user_env(client, log, copier, pull_credentials=("reader", "secret"))
+    await env.start()
+    assert copier.calls == [(_USER_IMAGE, ("reader", "secret"))]
+    assert log.index("copy") < log.index("reserve") < log.index("create")
+    (created,) = client.create_kwargs
+    assert created["image"] == _VCR_IMAGE
+    assert env.usage.request["image"] == _VCR_IMAGE
+    await env.stop()
+
+
+async def test_a_failed_copy_raises_a_clear_error_and_creates_no_box(client: FakeClient, log: list[str]) -> None:
+    """Check that a failed copy names the image, hides the copier's message, and reserves nothing."""
+    copier = FakeCopier(log, error=RuntimeError("denied for reader:secret"))
+    env = _user_env(client, log, copier, pull_credentials=("reader", "secret"))
+    with pytest.raises(ImageCopyError, match="Could not copy the image") as raised:
+        await env.start()
+    assert _USER_IMAGE in str(raised.value)
+    assert "secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert isinstance(raised.value, SandboxInfraError)
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+
+
+async def test_a_copy_without_a_digest_reference_is_refused(client: FakeClient, log: list[str]) -> None:
+    """Check that a copy that returns a mutable tag never boots."""
+    env = _user_env(client, log, FakeCopier(log, result="vcr.vercel.com/team/project/repo:latest"))
+    with pytest.raises(ImageCopyError, match="not pinned by digest"):
+        await env.start()
+    assert client.create_kwargs == []
+
+
+@pytest.mark.parametrize("image", ["ghcr.io/acme/repo:latest", "ghcr.io/acme/repo", "sha256:" + "c" * 64])
+def test_a_user_image_must_be_pinned_by_a_registry_digest(client: FakeClient, log: list[str], image: str) -> None:
+    """Check that a tag, a bare name or a local id is refused before any call."""
+    with pytest.raises(SandboxSpecError, match="pinned by digest"):
+        make_env(client, log, options={"source_image": image, "copy_image": FakeCopier(log)})
+    assert log == []
+
+
+def test_a_user_image_needs_a_copier(client: FakeClient, log: list[str]) -> None:
+    """Check that a user image with no copier fails at setup with a clear error."""
+    with pytest.raises(SandboxFatalError, match="needs an image copier"):
+        make_env(
+            client,
+            log,
+            image=None,
+            options={"source_image": _USER_IMAGE, "user_image_repository": _OWNER_REPOSITORY},
+        )
+
+
+def test_a_user_image_must_match_the_spec_image(client: FakeClient, log: list[str]) -> None:
+    """Check that a spec that names another image cannot hide which image the box runs."""
+    with pytest.raises(SandboxSpecError, match="other than the user image"):
+        make_env(
+            client,
+            log,
+            options={
+                "source_image": _USER_IMAGE,
+                "copy_image": FakeCopier(log),
+                "user_image_repository": _OWNER_REPOSITORY,
+            },
+        )
+
+
+async def test_a_box_from_a_snapshot_skips_the_copy(client: FakeClient, log: list[str]) -> None:
+    """Check that a snapshot box starts from the snapshot and copies nothing."""
+    copier = FakeCopier(log)
+    env = _user_env(client, log, copier)
+    env.snapshot_id = "snap-1"
+    await env.start()
+    assert copier.calls == []
+    (created,) = client.create_kwargs
+    assert created["image"] is None
+    await env.stop()
+
+
+async def test_a_box_without_a_user_image_starts_as_before(client: FakeClient, log: list[str]) -> None:
+    """Check that a box with no user image never copies and starts from the spec image."""
+    env = make_env(client, log)
+    await env.start()
+    assert "copy" not in log
+    (created,) = client.create_kwargs
+    assert created["image"] == "python:3.12"
+    assert env.usage.request["image"] == "python:3.12"
+    await env.stop()
+
+
+async def test_two_boxes_from_one_user_image_copy_it_once(client: FakeClient, log: list[str]) -> None:
+    """Check that a second box reuses the first copy, so the copy runs once for each digest."""
+    copier = FakeCopier(log)
+    first = _user_env(client, log, copier)
+    await first.start()
+    await first.stop()
+    second = _user_env(client, log, copier)
+    await second.start()
+    assert copier.calls == [(_USER_IMAGE, None)]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE, _VCR_IMAGE]
+    await second.stop()
+
+
+async def test_boxes_that_start_together_wait_for_one_copy(client: FakeClient, log: list[str]) -> None:
+    """Check that concurrent starts from one user image share one copy."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def copier(source: str, credentials: tuple[str, str] | None) -> str:
+        """Count the copy and wait until the test releases it.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        del credentials
+        calls.append(source)
+        started.set()
+        await release.wait()
+        return _VCR_IMAGE
+
+    envs = [_user_env(client, log, copier) for _ in range(3)]
+    starts = [asyncio.ensure_future(env.start()) for env in envs]
+    await started.wait()
+    release.set()
+    await asyncio.gather(*starts)
+    assert calls == [_USER_IMAGE]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE] * 3
+    assert vercel._COPYING == {}
+    for env in envs:
+        await env.stop()
+
+
+async def test_a_failed_copy_is_not_kept(client: FakeClient, log: list[str]) -> None:
+    """Check that a box after a failed copy tries the copy again."""
+    with pytest.raises(ImageCopyError):
+        await _user_env(client, log, FakeCopier(log, error=RuntimeError("busy"))).start()
+    copier = FakeCopier(log)
+    env = _user_env(client, log, copier)
+    await env.start()
+    assert copier.calls == [(_USER_IMAGE, None)]
+    await env.stop()
+
+
+async def test_a_copy_past_its_timeout_fails_and_creates_no_box(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a copy that runs past ``COPY_TIMEOUT`` raises a clear error and reserves nothing."""
+    monkeypatch.setattr(vercel, "COPY_TIMEOUT", 0.05)
+    with pytest.raises(ImageCopyError, match="TimeoutError"):
+        await _user_env(client, log, HangingCopier(log)).start()
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+    assert vercel._COPIED == {}
+
+
+async def test_a_cancel_during_the_copy_stops_it_and_creates_no_box(client: FakeClient, log: list[str]) -> None:
+    """Check that a cancel during the copy reaches the caller, ends the copy, and keeps nothing."""
+    copier = HangingCopier(log)
+    start = asyncio.ensure_future(_user_env(client, log, copier).start())
+    await copier.started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    await asyncio.sleep(0)
+    await asyncio.wait_for(copier.stopped.wait(), 1)
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+    assert vercel._COPYING == {}
+    assert vercel._COPIED == {}
+
+
+@pytest.mark.parametrize("pull_credentials", [("AWS", "renewed-token"), None])
+async def test_a_renewed_token_of_the_same_owner_reuses_the_copy(
+    client: FakeClient, log: list[str], pull_credentials: tuple[str, str] | None
+) -> None:
+    """Check that the same owner and digest reuse the copy when the pull token renews (SKY-891)."""
+    first = FakeCopier(log)
+    env = _user_env(client, log, first, pull_credentials=("AWS", "first-token"))
+    await env.start()
+    await env.stop()
+    second = FakeCopier(log)
+    renewed = _user_env(client, log, second, pull_credentials=pull_credentials)
+    await renewed.start()
+    assert first.calls == [(_USER_IMAGE, ("AWS", "first-token"))]
+    assert second.calls == []
+    assert client.create_kwargs[-1]["image"] == _VCR_IMAGE
+    await renewed.stop()
+
+
+async def test_another_owner_never_reuses_a_copy(client: FakeClient, log: list[str]) -> None:
+    """Check that the same digest in another owner's repository copies again, with the same token."""
+    first = FakeCopier(log)
+    env = _user_env(client, log, first, pull_credentials=("AWS", "token"))
+    await env.start()
+    await env.stop()
+    second = FakeCopier(log)
+    other = _user_env(client, log, second, pull_credentials=("AWS", "token"), user_image_repository="ghcr.io/acme/repo")
+    await other.start()
+    assert first.calls == [(_USER_IMAGE, ("AWS", "token"))]
+    assert second.calls == [(_USER_IMAGE, ("AWS", "token"))]
+    await other.stop()
+
+
+async def test_the_copy_cache_never_holds_the_secret(client: FakeClient, log: list[str]) -> None:
+    """Check that the cache key of a copy holds the owner's repository and no pull credentials."""
+    env = _user_env(client, log, FakeCopier(log), pull_credentials=("AWS", "secret-token"))
+    await env.start()
+    await env.stop()
+    (key,) = vercel._COPIED
+    assert key[:2] == (_USER_IMAGE, _OWNER_REPOSITORY)
+    assert not any("secret-token" in part for part in key)
+
+
+def test_a_user_image_needs_the_owners_repository(client: FakeClient, log: list[str]) -> None:
+    """Check that a user image with no owner repository fails closed before any call."""
+    with pytest.raises(SandboxSpecError, match="needs the owner's image repository"):
+        make_env(client, log, image=None, options={"source_image": _USER_IMAGE, "copy_image": FakeCopier(log)})
+    assert log == []
+
+
+def test_a_user_image_outside_the_owners_repository_is_refused(client: FakeClient, log: list[str]) -> None:
+    """Check that a user image under another owner's repository is refused before any call."""
+    with pytest.raises(SandboxSpecError, match="not in the owner's image repository"):
+        _user_env(client, log, FakeCopier(log), user_image_repository="ghcr.io/other")
+    assert log == []
+
+
+async def test_a_cancel_of_one_waiter_keeps_the_copy_for_the_other(client: FakeClient, log: list[str]) -> None:
+    """Check that a second box still gets the copy after the first box's start is cancelled."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def copier(source: str, credentials: tuple[str, str] | None) -> str:
+        """Count the copy and wait until the test releases it.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        del credentials
+        calls.append(source)
+        started.set()
+        await release.wait()
+        return _VCR_IMAGE
+
+    first = asyncio.ensure_future(_user_env(client, log, copier).start())
+    await started.wait()
+    second_env = _user_env(client, log, copier)
+    second = asyncio.ensure_future(second_env.start())
+    (copy,) = vercel._COPYING.values()
+    for _ in range(100):
+        if copy.waiters == 2:
+            break
+        await asyncio.sleep(0)
+    assert copy.waiters == 2
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    await second
+    assert calls == [_USER_IMAGE]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE]
+    assert vercel._COPYING == {}
+    await second_env.stop()

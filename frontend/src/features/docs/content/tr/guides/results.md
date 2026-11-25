@@ -64,7 +64,7 @@ def serve(input):
 
 - `input`, istekteki girdi alanlarının dict'idir.
 - Dönüş değeri JSON'a serileştirilebilir olmalıdır. Bir dict `outputs` olur. Başka herhangi bir değer `{"output": value}` olur.
-- `serve.py`, `skynet` yardımcı modülündeki `llm` ile bir model çağırabilir. Çalıştırmanın gizli değerlerini almaz.
+- `serve.py`, `openascent` yardımcı modülündeki `llm` ile bir model çağırabilir. Çalıştırmanın gizli değerlerini almaz.
 
 Skynet en iyi sürümü, çalıştırmayla aynı korumalı sandbox içinde çalıştırır. **Kullanım** sekmesinin iki bölümü vardır:
 
@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 Yanıt `outputs`, `input_fields`, `output_fields`, `model_used`, `cents_charged` ve `budget` değerlerini içerir.
 
 > [!TIP]
-> Her çağrı ayrı olarak, çağıranın bakiyesinden faturalandırılır. `max_cost_cents`, bu tek çağrının sent cinsinden en fazla ne kadar tutabileceğini belirler. Aynı `Idempotency-Key` değerini yeniden gönderirseniz Skynet çağrıyı yeniden ücretlendirmez.
+> Her çağrı ayrı olarak, çağıranın bakiyesinden faturalandırılır. `max_cost_cents` isteğe bağlıdır. Bu tek çağrı için kabul ettiğiniz en yüksek tutarı sent cinsinden kaydeder. Çağrıyı bakiyeniz sınırlar. Aynı `Idempotency-Key` değerini yeniden gönderirseniz Skynet çağrıyı yeniden ücretlendirmez.
 
 Kimlik doğrulama ve diğer uç noktalar için [API](/docs/api) sayfasını okuyun.
 

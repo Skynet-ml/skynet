@@ -298,7 +298,7 @@ test("R2 Composer retains an over-limit mid-turn draft", () => {
   const callback = expression("src/shared/ui/agent/composer.tsx", "sendMidTurn", {
     midTurn: { maxLength: 3, queue: () => { queued = true; } }, value: "long", disabled: false,
     maxLength: 3,
-    dictating: false, attaching: 0, hasDraft: true, acceptsMidTurn: undefined,
+    dictating: false, attaching: 0, hasDraft: true, acceptsMidTurn: undefined, mediaWaiting: false,
     onChange: () => assert.fail("cleared rejected text"), resetHeight: () => {},
     setLengthNotice: () => {},
   });

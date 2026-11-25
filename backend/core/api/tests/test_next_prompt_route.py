@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ...billing.cli_dispatch import NEXT_PROMPT_ROLE
 from ...models import ModelConfig
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -184,14 +185,16 @@ def test_local_mode_without_engine_returns_empty(
     monkeypatch.setattr(agent_mod, "route_local_byok_model", lambda *a, **k: None)
     config = ModelConfig(name="claude-sonnet-4.5", token_source="subscription", cli_provider="claude")
     monkeypatch.setattr(agent_mod, "route_agent_model", lambda picked: config)
-    seen: list[tuple[object, float]] = []
-    monkeypatch.setattr(agent_mod, "build_local_suggest_lm", lambda config, timeout: seen.append((config, timeout)))
+    seen: list[tuple[object, float, str]] = []
+    monkeypatch.setattr(
+        agent_mod, "build_local_suggest_lm", lambda config, timeout, role: seen.append((config, timeout, role))
+    )
     res = _client().post(
         "/optimizations/agent-suggest",
         json={"turns": _TURNS, "model": "subscription/claude/claude-sonnet-4.5"},
     )
     assert res.json() == {"suggestion": ""}
-    assert seen == [(config, agent_mod._SUGGEST_TIMEOUT_SECONDS)]
+    assert seen == [(config, agent_mod._SUGGEST_TIMEOUT_SECONDS, NEXT_PROMPT_ROLE)]
     assert metered == []
 
 
@@ -207,7 +210,7 @@ def test_mac_app_subscription_suggestion_logs_its_payer(
     lm = _FakeLM("ok, pasting it now")
     lm.model = "litellm_proxy/anthropic/claude-haiku-5.5"
     lm.subscription = True
-    monkeypatch.setattr(agent_mod, "build_local_suggest_lm", lambda config, timeout: lm)
+    monkeypatch.setattr(agent_mod, "build_local_suggest_lm", lambda config, timeout, role: lm)
     with caplog.at_level("INFO", logger=agent_mod.logger.name):
         res = _client().post(
             "/optimizations/agent-suggest",

@@ -65,7 +65,7 @@ export function RunOverview({
 }: {
   state: WizardV2State;
   guided: boolean;
-  /** The setup's hardening job; a job that ended well adds its line under the check. */
+  /** The setup's hardening job; a job that ended well adds its line under the title. */
   hardening?: HardeningJob | null;
 }) {
   const t = (key: string, params?: Record<string, string | number>) => v2Msg(key, guided, params);
@@ -114,12 +114,6 @@ export function RunOverview({
           </h3>
           <p className="text-sm text-muted-foreground">{t("submit.v2.overview.desc")}</p>
         </div>
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-          <span className="text-xs font-medium text-muted-foreground">
-            {t("submit.v2.metric.check.title")}
-          </span>
-          <span className="text-muted-foreground">{t("submit.v2.repo.check_on_submit")}</span>
-        </div>
         {hardening && HARDENING_SURVIVED.has(hardening.status) && (
           <p className="text-sm text-muted-foreground">
             {hardeningSurvived(hardening) > 0
@@ -127,6 +121,20 @@ export function RunOverview({
               : hardening.status === "budget_stop"
                 ? t("submit.v2.harden.budget", { k: hardening.round, m: hardening.fixed_count })
                 : t("submit.v2.harden.clean", { k: hardening.round })}
+          </p>
+        )}
+        {hardening?.noise && HARDENING_SURVIVED.has(hardening.status) && (
+          <p className="text-sm text-muted-foreground">
+            {hardening.noise.skipped ? (
+              <>
+                {t("submit.v2.harden.noise.skipped")} <bdi dir="auto">{hardening.noise.reason}</bdi>
+              </>
+            ) : (
+              t("submit.v2.harden.noise.scores", {
+                scores: hardening.noise.scores.map(fmt).join(", "),
+                spread: hardening.noise.spread === null ? "–" : fmt(hardening.noise.spread),
+              })
+            )}
           </p>
         )}
         <RunOnChoice />

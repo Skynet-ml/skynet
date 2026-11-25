@@ -81,7 +81,6 @@ O assistente lista apenas os otimizadores adequados à sua tarefa e às suas ent
 Defina por quanto tempo a execução pode continuar tentando e quanto pode gastar:
 
 - **Máx. de execuções do avaliador** (Guiado: **Máx. de tentativas**): o número máximo de candidatos que o Skynet pontua. Alguns otimizadores precisam de um número mínimo.
-- **Parar na pontuação** (Guiado: **Parar mais cedo quando a pontuação chegar a**): a execução para quando uma versão atinge essa pontuação.
 - **Máx. de iterações** (Guiado: **Máx. de rondas**): aparece para os otimizadores que suportam essa configuração.
 - **Limite de gastos**: o máximo que a execução pode gastar. O padrão é US$ 5, ou o valor **Necessário para começar**, se for maior. Você também pode selecionar **Sem limite**.
 
@@ -91,13 +90,13 @@ O assistente não deixa você continuar se o limite ou o seu saldo estiver abaix
 
 ### Avaliador
 
-Escreva `scorer.py`. Ele define `score(repo_path, case)` e retorna uma pontuação com feedback. O assistente pode escrevê-lo para você. Leia [Métricas e avaliadores](/docs/concepts/scorers).
+Escreva `scorer.py`. Ele define `score(repo_path, case, output=None)` e retorna uma pontuação com feedback. O avaliador lê `output`, o que a entrada `[run]` retornou para o caso. Ele não roda na pasta da versão e não importa código do repositório. O assistente pode escrevê-lo para você. Leia [Métricas e avaliadores](/docs/concepts/scorers).
 
 O repositório pode ter um arquivo `serve.py` com `def serve(input)`. O Skynet o usa para servir a melhor versão depois da execução. Leia [Ler os resultados](/docs/guides/results).
 
 ### Segredos
 
-Adicione segredos, como chaves de API de que o seu código precisa. Cada segredo chega ao seu código e ao seu avaliador como uma variável de ambiente com o mesmo nome. O agente de programação não pode vê-los. O Skynet oculta os valores deles nos registos.
+Adicione segredos, como chaves de API de que o seu código precisa. O seu código e o seu avaliador não recebem os segredos da execução como variáveis de ambiente. Um segredo chega a um papel só por uma tabela `[services.<name>]` que o papel lista em `[run] services` ou `[metric] services`, ou por um servidor do arquivo `mcp` do papel. Escreva o segredo nos `headers` da tabela como `${NAME}`. O agente de programação não pode vê-los. O Skynet oculta os valores deles nos registos.
 
 ### Verificação
 

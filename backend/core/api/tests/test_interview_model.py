@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from core.api import interview_model
@@ -146,6 +148,19 @@ def test_with_interview_default_attaches_measured_speeds(monkeypatch: pytest.Mon
     a, b = interview_model.with_interview_default(catalog).models
     assert (a.throughput_tps, a.ttft_ms, a.latency_ms) == (120.0, 450.0, 450.0 + 150 / 120.0 * 1000)
     assert (b.throughput_tps, b.ttft_ms, b.latency_ms) == (None, None, None)
+
+
+def test_with_interview_default_does_not_wait_for_a_measurement_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A catalog sent while the first measurement runs ships without speeds instead of holding a request thread."""
+    catalog = ModelCatalogResponse(models=[_model("openrouter/a", 1.0)], providers=[])
+    monkeypatch.setattr(interview_model, "interview_model_id", lambda: "openrouter/a")
+    monkeypatch.setattr(interview_model, "_speeds", {})
+    monkeypatch.setattr(interview_model, "_refresh_in_flight", True)
+    monkeypatch.setattr(interview_model, "_kick_refresh", lambda: None)
+    started = time.monotonic()
+    (a,) = interview_model.with_interview_default(catalog).models
+    assert time.monotonic() - started < 1
+    assert a.throughput_tps is None
 
 
 def test_refresh_keeps_the_last_speed_of_a_model_whose_fetch_failed(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -17,7 +17,6 @@ import pytest
 import core.worker.subprocess_runner as sr
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from core.worker.constants import (
-    EVENT_AGENT_RUN,
     EVENT_ERROR,
     EVENT_LOG,
     EVENT_PROGRESS,
@@ -331,6 +330,24 @@ def test_run_service_in_subprocess_blackbox_type_calls_run_blackbox_optimization
     ]
 
 
+def test_run_service_in_subprocess_runs_a_stored_payload_with_the_retired_stop_score() -> None:
+    """A run stored with ``budget.stop_at_score`` still starts and keeps that stop score on its budget (SKY-691).
+
+    ``_run_job`` reads this same budget object when the snapshot has no
+    ``[outcome] target``; ``test_service.py`` covers that half.
+    """
+    q: queue.Queue[dict] = queue.Queue()
+    payload = {**_BLACKBOX_PAYLOAD, "budget": {"max_scorer_runs": 10, "stop_at_score": 0.9}}
+
+    with _patch_run(return_value=_blackbox_result()) as run_bb:
+        run_service_in_subprocess(payload, "art-stop", q)
+
+    run_bb.assert_called_once()
+    assert run_bb.call_args.args[0].budget.max_scorer_runs == 10
+    assert run_bb.call_args.args[0].budget._legacy_stop_at_score == 0.9
+    assert [e for e in _drain_queue(q) if e.get("type") == EVENT_ERROR] == []
+
+
 def test_run_service_in_subprocess_blackbox_progress_is_forwarded() -> None:
     """Lane events emitted by the black-box run reach the parent as ``EVENT_PROGRESS``."""
     q: queue.Queue[dict] = queue.Queue()
@@ -342,15 +359,14 @@ def test_run_service_in_subprocess_blackbox_progress_is_forwarded() -> None:
         artifact_id,
         progress_callback,
         gepa_log_dir_path=None,
-        agent_run_sink=None,
-        target_route=None,
         evaluator_route=None,
         repo_snapshot=None,
+        loop=None,
     ):
-        """Stand-in for ``run_blackbox_optimization`` that emits one lane event and one run row."""
+        """Stand-in for ``run_blackbox_optimization`` that emits one lane event."""
         assert evaluator_route == relay
+        assert loop is None
         progress_callback("lane_started", {"engine": "gepa", "phase": "single", "budget": 5})
-        agent_run_sink({"run_id": 1, "status": "running"})
         fake_result = MagicMock()
         fake_result.model_dump.return_value = {}
         return fake_result
@@ -363,6 +379,3 @@ def test_run_service_in_subprocess_blackbox_progress_is_forwarded() -> None:
     assert len(progress_events) == 1
     assert progress_events[0]["event"] == "lane_started"
     assert progress_events[0]["metrics"] == {"engine": "gepa", "phase": "single", "budget": 5}
-    assert [e for e in events if e.get("type") == EVENT_AGENT_RUN] == [
-        {"type": EVENT_AGENT_RUN, "run": {"run_id": 1, "status": "running"}}
-    ]

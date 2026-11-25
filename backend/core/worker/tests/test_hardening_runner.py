@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import json
 import math
 import tarfile
 import threading
@@ -25,12 +27,15 @@ from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
-from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound, HardeningSession
 from core.service_gateway.optimization.blackbox import runner as runner_module
-from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
+from core.service_gateway.optimization.blackbox.hardening import AttackFailedError, _draft_fix, _measure, new_job
+from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
+from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer
+from core.service_gateway.optimization.blackbox.repo_workspace import WORK_DIR
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
-from core.worker import hardening_runner
+from core.worker import hardening_runner, hardening_sessions
 from core.worker.hardening_job import HardeningWorkspace
 from core.worker.hardening_runner import (
     OPEN_STATES,
@@ -46,6 +51,7 @@ from core.worker.hardening_runner import (
     process_next_hardening_job,
     renew_hardening_lease,
     store_hardening_result,
+    store_live_sessions,
 )
 
 _USER = "alice"
@@ -759,6 +765,43 @@ def test_a_drafted_fix_that_does_not_apply_fails_every_check(tmp_path: Path, mon
     assert current.fix.checks.reference_not_lower == "fail"
 
 
+def test_a_failed_run_scores_nan_and_fails_every_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed ``[run]`` entry has no score: the round gets NaN, fails its checks, no TypeError (SKY-751)."""
+    runner = _fixed_tree(tmp_path, ())
+    failed = SimpleNamespace(
+        score=lambda patch: {"score": None, "status": "run_failed", "feedback": "Run failed: boom"}, close=lambda: None
+    )
+    monkeypatch.setattr(runner, "open_scorer", lambda archive, fixes: failed)
+    fix = _diff("v1", "v2")
+    monkeypatch.setattr(runner, "draft_fix", lambda **kwargs: (fix, 0.0))
+    reference = tmp_path / "reference.diff"
+    reference.write_text("")
+    exploit = HardeningExploit(
+        id="e1",
+        kind="case",
+        label="exploit",
+        confidence=0.9,
+        reason="r",
+        unsure=False,
+        patch_diff="",
+        why_md="w",
+        user_verdict="confirmed",
+    )
+    job = new_job(attacker_model="m", judge_model="m", place="local")
+    current = HardeningRound(index=1, status="waiting_review", exploits=[exploit])
+    try:
+        assert math.isnan(runner._score(None, ""))
+        assert math.isnan(runner._score(fix, ""))
+        _draft_fix(job, current, runner, tmp_path / "exploits", reference)
+    finally:
+        runner.close()
+
+    assert job.status == "waiting_fix"
+    assert current.fix is not None
+    assert current.fix.checks.base_score_unchanged == "fail"
+    assert current.fix.checks.reference_not_lower == "fail"
+
+
 def test_an_approved_fix_that_does_not_apply_still_raises(tmp_path: Path) -> None:
     """When the approved fixes alone do not apply, the base score raises and the pass fails."""
     runner = _fixed_tree(tmp_path, (_diff("other", "v2"),))
@@ -1108,6 +1151,7 @@ def test_the_sweep_closes_a_hold_that_an_earlier_close_left_open(
     [
         ({"kind": "remote", "url": "https://score.example", "metric_code": "x"}, True, "hardening.no_python_metric"),
         ({"kind": "python"}, True, "hardening.no_python_metric"),
+        ({"kind": "python", "metric_code": "x", "command_metric": True}, True, "hardening.no_python_metric"),
         (None, False, "hardening.no_managed_models"),
         (
             {**_SCORER, "model": {"name": "openai/gpt-4o-mini", "token_source": "byok", "extra": {}}},
@@ -1188,7 +1232,7 @@ def test_a_byok_scorer_without_a_usable_key_ends_with_a_stable_key(
 
 
 def _compose_tree(root: Path) -> Path:
-    """Write a trusted tree whose optimize.toml names one compose service, ``db``.
+    """Write a trusted tree whose ascent.toml names one compose service, ``db``.
 
     Args:
         root: The folder to write the tree in.
@@ -1198,21 +1242,24 @@ def _compose_tree(root: Path) -> Path:
     """
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.py").write_text("VALUE = 1\n")
-    (root / "optimize.toml").write_text('version = 1\n[sandbox]\ncompose = "compose.yaml"\n')
+    (root / "ascent.toml").write_text(
+        'version = 1\n[sandbox]\ncompose = "compose.yaml"\n[run]\nentry = "src/app.py:main"\n'
+    )
     (root / "compose.yaml").write_text("services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n")
     return root
 
 
-# A drafted fix that renames the compose service, and one that breaks optimize.toml.
+# A drafted fix that renames the compose service, and one that breaks ascent.toml.
 _RENAME_SERVICE_FIX = (
     "diff --git a/compose.yaml b/compose.yaml\n"
     "--- a/compose.yaml\n+++ b/compose.yaml\n"
     "@@ -1,4 +1,4 @@\n services:\n-  db:\n+  evil:\n     image: postgres:16\n     command: postgres -D /data\n"
 )
 _BREAK_CONSTRAINTS_FIX = (
-    "diff --git a/optimize.toml b/optimize.toml\n"
-    "--- a/optimize.toml\n+++ b/optimize.toml\n"
-    '@@ -1,3 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n+not = [valid\n'
+    "diff --git a/ascent.toml b/ascent.toml\n"
+    "--- a/ascent.toml\n+++ b/ascent.toml\n"
+    '@@ -1,5 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n-[run]\n-entry = "src/app.py:main"\n'
+    "+not = [valid\n"
 )
 
 
@@ -1222,7 +1269,7 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     """A BYOK scorer model gets its saved key at run time, and each scorer box of a pass has its own key.
 
     Every box starts the unfixed trusted tree's ``[sandbox] compose`` services: a drafted fix that renames
-    the service or breaks optimize.toml changes neither the services nor the score.
+    the service or breaks ascent.toml changes neither the services nor the score.
     """
     budget_id = _budget(engine)
     job = _seed(
@@ -1278,8 +1325,12 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
             keys.append(spec.operation_key)
             services.append(tuple(service.name for service in spec.services))
 
+    closed: list[str] = []
+
     class FakeScorer:
-        """A scorer that prepares nothing."""
+        """A scorer that prepares nothing, or fails to prepare when ``fail`` is set."""
+
+        fail = False
 
         def __init__(self, workspace: FakeWorkspace, *args: Any, **kwargs: Any) -> None:
             """Keep nothing.
@@ -1291,7 +1342,13 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
             """
 
         def prepare(self) -> None:
-            """Prepare nothing."""
+            """Prepare nothing.
+
+            Raises:
+                RuntimeError: When ``fail`` is set.
+            """
+            if self.fail:
+                raise RuntimeError("setup broke")
 
         def score(self, patch: str) -> dict[str, float]:
             """Return a fixed score.
@@ -1305,7 +1362,8 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
             return {"score": 1.0}
 
         def close(self) -> None:
-            """Close nothing."""
+            """Record the close."""
+            closed.append("box")
 
     class FakeVault:
         """Returns one saved OpenAI connection."""
@@ -1355,13 +1413,24 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         assert runner._score(None, "") == 1.0
         assert runner._score(_RENAME_SERVICE_FIX, "") == 1.0
         assert runner._score(_BREAK_CONSTRAINTS_FIX, "") == 1.0
+        # Each attacker session opens its own box on the unfixed tree (SKY-682).
+        lane_archive = runner._fixed_archive(())
+        runner.open_scorer(lane_archive, (), lane="r1s1")
+        runner.open_scorer(lane_archive, (), lane="r1s2")
+        # A box whose setup fails is closed here, since the caller never gets it.
+        FakeScorer.fail = True
+        closed.clear()
+        with pytest.raises(RuntimeError, match="setup broke"):
+            runner.open_scorer(lane_archive, (), lane="r1s3")
+        assert closed == ["box"]
+        FakeScorer.fail = False
 
     assert protected[0]["scorer"]["model"]["extra"]["api_key"] == "saved-user-key"
     assert job.scorer is not None
     assert "api_key" not in job.scorer["model"]["extra"]
-    assert len(set(keys)) == 3
+    assert len(set(keys)) == 6
     assert all(key.startswith(f"repo-scorer:{operation_key(job.id)}:") for key in keys)
-    assert services == [("db",), ("db",), ("db",)]
+    assert services == [("db",)] * 6
 
     with (
         pytest.raises(ValueError, match="vault"),
@@ -1380,13 +1449,14 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
 
 
 # The metric adds the [metric] file's key to the [run] output, so a score
-# proves that the metric box got both.
+# proves that the metric box got both. The [run] command writes the version's
+# source as its output to ASCENT_OUTPUT (SKY-757).
 _METRIC_TREE_SCORER = {
     "metric_code": (
         "from pathlib import Path\n"
         "def score(repo_path, case=None, output=None):\n"
         "    key = int((Path(repo_path) / 'eval' / 'key.txt').read_text())\n"
-        "    value = int(output['stdout'].split('=')[1])\n"
+        "    value = int(output.split('=')[1])\n"
         "    return {'score': key * 10 + value, 'feedback': 'read'}\n"
     )
 }
@@ -1408,8 +1478,9 @@ def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     (trusted / "eval").mkdir()
     (trusted / "src" / "app.py").write_text("VALUE = 3\n")
     (trusted / "eval" / "key.txt").write_text("1\n")
-    (trusted / "optimize.toml").write_text(
-        'version = 1\n[run]\nentry = ["cat", "src/app.py"]\n[metric]\nfiles = ["eval/key.txt"]\n'
+    (trusted / "run.sh").write_text('printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"\n')
+    (trusted / "ascent.toml").write_text(
+        'version = 1\n[run]\nentry = ["sh", "run.sh"]\n[metric]\nfiles = ["eval/key.txt"]\n'
     )
 
     class LocalGateway:
@@ -1473,3 +1544,749 @@ def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     ) as hardening:
         assert hardening._score(None, "") == 13.0
         assert hardening._score(_KEY_FIX, "") == 23.0
+
+
+@pytest.mark.parametrize("require_version", [False, True])
+def test_the_runner_reads_the_trusted_tree_with_the_staging_version_rule(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_version: bool
+) -> None:
+    """A started pass opens on an ascent.toml with no version; a new pass refuses it (SKY-690).
+
+    Args:
+        engine: The test database.
+        tmp_path: The folder for the trusted tree.
+        monkeypatch: Replaces the gateway and the sandbox binding.
+        require_version: The staging's rule for a file with no version.
+    """
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "src").mkdir(parents=True)
+    (trusted / "src" / "app.py").write_text("VALUE = 1\n")
+    (trusted / "intent.md").write_text("Keep the app fast.\n")
+    (trusted / "ascent.toml").write_text('instructions = "intent.md"\n[run]\nentry = "src/app.py:main"\n')
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+        require_version=require_version,
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    if require_version:
+        with pytest.raises(ConstraintsError, match="version is missing"), opened:
+            pass
+    else:
+        with opened as runner:
+            assert runner._intent == "Keep the app fast."
+
+
+async def _fake_pi_turn(*, binary: str, handlers: Any, translator: Any, prompt: str) -> None:
+    """Drive the session handlers as Pi does: one model step, then its tool call, until a stop.
+
+    Args:
+        binary: Ignored.
+        handlers: The session.
+        translator: Ignored.
+        prompt: Ignored.
+    """
+    while True:
+        chunks = [chunk async for chunk in handlers.complete({})]
+        calls = (json.loads(chunks[-1])["choices"][0].get("delta") or {}).get("tool_calls") or []
+        if not calls:
+            return
+        for call in calls:
+            outcome = await handlers.call_tool(call["function"]["name"], json.loads(call["function"]["arguments"]))
+            if outcome.terminate:
+                return
+
+
+def _reply(content: str = "", calls: list[dict[str, Any]] | None = None) -> SimpleNamespace:
+    """Build one provider response.
+
+    Args:
+        content: The message text.
+        calls: The tool calls.
+
+    Returns:
+        A response with ``status`` and ``body``.
+    """
+    message: dict[str, Any] = {"content": content}
+    if calls:
+        message["tool_calls"] = calls
+    return SimpleNamespace(status=200, body=json.dumps({"choices": [{"message": message}]}).encode())
+
+
+def _tool(name: str, **args: Any) -> list[dict[str, Any]]:
+    """Build one tool call.
+
+    Args:
+        name: The tool.
+        **args: The arguments.
+
+    Returns:
+        The call list.
+    """
+    return [{"id": f"id-{name}", "function": {"name": name, "arguments": json.dumps(args)}}]
+
+
+def _session_runner(
+    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch, *, feedback: str = "ok", minimize: bool = False
+) -> tuple[RepoHardeningRunner, list[str], list[str]]:
+    """Build a runner with a fake gateway and lane boxes that record their lane.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        dispatch: The fake ``dispatch_guest``.
+        monkeypatch: Swaps the Pi turn for a fake one.
+        feedback: The feedback each box's score gives.
+        minimize: True when the metric's lower score is better.
+
+    Returns:
+        The runner, the lanes opened and the lanes closed.
+    """
+    agent = tmp_path / "agent.tgz"
+    source = tmp_path / "src" / "bot"
+    source.mkdir(parents=True)
+    (source / "main.py").write_text("print(1)\n")
+    with tarfile.open(agent, "w:gz") as tree:
+        tree.add(source / "main.py", arcname="bot/main.py")
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.py").write_text("v1\n")
+    workspace = HardeningWorkspace(
+        agent_archive=agent,
+        trusted_root=trusted,
+        exploits_path=trusted / "eval" / "exploits",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+        minimize=minimize,
+    )
+    opened: list[str] = []
+    closed: list[str] = []
+
+    def open_scorer(archive: Path, fixes: tuple[str, ...], *, lane: str = "") -> Any:
+        """Open a fake box that records its lane.
+
+        Args:
+            archive: The packed tree.
+            fixes: The fixes in it.
+            lane: The session that owns the box.
+
+        Returns:
+            The fake box.
+        """
+        opened.append(lane)
+        return SimpleNamespace(
+            score=lambda patch: {"score": 0.5, "feedback": feedback, "hidden": "eval/metric.py"},
+            close=lambda: closed.append(lane),
+            for_proposer=functools.partial(
+                RepoScorer.for_proposer, SimpleNamespace(_root="/box", _hidden=("eval/metric.py",))
+            ),
+        )
+
+    monkeypatch.setattr(
+        hardening_runner, "run_sessions", functools.partial(hardening_sessions.run_sessions, run_turn=_fake_pi_turn)
+    )
+    job = new_job(attacker_model="openai/m", judge_model="openai/j", place="local")
+    job.scorer = _SCORER
+    runner = RepoHardeningRunner(
+        workspace,
+        job,
+        gateway=SimpleNamespace(register=lambda **kw: {"model": kw["model"], "token": "t"}, dispatch_guest=dispatch),  # type: ignore[arg-type]
+        meter=SimpleNamespace(spent_usd=0.0, stopped=False),  # type: ignore[arg-type]
+        open_scorer=open_scorer,
+        managed_key="k",
+    )
+    return runner, opened, closed
+
+
+@pytest.mark.parametrize("view", ["black_box", "white_box"])
+def test_attack_runs_one_session_for_each_brief_in_its_own_lane_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, view: str
+) -> None:
+    """The lead agent writes K briefs; each session scores in its own box, which closes after the round (SKY-682)."""
+    prompts: list[str] = []
+    bodies: list[dict[str, Any]] = []
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent with two briefs, and each session with a metric run then a patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        bodies.append(body)
+        if "tools" not in body:
+            prompts.append(body["messages"][0]["content"])
+            return _reply('{"briefs": ["brief one", "brief two"]}')
+        if len(body["messages"]) == 1:
+            prompts.append(body["messages"][0]["content"])
+            return _reply(calls=_tool("run_metric", patch_diff="+x"))
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, opened, closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    try:
+        result = runner.attack(
+            round_index=2, view=view, model="openai/m", exploits_path=tmp_path / "none", budget_usd=None, sessions=2
+        )
+    finally:
+        runner.close()
+
+    assert result.briefs == ["brief one", "brief two"]
+    assert [s.status for s in result.sessions] == ["done", "done"]
+    assert sorted(c.session for c in result.candidates) == [1, 2]
+    assert sorted(opened) == ["r2s1", "r2s2"]
+    assert sorted(closed) == ["r2s1", "r2s2"]
+    assert all(b["parallel_tool_calls"] is False for b in bodies if "tools" in b)
+    assert "bot/main.py" in prompts[0]
+    assert all(("def score(): return 1" in p) == (view == "white_box") for p in prompts)
+    tool_text = json.dumps([b["messages"] for b in bodies if "tools" in b])
+    assert "eval/metric.py" not in tool_text
+
+
+def test_attack_asks_to_lower_the_score_of_a_minimize_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A minimize job tells the lead agent and every session that a hack lowers the score (SKY-750)."""
+    prompts: list[str] = []
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent with one brief, and the session with a patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        if len(body["messages"]) == 1:
+            prompts.append(body["messages"][0]["content"])
+        if "tools" not in body:
+            return _reply('{"briefs": ["brief one"]}')
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch, minimize=True)
+    try:
+        runner.attack(
+            round_index=1,
+            view="black_box",
+            model="openai/m",
+            exploits_path=tmp_path / "none",
+            budget_usd=None,
+            sessions=1,
+        )
+    finally:
+        runner.close()
+
+    assert len(prompts) == 2
+    assert "try to lower this repository's metric" in prompts[0]
+    assert "a change that lowers this repository's metric" in prompts[1]
+
+
+def test_a_session_sees_metric_feedback_without_hidden_traceback_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session score path filters like RepoScorer.dispatch: hidden metric frames go (SKY-353)."""
+    feedback = (
+        f"{RUN_FAILED}ValueError: boom\n"
+        "Traceback (most recent call last):\n"
+        f'  File "/box/{WORK_DIR}/eval/metric.py", line 3, in score\n'
+        "    secret_weight = 0.7\n"
+        f'  File "/box/{WORK_DIR}/bot/main.py", line 1, in <module>\n'
+        "    print(1)\n"
+        "ValueError: boom"
+    )
+    seen: list[str] = []
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent, then run the metric once and write the patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        if "tools" not in body:
+            return _reply('{"briefs": ["one"]}')
+        if len(body["messages"]) == 1:
+            return _reply(calls=_tool("run_metric", patch_diff="+x"))
+        seen.append(body["messages"][-1]["content"])
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch, feedback=feedback)
+    try:
+        runner.attack(
+            round_index=1, view="black_box", model="openai/m", exploits_path=tmp_path, budget_usd=None, sessions=1
+        )
+    finally:
+        runner.close()
+
+    shown = json.loads(seen[0])["feedback"]
+    assert "eval/metric.py" not in shown
+    assert "secret_weight" not in shown
+    assert 'File "bot/main.py"' in shown
+    assert "/box" not in shown
+
+
+def test_the_lead_agent_file_list_is_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A large tree gives the lead agent at most MAX_LEAD_FILES paths and a cut line."""
+    monkeypatch.setattr(hardening_runner, "MAX_LEAD_FILES", 2)
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as tree:
+        for name in ("a.py", "b.py", "c.py", "d.py"):
+            (tmp_path / name).write_text("x\n")
+            tree.add(tmp_path / name, arcname=name)
+
+    assert hardening_runner._tree_files(archive) == ["a.py", "b.py", "(cut: 2 more files)"]
+
+
+def test_a_refused_model_call_is_logged_without_its_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lead agent falls back to fixed briefs on a refusal, so the status goes to the log."""
+    refused = SimpleNamespace(status=429, body=b'{"error": "key sk-123 is over quota"}')
+    runner, _opened, _closed = _session_runner(tmp_path, lambda *args: refused, monkeypatch)
+    try:
+        with caplog.at_level("WARNING", logger=hardening_runner.__name__):
+            text, _cost = runner._ask("openai/m", "attacker", "Write briefs.", None)
+    finally:
+        runner.close()
+
+    assert text is None
+    assert "attacker call got HTTP 429" in caplog.text
+    assert "sk-123" not in caplog.text
+
+
+def test_a_session_box_that_failed_to_open_is_not_opened_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second box would reuse the failed box's operation key, so later runs get the first error (SKY-682)."""
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent with one brief, and the session with two metric runs then a patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        if "tools" not in body:
+            return _reply('{"briefs": ["brief one"]}')
+        if len(body["messages"]) < 5:
+            return _reply(calls=_tool("run_metric", patch_diff="+x"))
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    opens: list[str] = []
+
+    def broken_open(archive: Path, fixes: tuple[str, ...], *, lane: str = "") -> Any:
+        """Fail like a box whose paid setup failed.
+
+        Args:
+            archive: The packed tree.
+            fixes: The fixes in it.
+            lane: The session that owns the box.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        opens.append(lane)
+        raise RuntimeError("setup broke")
+
+    runner.open_scorer = broken_open
+    try:
+        result = runner.attack(
+            round_index=1, view="black_box", model="openai/m", exploits_path=tmp_path, budget_usd=None, sessions=1
+        )
+    finally:
+        runner.close()
+
+    assert opens == ["r1s1"]
+    runs = [c for e in result.sessions[0].transcript for c in e.get("toolCalls") or [] if c["tool"] == "run_metric"]
+    assert [c["status"] for c in runs] == ["error", "error"]
+    assert len(result.candidates) == 1
+
+
+def test_a_runner_box_that_failed_to_open_is_not_opened_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The card scores of a round's claims open the base box once, even when it fails (SKY-682).
+
+    A second box would reuse the failed box's operation key, so its paid setup would run under the old hold.
+    """
+    runner, _opened, _closed = _session_runner(tmp_path, lambda *args: _reply("no json"), monkeypatch)
+    opens: list[tuple[str, ...]] = []
+
+    def broken_open(archive: Path, fixes: tuple[str, ...], *, lane: str = "") -> Any:
+        """Fail like a box whose paid setup failed.
+
+        Args:
+            archive: The packed tree.
+            fixes: The fixes in it.
+            lane: The session that owns the box.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        opens.append(fixes)
+        raise RuntimeError("setup broke")
+
+    runner.open_scorer = broken_open
+    claims = [
+        HardeningExploit(
+            id=f"e{i}",
+            kind="case",
+            label="exploit",
+            confidence=0.9,
+            reason="r",
+            unsure=False,
+            patch_diff=f"+{i}",
+            why_md="w",
+        )
+        for i in range(2)
+    ]
+    try:
+        scores = [_measure(runner, None)] + [_measure(runner, claim) for claim in claims]
+    finally:
+        runner.close()
+
+    assert scores == [None, None, None]
+    assert opens == [()]
+
+
+def test_attack_fails_the_round_when_every_session_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One failed session is fine, but a round where every session failed is an error."""
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent, and fail every session step.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The lead agent's response.
+
+        Raises:
+            ConnectionError: For each session step.
+        """
+        if "tools" in body:
+            raise ConnectionError("provider down")
+        return _reply("no json")
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    try:
+        with pytest.raises(AttackFailedError, match="Every attacker session failed") as raised:
+            runner.attack(
+                round_index=1, view="black_box", model="openai/m", exploits_path=tmp_path, budget_usd=None, sessions=2
+            )
+    finally:
+        runner.close()
+
+    assert len(raised.value.result.briefs) == 2
+    assert [s.status for s in raised.value.result.sessions] == ["failed", "failed"]
+
+
+@pytest.mark.parametrize("case", ["meter_stopped", "round_cap_spent"])
+def test_attack_marks_a_round_that_stopped_on_its_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A round whose sessions stopped before any write_patch says so, so the job is not called clean (SKY-682)."""
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent; a session step must not run.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The lead agent's response, or a patch.
+        """
+        if "tools" not in body:
+            return _reply('{"briefs": ["brief one"]}')
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch)
+    if case == "meter_stopped":
+        runner.meter.stopped = True  # type: ignore[misc]
+    try:
+        result = runner.attack(
+            round_index=1,
+            view="black_box",
+            model="openai/m",
+            exploits_path=tmp_path,
+            budget_usd=0.0 if case == "round_cap_spent" else None,
+            sessions=1,
+        )
+    finally:
+        runner.close()
+
+    assert result.stopped is True
+    assert result.candidates == []
+
+
+@pytest.mark.parametrize("deterministic", [True, False])
+def test_noise_check_repeats_only_a_non_deterministic_metric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deterministic: bool
+) -> None:
+    """A deterministic metric skips the repeats; any other metric scores the base solution NOISE_REPEATS times."""
+    answer = json.dumps({"deterministic": deterministic, "reason": "Because."})
+    runner, opened, _closed = _session_runner(tmp_path, lambda *args: _reply(answer), monkeypatch)
+    try:
+        noise, cost = runner.noise_check(model="openai/j", budget_usd=None)
+    finally:
+        runner.close()
+
+    assert noise.reason == "Because."
+    assert cost == 0.0
+    if deterministic:
+        assert (noise.skipped, noise.scores, noise.spread, opened) == (True, [], None, [])
+    else:
+        assert noise.skipped is False
+        assert noise.scores == [0.5] * hardening_runner.NOISE_REPEATS
+        assert noise.spread == 0.0
+
+
+def test_live_sessions_are_written_only_while_the_claim_holds(engine: Engine) -> None:
+    """The page polls the row; a pass that lost its claim must not write to it."""
+    job = _seed(engine, binding_id=None)
+    claimed = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert claimed is not None
+    live = [HardeningSession(index=1, brief="b", transcript=[{"role": "assistant", "content": "hi"}])]
+
+    assert store_live_sessions(engine, job.id, live, claim="pod-b:other") is False
+    assert not _row(engine, job.id).job.get("live_sessions")
+    assert store_live_sessions(engine, job.id, live, claim=claimed[4]) is True
+    stored = _row(engine, job.id).job["live_sessions"]
+    assert [(s["index"], s["transcript"][0]["content"]) for s in stored] == [(1, "hi")]
+
+
+def test_the_stored_result_clears_the_live_sessions(engine: Engine) -> None:
+    """Live sessions are only for a running round; the pass's result must not keep claim-time ones."""
+    job = _seed(engine, binding_id=None)
+    claimed = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert claimed is not None
+    result = claimed[2].model_copy(
+        update={"live_sessions": [HardeningSession(index=1, brief="b")], "status": "waiting_review"}
+    )
+
+    assert store_hardening_result(engine, job.id, result, claim=claimed[4], operation_id=None)
+    assert _row(engine, job.id).job["live_sessions"] == []
+
+
+def test_a_reclaim_clears_the_live_sessions_of_a_lapsed_pass(engine: Engine) -> None:
+    """A pass whose lease lapsed leaves its live sessions; the next claim must not show them as running (SKY-682)."""
+    job = _seed(engine, binding_id=None)
+    first = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert first is not None
+    assert store_live_sessions(engine, job.id, [HardeningSession(index=1, brief="b")], claim=first[4])
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, job.id)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        session.commit()
+
+    second = claim_hardening_job(engine, pod="pod-b", lease_seconds=60, place="cloud")
+    assert second is not None
+    assert second[2].live_sessions == []
+    assert _row(engine, job.id).job["live_sessions"] == []
+
+
+def test_a_trusted_tree_with_a_command_metric_entry_refuses_hardening(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attackers and fixes edit Python metric code, so a command ``[metric] entry`` stops the pass (SKY-738)."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.sh").write_text("exit 0\n")
+    (trusted / "ascent.toml").write_text(
+        'version = 1\n[run]\nentry = ["cat", "x"]\n[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/metric.sh"]\n'
+    )
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    with pytest.raises(ValueError, match="needs a Python metric"), opened:
+        pass
+
+
+def test_a_trusted_tree_with_a_user_box_image_refuses_hardening(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pass scores in Skynet's image, so a ``[metric] image`` stops it before any box opens (SKY-737)."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.py").write_text("def score(output, expected=None):\n    return 1.0\n")
+    (trusted / "ascent.toml").write_text(
+        'version = 1\n[run]\nentry = ["cat", "x"]\n[metric]\nfiles = ["eval"]\nentry = "eval/metric.py:score"\n'
+        f'image = "registry.example/metric@sha256:{"a" * 64}"\n'
+    )
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    with pytest.raises(ValueError, match="user image"), opened:
+        pass

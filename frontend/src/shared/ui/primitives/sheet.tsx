@@ -82,7 +82,7 @@ function SheetContent({
         {showCloseButton && (
           <SheetPrimitive.Close
             data-slot="sheet-close"
-            className="close-button absolute top-2 end-2 [--close-btn-size:44px] lg:top-4 lg:end-4 lg:[--close-btn-size:26px]"
+            className="close-button absolute top-4 end-4 [@media(any-pointer:coarse)]:top-2 [@media(any-pointer:coarse)]:end-2"
           >
             <X />
             <span className="sr-only">{msg("shared.dialog.close")}</span>

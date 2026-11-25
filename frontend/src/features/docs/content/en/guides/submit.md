@@ -81,7 +81,6 @@ The wizard lists only the optimizers that fit your task and inputs. **Auto** is 
 Set how long the run may keep trying, and how much it may spend:
 
 - **Max scorer runs** (Guided: **Max tries**): the most candidates that Skynet scores. Some optimizers need a minimum number.
-- **Stop at score** (Guided: **Stop early once the score reaches**): the run stops when a version reaches this score.
 - **Max iterations** (Guided: **Max rounds**): shown for optimizers that support it.
 - **Spending limit**: the most the run may spend. The default is $5, or the amount **Needed to start** if that is more. You can also select **No limit**.
 
@@ -91,15 +90,15 @@ The wizard does not let you continue if the limit or your balance is below the a
 
 ### Scorer
 
-Write `scorer.py`. It defines `score(repo_path, case)` and returns a score with feedback. The assistant can write it for you. Read [Metrics and scorers](/docs/concepts/scorers).
+Write `scorer.py`. It defines `score(repo_path, case, output=None)` and returns a score with feedback. It reads `output`, what the `[run]` entry returned for the case. The scorer does not run in the version folder and does not import code from the repository. The assistant can write it for you. Read [Metrics and scorers](/docs/concepts/scorers).
 
 The repository can have a `serve.py` file with `def serve(input)`. Skynet uses it to serve the best version after the run. Read [Read the results](/docs/guides/results).
 
 ### Secrets
 
-Add secrets, such as API keys that your code needs. Each secret reaches your code and your scorer as an environment variable with the same name. The coding agent cannot see them. Skynet hides their values in the logs.
+Add secrets, such as API keys that your code needs. Your code and your scorer get no run secrets as environment variables. A secret reaches a role only through a `[services.<name>]` table that the role lists in `[run] services` or `[metric] services`, or through a server in the role's `mcp` file. Write the secret in the table's `headers` as `${NAME}`. The coding agent cannot see them. Skynet hides their values in the logs.
 
-The repository's `optimize.toml` can set a `[run] entry`, the function or command that runs each version on one case, and its `timeout` in seconds. That code gets no secrets. If it calls an API, declare the API as a `[services.<name>]` table and add the name to `[run] services`. Write each secret in the table's `headers` as `${NAME}`. The code sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox and sends it only to the host of that service. If the secret does not allow that host, the run does not start.
+The repository's `ascent.toml` needs a `[run] entry` or a `[target.<name>]` stage. The `[run] entry` is the function or command that runs each version on one case, and `[run] timeout` sets its time limit in seconds. That code gets no secrets. If it calls an API, declare the API as a `[services.<name>]` table and add the name to `[run] services`. Write each secret in the table's `headers` as `${NAME}`. The code sends its requests to the URL in `ASCENT_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox and sends it only to the host of that service. If the secret does not allow that host, the run does not start.
 
 ### Check
 

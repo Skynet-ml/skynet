@@ -1450,7 +1450,7 @@ def test_tool_roots_never_open_the_home_or_a_folder_in_it(tmp_path: Path) -> Non
 
 
 # The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
-_HIDDEN = ["optimize.toml", "metric", ".optimize/exploits", "reference/answers.json", "data/cases.jsonl"]
+_HIDDEN = ["ascent.toml", "metric", ".optimize/exploits", "reference/answers.json", "data/cases.jsonl"]
 
 
 def test_claude_turns_deny_each_hidden_path_by_exact_name(tmp_path: Path) -> None:
@@ -1464,7 +1464,7 @@ def test_claude_turns_deny_each_hidden_path_by_exact_name(tmp_path: Path) -> Non
             assert f"{tool}(/{root}/{hidden})" in rules
             assert f"{tool}(/{root}/{hidden}/**)" in rules
     assert not any(rule.startswith("Bash(") for rule in rules)
-    assert "Bash(*optimize.toml*)" in host_agent.claude_hidden_rules(workspace, _HIDDEN, full=True)
+    assert "Bash(*ascent.toml*)" in host_agent.claude_hidden_rules(workspace, _HIDDEN, full=True)
     assert not any("**/*" in rule or rule.endswith("(/**)") for rule in rules)
 
     argv = host_cli_argv("claude", "workspace_only", "bin", workspace, "m", hidden_rules=rules)
@@ -1480,7 +1480,7 @@ def test_claude_permission_denials_become_refusals_with_tool_and_kind(tmp_path: 
         {
             "type": "result",
             "permission_denials": [
-                {"tool_name": "Read", "tool_input": {"file_path": f"{workspace}/optimize.toml"}},
+                {"tool_name": "Read", "tool_input": {"file_path": f"{workspace}/ascent.toml"}},
                 {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "metric"}},
                 {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com"}},
             ],
@@ -1506,9 +1506,9 @@ def test_claude_denials_in_another_case_or_through_home_become_refusals(
     workspace.mkdir()
     first, rest = os.path.realpath(workspace).lstrip("/").split("/", 1)
     paths = [
-        f"/{first.upper()}/{rest}/optimize.toml",
+        f"/{first.upper()}/{rest}/ascent.toml",
         f"{os.path.realpath(workspace)}/METRIC/score.py".upper(),
-        "~/../workspace/optimize.toml",
+        "~/../workspace/ascent.toml",
     ]
     denials = [{"tool_name": "Read", "tool_input": {"file_path": path}} for path in paths]
     denials.append({"tool_name": "Bash", "tool_input": {"command": "cat $HOME/../workspace/data/cases.jsonl"}})
@@ -1636,19 +1636,19 @@ def test_installed_claude_refuses_hidden_paths_in_any_case_and_through_home(
     home, workspace = turn / "home", turn / "workspace"
     home.mkdir(parents=True)
     workspace.mkdir()
-    (workspace / "optimize.toml").write_text("HIDDEN_SENTINEL\n", encoding="utf-8")
+    (workspace / "ascent.toml").write_text("HIDDEN_SENTINEL\n", encoding="utf-8")
     (workspace / "notes.txt").write_text("VISIBLE_SENTINEL\n", encoding="utf-8")
     real = os.path.realpath(workspace)
     first, rest = real.lstrip("/").split("/", 1)
     path = {
-        "root-case": f"/{first.upper()}/{rest}/optimize.toml",
-        "upper-case": f"{real}/optimize.toml".upper(),
-        "home": "~/../workspace/optimize.toml",
+        "root-case": f"/{first.upper()}/{rest}/ascent.toml",
+        "upper-case": f"{real}/ascent.toml".upper(),
+        "home": "~/../workspace/ascent.toml",
         "other-file": f"/{first.upper()}/{rest}/notes.txt",
     }[form]
     results: list[dict] = []
     server = _fake_anthropic({"name": "Read", "input": {"file_path": path}}, results)
-    rules = host_agent.claude_hidden_rules(workspace, ["optimize.toml"], full=True)
+    rules = host_agent.claude_hidden_rules(workspace, ["ascent.toml"], full=True)
     argv = host_cli_argv(
         "claude", "full_access", str(_CLAUDE), workspace, "claude-sonnet-4-5", CLAUDE_ARGS, None, rules
     )
@@ -1673,7 +1673,7 @@ def test_installed_claude_refuses_hidden_paths_in_any_case_and_through_home(
     assert bool(document.get("permission_denials")) is denied
     assert ("VISIBLE_SENTINEL" in content) is (not denied)
     expected = [{"tool": "Read", "kind": "config"}] if denied else []
-    assert host_agent.host_refusals("claude", completed.stdout, turn, workspace, ["optimize.toml"]) == expected
+    assert host_agent.host_refusals("claude", completed.stdout, turn, workspace, ["ascent.toml"]) == expected
 
 
 @pytest.mark.skipif(_CLAUDE is None, reason="claude is not installed")
@@ -1786,7 +1786,7 @@ def test_codex_turns_install_a_guard_hook_that_refuses_hidden_paths(tmp_path: Pa
     assert "cases" not in (turn / "guard" / "refusals.jsonl").read_text()
 
 
-@pytest.mark.parametrize("hidden", [(), ("optimize.toml",)])
+@pytest.mark.parametrize("hidden", [(), ("ascent.toml",)])
 def test_codex_turns_trust_the_guard_hook_only_when_paths_are_hidden(
     local: Settings, guest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hidden: tuple[str, ...]
 ) -> None:
@@ -1809,9 +1809,9 @@ def test_codex_turns_trust_the_guard_hook_only_when_paths_are_hidden(
 @pytest.mark.parametrize(
     ("permission", "hidden", "guarded"),
     [
-        ("full_access", ("optimize.toml",), True),
+        ("full_access", ("ascent.toml",), True),
         ("full_access", (), False),
-        ("workspace_only", ("optimize.toml",), False),
+        ("workspace_only", ("ascent.toml",), False),
     ],
 )
 def test_claude_turns_load_the_bash_guard_hook_only_with_bash_and_hidden_paths(

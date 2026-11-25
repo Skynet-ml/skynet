@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.server
 import json
 import logging
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -17,6 +20,7 @@ import urllib.parse
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -24,19 +28,26 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
+from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
+from core.api import repo_judge
 from core.billing.budgets import BudgetError, BudgetInsufficientError
 from core.billing.model_gateway import ModelGateway
+from core.billing.model_mailbox import ModelMailbox
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.tests.test_env_connectors import MAPS_KEY, _operations, _runtime
-from core.billing.tests.test_model_gateway_transport import gateway  # noqa: F401 - pytest fixture
+from core.billing.tests.test_model_gateway_transport import (
+    _OneCallSession,
+    gateway,  # noqa: F401 - pytest fixture
+)
 from core.billing.usage_tags import box_tag, usage_scope
 from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
+from core.sandbox.errors import SandboxTransientError, sandbox_api_error
 from core.storage.models import Base
 from core.storage.run_call_store import FAILURE_REASON_CAP_BYTES, SECRET_MASK, PostgresRunCallStore
 from core.worker.scoped_relay import CallRecorder
@@ -54,9 +65,8 @@ from ..repo_scorer import (
     RepoScorer,
     _scrub,
     _StageRelay,
-    fold_case_scores,
 )
-from ..repo_workspace import CandidateBox, RepoWorkspace
+from ..repo_workspace import WORK_DIR, CandidateBox, RepoBoxSource, RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
@@ -65,28 +75,49 @@ from ..rule_judge import (
     WATCH_EVERY_ACTIONS,
     RuleJudge,
 )
-from ..sandbox import CommandResult, LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
+from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_contract import SandboxSession
+from ..sandbox_scorer import ScorerGateway
+from ..scorer import normalize_score
 from ..service import run_blackbox_optimization
+from ..tree_sandbox import BoxSession
+from .mocks import FakeGateway
 from .test_repo_workspace import _archive, _patch
 
-# The metric box holds no repository file, so the [run] entry prints what
+# The metric box holds no repository file, so the [run] entry's output is what
 # the metric scores: the version's source, then the file setup built (SKY-398).
-SCORER_RUN = ("sh", "-c", "cat src/app.py; echo ---; cat built.txt")
+# It writes that output to ASCENT_OUTPUT, as every command entry does (SKY-757).
+SCORER_RUN = (
+    "python3",
+    "-c",
+    "import json, os; text = open('src/app.py').read() + '---\\n' + open('built.txt').read();"
+    " json.dump({'output': text}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
+)
+
+
+def _wrapped(command: str) -> tuple[str, ...]:
+    """Make a shell command a ``[run]`` entry with the documented wrapper line (SKY-757).
+
+    Args:
+        command: The shell command, whose printed text goes to the logs.
+
+    Returns:
+        A command entry whose output is ``{"exit_code": <the command's exit code>}``.
+    """
+    return ("sh", "-c", f'{command} > /dev/null; echo "{{\\"output\\": {{\\"exit_code\\": $?}}}}" > "$ASCENT_OUTPUT"')
+
 
 SCORER = """
+import json
 import os
 
 def score(repo_path, case=None, output=None):
-    source, built = output["stdout"].split("---\\n")
+    source, built = output.split("---\\n")
     value = int(source.split("=")[1])
     return {
         "score": value / 10,
-        "feedback": "value read",
-        "secret": os.environ.get("API_KEY"),
-        "built": built,
-        "case": case,
-        "cases": {
+        "feedback": json.dumps({"secret": os.environ.get("API_KEY"), "built": built, "case": case}),
+        "scores": {
             "small": {"score": value / 20, "feedback": "small ok"},
             "large": {"score": value / 5, "feedback": "large ok"},
         },
@@ -167,15 +198,102 @@ def test_scores_the_baseline_and_a_version(scored: tuple[RepoScorer, Path, Path]
     scorer, archive, root = scored
     baseline = scorer.score("")
     assert baseline["score"] == pytest.approx(0.1)
-    assert baseline["built"] == "x = 1\n"
+    assert json.loads(baseline["feedback"])["built"] == "x = 1\n"
     improved = scorer.score(_patch(root / "v1", archive, {"src/app.py": "x = 7\n"}), {"id": 3})
     assert improved["score"] == pytest.approx(0.7)
-    assert improved["case"] == {"id": 3}
-    assert "cases" not in improved
+    assert json.loads(improved["feedback"])["case"] == {"id": 3}
     assert improved["scores"] == {
         "small": {"score": pytest.approx(0.35), "feedback": "small ok"},
         "large": {"score": pytest.approx(1.4), "feedback": "large ok"},
     }
+
+
+def test_the_metric_runs_on_the_python_that_the_image_check_reported(tmp_path: Path) -> None:
+    """A ``[metric]`` user image scores with the trusted Python its ``ascent check --image`` gave (SKY-737)."""
+    marker = tmp_path / "checked-python-ran"
+    python = tmp_path / "image" / "python"
+    python.parent.mkdir()
+    python.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command="cat src/app.py > built.txt",
+            secrets={},
+            metric_image="metric@sha256:" + "b" * 64,
+            metric_python=str(python),
+        ),
+        SCORER,
+        timeout_seconds=60,
+        run_entry=SCORER_RUN,
+    )
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.1)
+    finally:
+        scorer.close()
+    assert marker.exists()
+
+
+def test_the_scorer_opens_its_candidate_and_metric_boxes_through_the_box_source(
+    scored: tuple[RepoScorer, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One score takes a candidate box and a separate metric box from the evaluation box source, both offline (SKY-718)."""
+    scorer, _, _ = scored
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+    acquire = RepoBoxSource.acquire
+
+    def recorded(self: RepoBoxSource, agent_id: str, grants: Any) -> Any:
+        """Record the role and grants, then open the box.
+
+        Args:
+            self: The box source.
+            agent_id: The box role.
+            grants: The role's grants.
+
+        Returns:
+            The open box.
+        """
+        calls.append((agent_id, tuple(grants)))
+        return acquire(self, agent_id, grants)
+
+    monkeypatch.setattr(RepoBoxSource, "acquire", recorded)
+
+    assert scorer.score("")["score"] == pytest.approx(0.1)
+    assert sorted(calls) == [("candidate", ()), ("metric", ())]
+
+
+def test_the_run_entry_and_the_metric_run_through_the_tree_sandbox_session(
+    scored: tuple[RepoScorer, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``[run]`` entry runs as root in the candidate box; the metric runs without root in its own box (SKY-785)."""
+    scorer, _, _ = scored
+    calls: list[tuple[str, bool, bool]] = []
+    run = BoxSession.run
+
+    def recorded(self: BoxSession, command: str, **options: Any) -> Any:
+        """Record the box's role marker, the root flag and the output sink, then run the command.
+
+        Args:
+            self: The session.
+            command: The command line.
+            **options: The run's options.
+
+        Returns:
+            The command's result.
+        """
+        role = "candidate" if "candidate" in command else "metric"
+        calls.append((role, options.get("sudo", False), options.get("on_output") is not None))
+        return run(self, command, **options)
+
+    monkeypatch.setattr(BoxSession, "run", recorded)
+
+    assert scorer.score("")["score"] == pytest.approx(0.1)
+    assert sorted(calls) == [("candidate", True, True), ("metric", False, True)]
 
 
 class _ParkLog:
@@ -285,7 +403,13 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
 
         monkeypatch.setattr(CandidateBox, "close", close_raises)
     if failure == "run_failed":
-        assert scorer.score("")[STATUS_KEY] == RUN_FAILED_STATUS
+        reply = scorer.score("")
+        assert reply[STATUS_KEY] == RUN_FAILED_STATUS
+        # SKY-751: the reply carries the failure text, so the feedback check accepts it.
+        assert normalize_score(reply, own_keys=True) == (
+            None,
+            {"feedback": "Run failed: boom", STATUS_KEY: RUN_FAILED_STATUS},
+        )
     else:
         with pytest.raises((BudgetReached, UsagePendingError)):
             scorer.score("")
@@ -296,7 +420,7 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
 def test_no_run_secret_reaches_the_scorer(scored: tuple[RepoScorer, Path, Path]) -> None:
     """The box env holds no run secret; listed services get keys only through the relay."""
     scorer, _, _ = scored
-    assert scorer.score("")["secret"] is None
+    assert json.loads(scorer.score("")["feedback"])["secret"] is None
 
 
 def test_versions_outside_the_editable_paths_are_refused(scored: tuple[RepoScorer, Path, Path]) -> None:
@@ -366,7 +490,7 @@ def _labels_judge(
         ),
         judge,
         timeout_seconds=60,
-        run_entry=("python3", "src/app.py"),
+        run_entry=_wrapped("python3 src/app.py"),
     )
     return scorer, archive
 
@@ -524,31 +648,6 @@ def test_dispatch_answers_the_guest(scored: tuple[RepoScorer, Path, Path]) -> No
         scorer.dispatch({"candidate": {"a": "b"}})
 
 
-@pytest.mark.parametrize(
-    ("side_info", "expected"),
-    [
-        ({"feedback": "f"}, {"feedback": "f"}),
-        (
-            {"feedback": "f", "cases": {"a": {"score": 1, "feedback": "x"}, "b": (0.5, "y")}},
-            {"feedback": "f", "scores": {"a": {"score": 1.0, "feedback": "x"}, "b": {"score": 0.5, "feedback": "y"}}},
-        ),
-    ],
-)
-def test_fold_case_scores(side_info: dict, expected: dict) -> None:
-    """Per-case scores are optional and become named scores, each with its feedback."""
-    assert fold_case_scores(side_info) == expected
-
-
-@pytest.mark.parametrize(
-    "cases",
-    [[1, 2], {"a": "high"}, {"a": {"score": float("nan"), "feedback": "x"}}, {"a": True}, {"a": 1.0}],
-)
-def test_fold_case_scores_reject_bad_shapes(cases: object) -> None:
-    """Per-case scores must map names to a finite score with its own feedback."""
-    with pytest.raises(RepoScoreError):
-        fold_case_scores({"cases": cases})
-
-
 @pytest.mark.parametrize("engine", ["autoresearch", "gepa"])
 def test_a_repository_run_needs_its_tree(engine: str) -> None:
     """Refuse a repository run the guest cannot carry out before any scoring starts."""
@@ -620,11 +719,11 @@ def _ruled(tmp_path: Path, hook: _StubJudge | None = None) -> tuple[RepoScorer, 
             protected_paths=["eval"],
         ),
         "def score(repo_path, case, output):\n"
-        "    value = int(output['stdout'].split('=')[1])\n"
+        "    value = int(output.split('=')[1])\n"
         "    return {'score': value / 10, 'feedback': 'value read'}\n",
         timeout_seconds=60,
         rule_judge=judge,
-        run_entry=("cat", "src/app.py"),
+        run_entry=("sh", "-c", 'printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"'),
     )
     return scorer, archive, events, judge
 
@@ -639,7 +738,7 @@ def test_a_blocked_version_gets_only_the_fixed_message(tmp_path: Path) -> None:
         assert events == [
             {
                 "kind": EVENT_BLOCK,
-                "rule": "optimize.toml [paths]",
+                "rule": "ascent.toml [paths]",
                 "reason": "'eval/labels.csv' is protected by the repository rules ([paths] protected).",
             }
         ]
@@ -730,13 +829,12 @@ def _leaky(tmp_path: Path, code: str, rule_judge: RuleJudge | None = None) -> Re
 
 
 def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> None:
-    """Extra keys, the box's paths and each case's extras never reach the agent (SKY-353)."""
+    """The box's paths never reach the agent, in the feedback or in a named score (SKY-353)."""
     scorer = _leaky(
         tmp_path,
         "import os\ndef score(repo_path):\n"
         "    return {'score': 0.5, 'feedback': 'read ' + os.path.join(repo_path, 'eval/metric.py'),"
-        " 'weights': {'accuracy': 0.3}, 'metric_source': open(os.path.join(repo_path, 'eval/metric.py')).read(),"
-        " 'cases': {'a': {'score': 1, 'feedback': 'at ' + repo_path, 'formula': 'w * x'}}}\n",
+        " 'scores': {'a': {'score': 1, 'feedback': 'at ' + repo_path}}}\n",
     )
     try:
         reply = scorer.dispatch({"candidate": ""})
@@ -747,6 +845,20 @@ def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> No
             "feedback": "read eval/metric.py",
             "scores": {"a": {"score": pytest.approx(1.0), "feedback": "at ."}},
         }
+    finally:
+        scorer.close()
+
+
+def test_for_proposer_gives_the_same_view_as_dispatch(tmp_path: Path) -> None:
+    """The public proposer view drops the box's paths, as dispatch does (SKY-682)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n    return {'score': 0.5, 'feedback': 'at ' + repo_path}\n",
+    )
+    try:
+        view = scorer.for_proposer(scorer.score(""))
+        assert view == {"score": pytest.approx(0.5), "feedback": "at ."}
+        assert view == json.loads(scorer.dispatch({"candidate": ""}).body)
     finally:
         scorer.close()
 
@@ -814,6 +926,65 @@ def test_a_score_that_is_not_a_number_gets_a_fixed_422(tmp_path: Path, score: An
         reply = scorer.dispatch({"candidate": ""})
         assert reply.status == 422
         assert reply.body.decode() == "The scorer returned a score that is not a number."
+    finally:
+        scorer.close()
+
+
+def test_a_metric_answer_with_cases_is_refused_with_the_key_that_replaced_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The older ``cases`` key is an error that names ``scores``, so the version has no score (SKY-769).
+
+    Args:
+        tmp_path: Scratch folder.
+        caplog: The test's log capture.
+    """
+    scorer = _leaky(
+        tmp_path,
+        "def score(repo_path):\n    return {'score': 1.0, 'cases': {'a': {'score': 1.0}}}\n",
+    )
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="valid form") as refused:
+            scorer.score("")
+        assert "unknown key `cases`. Use `scores`." in caplog.text
+        assert str(refused.value).endswith(runner.ANSWER_FORM)
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize(
+    "side_info",
+    [{"feedback": "ok", "status": "run_failed"}, {"feedback": "ok", "illegal_approach": True}],
+    ids=["status", "illegal_approach"],
+)
+def test_the_parent_refuses_a_metric_box_answer_with_a_key_the_answer_form_does_not_have(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, side_info: dict[str, Any]
+) -> None:
+    """The parent checks the metric box's answer again, so a forged key gives no score (SKY-769).
+
+    The runner checks the answer, so the code rewrites the output file after the runner writes it.
+
+    Args:
+        tmp_path: Scratch folder.
+        caplog: The test's log capture.
+        side_info: The forged side info.
+    """
+    forged = json.dumps({"score": 0.5, "side_info": side_info, "error": None})
+    scorer = _leaky(
+        tmp_path,
+        "import atexit, os, sys\n"
+        f"atexit.register(lambda: open(os.path.join(sys.argv[1], 'output.json'), 'w').write({forged!r}))\n"
+        "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+    )
+    try:
+        with (
+            caplog.at_level(logging.WARNING),
+            pytest.raises(RepoScoreError, match="does not have the valid form") as refused,
+        ):
+            scorer.score("")
+        key = next(key for key in side_info if key != "feedback")
+        assert f"unknown key `{key}`" in caplog.text
+        assert str(refused.value).endswith(runner.ANSWER_FORM)
     finally:
         scorer.close()
 
@@ -914,7 +1085,13 @@ STAGE_TREE = {
 STAGES = {
     "double": TargetStage(entry="src/stages.py:double", timeout=30),
     "shout": TargetStage(
-        entry=("python3", "-c", "import json, sys; print(json.dumps(json.load(sys.stdin).upper()))"), timeout=30
+        entry=(
+            "python3",
+            "-c",
+            "import json, os; value = json.load(open(os.environ['ASCENT_INPUT']))['input'];"
+            " json.dump({'output': value.upper()}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
+        ),
+        timeout=30,
     ),
     "broken": TargetStage(entry="src/stages.py:broken", timeout=30),
     "slow": TargetStage(entry="src/stages.py:slow", timeout=1),
@@ -1023,7 +1200,7 @@ def _stage_scorer(
 def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
     """The scorer calls two stages; each stage box runs the scored version, and every box closes."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    doubled = call('double', {'v': 3})\n"
         "    return {'score': doubled['v'] / 10, 'feedback': call('shout', 'hi')}\n"
@@ -1047,7 +1224,7 @@ def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
 
 def test_the_guest_waits_as_long_as_a_stage_box_may_live(tmp_path: Path) -> None:
     """The guest's wait covers the stage layout and the scorer, so it never stops before the parent answers."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 1})['v'] / 10, 'ok'\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
     try:
@@ -1060,7 +1237,7 @@ def test_the_guest_waits_as_long_as_a_stage_box_may_live(tmp_path: Path) -> None
 
 def test_one_stage_is_enough(tmp_path: Path) -> None:
     """A run with one stage opens one box for each evaluation."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 1})['v'] / 10, 'ok'\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
     try:
@@ -1081,13 +1258,13 @@ def test_one_stage_is_enough(tmp_path: Path) -> None:
 def test_stage_failures_reach_the_scorer_as_stage_errors(tmp_path: Path, name: str, expected: str) -> None:
     """A failed stage, a stage past its timeout and an unknown name each raise ``StageError``."""
     code = (
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         f"        call({name!r}, 3)\n"
         "    except StageError as error:\n"
-        "        return 0.0, str(error)\n"
-        "    return 1.0, 'no error'\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
     )
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime)
@@ -1102,14 +1279,14 @@ def test_each_stage_call_is_recorded_with_its_status_and_no_secret(tmp_path: Pat
     """A good and a failed stage call each write one ``stage`` run call (E28)."""
     code = (
         "import os\n"
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    for name in ('double', 'broken'):\n"
         "        try:\n"
         "            call(name, {'v': 2, 'key': os.environ.get('JUDGE_KEY', 'stage-secret-value')})\n"
         "        except StageError:\n"
         "            pass\n"
-        "    return 1.0, 'ok'\n"
+        "    return {'score': 1.0, 'feedback': 'ok'}\n"
     )
     sink = _CallSink()
     scorer, _ = _stage_scorer(
@@ -1234,13 +1411,13 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
         entry=("python3", "-c", f"import sys; sys.stderr.write({secret!r} + 'B' * 490); sys.exit(1)"), timeout=30
     )
     code = (
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         "        call('failing', 1)\n"
         "    except StageError as error:\n"
-        "        return 0.0, str(error)\n"
-        "    return 1.0, 'no error'\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
     )
     sink = _CallSink()
     scorer, _ = _stage_scorer(
@@ -1260,6 +1437,158 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
     for text in (call["failure_reason"], call["response"], feedback):
         assert "0123456789" not in text
         assert "[secret]" in text
+
+
+def test_a_failed_command_stage_gives_the_metric_its_cause_with_the_secret_masked(tmp_path: Path) -> None:
+    """A command stage that echoes a secret to stdout and stderr and exits 2 reaches the metric as ``Stage 'x' failed: <cause>`` (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"echo 'shown {secret}'; echo 'leaked {secret}' >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "stdout: shown [secret]" in feedback
+    assert "stderr: leaked [secret]" in feedback
+    assert secret not in feedback
+
+
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"printf '{secret}%0791d\\n' 0 >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: " in feedback
+    assert "9876" not in feedback
+
+
+_LONG_SECRET = "tok-" + "".join(f"{i:03d}" for i in range(40))
+# 60 copies pass the box's 4,000-character bound, and 4,000 is no whole number
+# of copies, so the box's cut splits one copy (SKY-757).
+_REPEAT_SECRET = f"for i in $(seq 60); do printf '%s' '{_LONG_SECRET}' >&2; done"
+
+
+def _no_part_of_the_long_secret(text: str) -> bool:
+    """Say whether no 8-character piece of ``_LONG_SECRET`` is in the text.
+
+    Args:
+        text: The feedback to check.
+
+    Returns:
+        ``True`` when the text holds no part of the secret.
+    """
+    return not any(_LONG_SECRET[i : i + 8] in text for i in range(len(_LONG_SECRET) - 7))
+
+
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut before it masks the log (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", f"{_REPEAT_SECRET}; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": _LONG_SECRET}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: [secret]" in feedback
+    assert _no_part_of_the_long_secret(feedback)
+
+
+# Each script writes an output file whose OpenAscent cause quotes a secret in a
+# form the mask misses: a head cut of a number, or a key as a repr (SKY-757).
+_QUOTED_SECRETS = [
+    pytest.param(
+        "4111222233334444",
+        'printf \'{"output": %s%se400}\' "$(printf \'1%.0s\' $(seq 30))" 4111222233334444 > "$ASCENT_OUTPUT"',
+        ("4111222233", "22223333", "33334444"),
+        id="number",
+    ),
+    pytest.param(
+        "ab\\cd\\efgh",
+        'printf \'%s\' \'{"ab\\\\cd\\\\efgh": 1, "ab\\\\cd\\\\efgh": 2}\' > "$ASCENT_OUTPUT"',
+        ("efgh", "\\cd"),
+        id="repr-key",
+    ),
+]
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_a_stage_error(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A stage whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", script), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": secret}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert f"Stage 'failing' failed: {runner.INVALID_JSON_CAUSE[:40]}" in feedback
+    assert not [piece for piece in pieces if piece in feedback]
+
+
+def test_a_command_stage_runs_on_the_base_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command stage's runner starts with the base python3, not the one [setup] put first on PATH (SKY-757)."""
+    marker = tmp_path / "base-python-ran"
+    base = tmp_path / "base" / "python3"
+    base.parent.mkdir()
+    base.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    base.chmod(0o755)
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(base))
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': call('shout', 'hi')}\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"shout": STAGES["shout"]})
+    try:
+        assert scorer.score("")["feedback"] == "HI"
+    finally:
+        scorer.close()
+    assert marker.exists()
 
 
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1323,7 +1652,9 @@ def test_a_frame_for_an_unknown_stage_is_recorded_as_refused() -> None:
 def test_a_box_that_fails_to_open_leaves_none_open(tmp_path: Path) -> None:
     """When one stage box cannot open, the open ones close and the version gets no score."""
     runtime = RecordingRuntime(fail_on="shout")
-    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
     try:
         with pytest.raises(RepoScoreError, match="stage boxes could not open"):
             scorer.score("")
@@ -1333,10 +1664,86 @@ def test_a_box_that_fails_to_open_leaves_none_open(tmp_path: Path) -> None:
     assert runtime.closed == len(runtime.specs)
 
 
+def _api_error(status: int) -> SandboxApiError:
+    """Build the error the Vercel SDK raises for an HTTP error answer.
+
+    Args:
+        status: The HTTP status.
+
+    Returns:
+        The SDK error.
+    """
+    return SandboxApiError(httpx.Response(status), f"HTTP {status}: provider text")
+
+
+@pytest.mark.parametrize(
+    "error", [_api_error(429), _api_error(503), SandboxTransientError("busy")], ids=["429", "503", "transient"]
+)
+def test_a_temporary_provider_error_on_a_stage_open_stays_raw(tmp_path: Path, error: Exception) -> None:
+    """In judge use, a stage box open that the provider refuses for now raises the raw error, and no box stays open.
+
+    Args:
+        tmp_path: Scratch folder.
+        error: The temporary provider error.
+    """
+    runtime = RecordingRuntime(fail_on="shout", error=error)
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
+    scorer.raw_provider_errors = True
+    try:
+        with pytest.raises(type(error)) as raised:
+            scorer.dispatch({"candidate": "", "case": None})
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_a_lasting_provider_error_on_a_stage_open_gets_no_score(tmp_path: Path) -> None:
+    """A stage box open that the provider refuses for good still fails the version with the fixed message.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    runtime = RecordingRuntime(fail_on="shout", error=_api_error(400))
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
+    try:
+        with pytest.raises(RepoScoreError, match="stage boxes could not open"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+
+def test_a_temporary_stage_open_error_reaches_the_judge_as_temporary(tmp_path: Path) -> None:
+    """The judge's real score path gets the raw provider error, so the judge stores a temporary failure.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    error = _api_error(429)
+    runtime = RecordingRuntime(fail_on="shout", error=error)
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
+    try:
+        with pytest.raises(SandboxApiError) as raised:
+            repo_judge._score(SimpleNamespace(scorers=[scorer]), "", [], label="candidate")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert repo_judge._temporary(raised.value)
+    assert scorer.raw_provider_errors is True
+
+
 def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
     """A stage box the budget refuses stops the run as budget reached, with no box left open."""
     runtime = RecordingRuntime(fail_on="shout", error=BudgetReached("spent"))
-    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
     try:
         with pytest.raises(BudgetReached):
             scorer.score("")
@@ -1348,10 +1755,10 @@ def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
 def test_a_partial_line_before_a_call_does_not_hide_the_frame(tmp_path: Path) -> None:
     """A scorer that prints without a newline before ``call`` still gets the stage's answer."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    print('x', end='', flush=True)\n"
-        "    return call('double', {'v': 2})['v'] / 10, 'ok'\n"
+        "    return {'score': call('double', {'v': 2})['v'] / 10, 'feedback': 'ok'}\n"
     )
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
@@ -1367,7 +1774,7 @@ def test_calls_reach_their_stage_while_another_thread_prints(tmp_path: Path) -> 
     """A thread that keeps printing partial lines never makes a call wait for the scorer timeout."""
     code = (
         "import threading\n"
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    stop = threading.Event()\n"
         "    def chatter():\n"
@@ -1380,7 +1787,7 @@ def test_calls_reach_their_stage_while_another_thread_prints(tmp_path: Path) -> 
         "    finally:\n"
         "        stop.set()\n"
         "        thread.join()\n"
-        "    return total / 100, 'ok'\n"
+        "    return {'score': total / 100, 'feedback': 'ok'}\n"
     )
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
@@ -1396,11 +1803,11 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
     """Four calls to one stage overlap, each in its own process, up to ``max_concurrency``."""
     code = (
         "from concurrent.futures import ThreadPoolExecutor\n"
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    with ThreadPoolExecutor(4) as pool:\n"
         "        values = list(pool.map(lambda value: call('slow', value), [1.5] * 4))\n"
-        "    return sum(values), 'ok'\n"
+        "    return {'score': sum(values), 'feedback': 'ok'}\n"
     )
     stages = {"slow": TargetStage(entry="src/stages.py:slow", timeout=30)}
     runtime = RecordingRuntime()
@@ -1419,7 +1826,7 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
 
 def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(tmp_path: Path) -> None:
     """Each answer write moves every file's change time, yet a clean version keeps its score."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v'] / 10, 'ok'\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
     scorer, _ = _stage_scorer(
         tmp_path,
         code,
@@ -1437,10 +1844,10 @@ def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(
 def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_path: Path) -> None:
     """A version that changes a protected file gets no score, named once, before the metric calls a stage."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    total = sum(call('double', {'v': v})['v'] for v in (1, 2, 3))\n"
-        "    return total / 100, 'ok'\n"
+        "    return {'score': total / 100, 'feedback': 'ok'}\n"
     )
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(
@@ -1450,7 +1857,7 @@ def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_pat
         {"double": STAGES["double"]},
         scorer_runtime=_WriteTouchingRuntime(),
         protected_paths=("judge",),
-        run_entry=("sh", "-c", "echo 9 > judge/labels.csv"),
+        run_entry=_wrapped("echo 9 > judge/labels.csv"),
     )
     try:
         with pytest.raises(RepoScoreError, match=r"'judge/labels\.csv' is protected") as caught:
@@ -1461,54 +1868,44 @@ def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_pat
     assert runtime.sessions == []
 
 
-class _AnswerCheckFailingSession(_WriteTouchingSession):
-    """Local box whose joined answer check fails, as when the box stops answering."""
+def test_a_metric_stage_answer_skips_the_protected_file_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The metric box holds no repository file, so its stage answers run no protected-file check (SKY-398).
 
-    def run(self, command: str, **options: Any) -> Any:
-        """Fail the answer check and run every other command.
+    ``CandidateBox.answer`` runs every check and write of a relay answer in
+    the candidate box, so the test watches it and not the command text.
+    """
+    answered: list[str] = []
+    real = CandidateBox.answer
 
-        Args:
-            command: Shell command line.
-            **options: Run options.
-
-        Returns:
-            A failed result for the answer check, else the local result.
-        """
-        if command.startswith("export APP_ANSWER_PATH"):
-            return CommandResult(exit_code=1)
-        return self._session.run(command, **options)
-
-
-class _AnswerCheckFailingRuntime(LocalSubprocessRuntime):
-    """Local runtime whose boxes fail the answer check."""
-
-    def open(self, spec: SandboxSpec) -> Any:
-        """Open a local box wrapped so the answer check fails.
+    def answer(self: CandidateBox, path: str, text: str) -> tuple[str, ...] | None:
+        """Record a candidate-box answer, then give it.
 
         Args:
-            spec: The box's spec.
+            self: The candidate box.
+            path: Where the answer goes.
+            text: The answer.
 
         Returns:
-            The wrapped box.
+            The real answer's result.
         """
-        return _AnswerCheckFailingSession(super().open(spec))
+        answered.append(path)
+        return real(self, path, text)
 
-
-def test_a_metric_stage_answer_skips_the_protected_file_check(tmp_path: Path) -> None:
-    """The metric box holds no repository file, so its stage answers run no protected-file check (SKY-398)."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v'] / 10, 'ok'\n"
+    monkeypatch.setattr(CandidateBox, "answer", answer)
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
     scorer, _ = _stage_scorer(
         tmp_path,
         code,
         RecordingRuntime(),
         {"double": STAGES["double"]},
-        scorer_runtime=_AnswerCheckFailingRuntime(),
+        scorer_runtime=_WriteTouchingRuntime(),
         protected_paths=("judge",),
     )
     try:
         assert scorer.score("")["score"] == pytest.approx(0.6)
     finally:
         scorer.close()
+    assert answered == []
 
 
 class _LayoutFailingRuntime(RecordingRuntime):
@@ -1543,12 +1940,220 @@ class _LayoutFailingRuntime(RecordingRuntime):
 def test_a_layout_failure_gets_no_score_and_closes_every_box(tmp_path: Path) -> None:
     """A stage box that cannot take the tree fails the version with a fixed message, not a server error."""
     runtime = _LayoutFailingRuntime()
-    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
     try:
         with pytest.raises(RepoScoreError, match="could not lay out the version"):
             scorer.score("")
     finally:
         scorer.close()
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_a_temporary_provider_error_in_the_layout_stays_raw_and_closes_every_box(tmp_path: Path) -> None:
+    """In judge use, a stage box write that the provider refuses for now raises the raw error, and every box closes.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    error = _api_error(503)
+
+    class _BusyRuntime(_LayoutFailingRuntime):
+        """Open stage boxes whose file writes get a 503 from the provider."""
+
+        def open(self, spec: SandboxSpec) -> SandboxSession:
+            """Open one local box whose writes raise the 503.
+
+            Args:
+                spec: The stage box's spec.
+
+            Returns:
+                The local session.
+            """
+            session = super().open(spec)
+
+            def refuse(files: Mapping[str, str]) -> None:
+                """Fail every write with the provider's 503.
+
+                Args:
+                    files: The files the layout tried to write.
+
+                Raises:
+                    SandboxApiError: Always.
+                """
+                raise error
+
+            session.write_files = refuse  # type: ignore[method-assign]
+            return session
+
+    runtime = _BusyRuntime()
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
+    scorer.raw_provider_errors = True
+    try:
+        with pytest.raises(SandboxApiError) as raised:
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert runtime.specs
+    assert runtime.closed == len(runtime.specs)
+
+
+class _WriteFailingRuntime(RecordingRuntime):
+    """Open stage boxes whose file writes fail as the Vercel SDK fails them."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Set the error every write raises.
+
+        Args:
+            error: The write error.
+        """
+        super().__init__()
+        self._write_error = error
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Open one local box whose writes raise the SDK write error.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session.
+        """
+        session = super().open(spec)
+
+        def refuse(files: Mapping[str, str]) -> None:
+            """Fail every write.
+
+            Args:
+                files: The files the layout tried to write.
+
+            Raises:
+                SandboxFilesystemWriteError: Always.
+            """
+            raise self._write_error
+
+        session.write_files = refuse  # type: ignore[method-assign]
+        return session
+
+
+def _write_error(status: int) -> tuple[SandboxApiError, SandboxFilesystemWriteError]:
+    """Build the SDK's file write error over an HTTP error answer, chained as the SDK chains it.
+
+    Args:
+        status: The HTTP status.
+
+    Returns:
+        The API error and the write error that wraps it.
+    """
+    api = _api_error(status)
+    try:
+        raise SandboxFilesystemWriteError(paths=("a",), cwd="/", cause=api) from api
+    except SandboxFilesystemWriteError as error:
+        return api, error
+
+
+@pytest.mark.parametrize(("status", "temporary"), [(429, True), (503, True), (400, False)])
+def test_a_stage_write_error_keeps_its_api_status_through_the_judge_score(
+    tmp_path: Path, status: int, temporary: bool
+) -> None:
+    """The judge's real score path keeps the API error under an SDK write error, so a 429 or 5xx is temporary.
+
+    Args:
+        tmp_path: Scratch folder.
+        status: The HTTP status of the write.
+        temporary: Whether the judge must treat the error as temporary.
+    """
+    api, error = _write_error(status)
+    runtime = _WriteFailingRuntime(error)
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
+    try:
+        with pytest.raises(BaseException) as raised:
+            repo_judge._score(SimpleNamespace(scorers=[scorer]), "", [], label="candidate")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    assert runtime.closed == len(runtime.specs)
+    if temporary:
+        assert raised.value is error
+        assert sandbox_api_error(raised.value) is api
+    else:
+        assert isinstance(raised.value, ServiceError)
+        assert "could not lay out the version" in str(raised.value)
+    assert repo_judge._temporary(raised.value) is temporary
+
+
+_STAGE_FAILURES = {
+    "open": "The stage boxes could not open, so the version has no score.",
+    "layout": "A stage box could not lay out the version, so it has no score.",
+}
+
+
+def _temporary_stage_scorer(tmp_path: Path, where: str, status: int) -> tuple[RepoScorer, RecordingRuntime]:
+    """Open a scorer whose stage box open or layout gets a temporary sandbox API error.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: ``open`` or ``layout``, the step that fails.
+        status: The HTTP status, 429 or 5xx.
+
+    Returns:
+        The scorer, with the default flag, and its stage runtime.
+    """
+    error = _api_error(status)
+    runtime = RecordingRuntime(fail_on="shout", error=error) if where == "open" else _WriteFailingRuntime(error)
+    scorer, _ = _stage_scorer(
+        tmp_path, "def score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': 'ran'}\n", runtime
+    )
+    return scorer, runtime
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("where", ["open", "layout"])
+def test_a_temporary_stage_error_in_a_run_answers_the_guest_and_the_engine_command_ends(
+    tmp_path: Path, where: str, status: int
+) -> None:
+    """In a run, a temporary stage box error gives the guest the 422 of the base, and the mailbox does not raise.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: The step that fails.
+        status: The HTTP status.
+    """
+    scorer, runtime = _temporary_stage_scorer(tmp_path, where, status)
+    body = base64.b64encode(json.dumps({"candidate": "", "case": None}).encode()).decode()
+    session = _OneCallSession({"id": "e" * 32, "path": "/v1/_evaluator", "body": body, "headers": {}})
+    try:
+        ModelMailbox(lambda _t, _p, b, _h: scorer.dispatch(b), concurrency=1).run(session, "engine")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    answer = session.answer()
+    assert answer["status"] == 422
+    assert base64.b64decode(answer["body"]).decode() == _STAGE_FAILURES[where]
+    assert runtime.closed == len(runtime.specs)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("where", ["open", "layout"])
+def test_a_temporary_stage_error_with_the_default_flag_gets_no_score(tmp_path: Path, where: str, status: int) -> None:
+    """With the default flag, ``dispatch`` answers a temporary stage box error with the 422 of the base.
+
+    Args:
+        tmp_path: Scratch folder.
+        where: The step that fails.
+        status: The HTTP status.
+    """
+    scorer, runtime = _temporary_stage_scorer(tmp_path, where, status)
+    try:
+        reply = scorer.dispatch({"candidate": "", "case": None})
+    finally:
+        scorer.close()
+    assert scorer.raw_provider_errors is False
+    assert (reply.status, reply.body.decode()) == (422, _STAGE_FAILURES[where])
     assert runtime.closed == len(runtime.specs)
 
 
@@ -1616,6 +2221,94 @@ def test_an_answer_whose_check_fails_is_not_counted_as_a_protected_change() -> N
     relay.close()
     assert relay.unchecked
     assert relay.changes == []
+
+
+class _RaisingWorkspace(_Workspace):
+    """A fake candidate box whose answer raises, as a sandbox API 429 on its check or write does."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Keep the error.
+
+        Args:
+            error: What each answer raises.
+        """
+        super().__init__()
+        self.error = error
+
+    def answer(self, path: str, text: str) -> tuple[str, ...] | None:
+        """Fail the answer.
+
+        Args:
+            path: Where the answer goes.
+            text: The answer.
+
+        Raises:
+            BaseException: Always, the stored error.
+        """
+        raise self.error
+
+
+class _RefusingBox:
+    """A fake metric box whose every file write raises one error."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Keep the error.
+
+        Args:
+            error: What each write raises.
+        """
+        self.error = error
+
+    def write_files(self, files: Mapping[str, str]) -> None:
+        """Fail the write.
+
+        Args:
+            files: The files to write.
+
+        Raises:
+            BaseException: Always, the stored error.
+        """
+        raise self.error
+
+
+def test_a_raised_candidate_answer_marks_the_relay_and_keeps_the_first_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An answer that raises is not lost on the pool thread: the relay keeps the first error and logs only its type.
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    _, first = _write_error(429)
+    workspace = _RaisingWorkspace(first)
+    relay = _relay(workspace)
+    with caplog.at_level(logging.WARNING):
+        assert relay._answer("a" * 32, {"output": 1}) is False
+        workspace.error = _api_error(404)
+        assert relay._answer("b" * 32, {"output": 2}) is False
+    relay.close()
+    assert relay.unchecked
+    assert relay.failure is first
+    assert relay.changes == []
+    assert "SandboxFilesystemWriteError" in caplog.text
+    assert "provider text" not in caplog.text
+
+
+def test_a_raised_metric_box_answer_marks_the_relay_and_keeps_the_error() -> None:
+    """A metric box answer write that raises marks the relay unchecked and keeps the error for the score."""
+    _, error = _write_error(503)
+    relay = _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={},
+        box=_RefusingBox(error),  # type: ignore[arg-type]
+    )
+    assert relay._answer("a" * 32, {"output": 1}) is False
+    relay.close()
+    assert relay.unchecked
+    assert relay.failure is error
 
 
 def test_the_relay_finds_a_frame_that_does_not_start_its_line() -> None:
@@ -1694,7 +2387,7 @@ import urllib.request
 def score(repo_path, case=None):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request(
-        os.environ["SKYNET_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
+        os.environ["ASCENT_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
         data=b'{"text": "hi"}',
         headers={"Content-Type": "application/json", "Authorization": "Bearer guessed"},
         method="POST",
@@ -1712,7 +2405,7 @@ def score(repo_path, case=None):
         "key_name_in_env": "JUDGE_KEY" in os.environ,
         "other_secret": os.environ.get("OTHER_KEY") == "other-value",
     }
-    return answer["grade"] / 10, json.dumps(seen, sort_keys=True)
+    return {"score": answer["grade"] / 10, "feedback": json.dumps(seen, sort_keys=True)}
 """
 
 
@@ -1723,6 +2416,8 @@ def _service_scorer(
     run_entry: str | None = None,
     code: str = SERVICE_SCORER,
     recorder: CallRecorder | None = None,
+    timeout: float = 60,
+    run_timeout: float = 60.0,
 ) -> RepoScorer:
     """Open a scorer whose run declares one url service with a key.
 
@@ -1733,6 +2428,8 @@ def _service_scorer(
         run_entry: The ``[run]`` entry, if any.
         code: The metric's source.
         recorder: Writes each relayed call into the run record, if given.
+        timeout: The scorer's limit in seconds.
+        run_timeout: The ``[run]`` call's limit in seconds.
 
     Returns:
         The scorer.
@@ -1749,10 +2446,11 @@ def _service_scorer(
             secrets={"JUDGE_KEY": "judge-secret-value", "OTHER_KEY": "other-value"},
         ),
         code,
-        timeout_seconds=60,
+        timeout_seconds=timeout,
         services={"judge-api": ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{port}/v1/")},
         service_roles=roles,
         run_entry=run_entry,
+        run_timeout=run_timeout,
         secret_hosts={"JUDGE_KEY": "judge.example.test"},
         secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
         recorder=recorder,
@@ -1800,7 +2498,7 @@ import urllib.request
 
 
 def run(value):
-    url = os.environ.get("SKYNET_SERVICE_JUDGE_API_URL")
+    url = os.environ.get("ASCENT_SERVICE_JUDGE_API_URL")
     seen = {
         "key_in_env": any(v in ("judge-secret-value", "other-value") for v in os.environ.values()),
         "service_url": url is not None,
@@ -1817,7 +2515,7 @@ _OUTPUT_SCORER = """
 import json
 
 def score(repo_path, case, output):
-    return 1.0, json.dumps(output, sort_keys=True)
+    return {"score": 1.0, "feedback": json.dumps(output, sort_keys=True)}
 """
 
 
@@ -1860,6 +2558,268 @@ def test_a_run_role_reaches_its_listed_service_through_the_relay(
     assert json.loads(result["feedback"]) == {"grade": 7, "key_in_env": False, "service_url": True}
     [request] = upstream.requests
     assert request["headers"]["Authorization"] == "Bearer judge-secret-value"
+
+
+def _refuse_answer_writes(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Make every relay answer file write in a local box raise the error; other writes go through.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        error: The write error.
+    """
+    write = LocalSubprocessSession.write_files
+
+    def refuse(self: LocalSubprocessSession, files: Mapping[str, Any], *args: Any, **kwargs: Any) -> None:
+        """Fail only the relay answer files.
+
+        Args:
+            self: The session.
+            files: The files to write.
+            *args: Passed through.
+            **kwargs: Passed through.
+
+        Raises:
+            BaseException: For a relay answer file.
+        """
+        if any("/stages/" in path for path in files):
+            raise error
+        write(self, files, *args, **kwargs)
+
+    monkeypatch.setattr(LocalSubprocessSession, "write_files", refuse)
+
+
+def _refuse_candidate_answers(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Make ``CandidateBox.answer`` raise, as it does when its protected-file check gets a sandbox API error.
+
+    Args:
+        monkeypatch: Pytest patcher.
+        error: The error.
+    """
+
+    def refuse(self: CandidateBox, path: str, text: str) -> tuple[str, ...] | None:
+        """Fail the answer.
+
+        Args:
+            self: The candidate box.
+            path: Where the answer goes.
+            text: The answer.
+
+        Raises:
+            BaseException: Always.
+        """
+        raise error
+
+    monkeypatch.setattr(CandidateBox, "answer", refuse)
+
+
+def _score_or_error(scorer: RepoScorer, case: Any = None) -> Any:
+    """Score the version once, then close the scorer.
+
+    Args:
+        scorer: The scorer.
+        case: The case.
+
+    Returns:
+        The result, or the error the score raised.
+    """
+    try:
+        return scorer.score("", case)
+    except Exception as error:
+        return error
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize(("judge", "status"), [(False, 429), (True, 404)], ids=["run-429", "judge-404"])
+def test_a_lost_metric_answer_names_the_answer_not_the_timeout(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, judge: bool, status: int
+) -> None:
+    """A metric answer that never reaches the box fails the version with the answer message, not a timeout.
+
+    In a run even a 429 gives this fixed no-score error; in judge use a lasting 404 gives it too.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+        status: The HTTP status of the answer write.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    _refuse_answer_writes(monkeypatch, _write_error(status)[1])
+    scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)}, timeout=6)
+    scorer.raw_provider_errors = judge
+    outcome = _score_or_error(scorer)
+    assert isinstance(outcome, RepoScoreError), outcome
+    assert str(outcome) == "A stage answer could not be delivered, so the version has no score."
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_a_raised_candidate_answer_gets_no_score_not_a_false_zero(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """A candidate answer whose check raises a 429 never scores 0.0 as a failed run.
+
+    In a run the version gets the fixed no-score error; in judge use the raw 429 leaves the scorer.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    error = _api_error(429)
+    _refuse_candidate_answers(monkeypatch, error)
+    scorer = _service_scorer(
+        tmp_path,
+        upstream.port,
+        {"run": ("judge-api",), "metric": ()},
+        run_entry="src/cand.py:run",
+        code=_OUTPUT_SCORER,
+        run_timeout=4,
+    )
+    scorer.raw_provider_errors = judge
+    outcome = _score_or_error(scorer, {"input": 1})
+    if judge:
+        assert outcome is error
+    else:
+        assert isinstance(outcome, RepoScoreError), outcome
+        assert str(outcome) == "A relay answer could not be checked or delivered, so the version has no score."
+
+
+def test_a_temporary_unwatched_candidate_answer_write_stays_raw_in_judge_use(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In judge use, a 429 on a candidate answer file write leaves the scorer raw, not as a lasting no-score error.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    _, error = _write_error(429)
+    _refuse_answer_writes(monkeypatch, error)
+    scorer = _service_scorer(
+        tmp_path,
+        upstream.port,
+        {"run": ("judge-api",), "metric": ()},
+        run_entry="src/cand.py:run",
+        code=_OUTPUT_SCORER,
+        run_timeout=4,
+    )
+    scorer.raw_provider_errors = True
+    assert _score_or_error(scorer, {"input": 1}) is error
+
+
+def _stop_every_call(*_: Any, **__: Any) -> bytes:
+    """Raise the budget stop as the metered relay does.
+
+    Raises:
+        BudgetReached: Always.
+    """
+    raise BudgetReached("spent")
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_a_lost_budget_stop_answer_still_stops_the_evaluation(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, role: str, judge: bool
+) -> None:
+    """A 429 on the answer that carries a budget stop never hides the stop behind a no-score or raw error.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+        role: The role whose service call hits the stop.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    monkeypatch.setattr(repo_scorer, "relay_request", _stop_every_call)
+    if role == "run":
+        _refuse_candidate_answers(monkeypatch, _api_error(429))
+        scorer = _service_scorer(
+            tmp_path,
+            upstream.port,
+            {"run": ("judge-api",), "metric": ()},
+            run_entry="src/cand.py:run",
+            code=_OUTPUT_SCORER,
+            run_timeout=2,
+        )
+    else:
+        _refuse_answer_writes(monkeypatch, _write_error(429)[1])
+        scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)}, timeout=3)
+    scorer.raw_provider_errors = judge
+    with pytest.raises(BudgetReached, match="spent"):
+        _score_or_error(scorer, {"input": 1})
+
+
+def _stop_the_stage(*_: Any) -> dict[str, Any]:
+    """Raise the budget stop as a metered stage call does.
+
+    Raises:
+        BudgetReached: Always.
+    """
+    raise BudgetReached("spent")
+
+
+def test_a_lost_stage_budget_stop_answer_keeps_the_stop() -> None:
+    """Keep the budget stop of a stage answer that the metric box refused, so the scorer can still stop the run."""
+    relay = _StageRelay(
+        {}, {}, response_dir="calls/000001/stages", max_concurrency=1, env={}, box=_RefusingBox(_write_error(503)[1])
+    )  # type: ignore[arg-type]
+    relay._run = _stop_the_stage  # type: ignore[method-assign]
+    relay._call("double", "a" * 32, 1)
+    relay.close()
+    assert relay.unchecked
+    assert relay.first_control() == {"code": "budget_reached", "message": "spent"}
+
+
+@pytest.mark.parametrize("judge", [False, True], ids=["run", "judge"])
+def test_a_lost_stage_budget_stop_answer_still_stops_the_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: bool
+) -> None:
+    """A 503 on the metric box answer of a stage call's budget stop never hides the stop.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        judge: Whether the scorer runs for the judge.
+    """
+    monkeypatch.setattr(_StageRelay, "_run", _stop_the_stage)
+    _refuse_answer_writes(monkeypatch, _write_error(503)[1])
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v']}\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"double": STAGES["double"]})
+    scorer._timeout_seconds = 3
+    scorer.raw_provider_errors = judge
+    with pytest.raises(BudgetReached, match="spent"):
+        _score_or_error(scorer, {"input": 1})
+
+
+def test_a_temporary_answer_write_error_reaches_the_judge_as_temporary(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The judge's real score path gets the raw 429 of a metric answer write, so the judge stores a temporary failure.
+
+    Args:
+        tmp_path: Scratch folder.
+        upstream: The stand-in service.
+        monkeypatch: Pytest patcher.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    api, error = _write_error(429)
+    _refuse_answer_writes(monkeypatch, error)
+    scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)}, timeout=6)
+    try:
+        with pytest.raises(SandboxFilesystemWriteError) as raised:
+            repo_judge._score(SimpleNamespace(scorers=[scorer]), "", [], label="candidate")  # type: ignore[arg-type]
+    finally:
+        scorer.close()
+    assert raised.value is error
+    assert sandbox_api_error(raised.value) is api
+    assert repo_judge._temporary(raised.value)
 
 
 def _service_relay(
@@ -1953,7 +2913,7 @@ def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -
 @pytest.mark.parametrize(
     ("name", "status", "message"),
     [
-        ("nope", 404, "Service 'nope' is not in optimize.toml. Add a [services.nope] table."),
+        ("nope", 404, "Service 'nope' is not in ascent.toml. Add a [services.nope] table."),
         ("github", 403, "only services with a url go through the relay"),
     ],
 )
@@ -1972,11 +2932,11 @@ def test_unknown_services_and_catalog_connectors_are_refused(name: str, status: 
     ("name", "status", "message"),
     [
         ("judge", 403, "Service 'judge' is not listed for the [metric] role."),
-        ("Judge", 404, "Service 'Judge' is not in optimize.toml. Add a [services.Judge] table."),
-        ("JUDGE", 404, "Service 'JUDGE' is not in optimize.toml."),
-        ("judge/x", 404, "Service 'judge/x' is not in optimize.toml."),
-        ("../judge", 404, "Service '../judge' is not in optimize.toml."),
-        ("", 404, "is not in optimize.toml."),
+        ("Judge", 404, "Service 'Judge' is not in ascent.toml. Add a [services.Judge] table."),
+        ("JUDGE", 404, "Service 'JUDGE' is not in ascent.toml."),
+        ("judge/x", 404, "Service 'judge/x' is not in ascent.toml."),
+        ("../judge", 404, "Service '../judge' is not in ascent.toml."),
+        ("", 404, "is not in ascent.toml."),
     ],
 )
 def test_a_name_that_only_looks_like_a_declared_service_is_unknown(
@@ -3135,7 +4095,7 @@ def test_an_mcp_name_and_a_service_name_never_cross(echo: _Echo) -> None:
     assert mcp["error"].endswith("MCP server 'judge' is not in .mcp.json, the [run] MCP file. Add it there.")
     assert service == {
         "status": 404,
-        "error": "Service 'search' is not in optimize.toml. Add a [services.search] table.",
+        "error": "Service 'search' is not in ascent.toml. Add a [services.search] table.",
     }
     assert echo.paths == []
 
@@ -3310,7 +4270,7 @@ def lookup(value):
     # Long enough that parallel calls in one stage box overlap.
     time.sleep(1.0)
     body = value["body"].encode() if value.get("body") else None
-    url = os.environ["SKYNET_MCP_SEARCH_URL"] + value.get("path", "")
+    url = os.environ["ASCENT_MCP_SEARCH_URL"] + value.get("path", "")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Keep)
     try:
         with opener.open(urllib.request.Request(url, data=body, method="POST" if body else "GET")) as response:
@@ -3322,19 +4282,21 @@ def lookup(value):
         "body": text,
         "key_in_env": "JUDGE_KEY" in os.environ,
         "span": [started, time.time()],
-        "url": os.environ["SKYNET_MCP_SEARCH_URL"],
-        "config": json.load(open(os.environ["SKYNET_MCP_CONFIG"])),
+        "url": os.environ["ASCENT_MCP_SEARCH_URL"],
+        "config": json.load(open(os.environ["ASCENT_MCP_CONFIG"])),
     }
 """
 _LOOKUP_COMMAND = (
     "python3",
     "-c",
-    "import json, sys; sys.path.insert(0, 'src'); import lookup; print(json.dumps(lookup.lookup(json.load(sys.stdin))))",
+    "import json, os, sys; sys.path.insert(0, 'src'); import lookup;"
+    " value = json.load(open(os.environ['ASCENT_INPUT']))['input'];"
+    " json.dump({'output': lookup.lookup(value)}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
 )
 _LOOKUP_SCORER = (
     "import json\n"
     "from concurrent.futures import ThreadPoolExecutor\n"
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}, {'path': '/events'}]\n"
     "    with ThreadPoolExecutor(3) as pool:\n"
@@ -3395,7 +4357,7 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
 _TWO_LOOKUPS_SCORER = (
     "import json\n"
     "from concurrent.futures import ThreadPoolExecutor\n"
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}]\n"
     "    with ThreadPoolExecutor(2) as pool:\n"
@@ -3458,7 +4420,7 @@ def test_a_budget_stop_in_a_stages_mcp_call_stops_the_evaluation(
 
     monkeypatch.setattr(repo_scorer, "relay_request", stop)
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         "        return {'score': call('lookup', {'body': '{}'})['status'] / 1000, 'feedback': 'ran'}\n"
@@ -3765,7 +4727,7 @@ import os
 
 def score(repo_path, case, output):
     weight = open(os.path.join(repo_path, "eval/metric.py")).read().strip()
-    return 1.0, json.dumps({"output": output, "case": case, "weight": weight}, sort_keys=True)
+    return {"score": 1.0, "feedback": json.dumps({"output": output, "case": case, "weight": weight}, sort_keys=True)}
 """
 
 
@@ -3862,7 +4824,7 @@ def test_a_process_a_version_leaves_never_reaches_the_next_version(tmp_path: Pat
 
 def test_the_metric_runs_the_real_runner_whatever_the_candidate_left(tmp_path: Path) -> None:
     """A candidate cannot rewrite the runner or plant the metric's output for it (E38)."""
-    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    metric = "def score(repo_path, case, output):\n    return {'score': 0.25, 'feedback': 'real metric'}\n"
     scorer = _probed(tmp_path, "src/cand.py:tamper", code=metric)
     try:
         for _ in range(2):
@@ -3897,7 +4859,7 @@ def _base_python(tmp_path: Path) -> dict[str, str]:
 @pytest.mark.parametrize("entry", ["plant_module", "plant_pth"])
 def test_a_module_the_candidate_plants_for_the_metric_runner_never_runs(tmp_path: Path, entry: str) -> None:
     """A json.py next to the runner or a user-site .pth cannot forge the score or read the metric (E38, E40)."""
-    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    metric = "def score(repo_path, case, output):\n    return {'score': 0.25, 'feedback': 'real metric'}\n"
     # The test venv turns user site-packages off; a box python3 has them on.
     env = _base_python(tmp_path) if entry == "plant_pth" else None
     scorer = _probed(tmp_path, f"src/cand.py:{entry}", code=metric, env=env)
@@ -3952,7 +4914,7 @@ def test_a_git_config_the_candidate_plants_in_home_never_runs_in_a_later_checkou
         secrets={},
         hidden_paths=["eval"],
     )
-    metric = "def score(repo_path, case, output):\n    return 0.25, repr(output)\n"
+    metric = "def score(repo_path, case, output):\n    return {'score': 0.25, 'feedback': repr(output)}\n"
     scorer = RepoScorer(workspace, metric, timeout_seconds=90, run_entry="src/cand.py:go", run_timeout=10.0)
     try:
         scorer.score("", {"input": "plant"})
@@ -3964,7 +4926,7 @@ def test_a_git_config_the_candidate_plants_in_home_never_runs_in_a_later_checkou
 
 def test_a_candidate_that_links_the_calls_folder_cannot_touch_the_metric(tmp_path: Path) -> None:
     """A link in the candidate box ends with that box; the metric runs in its own box (SKY-398)."""
-    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    metric = "def score(repo_path, case, output):\n    return {'score': 0.25, 'feedback': 'real metric'}\n"
     scorer = _probed(tmp_path, "src/cand.py:tamper", code=metric)
     try:
         results = [scorer.score("", {"input": value}) for value in ("swap", "forge")]
@@ -3973,16 +4935,22 @@ def test_a_candidate_that_links_the_calls_folder_cannot_touch_the_metric(tmp_pat
     assert [(result["score"], result["feedback"]) for result in results] == [(0.25, "real metric")] * 2
 
 
-def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
-    """A candidate that raises gets 0 and "Run failed:" feedback; the metric never runs (E38)."""
+def test_a_failed_run_has_no_score_and_skips_the_metric(tmp_path: Path) -> None:
+    """A candidate that raises gets no score and "Run failed:" feedback; the metric never runs (E38, SKY-751).
+
+    Args:
+        tmp_path: Folder for the repository and the metric marker.
+    """
     marker = tmp_path / "metric-ran"
-    metric = f"def score(repo_path, case, output):\n    open({str(marker)!r}, 'w').write('x')\n    return 1.0\n"
+    metric = (
+        f"def score(repo_path, case, output):\n    open({str(marker)!r}, 'w').write('x')\n    return {{'score': 1.0}}\n"
+    )
     scorer = _probed(tmp_path, "src/cand.py:boom", code=metric)
     try:
         result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert result["feedback"].startswith("Run failed: ")
     assert "candidate broke" in result["feedback"]
     assert len(result["feedback"]) <= 2_000
@@ -3990,7 +4958,11 @@ def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
 
 
 def test_run_failed_feedback_keeps_the_version_frames_with_repo_paths(tmp_path: Path) -> None:
-    """The proposer sees the version's own frames, but no box path and no metric file (E41, D43, E61)."""
+    """The proposer sees the version's own frames, but no box path and no metric file (E41, D43, E61).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     scorer = _probed(tmp_path, "src/cand.py:boom")
     try:
         scorer.prepare()
@@ -3999,7 +4971,7 @@ def test_run_failed_feedback_keeps_the_version_frames_with_repo_paths(tmp_path: 
     finally:
         scorer.close()
     feedback = reply["feedback"]
-    assert reply["score"] == 0.0
+    assert reply["score"] is None
     assert feedback.startswith("Run failed: Traceback (most recent call last):")
     assert 'File "src/cand.py"' in feedback
     assert 'raise RuntimeError("candidate broke")' in feedback
@@ -4039,12 +5011,157 @@ def test_run_failed_scrub_drops_metric_runner_and_library_frames() -> None:
     assert _scrub(text.removeprefix("Run failed: "), root, ("eval",)) == "RuntimeError: broke"
 
 
-def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: Path) -> None:
-    """A command's exit code and stdout reach the metric; a nonzero exit is not a run failure (E38)."""
-    metric = "import json\ndef score(repo_path, case, output):\n    return 0.5, json.dumps(output, sort_keys=True)\n"
-    archive = _archive(
-        tmp_path, {"src/app.py": "x = 1\n", "src/cmd.py": "import sys\nprint(sys.stdin.read())\nsys.exit(3)\n"}
+def _shell_run_scorer(tmp_path: Path, script: str, secrets: Mapping[str, str] | None = None) -> RepoScorer:
+    """Build a local scorer whose ``[run] entry`` is ``sh src/run.sh`` and whose metric echoes the output (SKY-757).
+
+    Args:
+        tmp_path: Scratch folder.
+        script: The body of ``src/run.sh``.
+        secrets: The run's secrets.
+
+    Returns:
+        The scorer; the caller closes it.
+    """
+    metric = "import json\ndef score(repo_path, case, output):\n    return {'score': 0.5, 'feedback': json.dumps(output, sort_keys=True)}\n"
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.sh": script})
+    return RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets=dict(secrets or {}),
+        ),
+        metric,
+        timeout_seconds=60,
+        run_entry=("sh", "src/run.sh"),
+        run_timeout=10.0,
     )
+
+
+def test_a_shell_command_entry_reads_ascent_input_and_its_output_file_reaches_the_metric(tmp_path: Path) -> None:
+    """A real shell ``[run]`` command reads ``ASCENT_INPUT`` and writes ``ASCENT_OUTPUT``; its prints stay out (SKY-757)."""
+    script = (
+        "echo 'a debug line'\n"
+        'test -z "$(cat)"\n'
+        'printf \'{"output": {"seen": %s}}\' "$(cat "$ASCENT_INPUT")" > "$ASCENT_OUTPUT"\n'
+    )
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": {"q": 1}, "expected": 2})
+    finally:
+        scorer.close()
+    assert result["score"] == pytest.approx(0.5)
+    assert json.loads(result["feedback"]) == {"seen": {"input": {"q": 1}}}
+
+
+def test_the_wrapper_line_passes_a_nonzero_exit_code_to_the_metric(tmp_path: Path) -> None:
+    """The documented wrapper line turns a failing tool's exit code into the output (SKY-757)."""
+    script = 'python3 -c "import sys; sys.exit(3)" > log.txt\necho "{\\"output\\": {\\"exit_code\\": $?}}" > "$ASCENT_OUTPUT"\n'
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": None})
+    finally:
+        scorer.close()
+    assert json.loads(result["feedback"]) == {"exit_code": 3}
+
+
+def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
+    """A command that prints its answer and writes no output file is a run failure that shows the print, and the metric is not called."""
+    scorer = _shell_run_scorer(tmp_path, "echo '{\"output\": 1}'\n")
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"] == (
+        "Run failed: The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+        '\nstdout: {"output": 1}'
+    )
+
+
+def test_a_failed_command_with_long_stdout_and_stderr_keeps_its_cause(tmp_path: Path) -> None:
+    """Full stderr and stdout tails still leave the cause in the run feedback (SKY-757)."""
+    script = 'for i in $(seq 300); do echo "out line $i"; echo "err line $i" >&2; done\nexit 1\n'
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert result["feedback"].endswith("out line 300")
+    assert "err line 300\nstdout: " in result["feedback"]
+
+
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut, and the cause stays (SKY-757)."""
+    secret = "run-secret-value-9876"
+    scorer = _shell_run_scorer(tmp_path, f"printf '{secret}%0791d\\n' 0 >&2\nexit 1\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: " in result["feedback"]
+    assert "9876" not in result["feedback"]
+
+
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut, and the cause stays (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, f"{_REPEAT_SECRET}\nexit 1\n", {"JUDGE_KEY": _LONG_SECRET})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: [secret]" in result["feedback"]
+    assert _no_part_of_the_long_secret(result["feedback"])
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_the_run_feedback(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A [run] command whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, script + "\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: " + runner.INVALID_JSON_CAUSE)
+    assert not [piece for piece in pieces if piece in result["feedback"]]
+
+
+def test_a_long_cause_and_long_logs_still_start_the_run_feedback_with_the_cause(tmp_path: Path) -> None:
+    """The cause keeps its head, so the feedback's tail cut never drops it (SKY-757)."""
+    keys = ", ".join(f'"unknown_key_{i:02d}": 1' for i in range(60))
+    script = (
+        'for i in $(seq 100); do echo "out line $i"; echo "err line $i" >&2; done\n'
+        f"printf '%s' '{{\"output\": 1, {keys}}}' > \"$ASCENT_OUTPUT\"\n"
+    )
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The run output is not in the valid form:")
+    assert "\nstderr: " in result["feedback"]
+    assert result["feedback"].endswith("out line 100")
+
+
+def test_a_function_entry_keeps_the_end_of_its_traceback_in_the_run_feedback(tmp_path: Path) -> None:
+    """A function entry's error takes no command cut, so the exception line at its end stays (SKY-757)."""
+    frames = "".join(f"def frame_{i}(case):\n    return frame_{i + 1}(case)  # {'padding ' * 8}\n" for i in range(6))
+    source = frames + "def frame_6(case):\n    return {}['missing']\n\ndef run(case):\n    return frame_0(case)\n"
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/cand.py": source})
+    metric = "def score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': 'ran'}\n"
     scorer = RepoScorer(
         RepoWorkspace(
             runtime=LocalSubprocessRuntime(),
@@ -4057,20 +5174,23 @@ def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: 
         ),
         metric,
         timeout_seconds=60,
-        run_entry=("python3", "src/cmd.py"),
+        run_entry="src/cand.py:run",
         run_timeout=10.0,
     )
     try:
-        result = scorer.score("", {"input": {"q": 1}, "expected": 2})
+        result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == pytest.approx(0.5)
-    assert json.loads(result["feedback"]) == {"exit_code": 3, "stdout": '{"q": 1}\n'}
+    assert result["score"] is None
+    assert len(result["feedback"]) > runner.COMMAND_CAUSE_CHARS
+    assert result["feedback"].rstrip().endswith("KeyError: 'missing'")
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
-    """A run without ``[run]`` scores the tree directly and passes no output (E38)."""
-    metric = "import json\ndef score(repo_path, case, output):\n    return 1.0, json.dumps(output)\n"
+    """A run without ``[run]`` passes no output to the metric (E38)."""
+    metric = (
+        "import json\ndef score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': json.dumps(output)}\n"
+    )
     scorer = _probed(tmp_path, None, code=metric)
     try:
         result = scorer.score("", {"input": 1})
@@ -4084,7 +5204,7 @@ import json
 
 
 def score(repo_path, case, output=None, elapsed_s=None):
-    return 1.0, json.dumps({"output": output, "elapsed_s": elapsed_s})
+    return {"score": 1.0, "feedback": json.dumps({"output": output, "elapsed_s": elapsed_s})}
 """
 
 # Stands in for version code that the metric step imports: it rewrites the
@@ -4115,7 +5235,7 @@ def test_a_runner_that_a_metric_step_rewrote_never_times_the_next_case(tmp_path:
         f"FORGED = {_FORGED_SUPERVISOR!r}\n"
         "def score(repo_path, case, output=None, elapsed_s=None):\n"
         "    open('../app_runner.py', 'w').write(FORGED)\n"
-        "    return 1.0, json.dumps({'output': output, 'elapsed_s': elapsed_s})\n"
+        "    return {'score': 1.0, 'feedback': json.dumps({'output': output, 'elapsed_s': elapsed_s})}\n"
     )
     scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=metric)
     try:
@@ -4314,13 +5434,17 @@ class _LateForgeryRuntime(LocalSubprocessRuntime):
 
 
 def test_a_process_the_entry_left_cannot_forge_the_supervisor_result(tmp_path: Path) -> None:
-    """A ``setsid`` process that rewrites the result file after the supervisor exits changes nothing (SKY-398)."""
+    """A ``setsid`` process that rewrites the result file after the supervisor exits changes nothing (SKY-398).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     scorer = _probed(tmp_path, "src/cand.py:leaves_a_forger", runtime=_LateForgeryRuntime())
     try:
         result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert "the entry crashed" in result["feedback"]
     assert "FORGED" not in result["feedback"]
 
@@ -4374,15 +5498,115 @@ def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: 
         scorer.close()
 
 
-def test_a_timed_out_run_scores_zero_without_the_metric(tmp_path: Path) -> None:
-    """A ``[run]`` timeout scores 0, and the metric that would get the time never runs (SKY-642)."""
+class _CdpathRuntime(LocalSubprocessRuntime):
+    """Local runtime whose candidate runs see a ``CDPATH`` with a decoy work folder in it."""
+
+    def __init__(self, decoy: Path) -> None:
+        """Keep the decoy folder.
+
+        Args:
+            decoy: The folder that ``CDPATH`` names.
+        """
+        super().__init__()
+        self.decoy = decoy
+        self.commands: list[str] = []
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a local box whose candidate runs export ``CDPATH`` first.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The wrapped box.
+        """
+        session = super().open(spec)
+        decoy, commands = self.decoy, self.commands
+
+        class _Cdpath:
+            def __getattr__(self, name: str) -> Any:
+                """Pass every other attribute to the local box.
+
+                Args:
+                    name: The attribute.
+
+                Returns:
+                    The local box's attribute.
+                """
+                return getattr(session, name)
+
+            def run(self, command: str, **options: Any) -> Any:
+                """Run the command; a candidate run gets ``CDPATH`` set to the decoy.
+
+                Args:
+                    command: The shell command.
+                    **options: The run options.
+
+                Returns:
+                    The command's result.
+                """
+                if runner.CANDIDATE_FLAG in command:
+                    commands.append(command)
+                    command = f"export CDPATH={shlex.quote(str(decoy))}; {command}"
+                return session.run(command, **options)
+
+        return _Cdpath()
+
+
+def test_an_image_cdpath_cannot_move_the_root_supervisor_to_another_folder(tmp_path: Path) -> None:
+    """The root supervisor's ``cd`` is absolute, so a ``CDPATH`` decoy work folder is never used (SKY-737)."""
+    decoy = tmp_path / "decoy"
+    (decoy / WORK_DIR / "src").mkdir(parents=True)
+    (decoy / WORK_DIR / "src" / "cand.py").write_text("def echo(value):\n    return 'DECOY'\n")
+    runtime = _CdpathRuntime(decoy)
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert "DECOY" not in json.dumps(result)
+    assert runtime.commands
+    targets = [re.findall(r"\bcd (\S+)", command) for command in runtime.commands]
+    assert all(len(found) == 1 and found[0].startswith("/") and found[0].endswith(f"/{WORK_DIR}") for found in targets)
+    assert not any("PWD" in command for command in runtime.commands)
+
+
+@pytest.mark.parametrize("user_image", [True, False])
+def test_the_root_supervisor_falls_back_to_the_path_python3_only_without_a_user_image(
+    tmp_path: Path, user_image: bool
+) -> None:
+    """In a user image the supervisor runs only the base Python, never a ``python3`` that PATH finds (SKY-737).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+        user_image: Whether the workspace runs a user ``[run]`` image.
+    """
+    runtime = _CdpathRuntime(tmp_path / "decoy")
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    scorer._workspace.user_run_image = user_image
+    try:
+        scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert runtime.commands
+    for command in runtime.commands:
+        assert f"p={shlex.quote(repo_scorer._BASE_PYTHON)}" in command
+        assert ("p=python3" in command) is not user_image
+
+
+def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:
+    """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+    """
     metric = "def score(repo_path, case, output=None, elapsed_s=None):\n    raise RuntimeError('metric ran')\n"
     scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=metric, run_timeout=1.0)
     try:
         result = scorer.score("", {"input": 5})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert "timeout after 1 s" in result["feedback"]
 
 
@@ -4398,7 +5622,7 @@ def test_without_a_run_entry_the_metric_gets_no_time(tmp_path: Path) -> None:
 
 def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path) -> None:
     """The metric may not rerun the candidate: a new process is refused, so the version has no score (E40)."""
-    metric = "import subprocess\ndef score(repo_path, case, output):\n    subprocess.run(['true'])\n    return 1.0\n"
+    metric = "import subprocess\ndef score(repo_path, case, output):\n    subprocess.run(['true'])\n    return {'score': 1.0}\n"
     scorer = _probed(tmp_path, "src/cand.py:echo", code=metric)
     try:
         with pytest.raises(RepoScoreError, match="raised an error"):
@@ -4420,3 +5644,378 @@ def test_the_root_supervisor_refuses_a_changed_runner_file(tmp_path: Path) -> No
     assert "The supervisor file changed before it ran." in done.stderr
     path.write_text(repo_scorer.RUNNER_SOURCE, encoding="utf-8")
     assert subprocess.run([*boot, "--help"], capture_output=True, timeout=60, check=False).stderr.find(b"changed") == -1
+
+
+@pytest.mark.parametrize("value", [None, "/etc/box.cnf", "/dev/null"], ids=["unset", "set", "image-dev-null"])
+def test_the_root_supervisor_hashes_without_the_image_openssl_config(tmp_path: Path, value: str | None) -> None:
+    """The whole root process, after the hash too, reads no image OpenSSL config (SKY-737).
+
+    An image without ``_hashlib`` first loads OpenSSL at the runner's ``import ssl``,
+    after the hash, so the runner body must still see ``/dev/null``. The body also
+    gets the box's own value in ``_box_openssl_conf``, for the entry.
+    """
+    source = "import os, ssl\nprint(repr(os.environ.get('OPENSSL_CONF')), repr(_box_openssl_conf))\n"
+    path = tmp_path / "runner.py"
+    path.write_text(source, encoding="utf-8")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    env = {name: item for name, item in os.environ.items() if name != "OPENSSL_CONF"}
+    if value is not None:
+        env["OPENSSL_CONF"] = value
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", repo_scorer._SUPERVISOR_BOOT, str(path), digest],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+        env=env,
+    )
+
+    assert repo_scorer._SUPERVISOR_BOOT.index("'/dev/null'") < repo_scorer._SUPERVISOR_BOOT.index("import hashlib")
+    assert done.stdout == f"'/dev/null' {value!r}\n"
+
+
+_BASH_METRIC = """#!/usr/bin/env bash
+set -euo pipefail
+if grep -q 'x = 7' "$ASCENT_INPUT"; then
+  echo '{"score": 0.7, "feedback": "seven", "scores": {"exact": {"score": 1}}}' > "$ASCENT_OUTPUT"
+else
+  echo '{"score": 0.1, "feedback": "not seven"}' > "$ASCENT_OUTPUT"
+fi
+"""
+
+
+def _command_scorer(
+    tmp_path: Path,
+    metric: str,
+    monkeypatch: pytest.MonkeyPatch,
+    metric_setup: str | None = None,
+    entry: str = "eval/metric.sh",
+) -> tuple[RepoScorer, Path]:
+    """Build a scorer whose ``[metric] entry`` is a bash command in the hidden ``eval`` folder (SKY-738).
+
+    Args:
+        tmp_path: Scratch folder.
+        metric: The text of ``eval/metric.sh``.
+        monkeypatch: Puts this interpreter's folder first on ``PATH``, since the box's
+            ``python3`` must run the OpenAscent package.
+        metric_setup: The ``[metric] setup`` command, or None (SKY-740).
+        entry: The bash script that ``[metric] entry`` runs.
+
+    Returns:
+        The scorer and its archive.
+    """
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.sh": metric})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+            metric_setup=metric_setup,
+        ),
+        "",
+        timeout_seconds=60,
+        run_entry=("sh", "-c", 'printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"'),
+        metric_entry=("bash", entry),
+    )
+    return scorer, archive
+
+
+def test_a_bash_metric_scores_each_version_through_the_local_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real bash ``[metric] entry`` reads the ``[run]`` output and scores the baseline and a version (SKY-738)."""
+    scorer, archive = _command_scorer(tmp_path, _BASH_METRIC, monkeypatch)
+    try:
+        baseline = scorer.score("")
+        improved = scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 7\n"}), {"input": 1})
+    finally:
+        scorer.close()
+
+    assert (baseline["score"], baseline["feedback"]) == (pytest.approx(0.1), "not seven")
+    assert (improved["score"], improved["feedback"]) == (pytest.approx(0.7), "seven")
+    assert improved["scores"] == {"exact": {"score": pytest.approx(1.0), "feedback": ""}}
+
+
+def test_a_metric_setup_builds_the_bash_metric_once_and_each_score_uses_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[metric] setup`` builds the metric one time; each score runs the built file (SKY-740).
+
+    The build writes ``eval/built.sh`` from the checked-in source and adds one line to
+    ``eval/builds.log``. The built metric puts that line count in its feedback, so two
+    scores that both say ``builds=1`` prove that the setup ran once and its files stayed.
+    """
+    template = (
+        "builds=$(wc -l < eval/builds.log | tr -d ' ')\n"
+        'echo "{\\"score\\": 0.7, \\"feedback\\": \\"builds=$builds\\"}" > "$ASCENT_OUTPUT"\n'
+    )
+    build = "cp eval/metric.sh eval/built.sh && echo built >> eval/builds.log"
+    scorer, archive = _command_scorer(tmp_path, template, monkeypatch, metric_setup=build, entry="eval/built.sh")
+    try:
+        first = scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 7\n"}), {"input": 1})
+        second = scorer.score(_patch(tmp_path / "v2", archive, {"src/app.py": "x = 7\n"}), {"input": 2})
+    finally:
+        scorer.close()
+
+    assert (first["score"], first["feedback"]) == (pytest.approx(0.7), "builds=1")
+    assert second["feedback"] == "builds=1"
+
+
+@pytest.mark.parametrize(
+    ("metric", "message"),
+    [
+        ("echo secret-stderr >&2\nexit 4\n", "exited with a nonzero code (4)"),
+        ("exit 0\n", "wrote no result file at ASCENT_OUTPUT"),
+        ('echo nope > "$ASCENT_OUTPUT"\n', "result file is not valid JSON"),
+        ('echo \'{"feedback": "x"}\' > "$ASCENT_OUTPUT"\n', "does not have the valid form"),
+    ],
+)
+def test_a_failed_bash_metric_gives_no_score_and_names_the_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metric: str, message: str
+) -> None:
+    """Each failure raises Skynet's fixed message for its cause; the command's stderr stays out of it."""
+    scorer, _ = _command_scorer(tmp_path, metric, monkeypatch)
+    try:
+        with pytest.raises(RepoScoreError, match=re.escape(message)) as caught:
+            scorer.score("")
+    finally:
+        scorer.close()
+
+    assert "secret-stderr" not in str(caught.value)
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_metric_answer_leaves_no_part_of_a_secret_in_the_server_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    secret: str,
+    script: str,
+    pieces: tuple[str, ...],
+) -> None:
+    """A command metric whose answer is not valid JSON logs the fixed cause, which quotes no file (SKY-757)."""
+    scorer, _ = _command_scorer(tmp_path, script + "\n", monkeypatch)
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="result file is not valid JSON"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+    assert runner.INVALID_JSON_CAUSE in caplog.text
+    assert not [piece for piece in pieces if piece in caplog.text]
+
+
+# Calls the double stage with curl, checks each refused call and the error text of the
+# time-out and no-output stages, and scores the doubled value (SKY-767).
+_STAGE_BASH_METRIC = """set -euo pipefail
+post() { curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST -d "$2" "$1"; }
+doubled=$(curl -sf --noproxy '*' -X POST -d '{"input": {"v": 3}}' "$ASCENT_STAGE_DOUBLE_URL")
+unknown=$(post "${ASCENT_LOG_URL%/log}/stage/shout" '{"input": "hi"}')
+broken=$(post "$ASCENT_STAGE_BROKEN_URL" '{"input": 1}')
+slow=$(post "$ASCENT_STAGE_SLOW_URL" '{"input": 5}')
+slow_error=$(cat body.out)
+empty=$(post "$ASCENT_STAGE_EMPTY_URL" '{"input": 1}')
+empty_error=$(cat body.out)
+python3 - "$doubled" "$unknown" "$broken" "$slow" "$empty" "${ASCENT_STAGE_SHOUT_URL-unset}" \
+  "$slow_error" "$empty_error" <<'PY'
+import json, os, sys
+doubled, unknown, broken, slow, empty, shout, slow_error, empty_error = sys.argv[1:]
+feedback = f"unknown={unknown} broken={broken} slow={slow} empty={empty} shout={shout}"
+for name, body in (("slow", slow_error), ("empty", empty_error)):
+    feedback += f"\\n{name}: {json.loads(body)['error']}"
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"score": json.loads(doubled)["output"]["v"] / 10, "feedback": feedback}, f)
+PY
+"""
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls its stages with curl")
+def test_a_bash_metric_calls_a_stage_with_curl_and_a_stage_outside_the_run_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real bash metric reaches ``[target.double]`` at its URL; other stages and failed stages answer an error."""
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    stages = {name: STAGES[name] for name in ("double", "broken", "slow")}
+    # A command stage that writes no ASCENT_OUTPUT gives no valid output.
+    stages["empty"] = TargetStage(entry=("true",), timeout=30)
+    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.sh": _STAGE_BASH_METRIC})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+        ),
+        "",
+        timeout_seconds=60,
+        run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"'),
+        metric_entry=("bash", "eval/metric.sh"),
+        stages=stages,
+        stage_runtime=RecordingRuntime(),
+        stage_archive=_archive(tmp_path / "stage", STAGE_TREE),
+    )
+    try:
+        baseline = scorer.score("")
+        version = scorer.score(
+            _patch(tmp_path / "v1", archive, {"src/stages.py": STAGE_TREE["src/stages.py"].replace("2", "3")})
+        )
+    finally:
+        scorer.close()
+
+    assert baseline["score"] == pytest.approx(0.6)
+    statuses, slow, empty = baseline["feedback"].split("\n")
+    assert statuses == "unknown=404 broken=502 slow=502 empty=502 shout=unset"
+    assert slow == "slow: Stage 'slow' passed its 1s timeout."
+    assert empty.startswith("empty: Stage 'empty' failed: The command wrote no output file.")
+    assert version["score"] == pytest.approx(0.9)
+
+
+# Asks the judge model once and scores 1 when the model answered; its env must hold no key.
+_MODEL_BASH_METRIC = """set -euo pipefail
+keys=$(env | grep -c sk-metric-key || true)
+status=$(curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST \\
+  -d "{\\"model\\": \\"$ASCENT_MODEL\\", \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"hi\\"}]}" \\
+  "$ASCENT_MODEL_URL/chat/completions")
+printf '{"score": 1, "feedback": "keys=%s status=%s"}' "$keys" "$status" > "$ASCENT_OUTPUT"
+"""
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls the model with curl")
+def test_a_command_metric_gets_the_model_key_by_file_and_not_in_its_box_command_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metric box command env holds no key; the runner takes it from the call's key file (SKY-767)."""
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    commands: list[tuple[str, dict[str, str]]] = []
+    run = LocalSubprocessSession.run
+
+    def recorded(self: LocalSubprocessSession, command: str, **kwargs: Any) -> Any:
+        """Record each box command and its env, then run it."""
+        commands.append((command, dict(kwargs.get("env") or {})))
+        return run(self, command, **kwargs)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", recorded)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.sh": _MODEL_BASH_METRIC})
+    with FakeGateway(reply="judged") as fake:
+        scorer = RepoScorer(
+            RepoWorkspace(
+                runtime=LocalSubprocessRuntime(),
+                spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+                archive=archive,
+                editable_paths=["src"],
+                readonly_paths=[],
+                setup_command=None,
+                secrets={},
+                hidden_paths=["eval"],
+            ),
+            "",
+            timeout_seconds=60,
+            gateway=ScorerGateway(url=fake.url, model="judge-model", api_key="sk-metric-key", billing_model="judge"),
+            run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"'),
+            metric_entry=("bash", "eval/metric.sh"),
+        )
+        try:
+            result = scorer.score("")
+        finally:
+            scorer.close()
+    metric_envs = [env for command, env in commands if repo_scorer.METRIC_RUNNER_PATH in command]
+
+    assert result["feedback"] == "keys=0 status=200"
+    assert [request["authorization"] for request in fake.requests] == ["Bearer sk-metric-key"]
+    assert len(metric_envs) == 1
+    assert ENV_API_KEY not in metric_envs[0]
+    assert "sk-metric-key" not in json.dumps(metric_envs[0])
+
+
+def _case_file(path: str) -> str | None:
+    """Name the kind of a per-case file that the scorer writes into a box, or ``None`` for any other file.
+
+    Args:
+        path: The written path, relative to the box.
+
+    Returns:
+        ``runner``, ``ascent``, ``key`` or ``input``, or ``None``.
+    """
+    if path in (repo_scorer.RUNNER_PATH, repo_scorer.METRIC_RUNNER_PATH):
+        return "runner"
+    if path.startswith((f"{repo_scorer.RUN_ASCENT_DIR}/", f"{repo_scorer.METRIC_ASCENT_DIR}/")):
+        return "ascent"
+    return {runner.MODEL_KEY_FILE: "key", runner.INPUT_FILE: "input"}.get(path.rsplit("/", 1)[-1])
+
+
+@pytest.mark.parametrize(
+    ("commands", "expected"),
+    [
+        (False, [{"runner", "input"}, {"runner", "input"}]),
+        (True, [{"runner", "ascent", "input"}, {"runner", "ascent", "key", "input"}]),
+    ],
+    ids=["python-entries", "command-entries-with-model-key"],
+)
+def test_each_box_gets_its_case_files_in_one_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: bool, expected: list[set[str]]
+) -> None:
+    """One case writes its runner, OpenAscent, model key and input files in one call for each box (SKY-913).
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        commands: Command ``[run]`` and metric entries, with a model route, instead of Python ones.
+        expected: The kinds of files in each case write: the candidate box's, then the metric box's.
+    """
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    writes: list[list[str]] = []
+    write = LocalSubprocessSession.write_files
+
+    def recorded(self: LocalSubprocessSession, files: Mapping[str, str]) -> None:
+        """Record each write's paths, then write.
+
+        Args:
+            self: The session.
+            files: The files to write.
+        """
+        writes.append(list(files))
+        write(self, files)
+
+    monkeypatch.setattr(LocalSubprocessSession, "write_files", recorded)
+    metric = 'printf \'{"score": 1, "feedback": "ok"}\' > "$ASCENT_OUTPUT"\n'
+    archive = _archive(tmp_path, {"src/cand.py": "def run(value):\n    return value\n", "eval/metric.sh": metric})
+    with FakeGateway(reply="judged") as fake:
+        scorer = RepoScorer(
+            RepoWorkspace(
+                runtime=LocalSubprocessRuntime(),
+                spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+                archive=archive,
+                editable_paths=["src"],
+                readonly_paths=[],
+                setup_command=None,
+                secrets={},
+                hidden_paths=["eval"],
+            ),
+            "" if commands else "def score(repo_path, case=None, output=None):\n    return {'score': 1.0}\n",
+            timeout_seconds=60,
+            gateway=(
+                ScorerGateway(url=fake.url, model="judge-model", api_key="sk-metric-key", billing_model="judge")
+                if commands
+                else None
+            ),
+            run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"') if commands else "src/cand.py:run",
+            metric_entry=("bash", "eval/metric.sh") if commands else "eval/metric.py:score",
+        )
+        try:
+            assert scorer.score("", {"input": 1})["score"] == pytest.approx(1.0)
+        finally:
+            scorer.close()
+    case_writes = [kinds for kinds in ({_case_file(path) for path in paths} - {None} for paths in writes) if kinds]
+
+    assert case_writes == expected

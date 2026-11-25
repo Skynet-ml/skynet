@@ -9,36 +9,56 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
+  ArrowsIn,
+  ArrowsInLineVertical,
   Brain,
-  ChatText,
+  CaretDown,
+  CaretUp,
+  ChartBar,
   ClockCounterClockwise,
   Copy,
   Cpu,
   DownloadSimple,
   Gear,
+  GitDiff,
+  GitFork,
   SidebarSimple,
   PencilSimple,
   Plus,
   MagicWand,
-  ShareNetwork,
-  X,
+  Wallet,
 } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Button } from "@/shared/ui/primitives/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
+import { TooltipButton, TooltipShortcuts, commandKey } from "@/shared/ui/tooltip-button";
 
 import { AgentThread } from "@/shared/ui/agent/agent-thread";
-import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
+import { CHAT_ERROR_ICON_BUTTON_CLASS, ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
+import { RetryIconButton } from "@/shared/ui/retry-icon-button";
+import { CAPACITY_ERROR_CODE, capacityRetryDelay } from "@/shared/ui/agent/capacity-retry";
+import { ReconnectingNotice } from "@/shared/ui/agent/reconnecting-notice";
+import { ModelChangedNotice } from "@/shared/ui/agent/chat-notices";
+import { RAIL_MIN_ITEMS } from "@/shared/ui/agent/message-rail";
+import { UserMessageRail } from "@/shared/ui/agent/user-message-rail";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { splitPastes, withFilePaths } from "@/shared/ui/agent/pasted-text";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
-import { joinLineComments, withLineComments, type LineComment } from "@/shared/ui/agent/line-comments";
+import { MediaUrlContext } from "@/shared/ui/agent/media-attachments";
+import {
+  joinLineComments,
+  lineCommentId,
+  withLineComments,
+  type LineComment,
+} from "@/shared/ui/agent/line-comments";
 import { AppMark } from "@/shared/ui/app-mark";
-import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
+import { ComposerModelMenu, type ModelMenuHandle } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
 import {
+  labelsOnlyValue,
   resolveSlashOption,
   slashEfforts,
   slashKeepsFast,
@@ -85,12 +105,27 @@ import { useLocale } from "@/shared/providers/locale-provider";
 import { useColorTheme } from "@/shared/providers/theme-provider";
 
 import { useConversationStore } from "../hooks/use-conversation-store";
+import { useFork } from "../hooks/use-fork";
+import { useChatMedia } from "../hooks/use-chat-media";
+import { freeChatMediaUrls, resolveChatMediaUrl } from "../lib/chat-media";
+import { latestCompactionIndex } from "../lib/compaction";
+import { expandOnAttention } from "../lib/float-attention";
+import { forkPoints } from "../lib/fork";
+import { modelChanges } from "../lib/model-changes";
+import { outputsByToolCalls, railItemsOf } from "../lib/rail-items";
+import { sessionStats } from "../lib/session-stats";
+import { ChatContextUsage } from "./ChatContextUsage";
+import { QueuedComments } from "./QueuedComments";
+import { CompactionHold, CompactionMarker, CompactionStatus } from "./CompactionRow";
+import { SessionStatsCard, useSessionCard } from "./SessionStatsCard";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import { getConversation, isHostedConversation, loadConversation } from "../lib/conversation-api";
-import { isLocalMode } from "@/shared/lib/runtime-env";
+import {
+  getConversation,
+  isHostedConversation,
+  loadConversation,
+} from "../lib/conversation-api";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
-import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
 import {
@@ -124,8 +159,14 @@ import {
   type KickoffTurn,
   type SetupChat,
 } from "../lib/screen-agent";
-import { latestTurnEdits, messageEdits, turnState, type FileEdit } from "../lib/turn-edits";
-import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
+import { messageEdits } from "../lib/turn-edits";
+import {
+  isWizardWrite,
+  isWizardWriteStep,
+  liveValues,
+  mergedPatch,
+  writingFields,
+} from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
@@ -136,7 +177,13 @@ import { MAX_WIDTH, MIN_WIDTH, NARROW_VIEWPORT_QUERY } from "../constants";
 
 import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
-import { DatasetUploadCard, type ConfirmedDataset } from "./DatasetUploadCard";
+import {
+  DatasetUploadCard,
+  useComposerDatasetAttach,
+  useDatasetDraft,
+  useSendAfterRender,
+  type ConfirmedDataset,
+} from "./DatasetUploadCard";
 import { EditedFilesCard } from "./EditedFilesCard";
 import { LibraryDatasetCard, type ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 import { InferenceFormCard } from "./InferenceFormCard";
@@ -149,6 +196,7 @@ import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
 import { AGENT_PROMPT_EVENT, takeQueuedAgentPrompt } from "../lib/prompt-queue";
 import { parseAgentNavigation, parseAppearancePatch } from "../lib/settings-actions";
+import { useTitleReloads } from "../lib/title-reload";
 
 const REQUEST_DATASET_TOOL = "request_user_dataset_datasets_request_upload_post";
 const REQUEST_LIBRARY_TOOL = "request_user_dataset_from_library";
@@ -166,8 +214,9 @@ const RICH_CARD_TOOLS = new Set<string>([
 // play the splash banner, then route to the new optimization's details.
 const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_post"]);
 const NO_COMMENTS: readonly LineComment[] = [];
+const NO_BOOKMARKS: ReadonlySet<number> = new Set();
 
-/** Whether a file opens the dataset column-mapping card instead of being read as text. */
+/** Whether a composer file is read into dataset rows before it becomes a file card. */
 function isDatasetFile(file: File): boolean {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return (DATASET_UPLOAD_EXTENSIONS as readonly string[]).includes(ext);
@@ -257,23 +306,25 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (screen == null) return merged;
     const issue = wizardCtx?.screenIssue;
     const back = wizardCtx?.returnScreen;
-    const check = wizardCtx?.setupCheckIssue?.feedback;
+    const next = wizardCtx?.nextScreen;
     return {
       ...merged,
       wizard_screen: screen,
       ...(issue ? { screen_issue: issue } : {}),
       ...(back ? { return_screen: back } : {}),
-      ...(check ? { setup_check: check } : {}),
+      ...(next ? { next_screen: next } : {}),
     };
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
   // a reload or a return to a left setup brings it back, and submitting or
   // starting a new setup drops it from the setup. The server saves it like
-  // any other chat, so it can be shared, and the tab's copy finds it again.
+  // any other chat, the run it starts keeps it, and the tab's copy finds it
+  // again.
   // Each screen the wizard reaches gives the agent a turn of its own; an
   // agent's Back leaves the earlier screen its request.
   const shownScreen = wizardCtx?.wizardScreen ?? null;
   const inSetup = shownScreen !== null;
+  const chatFloat = wizardCtx?.chatFloat ?? null;
   const setupChatRef = React.useRef<string | null>(null);
   // The chat whose agent opened the setup: the wizard keeps it as the setup chat (SKY-631).
   const setupHandoffRef = React.useRef<{ id: string | null } | null>(null);
@@ -420,11 +471,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (!wizardCtx) return;
       const patch = extractWizardPatch(ev.result);
       if (Object.keys(patch).length > 0) {
-        // Every write, not only the form's own tool: the coding agent's files
+        // Every write, not only the form's own tool: the workspace tools' files
         // need their before-state for the "Edited N files" card.
         wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
         wizardCtx.applyAgentPatch(patch);
-        liveStateRef.current = { ...liveStateRef.current, ...patch };
+        liveStateRef.current = { ...liveStateRef.current, ...mergedPatch(liveStateRef.current, patch) };
       }
       const nav = ev.status === "ok" ? parseScreenNav(ev.result) : null;
       if (nav) {
@@ -436,6 +487,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   );
 
   const store = useConversationStore({ enabled: open || panelDock !== null });
+  const reloadTitleLater = useTitleReloads(store.reloadTitle);
 
   const handleConversationMeta = React.useCallback(
     (id: string, title: string, ctx: SessionEventContext) => {
@@ -457,13 +509,21 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     trustMode,
     onToolEnd: handleToolEnd,
     onConversationMeta: handleConversationMeta,
+    onConversationTitle: store.applyTitle,
+    onConversationTitleMissed: reloadTitleLater,
   });
   // Declared before the screen effect: a setup chat's server load reads it.
   const liveChatRef = React.useRef({ id: agent.conversationId, messages: agent.messages, busy: false });
-  // The setup chat whose server copy loads now; it shows no Share until the load ends.
-  const [setupLoad, setSetupLoad] = React.useState<string | null>(null);
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
+  // A minimized floating chat hides its thread, so a turn that ends in an
+  // error, a question or an approval request opens it again.
+  const needsUser = !!agent.error || !!agent.pendingApproval || (!!choices && !streaming);
+  const neededUser = React.useRef(needsUser);
+  React.useEffect(() => {
+    expandOnAttention(neededUser.current, needsUser, chatFloat);
+    neededUser.current = needsUser;
+  }, [needsUser, chatFloat]);
   // Each conversation on view gets fresh turn components, so one chat's
   // timers and "already shown" text never carry into another. A new chat
   // getting its id from its first turn is still the same chat.
@@ -472,6 +532,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const sameChat = chatView.id === null && streaming;
     setChatView({ id: agent.conversationId, key: sameChat ? chatView.key : chatView.key + 1 });
   }
+  // A layout effect, so the old chat's files are freed before the new chat's tiles fetch theirs.
+  React.useLayoutEffect(() => freeChatMediaUrls, [chatView.key]);
   // Any conversation still streaming or waiting its turn keeps the user's
   // notification pending; it fires once they have all settled.
   useCompletionNotification(
@@ -630,8 +692,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const openSetupChat = React.useCallback(
     async (saved: { id: string; messages: AgentMessage[] } | null, kickoff: string | null) => {
       const run = ++setupRunRef.current;
-      // An older run's load may still block Share; it no longer clears it.
-      setSetupLoad(null);
       if (!saved) {
         // The first turn saves the chat and gives it the server's id.
         keepSetupChat(newSetupChatId());
@@ -640,9 +700,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         openConversation(null, saved.messages);
       } else if (!activateConversation(saved.id)) {
         openConversation(saved.id, saved.messages);
-        setSetupLoad(saved.id);
         const load = await loadConversation(saved.id);
-        if (run === setupRunRef.current) setSetupLoad(null);
         // A load for a setup that closed or opened again must not touch the
         // new one. A restart to a new id during the load keeps the setup.
         if (run !== setupRunRef.current || setupChatRef.current === null) return;
@@ -711,7 +769,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         // The chat that asked for the setup goes on in it, with its turn
         // still running; the screen's kickoff waits for that turn to end.
         setupRunRef.current++;
-        setSetupLoad(null);
         setupMessagesRef.current = handed.messages;
         keepSetupChat(handed.id);
         if (start.kickoff) setKickoffScreen(shownScreen);
@@ -758,14 +815,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const webChat =
     agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
   const localMenu = useLocalAgentMenuModels(agent.model, webChat);
+  // Not in activeBusy: that also locks the composer, which stays open during /compact.
+  // It counts as busy for the live chat, so a fork that returns during it does not
+  // switch away, and a 404 on a setup chat's load waits for the next turn to restart it.
+  const compacting = agent.compacting?.reason === "manual";
   React.useEffect(() => {
-    liveChatRef.current = { id: agentConversationId, messages: agentMessages, busy: activeBusy };
+    liveChatRef.current = {
+      id: agentConversationId,
+      messages: agentMessages,
+      busy: activeBusy || compacting,
+    };
     kickoffTurnRef.current = trackKickoffTurn(kickoffTurnRef.current, activeBusy);
     const id = setupChatRef.current;
     if (!id || agentConversationId !== id || activeBusy) return;
     setupMessagesRef.current = agentMessages;
     keepSetupChat(id);
-  }, [agentMessages, agentConversationId, activeBusy, keepSetupChat]);
+  }, [agentMessages, agentConversationId, activeBusy, compacting, keepSetupChat]);
   const agentErrorCode = agent.errorCode;
   React.useEffect(() => {
     if (setupChatGone(setupChatRef.current, agentConversationId, agentErrorCode)) {
@@ -800,7 +865,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       setKickoffScreen(null);
       return;
     }
-    if (!panelDock || activeBusy || backgroundBusy) return;
+    if (!panelDock || activeBusy || backgroundBusy || compacting) return;
     setKickoffScreen(null);
     kickedScreensRef.current.add(kickoffScreen);
     kickoffTurnRef.current = {
@@ -817,6 +882,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     panelDock,
     activeBusy,
     backgroundBusy,
+    compacting,
     sendToAgent,
   ]);
 
@@ -828,7 +894,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (!inSetup || !autoFeedback || autoFeedback.id === sentFeedbackRef.current) return;
     const action = autoFeedbackAction({
       docked: panelDock !== null,
-      busy: activeBusy || backgroundBusy,
+      busy: activeBusy || backgroundBusy || compacting,
       silent: cloned && !userSpoke,
     });
     if (action === "wait") return;
@@ -836,7 +902,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (action === "skip") return;
     autoTurnRef.current = { id: autoFeedback.id, started: false };
     sendToAgent(autoFeedback.text);
-  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, cloned, userSpoke, sendToAgent]);
+  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, compacting, cloned, userSpoke, sendToAgent]);
   // The wizard checks the code again only once the agent finished the turn
   // the failed check started, not on the end of some other turn.
   const setFinishedAutoFeedback = wizardCtx?.setFinishedAutoFeedback;
@@ -859,56 +925,34 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   React.useEffect(() => {
     setAgentWritingFields?.(writingKey ? writingKey.split(",") : []);
   }, [writingKey, setAgentWritingFields]);
-  // The Changes pane's "Last turn" reads the newest turn that edited files.
   const writeBefore = wizardCtx?.writeBefore;
   const repoBase = wizardCtx?.repoBase;
-  const setLastTurnEdits = wizardCtx?.setLastTurnEdits;
-  React.useEffect(() => {
-    if (!inSetup || !setLastTurnEdits || !writeBefore) return;
-    setLastTurnEdits(latestTurnEdits(agent.messages, writeBefore, repoBase));
-  }, [inSetup, agent.messages, writeBefore, repoBase, setLastTurnEdits]);
-  // Undo and Reapply act on the newest turn that edited files, through the Changes pane.
-  const draftFiles = wizardCtx?.draftFiles ?? null;
-  const ideBusy = wizardCtx?.agentBusy ?? false;
-  const newestEdited = React.useMemo(() => {
-    if (!inSetup || !writeBefore) return null;
-    for (let i = agent.messages.length - 1; i >= 0; i--) {
-      const message = agent.messages[i]!;
-      if (messageEdits(message, writeBefore, repoBase).length > 0) return message;
-    }
-    return null;
-  }, [inSetup, agent.messages, writeBefore, repoBase]);
   const renderEditedFiles = React.useCallback(
     (message: AgentMessage) => {
       if (!writeBefore) return null;
       const edits = messageEdits(message, writeBefore, repoBase);
       if (edits.length === 0) return null;
-      const writeTurn = (turn: readonly FileEdit[], side: "before" | "after") => {
-        if (!draftFiles?.write(turn, side)) return;
-        toast(
-          msg(side === "before" ? "agent.edited_files.reverted" : "agent.edited_files.reapplied"),
-        );
-      };
-      return (
-        <EditedFilesCard
-          edits={edits}
-          onView={wizardCtx?.viewChanges ?? null}
-          undo={
-            draftFiles && message === newestEdited
-              ? {
-                  state: turnState(edits, draftFiles.text),
-                  disabled: ideBusy,
-                  onUndo: () => writeTurn(edits, "before"),
-                  onReapply: () => writeTurn(edits, "after"),
-                }
-              : null
-          }
-        />
-      );
+      return <EditedFilesCard edits={edits} onView={wizardCtx?.viewChanges ?? null} />;
     },
-    [writeBefore, repoBase, wizardCtx?.viewChanges, draftFiles, newestEdited, ideBusy],
+    [writeBefore, repoBase, wizardCtx?.viewChanges],
   );
-  const setupCheckIssue = inSetup ? (wizardCtx?.setupCheckIssue ?? null) : null;
+  // The user message rail. Bookmarks stay in memory, for this chat view only.
+  const railOutputs = React.useMemo(
+    () =>
+      outputsByToolCalls((m) =>
+        writeBefore ? messageEdits(m, writeBefore, repoBase).map((e) => e.path) : [],
+      ),
+    [writeBefore, repoBase],
+  );
+  const railItems = React.useMemo(
+    () => railItemsOf(agent.messages, railOutputs),
+    [agent.messages, railOutputs],
+  );
+  const [bookmarks, setBookmarks] = React.useState<{ key: number; at: ReadonlySet<number> }>({
+    key: 0,
+    at: new Set(),
+  });
+  const changedModels = React.useMemo(() => modelChanges(agent.messages), [agent.messages]);
   // Deleting the conversation you're currently viewing must drop you back to a
   // clean slate — otherwise the panel keeps showing the just-deleted thread and
   // the next message would try to append to a row that no longer exists (404).
@@ -924,140 +968,169 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   );
 
   const [draft, setDraft] = React.useState("");
-  const [attachOpen, setAttachOpen] = React.useState(false);
-  // The composer's attach button opens the OS file picker; the popover only
-  // appears once a dataset file was chosen, already parsed into the
-  // column-mapping card.
-  const [attachFile, setAttachFile] = React.useState<File | null>(null);
+  const {
+    open: sessionCardOpen,
+    show: showSessionCard,
+    close: closeSessionCard,
+  } = useSessionCard(chatView.key);
+  const chatMedia = useChatMedia();
+  const { forking, handleFork } = useFork({
+    agent,
+    store,
+    liveChatRef,
+    draft,
+    setDraft,
+    restoreMedia: chatMedia.restore,
+  });
+  // A fork during a manual /compact would copy the rows without the summary.
+  const canFork = !inSetup && !activeBusy && !compacting && !forking && !!agent.conversationId;
   const confirmedDatasetCallsRef = React.useRef<Set<string>>(new Set());
+  // A confirmed upload card renders nothing, so the turn must drop it, or it
+  // splits the steps around it (SKY-743). State, so the turn redraws.
+  const [confirmedUploadCalls, setConfirmedUploadCalls] = React.useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  // A new key remounts a tool card whose dataset left the draft unsent, so
+  // the user can pick again.
+  const [reopenedCards, setReopenedCards] = React.useState<Record<string, number>>({});
+  const reopenDatasetCard = React.useCallback((callId: string) => {
+    confirmedDatasetCallsRef.current.delete(callId);
+    setConfirmedUploadCalls((calls) => {
+      if (!calls.has(callId)) return calls;
+      const next = new Set(calls);
+      next.delete(callId);
+      return next;
+    });
+    setReopenedCards((cards) => ({ ...cards, [callId]: (cards[callId] ?? 0) + 1 }));
+  }, []);
 
-  const handleDatasetConfirm = React.useCallback(
-    async (callId: string, confirmed: ConfirmedDataset) => {
-      // A web chat must not stage rows or change the Mac's wizard.
-      if (webChat) return;
-      confirmedDatasetCallsRef.current.add(callId);
-      // Stage the rows on the backend before notifying the agent so the
-      // very next turn's wizard_state carries ``staged_dataset_id``. The
-      // submit wizard's own staging path only runs when its form is
-      // mounted; without this call an agent-panel-only flow ends up
-      // calling ``submit_unified_run_optimize_post`` with no dataset and 422s.
-      let stagedDatasetId: string | undefined;
-      try {
-        const staged = await stageDatasetForAgent({
+  const sendAfterRender = useSendAfterRender(agent.send);
+  // Stage the rows on the backend at once, so the turn that carries the
+  // card has ``staged_dataset_id``. The submit wizard's own staging path only
+  // runs when its form is mounted; without this call an agent-panel-only flow
+  // ends up calling ``submit_unified_run_optimize_post`` with no dataset and 422s.
+  const stageDataset = React.useCallback(
+    async (confirmed: ConfirmedDataset) =>
+      (
+        await stageDatasetForAgent({
           dataset: confirmed.rows,
           dataset_filename: confirmed.fileName,
-        });
-        stagedDatasetId = staged.staged_dataset_id;
-      } catch {
-        // Best-effort: if staging fails the agent will surface a clear
-        // 422 on submit and the user can re-attach. Falling back to no
-        // staged id matches the prior behaviour for the dispatched event.
-      }
-      const stagedDetail = {
-        dataset: confirmed.rows,
-        dataset_filename: confirmed.fileName,
-        staged_dataset_id: stagedDatasetId,
-        wizard_state: {
-          dataset_ready: true,
-          columns_configured: true,
-          dataset_columns: confirmed.columns,
-          column_kinds: confirmed.columnKinds,
-          column_roles: confirmed.columnRoles,
-        },
-      };
-      // Persist before dispatch so the wizard can replay it after navigation;
-      // the listener in use-unified-wizard reads+clears this key on mount.
-      try {
-        window.sessionStorage.setItem("wizard:staged-dataset", JSON.stringify(stagedDetail));
-      } catch {
-        // sessionStorage can throw under quota or private-mode policy; the
-        // live event below still covers the same-page case.
-      }
-      window.dispatchEvent(new CustomEvent("wizard:dataset-staged", { detail: stagedDetail }));
-      // Write the whole dataset descriptor into the shared context (not just
-      // the id) so it is the single source of truth: a wizard mounted on
-      // /submit hydrates the same rows from ``staged_dataset_id`` and reads
-      // columns + roles straight from here, instead of depending on the
-      // (quota-fragile) sessionStorage replay.
-      if (stagedDatasetId && wizardCtx) {
-        wizardCtx.setField("staged_dataset_id", stagedDatasetId, "user");
-        wizardCtx.setField("dataset_columns", confirmed.columns, "user");
-        wizardCtx.setField("dataset_ready", true, "user");
-        wizardCtx.setField("columns_configured", true, "user");
-      }
-      const mappingLine = confirmed.columns
-        .map((c) => {
-          const role = confirmed.columnRoles[c];
-          if (role === "ignore") return null;
-          return `- ${c} → ${role}`;
         })
-        .filter(Boolean)
-        .join("\n");
-      const note = formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_note", {
-        p1: confirmed.fileName,
-        p2: confirmed.rowCount,
-        p3: mappingLine,
-      });
-      const wizardOverride: WizardState | undefined = stagedDatasetId
-        ? {
-            staged_dataset_id: stagedDatasetId,
-            dataset_ready: true,
-            columns_configured: true,
-            dataset_columns: confirmed.columns,
-          }
-        : undefined;
-      agent.send(note, wizardOverride);
+      ).staged_dataset_id,
+    [],
+  );
+  const datasetDraft = useDatasetDraft({
+    draft,
+    setDraft,
+    stage: stageDataset,
+    wizard: wizardCtx,
+    onRelease: reopenDatasetCard,
+  });
+  const addOriginals = chatMedia.addOriginals;
+  const handleDatasetConfirm = React.useCallback(
+    (callId: string | undefined, confirmed: ConfirmedDataset, file: File) => {
+      // A web chat must not stage rows or change the Mac's wizard.
+      if (webChat) return;
+      // A composer attach has no tool card to mark or reopen.
+      if (callId) {
+        setConfirmedUploadCalls((calls) => new Set(calls).add(callId));
+      }
+      // The file waits in the composer as a card, as a PDF does (SKY-780).
+      const card = datasetDraft.attach(confirmed, callId);
+      // The card keeps its original as every attached file does (SKY-782),
+      // so the viewer shows the real workbook of an XLSX.
+      addOriginals([{ file, card }]);
     },
-    [agent, wizardCtx, webChat],
+    [webChat, datasetDraft, addOriginals],
+  );
+
+  // A switch to a hosted chat also drops a read under way, so its toast closes
+  // instead of the file vanishing in handleDatasetConfirm.
+  const attachComposerDataset = useComposerDatasetAttach(
+    `${agent.sessionKey}:${webChat}`,
+    React.useCallback(
+      (confirmed: ConfirmedDataset, file: File) => handleDatasetConfirm(undefined, confirmed, file),
+      [handleDatasetConfirm],
+    ),
   );
 
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
       if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
-      // By-reference twin of handleDatasetConfirm: no staging call — the run
-      // materializes rows from ``source_dataset_id`` on submit. Set the same
-      // gate fields so the next turn's wizard_state unlocks submit, and carry
-      // the library id so the backend injects it into the submit request.
-      if (wizardCtx) {
-        wizardCtx.setField("source_dataset_id", picked.sourceDatasetId, "user");
-        wizardCtx.setField("dataset_columns", picked.columns, "user");
-        wizardCtx.setField("dataset_ready", true, "user");
-        wizardCtx.setField("columns_configured", true, "user");
-      }
-      const mappingLine = picked.columns
-        .map((c) => {
-          const role = picked.columnRoles[c];
-          if (role === "ignore") return null;
-          return `- ${c} → ${role}`;
-        })
-        .filter(Boolean)
-        .join("\n");
-      const note = formatMsg("auto.features.agent.panel.components.generalistpanel.dataset_note", {
-        p1: picked.name,
-        p2: picked.rowCount,
-        p3: mappingLine,
-      });
-      const wizardOverride: WizardState = {
-        source_dataset_id: picked.sourceDatasetId,
-        dataset_ready: true,
-        columns_configured: true,
-        dataset_columns: picked.columns,
-      };
-      agent.send(note, wizardOverride);
+      datasetDraft.attachLibrary(picked, callId);
     },
-    [agent, wizardCtx, webChat],
+    [webChat, datasetDraft],
   );
 
   const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
   const clearLineComments = wizardCtx?.clearLineComments;
+  // A file card's id links its stored original, so a card that leaves the
+  // draft takes its original out of the message (SKY-782).
+  const draftFiles = React.useMemo(() => splitPastes(draft).files, [draft]);
+  const shownOriginals = chatMedia.shownOriginals;
+  const draftOriginals = React.useMemo(
+    () => shownOriginals(draftFiles),
+    [draftFiles, shownOriginals],
+  );
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
-    if (!trimmed && lineComments.length === 0) return;
-    agent.send(joinLineComments(trimmed, lineComments));
+    const files = splitPastes(draft).files;
+    const media = chatMedia.ready(files);
+    if (media === null) {
+      toast.info(chatMedia.blocked(files) ?? msg("agent.media.uploading"));
+      return;
+    }
+    if (datasetDraft.staging(draft)) {
+      toast.info(msg("agent.media.uploading"));
+      return;
+    }
+    if (!trimmed && lineComments.length === 0 && media.length === 0) return;
+    // Each file card names its stored file's path, where the agent reads it (SKY-781).
+    const paths = chatMedia.filePaths(splitPastes(trimmed).files);
+    const message = joinLineComments(withFilePaths(trimmed, paths), lineComments);
+    const options = media.length ? { media } : undefined;
+    // A manual /compact holds text only, so a turn with files waits in the
+    // composer; check it here, as the dataset's send goes after a render.
+    if (compacting && media.some((m) => m.kind !== "document")) {
+      toast.info(msg("agent.media.wait_compact"));
+      return;
+    }
+    const dataset = datasetDraft.take(draft);
+    if (dataset) {
+      // Sent after the cleared roles render, so the turn's wizard state does
+      // not carry the earlier file's roles.
+      sendAfterRender(message, dataset.override, options);
+    } else {
+      const sent = agent.send(message, undefined, options);
+      if (!sent && media.length) {
+        toast.info(msg("agent.media.wait_compact"));
+        return;
+      }
+    }
     setDraft("");
+    chatMedia.clear(files);
     clearLineComments?.();
-  }, [agent, draft, lineComments, clearLineComments]);
+  }, [
+    agent,
+    draft,
+    lineComments,
+    clearLineComments,
+    chatMedia,
+    datasetDraft,
+    compacting,
+    sendAfterRender,
+  ]);
+  // A draft with the pending dataset card skips the mid-turn queue: only
+  // handleSubmit applies the dataset, and its send stops the running reply.
+  const acceptsMidTurn = React.useCallback(
+    (text: string) => {
+      if (!datasetDraft.holds(text)) return true;
+      handleSubmit();
+      return false;
+    },
+    [datasetDraft, handleSubmit],
+  );
   const midTurn = React.useMemo(
     () => withLineComments(agent.midTurn, lineComments, clearLineComments),
     [agent.midTurn, lineComments, clearLineComments],
@@ -1115,20 +1188,21 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const renderToolCall = React.useCallback(
     (call: AgentToolCall, ctx: { isRetry: boolean }) => {
       if (call.tool === REQUEST_DATASET_TOOL) {
+        if (confirmedUploadCalls.has(call.id)) return null;
         // Intentionally NOT gated on ``streaming``: the agent's expected
         // flow is to call request_user_dataset and then submit in the
         // same turn, but MiniMax sometimes stops after the dataset
         // request without finishing — that would freeze the card in
         // disabled state while the user waits for a stream that already
         // hung up. Keeping the card live lets the upload proceed; the
-        // confirmation handler cancels any in-flight stream before
-        // starting the next turn.
+        // dataset's send cancels any in-flight stream before starting the
+        // next turn.
         return (
           <DatasetUploadCard
+            key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             disabled={webChat}
-            alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
-            onConfirm={(confirmed) => handleDatasetConfirm(call.id, confirmed)}
+            onConfirm={(confirmed, file) => handleDatasetConfirm(call.id, confirmed, file)}
           />
         );
       }
@@ -1139,6 +1213,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (call.tool === REQUEST_LIBRARY_TOOL) {
         return (
           <LibraryDatasetCard
+            key={`${call.id}:${reopenedCards[call.id] ?? 0}`}
             call={call}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
             onConfirm={(picked) => handleLibraryPick(call.id, picked)}
@@ -1150,6 +1225,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (call.tool === REQUEST_INFERENCE_TOOL) {
         return <InferenceFormCard call={call} disabled={streaming} />;
       }
+      // A finished setup write with nothing to show renders nothing, so the turn drops it.
+      if (isWizardWrite(call.tool) && !isWizardWriteStep(call, writeBefore?.[call.id])) return null;
       const renderer = getToolRenderer(call.tool);
       if (renderer?.card && call.status !== "running") {
         return renderer.card(call);
@@ -1157,28 +1234,30 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, streaming, webChat],
+    [
+      confirmedUploadCalls,
+      handleDatasetConfirm,
+      handleLibraryPick,
+      reopenedCards,
+      streaming,
+      webChat,
+      writeBefore,
+    ],
   );
 
   // Every call is a step in the turn's activity group except the ones the
-  // user acts on or reads at a glance: the request cards, the submit summary,
-  // which links to the new run, and each wizard write with its old and new values.
-  const isStepCall = React.useCallback((call: AgentToolCall) => {
-    if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;
-    const card = SUBMIT_TOOLS.has(call.tool) || isWizardWrite(call.tool);
-    return !(card && call.status !== "running");
-  }, []);
-  // A folded turn hides every tool but the requests the user must answer.
-  const isPinnedCall = React.useCallback(
-    (call: AgentToolCall) => RICH_CARD_TOOLS.has(call.tool),
-    [],
+  // user acts on: the request cards and the submit summary, which links to the
+  // new run. A wizard write is a step row that opens to its old and new values,
+  // except a finished write that changed nothing, which renders nothing.
+  const isStepCall = React.useCallback(
+    (call: AgentToolCall) => {
+      if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;
+      if (isWizardWrite(call.tool)) return isWizardWriteStep(call, writeBefore?.[call.id]);
+      return !(SUBMIT_TOOLS.has(call.tool) && call.status !== "running");
+    },
+    [writeBefore],
   );
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
-
-  // A share link opens the chat in hosted Skynet, so only the hosted app
-  // shares chats; the Mac app has no share button (SKY-294).
-  const canShare = !isLocalMode();
-  const [shareOpen, setShareOpen] = React.useState(false);
 
   // Pi runs its built-in slash commands only in its own terminal, so the
   // composer runs the ones that fit a hosted chat on this panel's controls
@@ -1225,12 +1304,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         : undefined;
     return extra ? [extra, ...rows] : rows;
   }, [localModels, catalogModels, slashPick]);
-  const canShareChat =
-    canShare &&
-    !webChat &&
-    !!agent.conversationId &&
-    agent.conversationId !== setupLoad &&
-    agent.messages.length > 0;
+  // The /session context window: the catalog's for the chat's model; the
+  // stats fall back to the backend's default without it.
+  const contextWindow = React.useMemo(() => {
+    const effective =
+      slashPick ?? (localModels ? localModels[0] : catalogFallbackModel(slashModels))?.value;
+    return catalogAll?.find((m) => m.value === effective)?.max_input_tokens ?? null;
+  }, [slashPick, localModels, slashModels, catalogAll]);
   const slashCommands = React.useMemo(() => {
     const effective =
       slashPick ??
@@ -1250,6 +1330,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         argHint: "<model>",
         description: msg("agent.slash.model"),
         icon: Cpu,
+        picker: true,
         current: effective ?? undefined,
         options: slashMenuModels.map((m) => ({
           value: m.value,
@@ -1265,10 +1346,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       argHint: "<level>",
       description: msg("agent.slash.thinking"),
       icon: Brain,
+      picker: true,
       hidden: !efforts.length,
       current: shownEffort ?? "default",
       options: [
-          { value: "default", label: msg("agent.model_menu.effort_default") },
+        { value: "default", label: msg("agent.model_menu.effort_default") },
         ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
       ],
     });
@@ -1285,13 +1367,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         argHint: "<name>",
         description: msg("agent.slash.name"),
         icon: PencilSimple,
+        needsText: true,
         hidden: inSetup || !agent.conversationId,
-      },
-      {
-        name: "share",
-        description: msg("agent.slash.share"),
-        icon: ShareNetwork,
-        hidden: !canShareChat,
       },
       {
         name: "copy",
@@ -1306,29 +1383,86 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         hidden: !agent.messages.length,
       },
     );
+    // /fork is hidden while it cannot run, so skip the split on every streamed update.
+    const forks = canFork ? forkPoints(agent.messages) : [];
+    commands.push(
+      {
+        name: "compact",
+        argHint: "<instructions>",
+        description: msg("agent.slash.compact"),
+        icon: ArrowsInLineVertical,
+        // Shown while a reply streams, so a run tells the user to wait for it.
+        hidden: !agent.messages.length,
+      },
+      {
+        name: "session",
+        description: msg("agent.slash.session"),
+        icon: ChartBar,
+        hidden: !agent.messages.length,
+      },
+      {
+        name: "fork",
+        argHint: "<message>",
+        description: msg("agent.slash.fork"),
+        icon: GitFork,
+        hidden: !canFork || !forks.length,
+        labelsOnly: true,
+        options: forks.map((p) => {
+          // Cut by code points, so a surrogate pair is never split in half. Typed
+          // text longer than the cut matches no row; the user picks it from the menu.
+          const chars = Array.from(p.text);
+          const label = chars.length > 80 ? `${chars.slice(0, 80).join("")}…` : p.text;
+          return { value: String(p.index), label };
+        }),
+      },
+    );
     commands.push({ name: "settings", description: msg("agent.slash.settings"), icon: Gear });
     return commands;
   }, [
     slashPick,
     agent.reasoningEffort,
     agent.conversationId,
-    agent.messages.length,
+    agent.messages,
+    canFork,
     localModels,
     slashModels,
     slashMenuModels,
     inSetup,
-    canShareChat,
     locale,
   ]);
 
+  const modelMenuRef = React.useRef<ModelMenuHandle>(null);
+  const modelMenuNode = (
+    <ComposerModelMenu
+      openRef={modelMenuRef}
+      value={agent.model}
+      onChange={agent.setModel}
+      effort={agent.reasoningEffort}
+      onEffortChange={agent.setReasoningEffort}
+      fast={agent.fastMode}
+      onFastChange={agent.setFastMode}
+      models={localMenu.models}
+      allModels={localMenu.allModels}
+      side={localMenu.side}
+    />
+  );
   const runSlash = React.useCallback(
-    (command: SlashCommand, arg: string) => {
+    (command: SlashCommand, arg: string, fromMenu: boolean) => {
       switch (command.name) {
         case "model":
         case "thinking": {
+          if (!arg) {
+            // After the slash menu's keypress, so the menu keeps the focus it takes.
+            requestAnimationFrame(() =>
+              modelMenuRef.current?.open(command.name === "model" ? "models" : "effort"),
+            );
+            return;
+          }
           const value = resolveSlashOption(arg, command.options ?? []);
           if (!value) {
-            toast.error(formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }));
+            toast.error(
+              formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }),
+            );
             return;
           }
           if (command.name === "thinking") {
@@ -1362,9 +1496,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           }
           void store.rename(agent.conversationId, arg);
           return;
-        case "share":
-          setShareOpen(true);
-          return;
         case "copy": {
           const last = agent.messages.findLast((m) => m.role === "assistant" && m.content.trim());
           if (!last) return;
@@ -1388,12 +1519,38 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           setTimeout(() => URL.revokeObjectURL(url), 0);
           return;
         }
+        case "compact":
+          agent.compact(arg);
+          return;
+        case "session":
+          agent.syncCost();
+          showSessionCard();
+          return;
+        case "fork": {
+          const value = labelsOnlyValue(command, arg, fromMenu);
+          if (value === null) {
+            toast.error(
+              formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }),
+            );
+            return;
+          }
+          void handleFork(Number(value));
+          return;
+        }
         case "settings":
           setSettingsOpen(true);
           return;
       }
     },
-    [agent, slashModels, handleNewConversation, store, setSettingsOpen],
+    [
+      agent,
+      slashModels,
+      handleNewConversation,
+      handleFork,
+      store,
+      setSettingsOpen,
+      showSessionCard,
+    ],
   );
   const slash = React.useMemo(
     () => ({ commands: slashCommands, run: runSlash }),
@@ -1410,16 +1567,42 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   const chatBody = (
     <div dir={dir} className="relative flex min-w-0 flex-1 flex-col">
-      <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2.5 shrink-0">
+      {/* Floating, the chat's bar takes the header's place. */}
+      {chatFloat && (
+        <div className="flex h-9 shrink-0 items-center gap-2 px-3 text-[12.5px]">
+          <span className="min-w-0 truncate font-medium">{msg("submit.agentic_ide.chat_tab")}</span>
+          {streaming && agent.statusLabel && (
+            <span className="min-w-0 truncate text-muted-foreground">{agent.statusLabel}</span>
+          )}
+          <span className="ms-auto flex shrink-0 items-center gap-0.5">
+            <FloatButton
+              label={msg(
+                chatFloat.expanded
+                  ? "submit.agentic_ide.minimize_chat"
+                  : "submit.agentic_ide.expand_chat",
+              )}
+              onClick={() => chatFloat.onExpand(!chatFloat.expanded)}
+            >
+              {chatFloat.expanded ? <CaretDown className="size-4" /> : <CaretUp className="size-4" />}
+            </FloatButton>
+            <FloatButton label={msg("submit.agentic_ide.dock_chat")} onClick={chatFloat.onDock}>
+              <ArrowsIn className="size-4" />
+            </FloatButton>
+          </span>
+        </div>
+      )}
+      <div
+        className={cn(
+          "flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2.5 shrink-0",
+          chatFloat && "hidden",
+        )}
+      >
         <div className="flex items-center gap-2 min-w-0">
           <span className="inline-flex size-6 shrink-0 overflow-hidden rounded-full bg-secondary">
             <AppMark className="size-full" aria-hidden="true" />
           </span>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 leading-tight">
-              <span className="text-[0.8125rem] font-medium">
-                {msg("auto.features.agent.panel.components.generalistpanel.3")}
-              </span>
               <Popover>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1450,6 +1633,36 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <CopyChatMenu messages={agent.messages} />
+          {wizardCtx?.changesToggle && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-pressed={wizardCtx.changesToggle.open}
+                  onClick={wizardCtx.changesToggle.toggle}
+                  className={cn(
+                    "text-muted-foreground hover:text-foreground",
+                    wizardCtx.changesToggle.open && "text-foreground",
+                  )}
+                  aria-label={msg("submit.agentic_ide.changes_tab")}
+                >
+                  <GitDiff className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <TooltipShortcuts
+                  rows={[
+                    {
+                      label: msg("submit.agentic_ide.changes_tab"),
+                      keys: [commandKey(), commandKey() === "⌘" ? "⌥" : "Alt", "B"],
+                    },
+                  ]}
+                />
+              </TooltipContent>
+            </Tooltip>
+          )}
           {/* The setup's chat is the draft's own: no history or second chat. */}
           {!inSetup && (
           <Tooltip>
@@ -1484,32 +1697,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               )}
             </TooltipContent>
           </Tooltip>
-          )}
-          {canShareChat && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={() => setShareOpen(true)}
-                  className="text-muted-foreground hover:text-foreground"
-                  aria-label={msg("shared.agent.share_conversation")}
-                >
-                  <ShareNetwork className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                {msg("shared.agent.share_conversation")}
-              </TooltipContent>
-            </Tooltip>
-          )}
-          {canShare && agent.conversationId && (
-            <ShareChatDialog
-              conversationId={agent.conversationId}
-              open={shareOpen}
-              onOpenChange={setShareOpen}
-            />
           )}
           {!inSetup && agent.messages.length > 0 && (
             <Tooltip>
@@ -1561,89 +1748,178 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </div>
       </div>
 
-      <AgentThread
-        className="overscroll-contain"
-        streaming={streaming}
-        isEmpty={agent.messages.length === 0}
-        emptyState={emptyState}
-        scrollDeps={[
-          agent.messages.length,
-          agent.messages[agent.messages.length - 1]?.content,
-          agent.messages[agent.messages.length - 1]?.toolCalls?.length,
-          agent.messages[agent.messages.length - 1]?.thinkingSegments?.at(-1)?.reasoning,
-          agent.statusLabel,
-          agent.pendingApproval?.id ?? "",
-        ]}
+      {/* Minimized, the floating chat keeps its thread mounted, so its scroll place survives. */}
+      <div
+        className={cn(
+          !chatFloat
+            ? "contents"
+            : chatFloat.expanded
+              ? "flex h-[min(50vh,440px)] min-h-0 flex-col border-y border-border/70"
+              : "hidden",
+        )}
       >
-        <ChatSourceContext.Provider value={webChat ? "hosted" : "local"}>
-          <LineCommentLinkContext.Provider value={wizardCtx?.viewChanges ?? null}>
-            <ChatTranscript
-              key={chatView.key}
-              messages={agent.messages}
-              streaming={streaming}
-              editAndResend={agent.editAndResend}
-              renderToolCall={renderToolCall}
-              isStepCall={isStepCall}
-              isPinnedCall={isPinnedCall}
-              stepKind={stepKind}
-              onRunCode={handleRunCode}
-              renderAfterContent={inSetup ? renderEditedFiles : undefined}
-              animatePairs
-              trailing={({ isEditingAny }) => (
-                <>
-                  {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
-                    <QuestionChoices
-                      options={choices}
-                      onSelect={(label) => agent.send(label)}
-                      hint={msg("agent.choices.hint")}
-                      ariaLabel={msg("agent.choices.label")}
-                    />
-                  )}
-                  {agent.pendingApproval && (
-                    <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
-                  )}
-                  {agent.error && (
-                    <ChatErrorBanner
-                      message={agent.error}
-                      retryLabel={msg(
-                        "auto.features.agent.panel.components.generalistpanel.error_retry",
-                      )}
-                      onRetry={
-                        agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
-                          ? undefined
-                          : agent.retry
-                      }
-                      action={
-                        agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                          <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
-                            {msg("billing.action.add_funds")}
-                          </Button>
-                        ) : undefined
-                      }
-                    />
-                  )}
-                </>
-              )}
+        <AgentThread
+          // The rail marks are 40px wide at the start edge; keep the text clear of them.
+          className={cn("overscroll-contain", railItems.length >= RAIL_MIN_ITEMS && "ps-11")}
+          streaming={streaming}
+          isEmpty={agent.messages.length === 0}
+          emptyState={emptyState}
+          scrollDeps={[
+            agent.messages.length,
+            agent.messages[agent.messages.length - 1]?.content,
+            agent.messages[agent.messages.length - 1]?.toolCalls?.length,
+            agent.messages[agent.messages.length - 1]?.thinkingSegments?.at(-1)?.reasoning,
+            agent.statusLabel,
+            agent.pendingApproval?.id ?? "",
+          ]}
+          overlay={(scrollBox) => (
+            <UserMessageRail
+              items={railItems}
+              scrollBox={scrollBox}
+              bookmarks={bookmarks.key === chatView.key ? bookmarks.at : NO_BOOKMARKS}
+              onBookmarkChange={(index, on) =>
+                setBookmarks((prev) => {
+                  const next = new Set(prev.key === chatView.key ? prev.at : []);
+                  if (on) next.add(index);
+                  else next.delete(index);
+                  return { key: chatView.key, at: next };
+                })
+              }
             />
-          </LineCommentLinkContext.Provider>
-        </ChatSourceContext.Provider>
-      </AgentThread>
+          )}
+        >
+          <ChatSourceContext.Provider value={webChat ? "hosted" : "local"}>
+          <MediaUrlContext.Provider value={resolveChatMediaUrl}>
+            <LineCommentLinkContext.Provider value={wizardCtx?.viewChanges ?? null}>
+              <ChatTranscript
+                key={chatView.key}
+                messages={agent.messages}
+                streaming={streaming}
+                editAndResend={(index, content) => {
+                  // An edit drops the turns after it, so their bookmarks go too.
+                  setBookmarks((prev) => ({
+                    key: prev.key,
+                    at: new Set([...prev.at].filter((at) => at <= index)),
+                  }));
+                  agent.editAndResend(index, content);
+                }}
+                renderBeforeUser={(index) => {
+                  const change = changedModels.get(index);
+                  return (
+                    change && (
+                      <ModelChangedNotice
+                        fromModel={modelDisplayName(change.from, catalogAll)}
+                        toModel={modelDisplayName(change.to, catalogAll)}
+                      />
+                    )
+                  );
+                }}
+                renderToolCall={renderToolCall}
+                isStepCall={isStepCall}
+                stepKind={stepKind}
+                onRunCode={handleRunCode}
+                renderAfterContent={inSetup ? renderEditedFiles : undefined}
+                animatePairs
+                onFork={canFork ? (index) => void handleFork(index) : undefined}
+                renderCompaction={(entry) => <CompactionMarker entry={entry} />}
+                compacting={
+                  agent.compacting?.reason === "threshold" ? (
+                    <CompactionHold
+                      history={agent.messages}
+                      summarizedTurns={agent.compacting.summarizedTurns}
+                      startedAt={agent.compacting.startedAt}
+                    />
+                  ) : undefined
+                }
+                trailing={({ isEditingAny }) => (
+                  <>
+                    <CompactionStatus
+                      active={Boolean(agent.compacting)}
+                      latest={
+                        agent.messages[latestCompactionIndex(agent.messages)]?.compaction
+                          ?.createdAt ?? null
+                      }
+                    />
+                    <AnimatePresence>
+                      {agent.compacting?.reason === "manual" && (
+                        <CompactionHold
+                          key="compacting"
+                          history={agent.messages}
+                          summarizedTurns={agent.compacting.summarizedTurns}
+                          startedAt={agent.compacting.startedAt}
+                          header
+                        />
+                      )}
+                    </AnimatePresence>
+                    {sessionCardOpen && (
+                      <SessionStatsCard
+                        stats={sessionStats(agent.messages, contextWindow)}
+                        onClose={closeSessionCard}
+                      />
+                    )}
+                    {choices &&
+                      !isEditingAny &&
+                      !streaming &&
+                      !agent.pendingApproval &&
+                      !agent.error && (
+                        <QuestionChoices
+                          options={choices}
+                          onSelect={(label) => agent.send(label)}
+                          hint={msg("agent.choices.hint")}
+                          ariaLabel={msg("agent.choices.label")}
+                        />
+                      )}
+                    {agent.pendingApproval && (
+                      <ApprovalCard
+                        payload={agent.pendingApproval}
+                        onResolve={agent.confirmApproval}
+                      />
+                    )}
+                    {agent.reconnect && (
+                      <ReconnectingNotice
+                        attempt={agent.reconnect.attempt}
+                        maxAttempts={agent.reconnect.maxAttempts}
+                      />
+                    )}
+                    {agent.error && (
+                      <ChatErrorBanner
+                        // A new key for each capacity failure starts its countdown again.
+                        key={agent.capacityFailures}
+                        message={agent.error}
+                        retryInSeconds={
+                          agent.errorCode === CAPACITY_ERROR_CODE && agent.capacityFailures > 0
+                            ? capacityRetryDelay(agent.capacityFailures - 1)
+                            : undefined
+                        }
+                        retryLabel={msg(
+                          "auto.features.agent.panel.components.generalistpanel.error_retry",
+                        )}
+                        onRetry={
+                          agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
+                            ? undefined
+                            : agent.retry
+                        }
+                        action={
+                          agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
+                            <RetryIconButton
+                              label={msg("billing.action.add_funds")}
+                              icon={Wallet}
+                              onClick={() => openSettingsTo("billing")}
+                              className={CHAT_ERROR_ICON_BUTTON_CLASS}
+                            />
+                          ) : undefined
+                        }
+                      />
+                    )}
+                  </>
+                )}
+              />
+            </LineCommentLinkContext.Provider>
+          </MediaUrlContext.Provider>
+          </ChatSourceContext.Provider>
+        </AgentThread>
+      </div>
 
-      {setupCheckIssue && !activeBusy && (
-        <div className="mx-3 mb-1.5 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-xs">
-          <span className="text-destructive">
-            {formatMsg("agent.setup_check.failed_chip", { count: setupCheckIssue.count })}
-          </span>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-6 px-2 text-xs"
-            onClick={() => agent.send(setupCheckIssue.feedback)}
-          >
-            {msg("agent.setup_check.ask_fix")}
-          </Button>
-        </div>
-      )}
       <Composer
         value={draft}
         onChange={setDraft}
@@ -1659,85 +1935,60 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   : "auto.features.agent.panel.components.generalistpanel.literal.5",
               )
         }
-        sendsEmpty={lineComments.length > 0}
+        sendsEmpty={lineComments.length > 0 || chatMedia.tiles.length > 0}
+        media={{ items: chatMedia.tiles, onRemove: chatMedia.remove }}
         chips={
           lineComments.length > 0 && (
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 py-0.5 ps-2 pe-1 text-xs text-foreground">
-              <ChatText className="size-3.5 text-muted-foreground" aria-hidden />
-              {formatMsg("shared.agent.line_comments.count", { count: lineComments.length })}
-              <button
-                type="button"
-                onClick={clearLineComments}
-                aria-label={msg("shared.agent.line_comments.remove")}
-                className="flex size-4 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              >
-                <X className="size-3" aria-hidden />
-              </button>
-            </span>
+            <QueuedComments
+              comments={lineComments}
+              onOpen={(c) => wizardCtx?.viewChanges?.(c.path, undefined, lineCommentId(c))}
+              onRemove={wizardCtx?.removeLineComment}
+              onEdit={wizardCtx?.updateLineComment}
+            />
           )
         }
+        mentions={wizardCtx?.repoPaths ?? undefined}
         streaming={activeBusy}
         midTurn={midTurn}
+        acceptsMidTurn={acceptsMidTurn}
         slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
-          <ComposerModelMenu
-            value={agent.model}
-            onChange={agent.setModel}
-            effort={agent.reasoningEffort}
-            onEffortChange={agent.setReasoningEffort}
-            fast={agent.fastMode}
-            onFastChange={agent.setFastMode}
-            models={localMenu.models}
-            allModels={localMenu.allModels}
-            side={localMenu.side}
-          />
+          // The setup chat puts the model menu on the start side; every other chat keeps it here.
+          <>
+            <ChatContextUsage
+              messages={agent.messages}
+              contextWindow={contextWindow}
+              streaming={streaming}
+            />
+            {!inSetup && modelMenuNode}
+          </>
         }
-        // Dataset files keep their column-mapping card; any other file is
-        // read as text by the composer.
-        claimsFile={isDatasetFile}
-        onAttachFile={(file) => {
-          setAttachFile(file);
-          setAttachOpen(true);
-        }}
+        // Dataset files are read into rows first; every file then becomes
+        // a file card in the composer. A hosted chat cannot take the rows,
+        // so there a dataset is a plain file card.
+        claimsFile={webChat ? undefined : isDatasetFile}
+        // The media routes are on this Mac's backend, so a hosted chat's file card gives only its type and size.
+        onMediaFiles={webChat ? undefined : chatMedia.addFiles}
+        onOriginalFiles={webChat ? undefined : chatMedia.addOriginals}
+        originals={webChat ? undefined : draftOriginals}
+        // A file card gets its path only on Send, so it waits for the reply too.
+        mediaWaiting={chatMedia.tiles.length > 0 || draftFiles.length > 0}
+        sendBlocked={chatMedia.blocked(draftFiles)}
+        // The file card in the draft shows the dataset, so nothing else opens (SKY-783).
+        onAttachFile={attachComposerDataset}
         leadingControls={
           <>
-            <Popover
-              open={attachOpen}
-              onOpenChange={(open) => {
-                setAttachOpen(open);
-                if (!open) setAttachFile(null);
-              }}
-            >
-              {/* Anchors the dataset card beside the composer's attach button. */}
-              <PopoverTrigger asChild>
-                <span aria-hidden className="pointer-events-none -ms-1 block size-0" />
-              </PopoverTrigger>
-              <PopoverContent
-                side="top"
-                align="start"
-                sideOffset={8}
-                className="w-96 max-w-[calc(100vw-2rem)] p-3"
-              >
-                <DatasetUploadCard
-                  initialFile={attachFile}
-                  onConfirm={(confirmed) => {
-                    setAttachOpen(false);
-                    setAttachFile(null);
-                    void handleDatasetConfirm(`user-attach-${confirmed.fileName}`, confirmed);
-                  }}
-                />
-              </PopoverContent>
-            </Popover>
-            {/* The setup agent works without approvals, so the trust mode does not apply. */}
-            {!inSetup && <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />}
+            {/* Every agent screen, setup too: in Ask mode the setup agent's file writes wait for approval. */}
+            <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />
+            {inSetup && modelMenuNode}
           </>
         }
         sendAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.6")}
         stopAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.7")}
       />
 
-      <PresenceStrip active={streaming} hue={inSetup ? undefined : hue} />
+      <PresenceStrip active={streaming} hue={hue} />
     </div>
   );
 
@@ -1848,5 +2099,36 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
       <SubmitSplashOverlay show={submitSplash} />
     </>
+  );
+}
+
+/**
+ * An icon button in the floating chat's bar.
+ *
+ * Args:
+ *   label: The button's accessible name and tooltip.
+ *   onClick: The button's action.
+ *   children: The icon.
+ */
+function FloatButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <TooltipButton delayDuration={250} tooltip={label}>
+      <button
+        type="button"
+        aria-label={label}
+        onClick={onClick}
+        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+      >
+        {children}
+      </button>
+    </TooltipButton>
   );
 }

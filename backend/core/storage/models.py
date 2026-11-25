@@ -498,6 +498,35 @@ class PushSubscriptionModel(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ImageBuildModel(Base):
+    """One build of a user's box image from a Dockerfile (SKY-737).
+
+    A finished build is reused by the same user's later runs when the input
+    hash matches. The row also holds the full build log, which the run record
+    names by the row id, so the log stays out of the job result JSON.
+    """
+
+    __tablename__ = "image_builds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    builder: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Null until the build succeeds: a started, failed or cancelled build keeps only its log.
+    image: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    log: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # The CodeBuild build id while the build may still run, so account deletion can stop a build whose
+    # worker was hard-killed (SKY-896). Only a built image clears it: a failed wait (a timeout or a lost
+    # status read) can end before CodeBuild does.
+    codebuild_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (Index("ix_image_builds_username_input_hash", "username", "input_hash"),)
+
+
 class SlackConnectionModel(Base):
     """One identity's install of the Skynet Slack app, where its Slack notifications go.
 
@@ -540,6 +569,25 @@ class ModelPrivacyPreferenceModel(Base):
 
     username: Mapped[str] = mapped_column(String(255), primary_key=True)
     data_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="deny")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class SetupBillingPreferenceModel(Base):
+    """Whether a caller's new runs bill their setup checks to the wallet only.
+
+    A missing row means ``True``: setup stays out of the run's spending limit
+    (SKY-925). ``False`` makes new budgets count setup against their limit.
+    """
+
+    __tablename__ = "setup_billing_preferences"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    from_wallet: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -716,8 +764,8 @@ class BillingCustomerModel(Base):
         default=0,
         server_default="0",
     )
-    # ``grant_remaining`` is what is left of the account's one-time free
-    # grant (500 cents = $5, seeded once and never renewed). NULL until the first
+    # ``grant_remaining`` is what is left of the account's one-time
+    # grant (seeded once from ``grant_cents()``, never renewed). NULL until the first
     # wallet read or run seeds it; seeding is lazy-evaluated on read, never
     # cron'd.
     grant_remaining: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)
@@ -795,7 +843,7 @@ class WalletLedgerModel(Base):
     # None on interactive debits (serve, agent chat), non-run rows, and rows
     # written before run attribution landed.
     optimization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    # Cents of a ``run`` row's charge drawn from the free grant; the paid part
+    # Cents of a ``run`` row's charge drawn from the grant; the paid part
     # is ``-delta_cents - from_grant_cents``. On a positive restart-waiver row,
     # the cents returned to the grant. None on non-run and older rows.
     from_grant_cents: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)
@@ -824,6 +872,10 @@ class ExecutionBudgetModel(Base):
     creation_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     total_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     uncapped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # A setup_in_total budget (continuous-plan cycles, or accounts that turn off wallet setup
+    # billing) keeps the policy from before SKY-925: its total caps and counts setup spend. Every
+    # other budget bills setup to the balance.
+    setup_in_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
@@ -836,6 +888,7 @@ class ExecutionBudgetModel(Base):
     billed_cents: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class ExecutionOperationModel(Base):
@@ -1003,7 +1056,7 @@ class UserSecretModel(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     # The hosts the user approved for this secret (SKY-641). A run may send it
-    # only to these, so an edited optimize.toml cannot redirect it. Empty
+    # only to these, so an edited ascent.toml cannot redirect it. Empty
     # (every secret saved before SKY-641) means no host.
     allowed_hosts: Mapped[list[str]] = mapped_column(
         JSON_STORE, nullable=False, default=list, server_default=text("'[]'")
@@ -1259,10 +1312,16 @@ class JobModel(Base):
     # shape is a first-class indexed column. NULL on legacy/child rows.
     composition: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Only the orphan sweep's requeues count here, so a manual resume does not
+    # use up a step log run's MAX_AUTOMATIC_RESUMES (SKY-801).
+    automatic_resumes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     code_version: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     # The image a protected run first executed in. Every later box for the run,
     # a resume after a redeploy included, boots from it so checkpoints stay loadable.
     sandbox_image: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The user images of the [run] and [metric] boxes, by role, pinned at the
+    # first start so a resume boots the same two digests (SKY-737).
+    box_images: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
     execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     execution_budget_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_budget_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1293,6 +1352,18 @@ class JobModel(Base):
     # folds the finished leg in before clearing the timestamps, so elapsed reports net
     # active compute across resumes without ever counting the paused gap between legs.
     accumulated_runtime_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    # The setup chat that created the run. Only the chat's own user reads it
+    # unmasked, admins read it masked, and anyone else, also a new owner after
+    # a transfer, gets 404. It is set only to a chat the submitter owns.
+    # SET NULL keeps a chat delete free of the run.
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # The step log shard of the run (SKY-731). The shard map or the first step log flush
+    # sets it once, and nothing changes it later, so a new shard never moves a run.
+    # NULL and ``main`` both mean the main database.
+    step_log_shard: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
@@ -1305,7 +1376,56 @@ class JobModel(Base):
         # the alembic migration so two concurrent submits with the same key
         # cannot both create rows.
         Index("ix_jobs_username_idempotency_key", "username", "idempotency_key"),
+        # Each new shard map with no extra shard looks for a job that records a shard other than
+        # ``main`` (SKY-731). Almost every run records ``main``, so the index leaves those rows out:
+        # it stays empty while no run uses an extra shard, and the lookup does not scan ``jobs``.
+        Index(
+            "ix_jobs_step_log_shard",
+            "step_log_shard",
+            postgresql_where=text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
+            sqlite_where=text("step_log_shard IS NOT NULL AND step_log_shard <> 'main'"),
+        ),
     )
+
+
+# An engine that replays its committed steps on a resume sends their progress
+# events again (SKY-808). A unique partial index keeps one row per job and
+# string value under this metrics key, so a replayed keyed event adds no row.
+PROGRESS_EVENT_KEY = "progress_event_key"
+PROGRESS_EVENT_KEY_INDEX = "ux_job_progress_events_event_key"
+# A key from a user subprocess is untrusted. Only a string of this length
+# counts as a key; a longer one would also bloat the index entry.
+MAX_PROGRESS_EVENT_KEY_LENGTH = 200
+# Each dialect spells the JSON lookup its own way. The ON CONFLICT target of
+# the keyed insert repeats these exact expressions so the database finds the index.
+PROGRESS_EVENT_KEY_SQL = {
+    "postgresql": (
+        f"(metrics ->> '{PROGRESS_EVENT_KEY}')",
+        f"jsonb_typeof(metrics -> '{PROGRESS_EVENT_KEY}') = 'string' "
+        f"AND length(metrics ->> '{PROGRESS_EVENT_KEY}') BETWEEN 1 AND {MAX_PROGRESS_EVENT_KEY_LENGTH}",
+    ),
+    "sqlite": (
+        f"json_extract(metrics, '$.{PROGRESS_EVENT_KEY}')",
+        f"json_type(metrics, '$.{PROGRESS_EVENT_KEY}') = 'text' "
+        f"AND length(json_extract(metrics, '$.{PROGRESS_EVENT_KEY}')) BETWEEN 1 AND {MAX_PROGRESS_EVENT_KEY_LENGTH}",
+    ),
+}
+
+
+def progress_event_key(metrics: dict[str, Any]) -> str | None:
+    """Return the event key that the unique key index covers, or ``None``.
+
+    Args:
+        metrics: Metric payload of a progress event.
+
+    Returns:
+        The key when it is a string of 1 to ``MAX_PROGRESS_EVENT_KEY_LENGTH``
+        characters, else ``None``.
+    """
+    key = metrics.get(PROGRESS_EVENT_KEY)
+    if isinstance(key, str) and 1 <= len(key) <= MAX_PROGRESS_EVENT_KEY_LENGTH:
+        return key
+    return None
 
 
 class ProgressEventModel(Base):
@@ -1321,7 +1441,19 @@ class ProgressEventModel(Base):
     event: Mapped[str | None] = mapped_column(String(255), nullable=True)
     metrics: Mapped[dict[str, Any]] = mapped_column(JSON_STORE, default=dict)
 
-    __table_args__ = (Index("ix_job_progress_events_optimization_timestamp", "optimization_id", "timestamp"),)
+    __table_args__ = (
+        Index("ix_job_progress_events_optimization_timestamp", "optimization_id", "timestamp"),
+        *(
+            Index(
+                PROGRESS_EVENT_KEY_INDEX,
+                "optimization_id",
+                text(key_sql),
+                unique=True,
+                **{f"{dialect}_where": text(where_sql)},
+            ).ddl_if(dialect=dialect)
+            for dialect, (key_sql, where_sql) in PROGRESS_EVENT_KEY_SQL.items()
+        ),
+    )
 
 
 class LogEntryModel(Base):
@@ -1383,13 +1515,11 @@ class GepaCheckpointModel(Base):
 
 
 class BlackboxAgentRunModel(Base):
-    """One sandboxed agent run of a black-box job: its answer, transcript and outcome.
+    """One stored agent run of a black-box job: its answer, transcript and outcome.
 
-    An agent target evaluates every ``(version, case)`` pair in its own
-    sandbox. The worker writes the row when the run starts, appends the
-    transcript as the box streams it, and rewrites the row with the answer
-    and outcome when the run ends, so the run view can show what each
-    version did on each case, live or after the fact. ``phase``/``trial``/
+    Only jobs from the retired agent target have these rows. No worker
+    writes new rows (SKY-834). The run view still reads the stored rows, so
+    it can show what each version did on each case. ``phase``/``trial``/
     ``example_id`` tie the row to the progress events that name the same
     run. ``stored_bytes`` folds into the owner's "optimizations" footprint;
     rows go with their job via the cascading foreign key.
@@ -1428,7 +1558,7 @@ class RunCallModel(Base):
     """One relay call made by a candidate of a run (SKY-364).
 
     The relay writes one row for each call out of a box: a model call, an MCP
-    tool call, a ``skynet.call`` to a stage, an evaluator call or an
+    tool call, an ``openascent.call`` to a stage, an evaluator call or an
     allowed-host request. ``seq`` counts the candidate's calls from 1 and is
     the ``since`` cursor of the live read route. The store assigns it under a
     lock on the candidate row, so a call with a lower ``seq`` always commits
@@ -1482,6 +1612,139 @@ class RunCandidateModel(Base):
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     last_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class WorkspaceModel(Base):
+    """A user's agent workspace: its policy, its budget and its storage format (SKY-710).
+
+    ``storage_version`` names the tree and pack format the workspace's data
+    uses, so a later format change can tell old data from new.
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSON_STORE, nullable=False, default=dict)
+    execution_budget_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    storage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class StoragePackModel(Base):
+    """One pack object that one step log flush wrote to the object store (SKY-710).
+
+    The row commits in the same transaction as the pack's steps and tree
+    objects, so a pack without a row is a flush that crashed after its PUT;
+    recovery applies it.
+
+    ``byte_size = -1`` marks a broken pack: the tree compactor found its object
+    missing or shorter than its rows (SKY-716). Its rows stay on it, and the
+    compactor no longer merges it. ``created_at`` is the write time, and for a
+    pack that the compactor merged, the retire time.
+    """
+
+    __tablename__ = "storage_packs"
+    # The compactor's candidate and retired-pack queries filter on created_at and sort by
+    # (created_at, pack_key) with a LIMIT (SKY-802).
+    __table_args__ = (Index("ix_storage_packs_created_at_pack_key", "created_at", "pack_key"),)
+
+    pack_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    worker_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    # An entry in this pack has no row (account deletion, stale step, duplicate, gone job); the compactor
+    # rewrites the pack without its bytes (SKY-733).
+    needs_rewrite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+
+
+class AgentStepModel(Base):
+    """One agent step: a command with its output and new tree, or a model response (SKY-710).
+
+    ``step_id`` is ``<run_id>:<agent_id>:<seq>``, so a retried commit maps to
+    the same row. The step body lives in the pack at ``pack_offset``/``pack_length``.
+    ``run_id`` is the job id and the shard key. On the main database, rows go
+    with their job via the cascading foreign key. Another shard has no
+    ``jobs`` table, so a job delete (``purge_run_shards``) and an account
+    purge (``purge_user_shards``) in ``tree_purge`` delete its rows (SKY-733).
+    """
+
+    __tablename__ = "agent_steps"
+    __table_args__ = (
+        Index("ux_agent_steps_run_agent_seq", "run_id", "agent_id", "seq", unique=True),
+        # The compactor reads the rows of one pack and checks if any row points at a pack (SKY-802).
+        Index("ix_agent_steps_pack_key", "pack_key"),
+    )
+
+    # run_id 36 + ":" + agent_id 64 + ":" + 10 digits of the largest Integer seq = 112.
+    step_id: Mapped[str] = mapped_column(String(112), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    execution_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    grant_list_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tree_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pack_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    pack_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pack_length: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class TreeObjectModel(Base):
+    """One content-addressed tree or blob object that an account owns (SKY-710).
+
+    ``object_id`` is the SHA-256 of the stored bytes, so the same content has
+    one row for each account. ``byte_size`` counts toward the owner's storage
+    footprint. No job foreign key: a tree outlives its run. The account
+    deletion purge deletes an account's rows (see
+    :mod:`core.storage.tree_purge`).
+    """
+
+    __tablename__ = "tree_objects"
+    # The compactor reads the rows of one pack and checks if any row points at a pack (SKY-802).
+    __table_args__ = (Index("ix_tree_objects_pack_key", "pack_key"),)
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    object_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pack_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    pack_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pack_length: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class AgentEffectModel(Base):
+    """One outside effect of a run, keyed by its effect key, so a retry does it only once (SKY-710)."""
+
+    __tablename__ = "agent_effects"
+
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), primary_key=True
+    )
+    effect_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    step_id: Mapped[str | None] = mapped_column(String(112), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
@@ -1641,10 +1904,6 @@ class AgentConversationModel(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # The share link this chat was continued from, when another user's link
-    # made it. Not a foreign key: a revoke deletes the link row and clears this
-    # column, and every shared-item read checks the live link row.
-    source_share_token: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -1655,39 +1914,43 @@ class AgentConversationModel(Base):
     __table_args__ = (
         Index("ix_agent_conversations_user_updated", "username", "updated_at"),
         Index("ix_agent_conversations_user_pinned", "username", "pinned"),
-        # One continued copy per user and link, so a second open finds the first.
-        Index("ix_agent_conversations_source_share", "source_share_token", "username", unique=True),
     )
 
 
-class AgentChatShareModel(Base):
-    """The one live share link of an agent conversation.
+class AgentFeedbackReportModel(Base):
+    """One report an agent sent when the user was not satisfied with a tool result (SKY-580).
 
-    ``link_type`` is ``view`` (anyone can read the chat), ``continue`` (a
-    signed-in user continues it as their own chat) or ``continue_data``
-    (as ``continue``, and the user can read the ticked ``items`` live,
-    read-only). ``items`` holds ``{"kind", "id"}`` entries. A revoke deletes
-    the row, so the token and every grant stop at once.
+    The agent writes the report with its ``send_feedback`` tool. The unique
+    key on ``(conversation_id, user_message_id)`` keeps it to at most one
+    report for each stored user message. A regenerate stores the message again
+    with a new id, so it can get one more report. ``user_message_id`` is the stored user message the report
+    is about. It has no foreign key on purpose: an edit or a regenerate deletes
+    that message, and the report must stay. Postgres takes message ids from a
+    sequence and never reuses them, so a later message never meets an old
+    report. The row holds only a short quote of the user and the agent's
+    summary, never secrets or file contents. Deleting the chat deletes its
+    reports.
     """
 
-    __tablename__ = "agent_chat_shares"
+    __tablename__ = "agent_feedback_reports"
 
-    token: Mapped[str] = mapped_column(String(48), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     conversation_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("agent_conversations.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
     )
-    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    link_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    items: Mapped[list[dict[str, Any]]] = mapped_column(JSON_STORE, nullable=False, default=list)
+    user_message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    agent: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_quote: Mapped[str] = mapped_column(String(300), nullable=False)
+    summary: Mapped[str] = mapped_column(String(1000), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC), index=True
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
+
+    __table_args__ = (UniqueConstraint("conversation_id", "user_message_id", name="uq_agent_feedback_reports_message"),)
 
 
 class AgentMessageModel(Base):
@@ -1774,6 +2037,33 @@ class AgentStagedDatasetModel(Base):
     )
 
     __table_args__ = (Index("ix_agent_staged_datasets_user_created", "username", "created_at"),)
+
+
+# An image, video or audio file a user attached in an agent chat (SKY-707),
+# or the original of an attached PDF, DOCX or XLSX (SKY-735).
+# Only ``username`` reads it. ``mime_type`` comes from the file's own bytes,
+# not from the upload header. The bytes count in the "agent_chats" storage.
+# ``conversation_id`` names the stored chat that sent the file; deleting the
+# chat deletes the file. A file no chat sent has none, and a sweep removes it.
+class ChatMediaModel(Base):
+    __tablename__ = "chat_media"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+
+    __table_args__ = (Index("ix_chat_media_user_created", "username", "created_at"),)
 
 
 # One left run-wizard setup per account, offered back on any device until the

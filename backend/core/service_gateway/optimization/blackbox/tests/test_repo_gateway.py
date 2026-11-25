@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,10 @@ from core.exceptions import ServiceError
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import repo_staging
 
+from .. import runner
+from .. import scorer as scorer_mod
 from ..preflight import verify_anything_in_sandbox
+from ..protocol import RUN_FAILED_STATUS, EvalServer, ScorerAbortError
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
@@ -61,14 +65,14 @@ import json, os, urllib.request
 
 def ask(text):
     body = json.dumps({
-        "model": os.environ["APP_MODEL"],
+        "model": os.environ["ASCENT_MODEL"],
         "max_tokens": 16,
         "messages": [{"role": "user", "content": text}],
     }).encode()
     request = urllib.request.Request(
         os.environ["OPENAI_BASE_URL"] + "/chat/completions",
         data=body,
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["APP_API_KEY"]},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["ASCENT_MODEL_KEY"]},
     )
     with urllib.request.urlopen(request) as response:
         return json.load(response)["choices"][0]["message"]["content"]
@@ -77,13 +81,13 @@ def ask(text):
 
 def run(value):
     leaked = any(key in item for item in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r}))
-    return {{"direct": ask("candidate prompt"), "leaked": leaked, "has_key": bool(os.environ.get("APP_API_KEY"))}}
+    return {{"direct": ask("candidate prompt"), "leaked": leaked, "has_key": bool(os.environ.get("ASCENT_MODEL_KEY"))}}
 """
 )
 # The metric box holds no repository file, so the version's own call runs
 # in the candidate box through the [run] entry, and the metric gets its output (SKY-398).
 SCORER = f"""
-import os
+import json, os
 
 def score(repo_path, case, output):
     direct = output["direct"]
@@ -91,18 +95,18 @@ def score(repo_path, case, output):
     leaked = output["leaked"] or any(
         key in value for value in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r})
     )
-    return {{
-        "score": 1.0 if direct == "OK" and judged == "OK" else 0.0,
-        "feedback": direct + " " + judged,
+    probe = {{
         "secret": os.environ.get("API_KEY"),
         "leaked": leaked,
-        "has_key": output["has_key"] and bool(os.environ.get("APP_API_KEY")),
+        "has_key": output["has_key"] and bool(os.environ.get("ASCENT_MODEL_KEY")),
     }}
+    # The answer allows no other keys (SKY-769), so the probe travels in the feedback.
+    return {{"score": 1.0 if direct == "OK" and judged == "OK" else 0.0, "feedback": json.dumps(probe)}}
 """
 
 
 @pytest.fixture(autouse=True)
-def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
 
     The supervisor then runs as the test's user and starts the entry as that
@@ -112,11 +116,12 @@ def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     Args:
         monkeypatch: Restores the local box's run after the test.
 
-    Returns:
+    Yields:
         The commands that asked for root, in order.
     """
     run = LocalSubprocessSession.run
     root_commands: list[str] = []
+    mailboxes: set[Path] = set()
 
     def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
         """Run the command as the test's user, and record a root request.
@@ -134,9 +139,34 @@ def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
             root_commands.append(command)
         return run(self, command, **options)
 
+    write_files = LocalSubprocessSession.write_files
+
+    def with_root_mailbox(self: LocalSubprocessSession, files: Mapping[str, str]) -> None:
+        """Write root mailbox files at their /tmp path, as root does in a real box, and the rest in the box.
+
+        A real root box writes the mailbox in sticky /tmp (SKY-902). A local
+        box writes only inside its working folder.
+
+        Args:
+            self: The local box.
+            files: Maps each path to its text content.
+        """
+        boxed = {}
+        for path, text in files.items():
+            if path.startswith(model_mailbox.ROOT_MAILBOX_PREFIX):
+                target = Path(path)
+                mailboxes.add(next(parent for parent in target.parents if parent.parent == Path("/tmp")))
+                target.write_text(text)
+            else:
+                boxed[path] = text
+        write_files(self, boxed)
+
     monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+    monkeypatch.setattr(LocalSubprocessSession, "write_files", with_root_mailbox)
     monkeypatch.setattr(model_mailbox, "ROOT_PYTHON", sys.executable)
-    return root_commands
+    yield root_commands
+    for folder in mailboxes:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -265,7 +295,13 @@ def _score(
 def test_a_managed_call_from_the_box_is_metered(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path, root_commands_in_local_boxes: list[str]
 ) -> None:
-    """Version code and the scorer's llm() reach the managed route; the parent pays and meters both."""
+    """Version code and the scorer's llm() reach the managed route; the parent pays and meters both.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
+        root_commands_in_local_boxes: The commands that dropped the scorer's root flag.
+    """
     model_gateway, sent = gateway
     result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY)
     # The [run] supervisor runs as root, and the mailbox still wraps it, so the entry keeps its model route.
@@ -274,11 +310,12 @@ def test_a_managed_call_from_the_box_is_metered(
     assert all(command.startswith(f"{sys.executable} -I -S -c ") for command in supervisors)
 
     document = result["document"]
+    probe = json.loads(document["feedback"])
     assert document["score"] == 1.0
-    assert document["leaked"] is False
-    assert document["has_key"] is True
+    assert probe["leaked"] is False
+    assert probe["has_key"] is True
     # No run secret enters the box (E38); the parent keeps it for redaction.
-    assert document["secret"] is None
+    assert probe["secret"] is None
     assert len(sent) == 2
     assert all(request.headers["authorization"] == f"Bearer {MANAGED_KEY}" for request in sent)
     route = result["scorer"]["model"]["extra"][ROUTE_KEY]
@@ -290,7 +327,12 @@ def test_a_managed_call_from_the_box_is_metered(
 def test_a_byok_call_from_the_box_uses_the_users_key_in_the_parent(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
 ) -> None:
-    """A BYOK route sends the user's key upstream from the parent; the box never holds it."""
+    """A BYOK route sends the user's key upstream from the parent; the box never holds it.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
+    """
     model_gateway, sent = gateway
     model = {
         "name": "openrouter/fixture/text",
@@ -303,7 +345,7 @@ def test_a_byok_call_from_the_box_uses_the_users_key_in_the_parent(
 
     document = result["document"]
     assert document["score"] == 1.0
-    assert document["leaked"] is False
+    assert json.loads(document["feedback"])["leaked"] is False
     assert len(sent) == 2
     assert all(request.headers["authorization"] == f"Bearer {BYOK_KEY}" for request in sent)
     route = result["scorer"]["model"]["extra"][ROUTE_KEY]
@@ -342,7 +384,12 @@ class _Evaluator:
 def test_a_box_cannot_reach_any_capability_beyond_its_model_route(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
 ) -> None:
-    """The box's code is refused at the evaluator, budget and model paths, even with a leaked token, and never blocks."""
+    """The box's code is refused at the evaluator, budget and model paths, even with a leaked token, and never blocks.
+
+    Args:
+        gateway: The gateway and the requests it sent.
+        tmp_path: Scratch folder.
+    """
     model_gateway, sent = gateway
     evaluator = _Evaluator()
     evaluator_token = model_gateway.bind_evaluator(evaluator)["token"]
@@ -352,7 +399,7 @@ import json, os, urllib.error, urllib.request
 def _status(path, token):
     request = urllib.request.Request(
         os.environ["OPENAI_BASE_URL"] + path,
-        data=json.dumps({{"model": os.environ["APP_MODEL"], "messages": []}}).encode(),
+        data=json.dumps({{"model": os.environ["ASCENT_MODEL"], "messages": []}}).encode(),
         headers={{"Content-Type": "application/json", "Authorization": "Bearer " + token}},
     )
     try:
@@ -362,7 +409,7 @@ def _status(path, token):
         return error.code
 
 def score(repo_path, case, output):
-    route = os.environ["APP_API_KEY"]
+    route = os.environ["ASCENT_MODEL_KEY"]
     statuses = [
         _status("/_evaluator", route),
         _status("/_evaluator", {evaluator_token!r}),
@@ -385,7 +432,11 @@ def score(repo_path, case, output):
 def test_route_dispatch_refuses_every_non_route_token_and_capability_path(
     gateway: tuple[ModelGateway, list[httpx.Request]],
 ) -> None:
-    """Only a registered model route token on a model path passes the parent box's dispatch."""
+    """Only a registered model route token on a model path passes the parent box's dispatch.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+    """
     model_gateway, _ = gateway
     evaluator_token = model_gateway.bind_evaluator(_Evaluator())["token"]
     protected = model_gateway.protect_payload(
@@ -463,6 +514,10 @@ def test_the_setup_check_scores_the_checkout_the_run_scores(
 
     The metric box holds no repository file (SKY-398), so the ``[run]``
     entry reads the checkout and the metric scores its output.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
     """
     metric_code = (
         "def score(repo_path, case, output):\n"
@@ -478,7 +533,12 @@ def test_the_setup_check_scores_the_checkout_the_run_scores(
 def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
 ) -> None:
-    """A repository has no seed, so the check scores the checkout itself and a metric that raises fails it (SKY-644)."""
+    """A repository has no seed, so the check scores the checkout itself and a metric that raises fails it (SKY-644).
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
+    """
     metric_code = (
         "from pathlib import Path\n"
         "def score(repo_path, case):\n"
@@ -492,6 +552,102 @@ def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
     assert check["status"] == "failed"
     assert "The scorer raised an error" in check["message"]
     assert "evaluator_readiness" not in result
+
+
+class _FailedRunRelay:
+    """Stand in for the parent relay: the repository scorer reports a failed ``[run]`` entry."""
+
+    def __init__(self, route: dict[str, str], *, timeout_seconds: float, label: str) -> None:
+        """Accept the relay's arguments.
+
+        Args:
+            route: The parent-issued capability.
+            timeout_seconds: The request timeout.
+            label: Names the scorer in failure messages.
+        """
+
+    def __call__(self, candidate: Any, case: Any = None) -> dict[str, Any]:
+        """Return the repository scorer's reply for a failed run.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            A reply with no score and the ``run_failed`` status.
+        """
+        return {"score": None, "feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_the_setup_check_trusts_the_failed_run_status_of_the_repository_scorer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup check reads its own scorer's ``run_failed`` reply as a failed run, not a wrong answer (SKY-769).
+
+    Args:
+        monkeypatch: Sets the relay.
+    """
+    monkeypatch.setattr(scorer_mod, "RemoteEvaluatorClient", _FailedRunRelay)
+    payload = {
+        "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return {'score': 1.0}\n"},
+        "target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["README"]}},
+        "cases": [{"input": "x"}],
+        "_skynet_evaluator_route": {"token": "route"},
+    }
+
+    result = verify_anything_in_sandbox(
+        payload, scope="evaluation", identity="repo-check", runtime=LocalSubprocessRuntime()
+    )
+
+    assert result["scorer_result"]["score"] is None
+    assert result["scorer_result"]["side_info"] == {"feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_a_wrong_answer_form_stops_a_repository_run_before_any_score(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """A bare number from the metric stops the run after one evaluation, through the parent's relay (SKY-769).
+
+    The relay turns the parent's refusal into a 422, so the stop works only
+    when the parent's fixed text keeps the answer form.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
+    """
+    model_gateway, _ = gateway
+    metric_code = "def score(repo_path, case=None):\n    return 0.8\n"
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=model_gateway.parent_sandbox_runtime(),
+            spec=SandboxSpec(lifetime_seconds=120, image=IMAGE, network_disabled=True, operation_key="repo-scorer:job"),
+            archive=_archive(tmp_path, {"README": "hello"}),
+            editable_paths=["README"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        metric_code,
+        timeout_seconds=60,
+    )
+    relayed = scorer_mod.RemoteScorer(
+        "unused",
+        secret=None,
+        timeout_seconds=60,
+        protected_route=model_gateway.bind_evaluator(scorer),
+        label="repository scorer",
+        trusted_reply=True,
+    )
+    server = EvalServer(relayed, max_evals=5)
+    try:
+        with pytest.raises(ScorerAbortError) as caught:
+            server.evaluate("")
+    finally:
+        scorer.close()
+
+    assert str(caught.value).endswith(runner.ANSWER_FORM)
+    assert "return 0.8" not in str(caught.value)
+    assert server.used == 1
 
 
 def _boot(tmp_path: Path, source: str, config: str, digests: tuple[str, str]) -> subprocess.CompletedProcess[str]:
@@ -533,7 +689,11 @@ def _sha(text: str) -> str:
 
 
 def test_the_root_proxy_refuses_a_proxy_file_the_box_user_changed(tmp_path: Path) -> None:
-    """A root proxy runs nothing when the proxy file differs from what the parent wrote (SKY-398)."""
+    """A root proxy runs nothing when the proxy file differs from what the parent wrote (SKY-398).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     sent = "print('parent proxy')\n"
 
     result = _boot(tmp_path, "print('candidate code as root')\n", "{}", (_sha(sent), _sha("{}")))
@@ -544,7 +704,11 @@ def test_the_root_proxy_refuses_a_proxy_file_the_box_user_changed(tmp_path: Path
 
 
 def test_the_root_proxy_runs_the_sent_bytes_with_a_private_config_copy(tmp_path: Path) -> None:
-    """With matching digests the boot runs the proxy on a config copy, not the box user's file."""
+    """With matching digests the boot runs the proxy on a config copy, not the box user's file.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     source = "import sys\nprint(open(sys.argv[1]).read(), sys.argv[1], *sys.argv[2:], sep='|')\n"
 
     result = _boot(tmp_path, source, '{"k": 1}', (_sha(source), _sha('{"k": 1}')))
@@ -579,7 +743,11 @@ class _RecordingSession:
 
 
 def test_only_the_root_supervisor_goes_through_the_model_mailbox(tmp_path: Path) -> None:
-    """A root setup command skips the mailbox, so no root proxy runs for it; the supervisor keeps its route."""
+    """A root setup command skips the mailbox, so no root proxy runs for it; the supervisor keeps its route.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     session = _RecordingSession()
 
     def mailbox(box: Any, command: str, *, sudo: bool = False, **_options: Any) -> str:

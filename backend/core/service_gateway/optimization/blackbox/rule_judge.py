@@ -1,6 +1,6 @@
 """Watch a repository run against its intent and plain-language rules.
 
-A repository's ``optimize.toml`` may name an instructions file that states
+A repository's ``ascent.toml`` may name an instructions file that states
 the run's intent (``instructions``) and a rule file that lists illegal
 approaches (``[proposer] illegal``), one top-level bullet per rule. Path rules
 cannot catch either, so an optional watch hook reads the agent's recent steps

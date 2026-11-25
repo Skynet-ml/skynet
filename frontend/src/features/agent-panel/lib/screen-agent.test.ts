@@ -32,6 +32,7 @@ const {
   parseScreenNav,
   registerSetupChatFlush,
   runScreenNav,
+  runSetupChatId,
   SETUP_CHAT_MAX_CHARS,
   setupChatLedger,
   setupChatSnapshot,
@@ -62,10 +63,45 @@ test("a continue with a return screen jumps straight back there", () => {
     goToScreen: (s: string) => calls.push(`go:${s}`),
     goForwardTo: (s: string) => calls.push(`to:${s}`),
   };
-  const nav = parseScreenNav({ screen_nav: { action: "continue", from: "optimizer", to: "budget" } });
-  assert.deepEqual(nav, { action: "continue", from: "optimizer", to: "budget" });
+  const nav = parseScreenNav({
+    screen_nav: { action: "continue", from: "optimizer", to: "budget", jump: true },
+  });
+  assert.deepEqual(nav, { action: "continue", from: "optimizer", to: "budget", jump: true });
   runScreenNav(nav!, navigator);
   assert.deepEqual(calls, ["to:budget"]);
+});
+
+test("every continue names the next screen, and a plain next move runs Continue (SKY-744)", () => {
+  const calls: string[] = [];
+  const navigator = {
+    screen: "brief",
+    forward: () => calls.push("forward"),
+    goToScreen: (s: string) => calls.push(`go:${s}`),
+    goForwardTo: (s: string) => calls.push(`to:${s}`),
+  };
+  const nav = parseScreenNav({ screen_nav: { action: "continue", from: "brief", to: "artifact" } });
+  assert.deepEqual(nav, { action: "continue", from: "brief", to: "artifact" });
+  runScreenNav(nav!, navigator);
+  assert.deepEqual(calls, ["forward"]);
+});
+
+test("a plain continue runs Continue even when its screen is stale (SKY-744)", () => {
+  const calls: string[] = [];
+  const navigator = {
+    screen: "source",
+    forward: () => calls.push("forward"),
+    goToScreen: (s: string) => calls.push(`go:${s}`),
+    goForwardTo: (s: string) => calls.push(`to:${s}`),
+  };
+  // The turn's data_mode write turned the next screen into plan; the snapshot said optimizer.
+  const nav = parseScreenNav({
+    screen_nav: { action: "continue", from: "source", to: "optimizer" },
+  });
+  assert.deepEqual(nav, { action: "continue", from: "source", to: "optimizer" });
+  runScreenNav(nav!, navigator);
+  // The move to the last screen.
+  runScreenNav({ action: "continue", from: "source", to: "overview" }, navigator);
+  assert.deepEqual(calls, ["forward", "forward"]);
 });
 
 test("the return screen is the latest screen a go-back left, until the wizard reaches it", () => {
@@ -74,7 +110,10 @@ test("the return screen is the latest screen a go-back left, until the wizard re
   assert.equal(nextReturnScreen("budget", back("optimizer")), "budget");
   assert.equal(nextReturnScreen("budget", { action: "continue", from: "brief" }), "budget");
   // A held jump keeps the screen; the wizard clears it when it gets there.
-  assert.equal(nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }), "budget");
+  assert.equal(
+    nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget", jump: true }),
+    "budget",
+  );
   // A go-back from past the old screen means the user moved on: the newer screen wins.
   assert.equal(nextReturnScreen("budget", back("overview")), "overview");
   // The user moved on to metric while the agent's turn from budget ran.
@@ -86,6 +125,10 @@ test("the wizard reaches the return screen on it or past it", () => {
   assert.equal(reachedReturnScreen("budget", "metric"), true);
   assert.equal(reachedReturnScreen("budget", "brief"), false);
   assert.equal(reachedReturnScreen("budget", null), false);
+  // Hardening sits between the code and the check (SKY-684).
+  assert.equal(reachedReturnScreen("harden", "metric"), false);
+  assert.equal(reachedReturnScreen("harden", "check"), true);
+  assert.equal(reachedReturnScreen("metric", "harden"), true);
 });
 
 test("a back result jumps to the named screen with its request", () => {
@@ -148,6 +191,18 @@ test("a setup chat kept with no messages, as the server once saved it, is not re
   assert.equal(legacySetupChatId("not json"), null);
 });
 
+test("a run keeps only a setup chat saved on the server it starts on", () => {
+  const kept = (id: string) => JSON.stringify({ id, kicked: [], messages: [] });
+  assert.equal(runSetupChatId(kept("c1"), "local"), "c1");
+  assert.equal(runSetupChatId(kept("c1"), "hosted"), null);
+  assert.equal(runSetupChatId(kept("hosted:c2"), "hosted"), "c2");
+  assert.equal(runSetupChatId(kept("hosted:c2"), "local"), null);
+  assert.equal(runSetupChatId(kept("setup-abc"), "local"), null);
+  assert.equal(runSetupChatId('{"id":"c3","kicked":[]}', "local"), null);
+  assert.equal(runSetupChatId(null, "local"), null);
+  assert.equal(runSetupChatId("not json", "local"), null);
+});
+
 test("a mid-turn copy keeps the user's message and the reply so far, without an empty bubble", () => {
   const user = { role: "user" as const, content: "q" };
   const empty = { role: "assistant" as const, content: "", toolCalls: [] };
@@ -174,6 +229,19 @@ test("a mid-turn copy ends running and pending tool rows and open thinking", () 
   assert.equal(kept?.thinkingSegments?.[0]?.endedAt, 9);
   const onlyPending = { role: "assistant" as const, content: "", toolCalls: [pending] };
   assert.deepEqual(setupChatSnapshot([user, onlyPending], null, 9), [user]);
+});
+
+test("a mid-turn copy keeps a thinking segment after the tool it followed when a pending row drops", () => {
+  const user = { role: "user" as const, content: "set it" };
+  const pending = { id: "pending:0", tool: "x", reason: "", status: "running" as const, startedAt: 1, endedAt: null };
+  const done = { id: "t0", tool: "y", reason: "", status: "done" as const, startedAt: 1, endedAt: 2 };
+  const reply = {
+    role: "assistant" as const, content: "",
+    toolCalls: [pending, done],
+    thinkingSegments: [{ reasoning: "hm", toolsBefore: 2, startedAt: 3, endedAt: 4 }],
+  };
+  const [, kept] = setupChatSnapshot([user, reply], null, 9);
+  assert.equal(kept?.thinkingSegments?.[0]?.toolsBefore, 1);
 });
 
 test("a mid-turn copy drops a running kickoff but keeps what the user wrote during it", () => {

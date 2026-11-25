@@ -46,7 +46,7 @@ const beigeEditorTheme = EditorView.theme(
     },
     ".cm-content": {
       caretColor: "var(--primary)",
-      fontFamily: "ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace",
+      fontFamily: "'Geist Mono Variable', ui-monospace, Menlo, monospace",
       fontSize: "12.5px",
     },
     ".cm-cursor, .cm-dropCursor": {
@@ -128,7 +128,7 @@ const beigeEditorTheme = EditorView.theme(
       backgroundColor: "var(--popover)",
     },
     ".cm-tooltip-autocomplete > ul": {
-      fontFamily: "ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace",
+      fontFamily: "'Geist Mono Variable', ui-monospace, Menlo, monospace",
       fontSize: "12px",
     },
     ".cm-tooltip-autocomplete > ul > li": {

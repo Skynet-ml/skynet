@@ -55,7 +55,7 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
         imported, handler = statement.body[0], statement.handlers[0]
         if not (
             isinstance(imported, ast.ImportFrom)
-            and imported.module == "skynet"
+            and imported.module == "openascent"
             and imported.level == 0
             and len(imported.names) == 1
             and imported.names[0].name == "llm"
@@ -84,7 +84,7 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
         allowed_fallbacks.clear()
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "skynet" and node.level == 0:
+        if isinstance(node, ast.ImportFrom) and node.module == "openascent" and node.level == 0:
             for alias in node.names:
                 if alias.name == "llm":
                     aliases.add(alias.asname or alias.name)
@@ -92,7 +92,7 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
                 elif alias.name == "*":
                     aliases.add("llm")
         elif isinstance(node, ast.Import):
-            modules.update(alias.asname or alias.name for alias in node.names if alias.name == "skynet")
+            modules.update(alias.asname or alias.name for alias in node.names if alias.name == "openascent")
 
     def is_helper(node: ast.AST) -> bool:
         """Recognize a direct helper name or module attribute."""
@@ -130,11 +130,11 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
             bound.update(node.names)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
-                if isinstance(node, ast.Import) and alias.name == "skynet":
+                if isinstance(node, ast.Import) and alias.name == "openascent":
                     continue
                 if (
                     isinstance(node, ast.ImportFrom)
-                    and node.module == "skynet"
+                    and node.module == "openascent"
                     and node.level == 0
                     and alias.name in {"llm", "*"}
                 ):
@@ -170,7 +170,7 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
                 isinstance(node, ast.Call)
                 and node.args
                 and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == "skynet"
+                and node.args[0].value == "openascent"
                 and (
                     (isinstance(node.func, ast.Name) and node.func.id in {"__import__", "import_module"})
                     or (
@@ -188,7 +188,7 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
                 and node.value.value.id == "sys"
                 and node.value.attr == "modules"
                 and isinstance(node.slice, ast.Constant)
-                and node.slice.value == "skynet"
+                and node.slice.value == "openascent"
             )
             or (
                 isinstance(node, ast.Call)

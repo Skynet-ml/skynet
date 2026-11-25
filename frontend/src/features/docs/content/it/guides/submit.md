@@ -81,7 +81,6 @@ La procedura guidata elenca solo gli ottimizzatori adatti alla tua attività e a
 Imposta per quanto tempo l'esecuzione può continuare a provare e quanto può spendere:
 
 - **Esecuzioni dello scorer max** (Guidato: **Tentativi max**): il numero massimo di candidati a cui Skynet assegna un punteggio. Alcuni ottimizzatori richiedono un numero minimo.
-- **Fermati al punteggio** (Guidato: **Fermati prima quando il punteggio raggiunge**): l'esecuzione si ferma quando una versione raggiunge questo punteggio.
 - **Iterazioni max** (Guidato: **Round max**): mostrato per gli ottimizzatori che lo supportano.
 - **Limite di spesa**: il massimo che l'esecuzione può spendere. Il valore predefinito è 5 $, oppure l'importo **Necessario per iniziare** se è maggiore. Puoi anche selezionare **Nessun limite**.
 
@@ -91,13 +90,13 @@ La procedura guidata non ti fa proseguire se il limite o il tuo saldo è inferio
 
 ### Scorer
 
-Scrivi `scorer.py`. Definisce `score(repo_path, case)` e restituisce un punteggio con un feedback. L'assistente può scriverlo per te. Leggi [Metriche e scorer](/docs/concepts/scorers).
+Scrivi `scorer.py`. Definisce `score(repo_path, case, output=None)` e restituisce un punteggio con un feedback. Lo scorer legge `output`, cioè ciò che la entry `[run]` ha restituito per il caso. Non gira nella cartella della versione e non importa codice dal repository. L'assistente può scriverlo per te. Leggi [Metriche e scorer](/docs/concepts/scorers).
 
 Il repository può avere un file `serve.py` con `def serve(input)`. Skynet lo usa per servire la versione migliore dopo l'esecuzione. Leggi [Leggere i risultati](/docs/guides/results).
 
 ### Secret
 
-Aggiungi i secret, come le chiavi API di cui ha bisogno il tuo codice. Ogni segreto arriva al tuo codice e al tuo scorer come variabile d'ambiente con lo stesso nome. L'agente di programmazione non può vederli. Skynet nasconde i loro valori nei log.
+Aggiungi i secret, come le chiavi API di cui ha bisogno il tuo codice. Il tuo codice e il tuo scorer non ricevono i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva a un ruolo solo tramite una tabella `[services.<name>]` che il ruolo elenca in `[run] services` o `[metric] services`, o tramite un server del file `mcp` del ruolo. Scrivi il segreto negli `headers` della tabella come `${NAME}`. L'agente di programmazione non può vederli. Skynet nasconde i loro valori nei log.
 
 ### Controllo
 

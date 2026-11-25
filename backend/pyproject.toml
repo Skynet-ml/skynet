@@ -81,8 +81,10 @@ dependencies = [
     "sentry-sdk>=2.67,<3",
     "pip==26.2.1",
     "pyarrow>=17",
-    # Text extraction for files attached in agent chats (core.service_gateway.agents.attachments):
-    # PDF and legacy .xls. Both are pure Python with no dependencies.
+    # Readers that the agent chat's commands use on attached files
+    # (core.service_gateway.agents.attachment_sandbox): PDF, legacy .xls and
+    # Avro. The Mac app's commands run on this Python.
+    "fastavro>=1.9",
     "pypdf>=6.20.0",
     "xlrd>=2",
     "pymysql>=1.1",
@@ -96,6 +98,11 @@ dependencies = [
     # sync bridge into the async sandbox interface, and it came in only
     # through httpx.
     "anyio>=4.14",
+    # OpenAscent reference package (SKY-738): the metric box calls its
+    # call_metric for a command [metric] entry, and repo_constraints reads
+    # ascent.toml with its parser (SKY-760). Exact pin, as the standard's
+    # behaviour must not move under a run.
+    "openascent==0.4.5",
 ]
 
 [project.optional-dependencies]
@@ -199,6 +206,42 @@ gke = [
     # GKE sandbox provider (SKY-459). Optional import in
     # core.sandbox.providers.gke; the factory loads it lazily.
     "kubernetes>=32.0.0",
+]
+novita = [
+    # Novita sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.novita; the default legacy backend never needs it.
+    # 2.1.4 is the first release whose create takes ``resources``.
+    "novita-sandbox>=2.1.4",
+]
+blaxel = [
+    # Blaxel sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.blaxel; the default legacy backend never needs it.
+    "blaxel>=0.4.24",
+]
+hyperbrowser = [
+    # Hyperbrowser sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.hyperbrowser; the default legacy backend never needs it.
+    "hyperbrowser>=1.5.0",
+]
+runta = [
+    # Runta sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.runta; the default legacy backend never needs it.
+    "runta-sdk>=0.2.6,<0.3",
+]
+superserve = [
+    # Superserve sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.superserve; the default legacy backend never needs it.
+    # 0.13.0 is the first release whose SandboxInfo has vcpu_max (memory_max_mib
+    # came in 0.12.0); the funded-size check needs both to see a box that can grow.
+    "superserve>=0.13.0,<0.15",
+]
+hf_sandbox = [
+    # Hugging Face Sandbox provider (SKY-942), imported lazily by
+    # core.sandbox.providers.hf_sandbox. Harbor's hf_sandbox uses
+    # huggingface_hub.Sandbox, which first ships in 1.22.0. The base install
+    # already gets the hub through tokenizers, so this floor also lifts the
+    # base pin. The <2 cap is there because transformers and tokenizers need hub <2.
+    "huggingface-hub>=1.22,<2",
 ]
 
 [tool.uv]

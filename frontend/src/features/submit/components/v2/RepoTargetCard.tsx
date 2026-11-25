@@ -372,9 +372,15 @@ export function RepoTargetCard({
                 </Select>
               ) : (
                 <Input
+                  // Uncontrolled until blur: each patch of another branch drops
+                  // the draft files, so a keystroke must not send one. The key
+                  // resets the field when the branch changes elsewhere.
+                  key={repo.branch}
                   id="v2-repo-branch"
-                  value={repo.branch}
-                  onChange={(e) => patch({ branch: e.target.value })}
+                  defaultValue={repo.branch}
+                  onBlur={(e) => {
+                    if (e.target.value !== repo.branch) patch({ branch: e.target.value });
+                  }}
                   placeholder={msg("submit.blackbox.repo.branch_default")}
                   autoComplete="off"
                   spellCheck={false}
@@ -409,9 +415,13 @@ export function RepoTargetCard({
                 </Select>
               ) : (
                 <Input
+                  // Uncontrolled until blur, like the branch field above.
+                  key={repo.commit}
                   id="v2-repo-commit"
-                  value={repo.commit}
-                  onChange={(e) => patch({ commit: e.target.value })}
+                  defaultValue={repo.commit}
+                  onBlur={(e) => {
+                    if (e.target.value !== repo.commit) patch({ commit: e.target.value });
+                  }}
                   placeholder={t("submit.v2.repo.commit_placeholder")}
                   autoComplete="off"
                   spellCheck={false}
