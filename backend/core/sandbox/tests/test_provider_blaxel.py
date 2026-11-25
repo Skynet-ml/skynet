@@ -33,6 +33,7 @@ from core.sandbox import (
     SandboxSpecError,
     factory,
 )
+from core.sandbox.capabilities import NetworkMode
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError
 from core.sandbox.factory import ProductionNotAllowedError
 from core.sandbox.metering import usage_adapter
@@ -47,14 +48,16 @@ _SPEC = SandboxSpec(lifetime_seconds=300)
 class FakeSandboxAPIError(Exception):
     """Stand in for ``blaxel.core.SandboxAPIError``."""
 
-    def __init__(self, status_code: int) -> None:
-        """Keep the HTTP status.
+    def __init__(self, status_code: int, code: str | None = None) -> None:
+        """Keep the HTTP status and the error code.
 
         Args:
             status_code: The HTTP status.
+            code: The Blaxel error code, or ``None``.
         """
         super().__init__(f"HTTP {status_code}")
         self.status_code = status_code
+        self.code = code
 
 
 class FakeCreationTimeoutError(FakeSandboxAPIError):
@@ -384,16 +387,8 @@ async def _until(predicate: Callable[[], bool]) -> None:
     raise AssertionError("The condition did not hold in time.")
 
 
-async def test_create_sends_the_name_image_memory_and_ttl(
-    fake_blaxel: FakeBlaxel, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Send a unique name, the default image, 2048 MB for each vCPU, the ttl of the lifetime and a deadline.
-
-    Args:
-        fake_blaxel: The fake SDK.
-        monkeypatch: Pytest fixture that clears ``BL_REGION``.
-    """
-    monkeypatch.delenv("BL_REGION", raising=False)
+async def test_create_sends_the_name_image_memory_and_ttl(fake_blaxel: FakeBlaxel) -> None:
+    """Send a unique name, the default image, 2048 MB for each vCPU, the ttl of the lifetime and a deadline."""
     async with BlaxelEnvironment(SandboxSpec(lifetime_seconds=600, resources=ResourceRequest(cpus=2))):
         config = fake_blaxel.only_box().config
     assert config["name"].startswith("skynet-")
@@ -402,19 +397,8 @@ async def test_create_sends_the_name_image_memory_and_ttl(
     assert config["memory"] == 4096
     assert config["ttl"] == "600s"
     assert "network" not in config
-    assert "region" not in config
     # The SDK maximum, so the boot stays inside the 60 s margin of the hold.
     assert fake_blaxel.create_timeout == 50
-
-
-def test_region_comes_from_bl_region(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Send the ``BL_REGION`` region when it is set.
-
-    Args:
-        monkeypatch: Pytest fixture that sets ``BL_REGION``.
-    """
-    monkeypatch.setenv("BL_REGION", "us-pdx-1")
-    assert BlaxelEnvironment(SandboxSpec(lifetime_seconds=300))._create_config("skynet-x")["region"] == "us-pdx-1"
 
 
 @pytest.mark.parametrize(("lifetime", "ttl"), [(10, "300s"), (300, "300s"), (300.2, "301s"), (86_400, "86400s")])
@@ -478,24 +462,24 @@ def test_memory_follows_the_vcpus(resources: ResourceRequest, memory: int) -> No
 
 
 @pytest.mark.parametrize(
-    ("spec", "network"),
+    "spec",
     [
-        (SandboxSpec(lifetime_seconds=300, network_disabled=True), "skynet-no-network.invalid"),
-        (SandboxSpec(lifetime_seconds=300, allowed_hosts=("pypi.org",)), "pypi.org"),
+        SandboxSpec(lifetime_seconds=300, operation_key="op-1", network_disabled=True),
+        SandboxSpec(lifetime_seconds=300, operation_key="op-1", allowed_hosts=("pypi.org",)),
     ],
 )
-def test_egress_policy_is_an_allowlist(spec: SandboxSpec, network: str) -> None:
-    """Send a proxy allowlist behind the proxy firewall, with a domain that never resolves for no network.
+def test_egress_limits_are_refused_before_the_reserve(fake_blaxel: FakeBlaxel, spec: SandboxSpec) -> None:
+    """Refuse a spec with no network or an allowlist before any reserve or create.
 
     Args:
-        spec: The spec.
-        network: The expected only allowed domain.
+        fake_blaxel: The fake SDK.
+        spec: The spec that needs egress isolation.
     """
-    config = BlaxelEnvironment(spec)._create_config("skynet-x")
-    assert config["network"] == {
-        "firewall": {"rulesets": ["proxy"]},
-        "proxy": {"allowedDomains": [network], "routing": []},
-    }
+    budget = SimpleNamespace(reservations=[])
+    with pytest.raises(SandboxSpecError, match="network mode"):
+        BlaxelEnvironment(spec, budget=budget, usage_factory=FakeUsage)
+    assert budget.reservations == []
+    assert not fake_blaxel.create_entered.is_set()
 
 
 async def test_exec_runs_bash_in_the_cwd_with_the_merged_env(fake_blaxel: FakeBlaxel) -> None:
@@ -576,13 +560,13 @@ def test_factory_refuses_the_blaxel_provider_in_production(monkeypatch: pytest.M
     assert factory.PROVIDERS["blaxel"].production_allowed is False
 
 
-def test_capabilities_are_billable_with_every_network_mode() -> None:
-    """Report billing, every network mode and a fixed egress policy."""
+def test_capabilities_are_billable_with_open_egress_only() -> None:
+    """Report billing, only open egress and a fixed egress policy."""
     caps = BlaxelEnvironment.capabilities
     assert caps.name == "blaxel"
     assert caps.billable is True
     assert not caps.dynamic_network_policy
-    assert len(caps.network_modes) == 3
+    assert caps.network_modes == frozenset({NetworkMode.OPEN})
     assert caps.memory_mb_per_vcpu == 2048
     assert usage_adapter("blaxel") is not None
 
@@ -696,6 +680,9 @@ async def test_protected_box_reserves_before_the_create_and_settles_after_the_de
         (FakeSandboxAPIError(400), None, True),
         (FakeSandboxAPIError(402), None, True),
         (FakeSandboxAPIError(400), FakeSandboxAPIError(500), False),
+        (FakeSandboxAPIError(503, "AUTHENTICATION_UNAVAILABLE"), None, True),
+        (FakeSandboxAPIError(503, "AUTHENTICATION_UNAVAILABLE"), FakeSandboxAPIError(500), False),
+        (FakeSandboxAPIError(503), None, False),
         (FakeSandboxAPIError(409), None, False),
         (FakeSandboxAPIError(429), None, False),
         (FakeSandboxAPIError(500), None, False),
@@ -726,9 +713,15 @@ async def test_failed_create_releases_only_when_no_box_can_exist(
     assert env.usage is None
 
 
-async def test_box_that_a_failed_create_made_is_deleted_and_settled(fake_blaxel: FakeBlaxel) -> None:
-    """Delete and settle, not release, a box that the lookup finds after a failed create."""
-    fake_blaxel.create_error = FakeSandboxAPIError(400)
+@pytest.mark.parametrize("error", [FakeSandboxAPIError(400), FakeSandboxAPIError(503, "AUTHENTICATION_UNAVAILABLE")])
+async def test_box_that_a_failed_create_made_is_deleted_and_settled(fake_blaxel: FakeBlaxel, error: Exception) -> None:
+    """Delete and settle, not release, a box that the lookup finds after a refused create.
+
+    Args:
+        fake_blaxel: The fake SDK.
+        error: The refused create error.
+    """
+    fake_blaxel.create_error = error
     fake_blaxel.create_error_makes_box = True
     env, budget = _protected()
     with pytest.raises(FakeSandboxAPIError):

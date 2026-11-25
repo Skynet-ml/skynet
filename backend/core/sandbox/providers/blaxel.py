@@ -1,9 +1,8 @@
 """The async Blaxel sandbox provider, for dev and evaluation only.
 
 Adapted from Harbor 0.25.0 (Apache-2.0), harbor/environments/blaxel.py: the
-``SandboxInstance.create`` config (name, image, memory, ttl, network), the
-egress allowlist with an unresolvable sentinel domain for a box with no
-network, the ``bash -c`` command through ``process.exec`` and
+``SandboxInstance.create`` config (name, image, memory, ttl), the
+``bash -c`` command through ``process.exec`` and
 ``process.wait``, the kill of a command that runs past its time, the
 ``mkdir -p`` before a file write, ``fs.write_binary`` and ``fs.read_binary``,
 the delete by name and the credentials preflight come from it. Changes: the
@@ -13,11 +12,12 @@ before the create and settles its measured runtime after the delete
 (SKY-936), the ``ttl`` is the spec lifetime instead of a fixed 24 hours, the
 memory comes from the vCPU count, each create gets a new unique name, a
 failed create looks up its box by that name, a cancel never leaks a box or
-a hold, the job sweep stops the boxes that this process started, the
-egress allowlist moves to ``proxy.allowedDomains`` with the ``proxy``
-firewall ruleset, the create has a deadline, and ``BL_REGION`` pins the
-region. Harbor's Dockerfile and compose builds, Docker-in-Docker, directory
-transfer and attach are left out.
+a hold, the job sweep stops the boxes that this process started, and the
+create has a deadline. Harbor's Dockerfile and compose builds,
+Docker-in-Docker, directory transfer and attach are left out. Harbor's egress
+allowlist and no-network box are left out too: Blaxel always lets some
+traffic past its proxy, so egress isolation cannot be proven; revisit with a
+live probe.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ import asyncio
 import functools
 import logging
 import math
-import os
 import shlex
 import uuid
 from collections.abc import Callable, Mapping
@@ -39,7 +38,7 @@ from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, resolve_resources
-from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
+from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError
 from ..resources import ResourceMode, SandboxSpec
 from ..telemetry import current_output_sink
@@ -63,14 +62,14 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Blaxel gives each 2048 MB of memory one vCPU and bills per GB of memory, so
-# the memory size follows the vCPU count. Egress is included in the price,
-# so a protected box may use every network mode. Blaxel sets the egress
-# policy only at create time. NONE and ALLOWLIST stay declared because the
-# SDK 0.4.28 FirewallConfig docs say the "proxy" ruleset restricts egress to
-# the proxy, and the proxy enforces the allowlist.
+# the memory size follows the vCPU count. Only open egress is declared: the
+# SDK 0.4.28 ProxyConfig docs say localhost, the private ranges,
+# 169.254.169.254, .local and .internal always bypass the proxy, and no doc
+# says the "proxy" firewall ruleset blocks that direct traffic. So a spec with
+# no network or an allowlist is refused before any reserve or create.
 BLAXEL_CAPABILITIES = EnvironmentCapabilities(
     name="blaxel",
-    network_modes=frozenset(NetworkMode),
+    network_modes=frozenset({NetworkMode.OPEN}),
     dynamic_network_policy=False,
     memory_mb_per_vcpu=2048,
     billable=True,
@@ -84,11 +83,6 @@ _DEFAULT_MEMORY_MB = 4096
 _MIN_TTL_SEC = 5 * 60
 _MAX_LIFETIME_SEC = 30 * 24 * 60 * 60
 _NAME_PREFIX = "skynet-"
-# Blaxel enforces egress through an allowlist, so a box with no network gets
-# an allowlist with one domain that never resolves (from Harbor).
-_NO_NETWORK_DOMAIN = "skynet-no-network.invalid"
-# The SDK 0.4.28 "proxy" ruleset blocks egress that does not pass the proxy.
-_FIREWALL = {"rulesets": ["proxy"]}
 # The SDK maximum (MAX_CREATION_TIMEOUT_SECONDS). The usage funds 60 s on top
 # of the ttl for the boot and the delete, so the boot always ends inside it.
 _CREATE_TIMEOUT_SEC = 50
@@ -102,6 +96,9 @@ _GONE_STATUSES = frozenset({"DELETING", "TERMINATED"})
 # plane releases its box, but not whether that box was billed. A refused
 # create still releases its hold only when the name lookup finds no box.
 _REFUSED_CREATE_STATUSES = frozenset({400, 401, 402, 403, 404, 413, 422})
+# The SDK create docs say a 503 with this code is answered before anything is
+# created. Any other 503 says nothing about the box.
+_AUTH_UNAVAILABLE = (503, "AUTHENTICATION_UNAVAILABLE")
 _NOT_FOUND = 404
 # The command's own server-side timeout only cleans up; the provider's wait
 # ends first and kills the command.
@@ -459,7 +456,7 @@ class BlaxelEnvironment(SandboxEnvironment):
             name: The unique sandbox name.
 
         Returns:
-            The create config with the funded ttl and the egress policy.
+            The create config with the funded ttl. The SDK adds ``BL_REGION``.
         """
         config: dict[str, Any] = {
             "name": name,
@@ -468,16 +465,6 @@ class BlaxelEnvironment(SandboxEnvironment):
             # Blaxel deletes the box at its ttl, so the funded lifetime bounds the box.
             "ttl": f"{self._ttl_sec}s",
         }
-        network = network_config(
-            NetworkPolicy(disabled=self.spec.network_disabled, allowed_hosts=self.spec.allowed_hosts)
-        )
-        if network is not None:
-            config["network"] = network
-        # With no region, Blaxel picks one and the SDK warns that the region
-        # becomes required. The box then works, but a later SDK can refuse it.
-        region = os.environ.get("BL_REGION")
-        if region:
-            config["region"] = region
         return config
 
     async def _create(self, name: str, usage: Any | None) -> Any:
@@ -538,28 +525,6 @@ def _memory_mb(spec: SandboxSpec) -> int:
     return math.ceil(request.memory_mb / _MB_PER_VCPU) * _MB_PER_VCPU
 
 
-def network_config(policy: NetworkPolicy) -> dict[str, Any] | None:
-    """Map an egress policy to the Blaxel create ``network`` config.
-
-    Args:
-        policy: The egress policy.
-
-    Returns:
-        ``None`` for open egress, or a proxy allowlist with the ``proxy``
-        firewall ruleset. A box with no network gets an allowlist with one
-        domain that never resolves.
-    """
-    if policy.disabled:
-        hosts = [_NO_NETWORK_DOMAIN]
-    elif policy.allowed_hosts:
-        hosts = list(policy.allowed_hosts)
-    else:
-        return None
-    # A host in ``proxy.bypass`` goes direct and skips the allowlist, so the
-    # allowed hosts are never put there.
-    return {"firewall": dict(_FIREWALL), "proxy": {"allowedDomains": hosts, "routing": []}}
-
-
 def _require_sdk() -> None:
     """Raise when the Blaxel SDK is not installed.
 
@@ -591,11 +556,15 @@ def _refused(error: BaseException | None) -> bool:
         error: The create error.
 
     Returns:
-        True for a ``SandboxAPIError`` with a refused status that is not a creation timeout.
+        True for a ``SandboxAPIError`` with a refused status that is not a
+        creation timeout, or a 503 with code ``AUTHENTICATION_UNAVAILABLE``.
     """
     if SandboxCreationTimeoutError is not None and isinstance(error, SandboxCreationTimeoutError):
         return False
-    return _status_code(error) in _REFUSED_CREATE_STATUSES
+    status = _status_code(error)
+    if (status, getattr(error, "code", None)) == _AUTH_UNAVAILABLE:
+        return True
+    return status in _REFUSED_CREATE_STATUSES
 
 
 async def _delete(name: str) -> None:
