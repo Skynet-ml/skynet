@@ -5,7 +5,7 @@ import {
   INLINE_MATH_MARK,
   codeBlockLabel,
   endsInOpenFence,
-  isSafeImageSrc,
+  isInlineImageSrc,
   prepareMath,
   repairStreamingMarkdown,
 } from "./markdown-source.ts";
@@ -76,12 +76,12 @@ test("endsInOpenFence finds a fence that is not closed yet", () => {
   assert.equal(endsInOpenFence("no code"), false);
 });
 
-test("isSafeImageSrc allows only https and inline raster images", () => {
-  assert.equal(isSafeImageSrc("https://a.b/c.png"), true);
-  assert.equal(isSafeImageSrc("data:image/png;base64,AAAA"), true);
-  assert.equal(isSafeImageSrc("data:image/svg+xml;base64,AAAA"), false);
-  assert.equal(isSafeImageSrc("http://a.b/c.png"), false);
-  assert.equal(isSafeImageSrc("javascript:alert(1)"), false);
+test("isInlineImageSrc allows only inline raster images", () => {
+  assert.equal(isInlineImageSrc("data:image/png;base64,AAAA"), true);
+  assert.equal(isInlineImageSrc("https://a.b/c.png"), false);
+  assert.equal(isInlineImageSrc("data:image/svg+xml;base64,AAAA"), false);
+  assert.equal(isInlineImageSrc("http://a.b/c.png"), false);
+  assert.equal(isInlineImageSrc("javascript:alert(1)"), false);
 });
 
 test("repairStreamingMarkdown looks only at prose after the last code fence", () => {

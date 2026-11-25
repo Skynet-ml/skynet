@@ -26,7 +26,7 @@ import {
   INLINE_MATH_MARK,
   codeBlockLabel,
   endsInOpenFence,
-  isSafeImageSrc,
+  isInlineImageSrc,
   prepareMath,
   repairStreamingMarkdown,
 } from "./markdown-source";
@@ -447,7 +447,7 @@ function rehypeTableColumns() {
 const REHYPE_PLUGINS = [rehypeTableColumns];
 
 const urlTransform: UrlTransform = (url, key, node) =>
-  key === "src" && node.tagName === "img" && isSafeImageSrc(url) ? url : defaultUrlTransform(url);
+  key === "src" && node.tagName === "img" && isInlineImageSrc(url) ? url : defaultUrlTransform(url);
 
 function PreBlock({ end, children }: { end?: number; children?: React.ReactNode }) {
   const { userTone, openFenceEnd } = React.useContext(MarkdownContext);
@@ -509,13 +509,18 @@ const COMPONENTS: Components = {
       {children}
     </TableBlock>
   ),
-  img: ({ node: _node, src, alt }) =>
-    typeof src === "string" && isSafeImageSrc(src) ? (
-      // Chat images come from any https host, so next/image's host allowlist cannot cover them.
-      <img src={src} alt={alt ?? ""} loading="lazy" />
-    ) : (
-      <span>{alt}</span>
-    ),
+  img: ({ node: _node, src, alt }) => {
+    if (typeof src !== "string") return <span>{alt}</span>;
+    // An inline image needs no request. Loading a remote image with no click would let an
+    // injected reply send chat data to any host in its URL, so a remote image is only a link.
+    if (isInlineImageSrc(src)) return <img src={src} alt={alt ?? ""} />;
+    if (!/^https:\/\//i.test(src)) return <span>{alt}</span>;
+    return (
+      <a href={src} target="_blank" rel="noreferrer noopener">
+        {alt || src}
+      </a>
+    );
+  },
 };
 
 export interface MessageMarkdownProps {

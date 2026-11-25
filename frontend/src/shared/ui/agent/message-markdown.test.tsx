@@ -77,9 +77,18 @@ void describe("MessageMarkdown", () => {
     assert.ok(html.includes("font-size: var(--md-code-size, 0.875rem)"), html);
   });
 
-  void it("loads only https and inline raster images", () => {
-    const html = render("![ok](https://a.b/i.png) ![bad](http://a.b/i.png)");
-    assert.ok(html.includes('<img src="https://a.b/i.png"'), html);
+  void it("loads only inline raster images and links remote ones", () => {
+    const html = render(
+      "![in](data:image/png;base64,AAAA) ![remote](https://a.b/i.png?d=x) ![bad](http://a.b/i.png)",
+    );
+    assert.ok(html.includes('<img src="data:image/png;base64,AAAA" alt="in"'), html);
+    assert.ok(!html.includes('<img src="https://'), html);
+    assert.ok(
+      html.includes(
+        '<a href="https://a.b/i.png?d=x" target="_blank" rel="noreferrer noopener">remote</a>',
+      ),
+      html,
+    );
     assert.ok(html.includes("<span>bad</span>"), html);
   });
 

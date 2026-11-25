@@ -189,7 +189,7 @@ export function codeBlockLabel(language: string): string {
 
 const DATA_IMAGE = /^data:image\/(png|jpeg|jpg|webp|gif|avif);base64,/i;
 
-/** Whether an image source is safe to load: https, or an inline raster image. */
-export function isSafeImageSrc(src: string): boolean {
-  return /^https:\/\//i.test(src) || DATA_IMAGE.test(src);
+/** Whether an image source is an inline raster image, the only kind chat loads by itself. */
+export function isInlineImageSrc(src: string): boolean {
+  return DATA_IMAGE.test(src);
 }
