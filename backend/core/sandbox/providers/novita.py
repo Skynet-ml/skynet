@@ -55,9 +55,11 @@ from ..telemetry import current_output_sink
 
 try:
     from novita_sandbox.core import AsyncSandbox, SandboxQuery
+    from novita_sandbox.core.compat import should_use_legacy
 except ImportError:
     AsyncSandbox = None
     SandboxQuery = None
+    should_use_legacy = None
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,9 @@ REFUSAL_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
 _REFUSAL_ERRORS = frozenset({"AuthenticationException", "RateLimitException"})
 _STATUS_PREFIX = re.compile(r"^(\d{3}):")
 TIMEOUT_EXIT_CODE = 124
+LEGACY_DOMAIN_MESSAGE = (
+    "The Novita domain in NOVITA_DOMAIN is a legacy domain, which cannot size a sandbox. Use a current domain."
+)
 
 NOVITA_CAPABILITIES = EnvironmentCapabilities(
     name="novita",
@@ -121,6 +126,19 @@ def _is_refusal(error: BaseException) -> bool:
         return False
     match = _STATUS_PREFIX.match(str(error))
     return match is not None and int(match.group(1)) in REFUSAL_STATUSES
+
+
+def _legacy_domain() -> bool:
+    """Tell whether the SDK talks to a legacy Novita domain.
+
+    SDK 2.1.4 resolves the domain from ``NOVITA_DOMAIN`` or its default. On a
+    legacy domain its create raises ``NotImplementedError`` for ``resources``
+    and ignores ``lifecycle``, so this provider cannot size or bound a box there.
+
+    Returns:
+        True when the SDK resolves a legacy domain.
+    """
+    return should_use_legacy is not None and should_use_legacy(None)
 
 
 def _network_options(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> dict[str, Any]:
@@ -212,6 +230,8 @@ class NovitaEnvironment(SandboxEnvironment):
             raise SandboxFatalError("The novita-sandbox package is not installed: install the `novita` extra.")
         if not os.environ.get(API_KEY_ENV):
             raise SandboxFatalError(f"The Novita sandbox needs the {API_KEY_ENV} variable.")
+        if _legacy_domain():
+            raise SandboxFatalError(LEGACY_DOMAIN_MESSAGE)
 
     def _timeout(self) -> int:
         """Return the Novita timeout of the box, in whole seconds.
@@ -258,6 +278,9 @@ class NovitaEnvironment(SandboxEnvironment):
             SandboxSpecError: Skynet cannot fund the box, or the box is larger
                 than its funding.
         """
+        # Checked before the reserve: no hold exists, so nothing stays pending.
+        if _legacy_domain():
+            raise SandboxSpecError(LEGACY_DOMAIN_MESSAGE)
         usage = await self._reserve()
         self._create_sent = True
         self._create_unknown = True

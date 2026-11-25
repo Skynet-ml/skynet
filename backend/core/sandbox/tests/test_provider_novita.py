@@ -966,3 +966,21 @@ async def test_cancel_during_create_with_an_empty_list_stays_pending(database: E
     with pytest.raises(UsagePendingError):
         await env.stop()
     assert _state(database, runtime).state == "pending"
+
+
+async def test_legacy_domain_is_refused_before_the_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse a legacy domain before any hold or create, because the SDK cannot size a box there.
+
+    Args:
+        monkeypatch: Makes the SDK report a legacy domain.
+    """
+    monkeypatch.setattr(novita, "should_use_legacy", lambda opts: True)
+    monkeypatch.setenv(novita.API_KEY_ENV, "fixture")
+    with pytest.raises(SandboxFatalError):
+        novita.NovitaEnvironment.preflight()
+    env, usages = _protected(FakeClock())
+    with pytest.raises(SandboxSpecError):
+        await env.start()
+    assert usages == []
+    assert FakeSandbox.calls == []
+    await env.stop()
