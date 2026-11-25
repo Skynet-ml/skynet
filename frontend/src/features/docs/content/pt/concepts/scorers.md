@@ -14,12 +14,12 @@ def score(repo_path, case, output=None):
 | `case`      | Um dict. `case["input"]` contém os campos de entrada. `case["expected"]` contém o valor esperado, ou `None` |
 | `output`    | O que a entrada `[run]` retornou para o caso, ou `None` se o arquivo não tiver `[run]` |
 
-O arquivo `optimize.toml` do repositório precisa ter uma seção `[run]` ou uma etapa `[target.<name>]`. A entrada `[run]` (`entry`) executa uma versão em um caso, na sua própria sandbox. O Skynet recusa um arquivo sem nenhuma das duas, porque todas as versões receberiam a mesma pontuação.
+O arquivo `ascent.toml` do repositório precisa ter uma seção `[run]` ou uma etapa `[target.<name>]`. A entrada `[run]` (`entry`) executa uma versão em um caso, na sua própria sandbox. O Skynet recusa um arquivo sem nenhuma das duas, porque todas as versões receberiam a mesma pontuação.
 
 - Uma entrada de função, por exemplo `entry = "serve.py:serve"`, recebe `case["input"]` como argumento. `output` é o valor que ela retorna.
-- Uma entrada de comando, por exemplo `entry = ["python", "-m", "pytest", "-q"]`, recebe a entrada do caso como JSON no stdin. `output` é `{"exit_code": ..., "stdout": "..."}`.
+- Uma entrada de comando, por exemplo `entry = ["python", "run_tests.py"]`, lê `{"input": ...}` do arquivo JSON no caminho de `ASCENT_INPUT`. Ela escreve `{"output": ...}` no caminho de `ASCENT_OUTPUT`. `output` é o valor em `"output"`. O que o comando imprime vai só para os logs.
 
-O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica. O avaliador não pode importar nem executar o código da versão. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from skynet import call`. Leia [Como a otimização funciona](/docs/concepts/optimization).
+O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica. O avaliador não pode importar nem executar o código da versão. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from openascent import call`. Leia [Como a otimização funciona](/docs/concepts/optimization).
 
 ## O valor de retorno
 
@@ -69,7 +69,7 @@ O GEPA e o Auto leem o texto de feedback para escrever a próxima versão. Diga 
 
 ### Correspondência exata
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -88,30 +88,40 @@ def score(repo_path, case, output=None):
 
 ### Rodar os testes do repositório
 
-A entrada `[run]` roda os testes. O avaliador lê o código de saída e a saída dos testes.
+A entrada `[run]` roda os testes. O `pytest` sai com um código diferente de zero quando um teste falha, e um código de saída diferente de zero faz o caso falhar. Por isso o wrapper `run_tests.py` escreve o resultado em `ASCENT_OUTPUT` e sai com 0. O avaliador lê esse resultado.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-Quando a entrada `[run]` falha em um caso, esse caso não tem nota. Se a entrada não inicia, excede o tempo limite ou um sinal a para, ou se uma entrada de função lança uma exceção ou sai antes de retornar um valor, o feedback é `Run failed: …`, e o Skynet não chama o avaliador. Um código de saída diferente de zero de uma entrada de comando não é uma falha: o avaliador o recebe em `output`. Uma versão com um caso assim não tem nota. Ela não pode ser a melhor versão, não atinge nenhum `[outcome] target` e não abre nenhum pull request. Se uma falha precisa contar como um número, capture a falha no seu programa, escreva uma saída e deixe o avaliador dar uma nota a ela. Leia as [regras do repositório](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+Quando a entrada `[run]` falha em um caso, esse caso não tem nota. Se a entrada não inicia, excede o tempo limite ou um sinal a para, ou se uma entrada de função lança uma exceção ou sai antes de retornar um valor, o feedback é `Run failed: …`, e o Skynet não chama o avaliador. Uma entrada de comando também falha quando sai com um código diferente de zero ou não escreve um arquivo de saída válido. Uma versão com um caso assim não tem nota. Ela não pode ser a melhor versão, não atinge nenhum `[outcome] target` e não abre nenhum pull request. Se uma falha precisa contar como um número, capture a falha no seu programa, escreva uma saída e deixe o avaliador dar uma nota a ela. Leia as [regras do repositório](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Modelo como juiz
 
-O avaliador pode chamar um modelo. Importe `llm` do módulo auxiliar `skynet`. A chamada passa pelo gateway de modelos do Skynet e vai para o modelo do avaliador da execução.
+O avaliador pode chamar um modelo. Importe `llm` do módulo auxiliar `openascent`. A chamada passa pelo gateway de modelos do Skynet e vai para o modelo do avaliador da execução.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -119,7 +129,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -133,12 +143,12 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-O avaliador também pode usar qualquer cliente compatível com OpenAI com as variáveis de ambiente `OPENAI_BASE_URL`, `APP_API_KEY` e `APP_MODEL`. O gateway aceita apenas o modelo do avaliador da execução.
+O avaliador também pode usar qualquer cliente compatível com OpenAI com as variáveis de ambiente `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` e `ASCENT_MODEL`. O gateway aceita apenas o modelo do avaliador da execução.
 
 ## Chamadas de modelo e segredos
 
 - As chamadas com as chaves do Skynet são medidas no orçamento da execução. Com a sua própria chave (BYOK), a chamada vai para a chave do seu provedor, sem taxa de modelo do Skynet. Leia [Cobrança](/docs/concepts/billing).
-- O avaliador não recebe os segredos da execução como variáveis de ambiente. Um segredo chega ao avaliador só por uma tabela `[services.<name>]` que `[metric] services` lista, ou por um servidor do arquivo `[metric] mcp`. Escreva o segredo nos `headers` da tabela como `${NAME}`. O avaliador envia as requisições para a URL em `SKYNET_SERVICE_<NAME>_URL`. O Skynet adiciona o segredo fora da sandbox.
+- O avaliador não recebe os segredos da execução como variáveis de ambiente. Um segredo chega ao avaliador só por uma tabela `[services.<name>]` que `[metric] services` lista, ou por um servidor do arquivo `[metric] mcp`. Escreva o segredo nos `headers` da tabela como `${NAME}`. O avaliador envia as requisições para a URL em `ASCENT_SERVICE_<NAME>_URL`. O Skynet adiciona o segredo fora da sandbox.
 - O Skynet oculta os valores dos segredos na saída do avaliador e nos logs.
 
 ## Limites

@@ -2,9 +2,9 @@ Skynet הוא Optimize Anything: כל ריצה מייעלת מאגר קוד. מ�
 
 ## החוזה המשותף
 
-לכל ריצה יש מאגר קוד, קובץ `optimize.toml` עם `entry` ב-`[run]` או שלב `[target.<name>]`, ופונקציית ניקוד. ה-`entry` של `[run]` מריץ גרסה אחת של המאגר על מקרה אחד. פונקציית הניקוד היא פונקציית Python שמקבלת את הפלט של ה-`entry` ואת המקרה.
+לכל ריצה יש מאגר קוד, קובץ `ascent.toml` עם `entry` ב-`[run]` או שלב `[target.<name>]`, ופונקציית ניקוד. ה-`entry` של `[run]` מריץ גרסה אחת של המאגר על מקרה אחד. פונקציית הניקוד היא פונקציית Python שמקבלת את הפלט של ה-`entry` ואת המקרה.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 בתיקיית השורש של המאגר יש קובץ `serve.py` עם `def serve(input)`. ה-`entry` של `[run]` קורא לו בתיבת sandbox משלו.‏ Skynet משתמש בו כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
 
-פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך ואין קוד של גרסה, ולכן פונקציית הניקוד לא יכולה לייבא את `serve.py`. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from skynet import call`. בלי `entry` ב-`[run]` או שלב `[target.<name>]`, ‏Skynet דוחה את הקובץ `optimize.toml`.
+פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך ואין קוד של גרסה, ולכן פונקציית הניקוד לא יכולה לייבא את `serve.py`. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from openascent import call`. בלי `entry` ב-`[run]` או שלב `[target.<name>]`, ‏Skynet דוחה את הקובץ `ascent.toml`.
 
 > [!NOTE]
 > סוכן הקוד שכותב את הגרסאות לא רואה את קוד המקור של פונקציית הניקוד, את הערכים הצפויים או את סודות הריצה.
@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | משתנה                | מה הוא מכיל                                                   |
 | -------------------- | ------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | הכתובת של השער. ‏`APP_GATEWAY_URL` מכיל את אותו ערך.          |
-| `APP_API_KEY`        | טוקן לריצה הזו בלבד. זה לא מפתח של ספק.                       |
-| `APP_MODEL`          | שם המודל לשליחה. זה מודל הניקוד של הריצה.                     |
+| `OPENAI_BASE_URL`    | הכתובת של השער. ‏`ASCENT_MODEL_URL` מכיל את אותו ערך.         |
+| `ASCENT_MODEL_KEY`   | טוקן לריצה הזו בלבד. זה לא מפתח של ספק.                       |
+| `ASCENT_MODEL`       | שם המודל לשליחה. זה מודל הניקוד של הריצה.                     |
 | `ANTHROPIC_BASE_URL` | הכתובת של השער עבור SDK של Anthropic.                         |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

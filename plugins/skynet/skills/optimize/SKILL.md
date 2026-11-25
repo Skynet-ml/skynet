@@ -17,8 +17,8 @@ The tools:
 | `repo_draft_set_repository` | Sets the repository, its branch or commit, and the paths the run may change. | Free |
 | `repo_draft_set_data` | Sets the cases the scorer runs on. Optional. | Free |
 | `repo_draft_set_scorer` | Sets the Python scorer that grades each version. | Free |
-| `repo_draft_contract_guide` | Returns the `optimize.toml` format guide and an example file. | Free |
-| `repo_draft_set_contract` | Saves the run's `optimize.toml` contract. Required when the repository has none. | Free |
+| `repo_draft_contract_guide` | Returns the `ascent.toml` format guide and an example file. | Free |
+| `repo_draft_set_contract` | Saves the run's `ascent.toml` contract. Required when the repository has none. | Free |
 | `repo_draft_set_models` | Sets the model of the coding agent and who pays for its calls. | Free |
 | `repo_draft_set_engine` | Sets the optimization engine. | Free |
 | `repo_draft_set_budget` | Sets how many scorer runs the search can use. Optional. | Free |
@@ -58,17 +58,18 @@ change their plan. Then call `next_tool`.
    Skip this step when the scorer needs no cases.
 5. **Set the scorer.** Write Python that defines
    `score(repo_path, case, output=None)`. `output` is what the `[run]` entry
-   of the repository's `optimize.toml` returned for the case. With
+   of the repository's `ascent.toml` returned for the case. With
    `[target.<name>]` stages, the scorer calls each stage with
-   `call("<name>", input)`, imported by `from skynet import call, StageError`.
+   `call("<name>", input)`, imported by `from openascent import call, StageError`.
    The scorer runs in its own box that holds only the metric files and no
    version code, so it never imports the repository's code. With no cases, the entry runs once with no
    input. Return one object: `{"score": <number>, "feedback": "<short text>"}`.
-   Higher is better. Only `score` is required. Give the feedback: the
+   Higher is better, unless `ascent.toml` sets `direction = "minimize"`
+   under `[metric]`. Only `score` is required. Give the feedback: the
    engines learn from it. Named scores go under
    `"scores": {"<name>": {"score": <number>}}`. Skynet refuses a bare
    number, a pair and any other key. Call `repo_draft_set_scorer` with the code as `metric_code`.
-   Then set the contract. Every new run needs an `optimize.toml`, in the
+   Then set the contract. Every new run needs an `ascent.toml`, in the
    draft or in the repository. When the repository has none, call
    `repo_draft_contract_guide`, write the file from its guide (start with
    `version = 1`), and call `repo_draft_set_contract` with the text. The file
@@ -162,7 +163,7 @@ A ticket classifier in `acme/support-bot`, in `classifier/`:
        return {"score": 1.0 if ok else 0.0, "feedback": "correct" if ok else f"expected {case['expected']}, got {output}"}
    ```
 
-   The repository's `optimize.toml` `[run]` entry runs the classifier on
+   The repository's `ascent.toml` `[run]` entry runs the classifier on
    each case's input.
 5. `repo_draft_set_models`, `repo_draft_set_engine`, `repo_draft_review`,
    the user's agreement, then `repo_draft_submit`.

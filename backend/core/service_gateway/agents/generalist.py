@@ -16,7 +16,7 @@ Phased exposure (the gate):
   ``profile_datasets``. A repository run gets ``validate_code`` without one.
 * On the Metric screen: the workspace tools (:mod:`.workspace_tools`), which
   read a repository run's checkout and write its ``metric.py`` and any file
-  of the repository, ``optimize.toml`` included.
+  of the repository, ``ascent.toml`` included.
 * No submit tool: every run optimizes a repository, and the wizard's
   own Run button submits it.
 * Always available post-submit: ``cancel_job``, rename/pin.
@@ -73,6 +73,7 @@ from ..language_models import (
     build_language_model,
     served_model_from,
 )
+from ..optimization.blackbox.repo_constraints import ERROR
 from ..optimization.training_ground.registry import hash_tool_schema
 from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
@@ -95,7 +96,10 @@ from .workspace_tools import (
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
-    optimize_toml_error,
+    ascent_toml_diagnostics,
+    diagnostic_text,
+    has_error,
+    model_diagnostics,
     workspace_tools,
 )
 
@@ -1083,8 +1087,8 @@ class WizardState(TypedDict, total=False):
     spending_floor_cents: int | None
     run_code: str
     metric_code: str
-    # The repository's optimize.toml in the setup draft; only the Metric screen's workspace tools write it (SKY-184).
-    optimize_toml: str
+    # The repository's ascent.toml in the setup draft; only the Metric screen's workspace tools write it (SKY-184).
+    ascent_toml: str
     # The other repository files in the setup draft, path to text. The run writes them over its checkout.
     workspace_files: dict[str, str]
     # The commit the workspace tools read the draft files at; the run refuses them on any other commit.
@@ -1133,7 +1137,7 @@ _ALWAYS_TOOLS = frozenset(
         "get_analytics_summary_analytics_summary_get",
         "get_optimizer_stats_analytics_optimizers_get",
         "get_model_stats_analytics_models_get",
-        # Read-only wallet: balance, free grant, plan, and recent ledger —
+        # Read-only wallet: one balance, plan, and recent ledger —
         # lets the agent answer "how much money do I have left / what did I spend?".
         "get_wallet_for_agent",
         "serve_info_serve",
@@ -1482,7 +1486,7 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
             "task_background",
             "data_mode",
             "dataset_columns",
-            "optimize_toml",
+            "ascent_toml",
             "repo_provider",
             "github_connected",
             "run_code",
@@ -1713,27 +1717,35 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     # A repository run has no run.py: its scorer reads the checkout itself.
     if screen == "metric" and not str(state.get("metric_code") or "").strip():
         return ["metric_code must be written"]
-    if screen == "metric" and (error := _setup_error(state)):
-        return [f"optimize.toml is not valid: {error['message']}"]
+    diagnostics, hidden = _setup_diagnostics(state) if screen == "metric" else ([], 0)
+    if has_error(diagnostics):
+        capped = model_diagnostics([item for item in diagnostics if item["level"] == ERROR], hidden)
+        missing = [f"ascent.toml is not valid: {diagnostic_text(item)}" for item in capped["diagnostics"]]
+        if omitted := capped.get("diagnostics_omitted"):
+            noun = "error" if omitted == 1 else "errors"
+            missing.append(f"ascent.toml has {omitted} more {noun}; call {SETUP_CHECK_TOOL} after the fix.")
+        return missing
     if screen == "overview":
         return ["this is the last screen; the user starts the run from it"]
     return []
 
 
-def _setup_error(state: WizardState) -> dict[str, Any] | None:
-    """Check the setup draft's ``optimize.toml`` with the parser a run uses.
+def _setup_diagnostics(state: WizardState) -> tuple[list[dict[str, Any]], int]:
+    """Check the setup draft's ``ascent.toml`` with the parser a run uses.
 
-    A draft with no ``optimize.toml`` passes: the run then reads the
+    A draft with no ``ascent.toml`` passes: the run then reads the
     repository's own file, if it has one.
 
     Args:
         state: The wizard snapshot with this turn's writes merged in.
 
     Returns:
-        The parser's first error, or ``None`` when the file is valid or absent.
+        Every error and warning of the parser and the count of errors past its
+        cap, as :func:`ascent_toml_diagnostics` gives them; an empty list when
+        the file is valid with no warning, or absent.
     """
-    text = str(state.get("optimize_toml") or "")
-    return optimize_toml_error(text) if text.strip() else None
+    text = str(state.get("ascent_toml") or "")
+    return ascent_toml_diagnostics(text) if text.strip() else ([], 0)
 
 
 def _limit_below_floor(state: WizardState) -> str | None:
@@ -2081,18 +2093,23 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         }
 
     async def check_setup() -> Any:
-        """Check the setup draft's optimize.toml the way a run reads it."""
-        error = _setup_error(cast(WizardState, {**state, **turn.wizard_patch}))
-        return {"ok": error is None, "errors": [error] if error else []}
+        """Check the setup draft's ascent.toml the way a run reads it."""
+        diagnostics, hidden = _setup_diagnostics(cast(WizardState, {**state, **turn.wizard_patch}))
+        capped = model_diagnostics(diagnostics, hidden)
+        result = {"ok": not has_error(diagnostics), "errors": capped["diagnostics"]}
+        if "diagnostics_omitted" in capped:
+            result["errors_omitted"] = capped["diagnostics_omitted"]
+        return result
 
     setup_check = [
         dspy.Tool(
             check_setup,
             name=SETUP_CHECK_TOOL,
             desc=(
-                "Check the setup draft's optimize.toml with the parser a run uses. Returns ok, or the first "
-                "error with its section and key. continue_to_next_screen runs the same check and refuses "
-                "while it fails, so fix the error first."
+                "Check the setup draft's ascent.toml with the parser a run uses. Returns ok, and the errors, "
+                "then the warnings, each with its level, line, section and key: at most 20, and errors_omitted "
+                "counts the rest. continue_to_next_screen runs the same "
+                "check and refuses while an error stays, so fix every error first; a warning blocks nothing."
             ),
             arg_desc={},
         )
@@ -2495,7 +2512,7 @@ Capabilities worth knowing about:
   call ``open_page`` with only the area's ``tab`` (no ``path``) and tell
   the user what to do there. Use ``open_page`` too when the user asks to
   see a settings tab.
-* Saved secrets: when a run's optimize.toml sends a secret as ``${NAME}``
+* Saved secrets: when a run's ascent.toml sends a secret as ``${NAME}``
   in a ``[services.<name>]`` entry, call ``request_secret`` with that name,
   what it is for and its host, one secret per call. The user types the value
   in a secure card and you get back only ``saved`` or ``skipped``. Never ask
@@ -2790,14 +2807,14 @@ SCREEN_FOCUS: dict[str, str] = {
     "budget": ("Budget: " + _ASK_FOR_BUDGET),
     "metric": (
         "Metric: you write the run's code yourself. Read the repository, then write ``metric.py`` and, when "
-        "the run needs one, the repository's ``optimize.toml`` with ``write_workspace_file`` or "
+        "the run needs one, the repository's ``ascent.toml`` with ``write_workspace_file`` or "
         "``edit_workspace_file`` (a repository run has no ``run_code``). The same tools change any other "
         "repository file; ``changed_repository_files`` lists the ones the draft already changes. When you "
-        "write optimize.toml, show "
+        "write ascent.toml, show "
         "the user the file in full. Then say in one sentence what the metric measures and which files you "
-        "read. Check ``metric_code`` with ``validate_code`` and optimize.toml with ``check_setup`` "
+        "read. Check ``metric_code`` with ``validate_code`` and ascent.toml with ``check_setup`` "
         "before you continue; for a "
-        "repository run the wizard fills its ``column_mapping``. When optimize.toml sends a secret as "
+        "repository run the wizard fills its ``column_mapping``. When ascent.toml sends a secret as "
         "``${NAME}`` in a ``[services.<name>]`` entry, call ``request_secret`` for it with its purpose and "
         "host, one secret per call: the user types the value in a secure card, and you get back only "
         "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted.\n"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
@@ -18,7 +18,14 @@ from sqlalchemy import Engine, create_engine, event, func, select, text
 from sqlalchemy.orm import Session
 
 from core.billing.budget_amounts import CENT_SCALE, wallet_reserved_cents
-from core.billing.budgets import BudgetConflictError, BudgetInFlightError, BudgetService
+from core.billing.budgets import (
+    AGENT_LEASE_COST_KIND,
+    BudgetBoundExceededError,
+    BudgetConflictError,
+    BudgetInFlightError,
+    BudgetService,
+)
+from core.billing.signals import BudgetReached
 from core.config import app_env, settings
 from core.storage.models import (
     AgentConversationModel,
@@ -146,6 +153,45 @@ def test_parallel_admission_cannot_overcommit(database: Engine, shared_budget: b
         assert session.scalar(select(func.count()).select_from(ExecutionOperationModel)) == 1
 
 
+def test_parallel_run_reservations_ignore_setup_settlements(database: Engine) -> None:
+    """Admit run work against the whole limit after setup spend, and still one race winner (SKY-925)."""
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="setup-then-run")
+    setup = _reserve(service, budget.id, "setup-check", maximum=30)
+    service.mark_dispatched(setup.id, "alice")
+    service.settle(setup.id, "alice", evidence_key="setup-usage", actual_cents=30, evidence={"usage": "setup"})
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    barrier = Barrier(2)
+
+    def run(key: str) -> str:
+        """Begin both run admissions together; each fits the limit only while setup spend is ignored."""
+        barrier.wait(timeout=5)
+        try:
+            return service.reserve(
+                budget.id,
+                "alice",
+                operation_key=key,
+                generation=0,
+                phase="run",
+                cost_kind="model",
+                request_fingerprint="fixture",
+                price_snapshot={"version": "fixture-v1"},
+                max_cents=40,
+            ).state
+        except BudgetInFlightError:
+            return "contended"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(run, ["one", "two"]))
+    assert sorted(outcomes) == ["contended", "reserved"]
+    snapshot = service.get(budget.id, "alice")
+    assert (snapshot.setup_spent_cents, snapshot.reserved_cents, snapshot.available_cents) == (30, 40, 10)
+    assert snapshot.billed_cents == 30
+
+
 def test_parallel_first_budgets_of_a_new_account_share_one_wallet(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -231,6 +277,12 @@ def test_migration_applies_from_legacy_credit_ledger_and_is_idempotent(database:
     assert rename_spec.loader is not None
     rename = importlib.util.module_from_spec(rename_spec)
     rename_spec.loader.exec_module(rename)
+    setup_path = path.with_name("d6e8f0a2b4c7_add_execution_budget_setup_in_total.py")
+    setup_spec = importlib.util.spec_from_file_location("setup_in_total_migration_fixture", setup_path)
+    assert setup_spec is not None
+    assert setup_spec.loader is not None
+    setup_flag = importlib.util.module_from_spec(setup_spec)
+    setup_spec.loader.exec_module(setup_flag)
     with database.begin() as connection, Operations.context(MigrationContext.configure(connection)):
         rename.downgrade()
         migration.downgrade()
@@ -242,9 +294,12 @@ def test_migration_applies_from_legacy_credit_ledger_and_is_idempotent(database:
         rename.upgrade()
         # Migration c4f1a7e9d2b6 (SKY-710) adds this column, and ExecutionBudgetModel maps it.
         connection.execute(text("ALTER TABLE execution_budgets ADD COLUMN workspace_id VARCHAR(36)"))
+        setup_flag.upgrade()
+        setup_flag.upgrade()
     service = BudgetService(engine=database)
     budget = service.create("alice", 10, idempotency_key="migrated")
     assert budget.uncapped is False
+    assert budget.setup_in_total is False
     operation = _reserve(service, budget.id, "call", maximum=5)
     service.mark_dispatched(operation.id, "alice")
     result = service.settle(operation.id, "alice", evidence_key="usage", actual_cents=2, evidence={})
@@ -434,6 +489,289 @@ def test_crashed_lease_returns_its_untaken_slices_on_fence(database: Engine) -> 
         assert states == ["settled", "released", "released", "released"]
 
 
+def _agent_lease(service: BudgetService, budget_id: str) -> str:
+    """Reserve and dispatch one run-phase agent lease slice of 10 cents, as a worker's agent does."""
+    (operation,) = service.reserve_lease(
+        budget_id,
+        "alice",
+        lease_key="agent",
+        slices=1,
+        generation=0,
+        phase="run",
+        cost_kind=AGENT_LEASE_COST_KIND,
+        request_fingerprint="agent",
+        price_snapshot={"version": "agent-lease-v1"},
+        max_cents=10,
+    )
+    service.mark_dispatched(operation.id, "alice")
+    return operation.id
+
+
+def test_fence_settles_a_dead_workers_lease_slice_on_postgres(database: Engine) -> None:
+    """End an open lease slice at its last settle and release the rest of its coverage (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    service.attach_to_job(budget.id, "alice", "run-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="step-1", actual_cents=3, evidence={"step": 1}, final=False)
+    assert _budget_units(database, budget.id) == (7 * CENT_SCALE, 3 * CENT_SCALE)
+
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    assert _budget_units(database, budget.id) == (0, 3 * CENT_SCALE)
+    with Session(database) as session:
+        assert session.get(ExecutionOperationModel, lease).state == "settled"
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 47
+
+
+@pytest.mark.parametrize(
+    "zone", [UTC, timezone(timedelta(hours=-8))], ids=["checkpoint-in-utc", "checkpoint-in-another-zone"]
+)
+def test_lease_waiver_keeps_the_usage_that_settled_before_the_checkpoint_on_postgres(
+    database: Engine, zone: timezone
+) -> None:
+    """Credit only a lease's usage after the checkpoint, with aware times in any zone (SKY-829).
+
+    The session time zone is neither UTC nor the machine's zone, so a naive time on either side of the
+    ``created_at <= settled_after`` compare moves by hours and keeps the wrong record.
+    """
+    database.dispose()
+
+    @event.listens_for(database, "connect")
+    def set_zone(connection, record) -> None:
+        """Give every new session a zone that differs from UTC and from this machine's zone."""
+        with connection.cursor() as cursor:
+            cursor.execute("SET TIME ZONE 'Asia/Kolkata'")
+
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 40, idempotency_key="restart")
+    service.attach_to_job(budget.id, "alice", "restart-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="kept", actual_cents=2, evidence={"step": "kept"}, final=False)
+    checkpoint = datetime.now(UTC).astimezone(zone)
+    service.settle(lease, "alice", evidence_key="lost", actual_cents=5, evidence={"step": "lost"}, final=False)
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    waived = service.waive_interrupted_work(budget.id, "alice", generation=0, settled_after=checkpoint)
+
+    assert waived.billed_cents == 2
+    assert _budget_units(database, budget.id) == (0, 2 * CENT_SCALE)
+    with Session(database) as session:
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 48
+
+
+def test_a_fenced_lease_late_settle_keeps_evidence_and_bills_nothing_on_postgres(database: Engine) -> None:
+    """A fenced worker's late call is repeated by the resume, so its settle charges nothing (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    service.attach_to_job(budget.id, "alice", "run-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="step-1", actual_cents=2, evidence={"step": 1}, final=False)
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    late = service.settle(lease, "alice", evidence_key="late", actual_cents=4, evidence={"step": 2}, final=True)
+
+    assert late.budget.billed_cents == 2
+    assert _budget_units(database, budget.id) == (0, 2 * CENT_SCALE)
+    with Session(database) as session:
+        evidence = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "late")
+        ).one()
+        assert (evidence.actual_units, evidence.billed_cents, evidence.issue) == (4 * CENT_SCALE, 0, None)
+        assert session.get(ExecutionOperationModel, lease).actual_units == 2 * CENT_SCALE
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 48
+
+
+def _fenced_lease(service: BudgetService) -> tuple[str, str]:
+    """Settle 2 cents on a run's lease slice, then fence its generation.
+
+    Args:
+        service: The budget service.
+
+    Returns:
+        The budget id and the lease id.
+    """
+    budget = service.create("alice", 50, idempotency_key="draft")
+    service.attach_to_job(budget.id, "alice", "run-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="step-1", actual_cents=2, evidence={"step": 1}, final=False)
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+    return budget.id, lease
+
+
+def _budget_state(database: Engine, budget_id: str) -> tuple[str, str | None, int]:
+    """Read the state, blocked reason and billed cents of one budget."""
+    with Session(database) as session:
+        budget = session.get(ExecutionBudgetModel, budget_id)
+        return budget.state, budget.blocked_reason, budget.billed_cents
+
+
+def test_a_fenced_late_settle_above_the_bound_does_not_block_the_resumed_budget_on_postgres(
+    database: Engine,
+) -> None:
+    """The resumed generation uses the same budget, so an old worker's bad settle must not block it (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget_id, lease = _fenced_lease(service)
+    before = _budget_state(database, budget_id)
+
+    with pytest.raises(BudgetBoundExceededError):
+        service.settle(lease, "alice", evidence_key="late", actual_cents=15, evidence={"step": 2}, final=True)
+
+    assert _budget_state(database, budget_id) == before == ("attached", None, 2)
+    with Session(database) as session:
+        evidence = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "late")
+        ).one()
+        assert (evidence.billed_cents, evidence.issue) == (0, "bound_exceeded")
+        assert session.get(ExecutionOperationModel, lease).state == "settled"
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 48
+
+
+def test_a_fenced_late_settle_cannot_go_below_an_earlier_late_settle_on_postgres(database: Engine) -> None:
+    """Usage is cumulative across late settles too, not only from the value at fence time (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    service.settle(lease, "alice", evidence_key="late-1", actual_cents=6, evidence={"step": 2}, final=False)
+
+    with pytest.raises(BudgetConflictError, match="cannot decrease"):
+        service.settle(lease, "alice", evidence_key="late-2", actual_cents=4, evidence={"step": 3}, final=False)
+
+
+def test_a_fenced_late_settle_floor_counts_scope_usage_when_the_wallet_charge_is_smaller_on_postgres(
+    database: Engine,
+) -> None:
+    """A BYOK-shaped late settle charges the wallet less than its scope, so the scope floor must hold (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    service.settle(
+        lease, "alice", evidence_key="late-1", actual_cents=6, actual_wallet_cents=2, evidence={"step": 2}, final=False
+    )
+
+    with pytest.raises(BudgetConflictError, match="cannot decrease"):
+        service.settle(
+            lease,
+            "alice",
+            evidence_key="late-2",
+            actual_cents=4,
+            actual_wallet_cents=3,
+            evidence={"step": 3},
+            final=False,
+        )
+
+
+def test_a_fenced_late_settle_floor_counts_wallet_usage_when_the_scope_grows_on_postgres(database: Engine) -> None:
+    """A later late settle can raise its scope, but its wallet charge must not go below an earlier one (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    service.settle(
+        lease, "alice", evidence_key="late-1", actual_cents=6, actual_wallet_cents=4, evidence={"step": 2}, final=False
+    )
+
+    with pytest.raises(BudgetConflictError, match="cannot decrease"):
+        service.settle(
+            lease,
+            "alice",
+            evidence_key="late-2",
+            actual_cents=7,
+            actual_wallet_cents=3,
+            evidence={"step": 3},
+            final=False,
+        )
+
+
+def test_a_refused_fenced_late_settle_does_not_raise_the_floor_on_postgres(database: Engine) -> None:
+    """A late settle that the bound refused counts for nothing, as on the live path (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    with pytest.raises(BudgetBoundExceededError):
+        service.settle(lease, "alice", evidence_key="late-1", actual_cents=15, evidence={"step": 2}, final=False)
+
+    late = service.settle(lease, "alice", evidence_key="late-2", actual_cents=8, evidence={"step": 3}, final=True)
+
+    assert late.budget.billed_cents == 2
+    with Session(database) as session:
+        evidence = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "late-2")
+        ).one()
+        assert (evidence.actual_units, evidence.billed_cents, evidence.issue) == (8 * CENT_SCALE, 0, None)
+
+
+def test_a_current_generation_lease_cannot_settle_again_after_its_final_settle_on_postgres(
+    database: Engine,
+) -> None:
+    """Only a fenced generation's lease takes a late settle; a live lease that settled is closed (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    service.attach_to_job(budget.id, "alice", "run-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="step-1", actual_cents=3, evidence={"step": 1}, final=True)
+
+    with pytest.raises(BudgetConflictError, match="dispatched attempt"):
+        service.settle(lease, "alice", evidence_key="step-2", actual_cents=4, evidence={"step": 2}, final=True)
+
+
+def test_lease_waiver_returns_only_the_grant_that_the_lost_settle_drew_on_postgres(database: Engine) -> None:
+    """The grant that the kept settle drew stays spent; the lost settle's grant and paid cents return (SKY-829)."""
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").grant_remaining = 4
+        session.commit()
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 40, idempotency_key="restart")
+    service.attach_to_job(budget.id, "alice", "restart-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="kept", actual_cents=2, evidence={"step": "kept"}, final=False)
+    checkpoint = datetime.now(UTC)
+    # The lost settle draws the last 2 grant cents and 1 paid cent.
+    service.settle(lease, "alice", evidence_key="lost", actual_cents=5, evidence={"step": "lost"}, final=False)
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    waived = service.waive_interrupted_work(budget.id, "alice", generation=0, settled_after=checkpoint)
+
+    assert waived.billed_cents == 2
+    with Session(database) as session:
+        wallet = session.get(BillingCustomerModel, "alice")
+        assert (wallet.grant_remaining, wallet.balance_cents) == (2, 50)
+
+
+def test_lease_waiver_keeps_a_settle_saved_at_the_checkpoint_time_on_postgres(database: Engine) -> None:
+    """A settle at the exact checkpoint time is part of the kept work (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 40, idempotency_key="restart")
+    service.attach_to_job(budget.id, "alice", "restart-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="kept", actual_cents=2, evidence={"step": "kept"}, final=False)
+    with Session(database) as session:
+        checkpoint = session.scalars(
+            select(ExecutionUsageEvidenceModel.created_at).where(ExecutionUsageEvidenceModel.evidence_key == "kept")
+        ).one()
+    service.settle(lease, "alice", evidence_key="lost", actual_cents=5, evidence={"step": "lost"}, final=False)
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    waived = service.waive_interrupted_work(budget.id, "alice", generation=0, settled_after=checkpoint)
+
+    assert waived.billed_cents == 2
+
+
+def test_lease_waiver_does_not_keep_a_refused_settle_from_before_the_checkpoint_on_postgres(
+    database: Engine,
+) -> None:
+    """A refused settle billed nothing, so it is no kept work, also when the lease settles later (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 40, idempotency_key="restart")
+    service.attach_to_job(budget.id, "alice", "restart-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    with pytest.raises(BudgetBoundExceededError):
+        service.settle(lease, "alice", evidence_key="refused", actual_cents=15, evidence={"step": 1}, final=False)
+    checkpoint = datetime.now(UTC)
+    service.settle(lease, "alice", evidence_key="lost", actual_cents=5, evidence={"step": 2}, final=True)
+
+    waived = service.waive_interrupted_work(budget.id, "alice", generation=0, settled_after=checkpoint)
+
+    assert waived.billed_cents == 0
+    with Session(database) as session:
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 50
+
+
 def test_parallel_duplicate_lease_reserves_once(database: Engine) -> None:
     """Serialize two concurrent leases with one key into one reservation."""
     service = BudgetService(engine=database)
@@ -527,7 +865,12 @@ def test_a_later_non_user_stop_keeps_the_user_stop_reason_on_postgres(database: 
 
 
 def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engine, tmp_path: Path) -> None:
-    """Run 1,000 agents of one run in parallel against one workspace budget, under real row locks (SKY-717)."""
+    """Run 1,000 agents of one run in parallel against one workspace budget, under real row locks (SKY-717).
+
+    Args:
+        database: Real PostgreSQL engine.
+        tmp_path: Holds the step log's objects.
+    """
     service = BudgetService(engine=database)
     budget = service.create("alice", 40, idempotency_key="workspace")
     budget = service.attach_to_job(budget.id, "alice", "run-1", expected_revision=budget.revision)
@@ -569,7 +912,8 @@ def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engi
         try:
             for _ in range(3):
                 agent.step("model", 1, work)
-        except LeaseExhaustedError:
+        # The spent cap gives BudgetReached; holds of other agents in flight give LeaseExhaustedError (SKY-914).
+        except (LeaseExhaustedError, BudgetReached):
             pass
         finally:
             agent.close()

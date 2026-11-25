@@ -127,6 +127,25 @@ void describe("finished-run Overview fixtures", () => {
     });
   }
 
+  void it("SKY-750: says lower is better and counts a lower minimize score as a gain", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      blackbox_result: {
+        ...fixture.job.blackbox_result!,
+        baseline_score: 0.78,
+        best_score: 0.42,
+        metric_improvement: null,
+        direction: "minimize" as const,
+      },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes("optimization.overview.lower_is_better"), "lower is better");
+    assert.ok(html.includes("+0.36"), "the gain is positive");
+    assert.ok(!html.includes("--danger-dim"), "the improvement card is not red");
+    assert.ok(!render(fixture).includes("optimization.overview.lower_is_better"), "maximize");
+  });
+
   void it("never says no score for a stopped run that missed its final score", () => {
     const fixture = overviewFixture("oa-gepa");
     const job = {

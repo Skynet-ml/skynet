@@ -17,7 +17,7 @@ import type { PaneComment } from "./review/parts";
 import { ReviewPane, type RepoHostLink } from "./review/review-pane";
 import { clampShare, shareRange, snapAt, type Snap } from "./split";
 
-const OPTIMIZE_TOML = "optimize.toml";
+const ASCENT_TOML = "ascent.toml";
 // The entry files are new in the draft; the repository never holds them.
 const DRAFT_ONLY = new Set([RUN_FILE, METRIC_FILE]);
 // Below this width the chat and the Changes pane become two tabs.
@@ -213,7 +213,7 @@ export function AgenticIde({
   const draftPaths = React.useMemo(() => Object.keys(texts).sort(), [texts]);
   const basePaths = React.useMemo(
     () =>
-      repo && !draftPaths.includes(OPTIMIZE_TOML) ? [...draftPaths, OPTIMIZE_TOML] : draftPaths,
+      repo && !draftPaths.includes(ASCENT_TOML) ? [...draftPaths, ASCENT_TOML] : draftPaths,
     [repo, draftPaths],
   );
   // A file of the tree that the draft does not hold is read when its tab opens.
@@ -225,7 +225,7 @@ export function AgenticIde({
   const { reads, retry } = useRepoReads(repo, readPaths);
   const treePaths = useRepoTree(repo);
   // The base the draft changes: "" for a file the repository cannot give as text.
-  // A failed or unreadable optimize.toml read maps to undefined: the repository
+  // A failed or unreadable ascent.toml read maps to undefined: the repository
   // may have the file, so the Metric screen must not hold on it (SKY-693).
   const base = React.useMemo(() => {
     const known = new Map<string, string | undefined>();
@@ -234,7 +234,7 @@ export function AgenticIde({
     return known;
   }, [reads, basePaths, repo]);
   // The chat's "Edited N files" card diffs a file the draft
-  // did not hold yet (the repository's optimize.toml) against this base.
+  // did not hold yet (the repository's ascent.toml) against this base.
   // A read with no known text has no entry, so the Metric screen does not hold on it.
   const knownBase = React.useMemo(
     () =>

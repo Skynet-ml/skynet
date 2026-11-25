@@ -117,6 +117,26 @@ sys.exit(runner.main())
 '''
 
 
+def _runner_files() -> dict[str, str]:
+    """Collect the runner, the harness bridge and the pinned plugin that the child runs next to.
+
+    Returns:
+        Relative file paths mapped to their text.
+    """
+    runner = Path(autosaddler_runner.__file__)
+    bridge = Path(harness_bridge.__file__)
+    files = {
+        runner.name: runner.read_text(encoding="utf-8"),
+        bridge.name: bridge.read_text(encoding="utf-8"),
+        "exec_shim.py": bridge.with_name("exec_shim.py").read_text(encoding="utf-8"),
+        "repo_tree.py": Path(repo_tree.__file__).read_text(encoding="utf-8"),
+    }
+    plugin = runner.with_name("autosaddler_plugin")
+    for asset in sorted([*plugin.rglob("*.md"), plugin / "LICENSE"]):
+        files[f"autosaddler_plugin/{asset.relative_to(plugin).as_posix()}"] = asset.read_text(encoding="utf-8")
+    return files
+
+
 def _upstream_python() -> str | None:
     """Find an interpreter that can import the pinned upstream package.
 
@@ -946,7 +966,7 @@ def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> 
     agent = tmp_path / "agent.py"
     agent.write_text(
         "import json, os, pathlib\n"
-        "assert pathlib.Path('AGENTS.md').read_text() and pathlib.Path(os.environ['APP_PROMPT_FILE']).read_text()\n"
+        "assert pathlib.Path('AGENTS.md').read_text() and pathlib.Path(os.environ['ASCENT_TASK']).read_text()\n"
         "schema = pathlib.Path('.autosaddler/session_output_schema.json').read_text()\n"
         "context = json.loads(pathlib.Path('.autosaddler/session_context.json').read_text())\n"
         "if 'diagnosis' in schema:\n"
@@ -998,7 +1018,7 @@ def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> 
     (tmp_path / "input.json").write_text(json.dumps(payload))
     # The sandbox ships only the runner and the bridge; running from the package
     # directory would shadow upstream ``autosaddler`` with Skynet's engine module.
-    for name, text in native_runtime._runner_files("autosaddler").items():
+    for name, text in _runner_files().items():
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text)
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUNBUFFERED": "1"}
@@ -1094,7 +1114,7 @@ def test_runner_evolves_repository_versions_scored_by_the_parent(tmp_path: Path)
             "run_command": f'"{python}" "{agent}"',
             "instructions_file": "GUIDE.md",
             "output_format": "plain",
-            "files": {"harness.json": "__APP_API_KEY__"},
+            "files": {"harness.json": "__ASCENT_MODEL_KEY__"},
             "env": {},
             "model": "claude-test",
             "price": {"input": 0.0, "output": 0.0},
@@ -1110,7 +1130,7 @@ def test_runner_evolves_repository_versions_scored_by_the_parent(tmp_path: Path)
     }
     payload["repo"]["editable_paths"] = ["src"]
     (tmp_path / "input.json").write_text(json.dumps(payload))
-    for name, text in native_runtime._runner_files("autosaddler").items():
+    for name, text in _runner_files().items():
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text)
     env = {
@@ -2234,7 +2254,7 @@ def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
 
         assert not worker.is_alive()
         assert len(errors) == 1
-        assert "[proposer] setup command in optimize.toml" in str(errors[0])
+        assert "[proposer] setup command in ascent.toml" in str(errors[0])
         with pytest.raises(ProcessLookupError):
             os.kill(setup_pid, 0)
     finally:
@@ -2671,7 +2691,7 @@ def test_upstream_policies_handle_the_no_score_floor(tmp_path: Path) -> None:
     python = _upstream_python()
     if python is None:
         pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
-    for name, text in native_runtime._runner_files("autosaddler").items():
+    for name, text in _runner_files().items():
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text)
     (tmp_path / "probe.py").write_text(_UPSTREAM_POLICIES)

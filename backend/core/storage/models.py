@@ -498,6 +498,35 @@ class PushSubscriptionModel(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ImageBuildModel(Base):
+    """One build of a user's box image from a Dockerfile (SKY-737).
+
+    A finished build is reused by the same user's later runs when the input
+    hash matches. The row also holds the full build log, which the run record
+    names by the row id, so the log stays out of the job result JSON.
+    """
+
+    __tablename__ = "image_builds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    builder: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Null until the build succeeds: a started, failed or cancelled build keeps only its log.
+    image: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    log: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # The CodeBuild build id while the build may still run, so account deletion can stop a build whose
+    # worker was hard-killed (SKY-896). Only a built image clears it: a failed wait (a timeout or a lost
+    # status read) can end before CodeBuild does.
+    codebuild_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (Index("ix_image_builds_username_input_hash", "username", "input_hash"),)
+
+
 class SlackConnectionModel(Base):
     """One identity's install of the Skynet Slack app, where its Slack notifications go.
 
@@ -540,6 +569,25 @@ class ModelPrivacyPreferenceModel(Base):
 
     username: Mapped[str] = mapped_column(String(255), primary_key=True)
     data_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="deny")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class SetupBillingPreferenceModel(Base):
+    """Whether a caller's new runs bill their setup checks to the wallet only.
+
+    A missing row means ``True``: setup stays out of the run's spending limit
+    (SKY-925). ``False`` makes new budgets count setup against their limit.
+    """
+
+    __tablename__ = "setup_billing_preferences"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    from_wallet: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -716,8 +764,8 @@ class BillingCustomerModel(Base):
         default=0,
         server_default="0",
     )
-    # ``grant_remaining`` is what is left of the account's one-time free
-    # grant (500 cents = $5, seeded once and never renewed). NULL until the first
+    # ``grant_remaining`` is what is left of the account's one-time
+    # grant (seeded once from ``grant_cents()``, never renewed). NULL until the first
     # wallet read or run seeds it; seeding is lazy-evaluated on read, never
     # cron'd.
     grant_remaining: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)
@@ -795,7 +843,7 @@ class WalletLedgerModel(Base):
     # None on interactive debits (serve, agent chat), non-run rows, and rows
     # written before run attribution landed.
     optimization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    # Cents of a ``run`` row's charge drawn from the free grant; the paid part
+    # Cents of a ``run`` row's charge drawn from the grant; the paid part
     # is ``-delta_cents - from_grant_cents``. On a positive restart-waiver row,
     # the cents returned to the grant. None on non-run and older rows.
     from_grant_cents: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)
@@ -824,6 +872,10 @@ class ExecutionBudgetModel(Base):
     creation_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     total_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     uncapped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # A setup_in_total budget (continuous-plan cycles, or accounts that turn off wallet setup
+    # billing) keeps the policy from before SKY-925: its total caps and counts setup spend. Every
+    # other budget bills setup to the balance.
+    setup_in_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
@@ -1004,7 +1056,7 @@ class UserSecretModel(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     # The hosts the user approved for this secret (SKY-641). A run may send it
-    # only to these, so an edited optimize.toml cannot redirect it. Empty
+    # only to these, so an edited ascent.toml cannot redirect it. Empty
     # (every secret saved before SKY-641) means no host.
     allowed_hosts: Mapped[list[str]] = mapped_column(
         JSON_STORE, nullable=False, default=list, server_default=text("'[]'")
@@ -1267,6 +1319,9 @@ class JobModel(Base):
     # The image a protected run first executed in. Every later box for the run,
     # a resume after a redeploy included, boots from it so checkpoints stay loadable.
     sandbox_image: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The user images of the [run] and [metric] boxes, by role, pinned at the
+    # first start so a resume boots the same two digests (SKY-737).
+    box_images: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
     execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     execution_budget_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_budget_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1460,13 +1515,11 @@ class GepaCheckpointModel(Base):
 
 
 class BlackboxAgentRunModel(Base):
-    """One sandboxed agent run of a black-box job: its answer, transcript and outcome.
+    """One stored agent run of a black-box job: its answer, transcript and outcome.
 
-    An agent target evaluates every ``(version, case)`` pair in its own
-    sandbox. The worker writes the row when the run starts, appends the
-    transcript as the box streams it, and rewrites the row with the answer
-    and outcome when the run ends, so the run view can show what each
-    version did on each case, live or after the fact. ``phase``/``trial``/
+    Only jobs from the retired agent target have these rows. No worker
+    writes new rows (SKY-834). The run view still reads the stored rows, so
+    it can show what each version did on each case. ``phase``/``trial``/
     ``example_id`` tie the row to the progress events that name the same
     run. ``stored_bytes`` folds into the owner's "optimizations" footprint;
     rows go with their job via the cascading foreign key.
@@ -1505,7 +1558,7 @@ class RunCallModel(Base):
     """One relay call made by a candidate of a run (SKY-364).
 
     The relay writes one row for each call out of a box: a model call, an MCP
-    tool call, a ``skynet.call`` to a stage, an evaluator call or an
+    tool call, an ``openascent.call`` to a stage, an evaluator call or an
     allowed-host request. ``seq`` counts the candidate's calls from 1 and is
     the ``since`` cursor of the live read route. The store assigns it under a
     lock on the candidate row, so a call with a lower ``seq`` always commits

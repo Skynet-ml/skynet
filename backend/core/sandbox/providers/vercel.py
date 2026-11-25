@@ -30,6 +30,10 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
   unrecorded, and code in the box can write to the log. Rows carry
   ``egress_record.VERCEL_SOURCE``. Plain HTTP is not routed, so it goes out
   unrecorded too.
+- A box can start from a user image in a neutral OCI registry (SKY-889).
+  Vercel Sandbox starts only from its own registry, so the box first copies
+  the image there through an injected copier, and then starts from the
+  digest that the copier returns.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ import base64
 import codecs
 import contextlib
 import dataclasses
+import functools
 import logging
 import math
 import posixpath
@@ -53,6 +58,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from core.billing.budgets import BudgetError
+from core.billing.model_mailbox import root_empty_command
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
@@ -68,7 +74,8 @@ from core.config import settings
 from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources, validate_spec
 from ..egress_record import LOG_BYTES, LOG_LINES, PROXY_SOURCE, READY_MARKER, VERCEL_SOURCE, box_secrets, record_calls
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
-from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
+from ..errors import SandboxFatalError, SandboxInfraError, SandboxRejectedError, StartTimeoutError
+from ..image_registry import COPY_TIMEOUT_SECONDS, ImageCopier
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import ResourceMode, SandboxSpec
 from ..services import ComposeService, box_resources, start_services, stop_services
@@ -81,6 +88,7 @@ from ..snapshots import (
     snapshot_hold_retention,
 )
 from ..telemetry import BoxTimings, current_output_sink
+from .docker import digest_image, in_repository
 
 try:
     import httpx2
@@ -88,6 +96,8 @@ try:
         NetworkPolicy as SdkNetworkPolicy,
     )
     from vercel.sandbox import (
+        NetworkPolicyMatcher,
+        NetworkPolicyRequestMatcher,
         NetworkPolicyRule,
         NetworkPolicyTransform,
         SandboxApiError,
@@ -105,6 +115,8 @@ try:
 except ImportError:
     httpx2 = None
     SdkNetworkPolicy = None
+    NetworkPolicyMatcher = None
+    NetworkPolicyRequestMatcher = None
     NetworkPolicyRule = None
     NetworkPolicyTransform = None
     SandboxApiError = None
@@ -126,6 +138,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CREATE_TIMEOUT = 120.0
+# The run reserves the copy for this same limit (SKY-891).
+COPY_TIMEOUT = COPY_TIMEOUT_SECONDS
 KILL_GRACE = 30.0
 KILL_AFTER_MAX = 18_000.0
 CANCEL_GRACE = 10.0
@@ -150,6 +164,44 @@ OUTPUT_PREFIX = "/tmp/.app-output-"
 # or link at a /tmp name before root's redirect opens it. In sticky /tmp it
 # cannot plant into, rename or remove root's own 0755 folder (TU-1).
 ROOT_OUTPUT_PREFIX = "/tmp/.app-root-output-"
+# Only root makes a folder with one of these prefixes: the caller makes each
+# folder of the path with a root ``mkdir`` that fails on anything already at the
+# name, before it uploads there. The box user cannot plant into, rename or
+# remove such a folder in sticky /tmp, so the file API can write there. The
+# file API replaces a link, FIFO or empty folder at the last part of the path
+# with its own file; it follows only a link in an earlier part (SKY-902).
+ROOT_MODEL_PREFIX = "/tmp/.app-root-model-"
+ROOT_UPLOAD_PREFIX = "/tmp/.app-root-upload-"
+DIRECT_WRITE_PREFIXES = (ROOT_MODEL_PREFIX,)
+# The file API writes with all capabilities and follows a link that the box
+# user plants, so it reached /usr/local/lib (SKY-902). So it writes every other
+# upload into a root-made folder under ``ROOT_UPLOAD_PREFIX``, and this script
+# copies each file to its path as the box user with no capability: the kernel
+# then refuses any write that the box user could not make itself, through a
+# link too. Not stdin: a 1000-byte stdin upload took 341 s in a real box. A
+# planted FIFO blocks the open of a path, so each copy runs under the box's own
+# ``timeout``: in a real box the SDK's ``kill_after`` did not end such a step.
+# A copy is a small local file, so a short deadline is enough, and a FIFO
+# costs one short wait. ``UPLOAD_KILL_AFTER`` is only the backstop of a step.
+# The uutils ``timeout`` (Ubuntu 26.04) kills only its direct child, and bash
+# 5.3 forks the last command, so ``exec`` keeps the FIFO open in that child.
+# ``--preserve-status`` gives 137 there too; GNU ``timeout`` kills itself and
+# gives 137 anyway (SKY-969).
+# Each copy first removes the target, as the file API did, so a read-only file
+# that the box user owns (for example a runner that a version made 0444) is
+# still replaced, and a link, FIFO or empty folder at the name goes away when
+# it can. ``rmdir`` refuses a link, so it removes only a real empty folder.
+UPLOAD_COPY_DEADLINE = 10
+UPLOAD_SCRIPT = (
+    'stage="$1"; shift; index=0; for path in "$@"; do '
+    'case "$path" in */*) folder="${path%/*}"; [ -z "$folder" ] || /bin/mkdir -p -- "$folder" || exit 1;; esac; '
+    f"/usr/bin/timeout --preserve-status --signal=KILL {UPLOAD_COPY_DEADLINE}s /bin/bash --noprofile --norc -c "
+    '\'/bin/rmdir -- "$2" 2>/dev/null; /bin/rm -f -- "$2" 2>/dev/null; exec /bin/cat -- "$1" > "$2"\' copy "$stage/$index" "$path" || exit; index=$((index + 1)); done'
+)
+UPLOAD_KILL_AFTER = 120.0
+# A model mailbox empties its folder only after every answer write ends, so a
+# file API write that never answers must not hold the command open (SKY-902).
+WRITE_BATCH_TIMEOUT = 60.0
 # ``timeout --signal=KILL`` gives only 137. A command's own 124 is its real code.
 TIMEOUT_CODE = 137
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
@@ -158,7 +210,12 @@ SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 # inherit the flag and cannot drop it, and the kernel then ignores sudo's
 # setuid bit, so Codex and the [run] entry never reach root (SKY-389, SKY-398).
 # The absolute path keeps a planted `setpriv` earlier on PATH from skipping it.
-NO_NEW_PRIVS = ("/usr/bin/setpriv", "--no-new-privs")
+# Vercel starts every command with all capabilities in its ambient set, so a
+# non-root box user could still write root-owned files (SKY-901). Clearing the
+# inheritable and ambient sets leaves the next exec with none: no_new_privs
+# also ignores file capabilities. The bounding set stays, because dropping it
+# needs CAP_SETPCAP, and a box without it would then fail every command.
+UNPRIVILEGED = ("/usr/bin/setpriv", "--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all")
 # A root command must find programs only in root-owned folders, and no program
 # file in them may be writable by the box user. /app/.venv/bin is writable by
 # the box user. The box's sudo may pass the box PATH through, so every root
@@ -208,6 +265,79 @@ ClientFactory = Callable[[ResponseCapture | None], Any]
 UsageFactory = Callable[..., Any]
 
 
+class ImageCopyError(SandboxInfraError):
+    """Report that a user image did not reach Vercel's registry."""
+
+
+@dataclasses.dataclass
+class _Copy:
+    """One running image copy and the number of boxes that wait for it."""
+
+    task: asyncio.Task[str]
+    waiters: int = 0
+
+
+# The digest pins the content, so each process copies one source image into
+# one Vercel project once for each owner, and later boxes reuse that copy. The
+# key holds the owner's repository, and the box refuses a source image outside
+# it, so another owner never reuses a private copy. The key holds no pull
+# credentials: the run's token renews about every 45 minutes, and a renewed
+# token must not copy the same image again. A failed or cancelled copy is not
+# kept. Tasks are kept for each event loop, because a task cannot be awaited
+# from another loop.
+_CopyKey = tuple[str, str, str, str]
+_COPIED: dict[_CopyKey, str] = {}
+_COPYING: dict[tuple[_CopyKey, asyncio.AbstractEventLoop], _Copy] = {}
+
+
+async def _copy_image_once(copy_image: ImageCopier, source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+    """Copy one user image into Vercel's registry.
+
+    Args:
+        copy_image: The image copier.
+        source_image: The user image, pinned by digest.
+        pull_credentials: The (username, password) that read the source image.
+
+    Returns:
+        The copy's reference, pinned by digest.
+
+    Raises:
+        ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
+            returned no digest reference.
+        BudgetError: A metered copier found no funds for the copy.
+    """
+    try:
+        async with asyncio.timeout(COPY_TIMEOUT):
+            copied = await copy_image(source_image, pull_credentials)
+    except BudgetError:
+        # A metered copier refused the copy before it started (SKY-891); the
+        # budget stop must reach the run as it is, not as a failed copy.
+        raise
+    except Exception as error:
+        # Only the type: a copier's message can echo the pull credentials.
+        raise ImageCopyError(
+            f"Could not copy the image {source_image} into Vercel's registry: {type(error).__name__}."
+        ) from None
+    if not digest_image(copied):
+        raise ImageCopyError(f"The copy of {source_image} in Vercel's registry is not pinned by digest.")
+    return copied
+
+
+def _finish_copy(key: _CopyKey, loop: asyncio.AbstractEventLoop, copy: _Copy, task: asyncio.Task[str]) -> None:
+    """Keep a successful copy, and drop this copy from the running copies.
+
+    Args:
+        key: The copy's cache key.
+        loop: The event loop of the copy task.
+        copy: The running copy that ended.
+        task: The copy task, which is done.
+    """
+    if _COPYING.get((key, loop)) is copy:
+        del _COPYING[(key, loop)]
+    if not task.cancelled() and task.exception() is None:
+        _COPIED[key] = task.result()
+
+
 def _error_types(*names: str) -> tuple[type[BaseException], ...]:
     """Collect transport error classes from both httpx packages.
 
@@ -228,6 +358,8 @@ def _error_types(*names: str) -> tuple[type[BaseException], ...]:
 
 # Only errors where the request never reached the box are safe to resend:
 # a resent create_process after a read error could start the command twice.
+# httpx raises these three before it sends a byte: no connection opened, or
+# none came free in the pool. A failure after the send is a read or write error.
 _CONNECT_ERRORS = _error_types("ConnectError", "ConnectTimeout", "PoolTimeout")
 _TRANSPORT_ERRORS = _error_types("TransportError")
 _WAIT_ERRORS = _TRANSPORT_ERRORS + tuple(error for error in (SandboxStreamError, SandboxResponseError) if error)
@@ -318,7 +450,7 @@ def _bash(args: Sequence[str], *, sudo: bool = False) -> tuple[str, list[str]]:
         script, *rest = args
         return "/bin/bash", [*SHELL_FLAGS, f"export PATH={ROOT_PATH}; {script}", *rest]
     # setpriv looks up a bare name on the box PATH, which the box user can write.
-    return NO_NEW_PRIVS[0], [*NO_NEW_PRIVS[1:], "/bin/bash", *SHELL_FLAGS, *args]
+    return UNPRIVILEGED[0], [*UNPRIVILEGED[1:], "/bin/bash", *SHELL_FLAGS, *args]
 
 
 def _wrapper(inner: str, token: str, *, sudo: bool) -> tuple[str, str, str, str]:
@@ -377,6 +509,47 @@ def box_name(operation_key: str | None, budget: Any | None = None) -> str:
         return f"skynet-{uuid.uuid4().hex}"
     parts = [budget.budget_id, budget.generation, operation_key] if budget is not None else [operation_key]
     return "skynet-" + json_fingerprint(parts)[:48]
+
+
+# One path segment below a credential prefix: no '%' and no ';', and after any leading dots a character that is
+# not ',' or '='. So a '.', '..', empty ('//'), percent-encoded ('%2e', '%2f') or backslash segment never
+# matches, and neither does a path parameter such as '..;' or '..=x', which Tomcat and Jetty read as '..'.
+# The regex uses only character classes, plain groups, '*', '?' and anchors, because the edge's regex dialect is
+# not known to support escapes, non-capturing groups or lookarounds.
+_CLEAN_SEGMENT = r"/[.]*[A-Za-z0-9_~!$&'()+:@-][A-Za-z0-9._~!$&'()+,=:@-]*"
+
+
+def _path_regex(path: str) -> str:
+    """Build the edge regex that matches a path prefix and only the clean paths below it.
+
+    Args:
+        path: The normalized, non-root path prefix, such as ``/team``.
+
+    Returns:
+        An anchored regex that matches ``path``, ``path/`` and clean segments below it.
+    """
+    literal = "".join(char if char.isalnum() or char == "/" else f"[{char}]" for char in path.rstrip("/"))
+    return f"^{literal}({_CLEAN_SEGMENT})*/?$"
+
+
+def _header_rules(path: str, headers: Mapping[str, str]) -> tuple[Any, ...]:
+    """Build the SDK rules that add headers to a host's requests under one path prefix.
+
+    Args:
+        path: The normalized path prefix; ``/`` covers the whole host.
+        headers: The headers to add.
+
+    Returns:
+        One rule for the root, else one rule for the prefix and the clean paths below it.
+    """
+    transform = (NetworkPolicyTransform(headers=dict(headers)),)
+    if path == "/":
+        return (NetworkPolicyRule(transform=transform),)
+    # A bare starts_with("/mcp") also matches "/mcp-admin", another server's path on the same host (SKY-833).
+    # The edge matches the raw path, so starts_with("/team/") also gives the headers to '/team/../admin',
+    # which a server that normalizes the path serves as '/admin'. Such a request goes out with no headers.
+    match = NetworkPolicyRequestMatcher(path=NetworkPolicyMatcher.regex(_path_regex(path)))
+    return (NetworkPolicyRule(transform=transform, match=match),)
 
 
 def policy_confirmed(policy: NetworkPolicy, readback: Any | None) -> bool:
@@ -445,6 +618,9 @@ class VercelEnvironment(SandboxEnvironment):
     """
 
     capabilities = VERCEL_CAPABILITIES
+    # The file API writes with root rights, so a guest model mailbox can keep
+    # its folders in sticky /tmp, where the box user cannot swap them (SKY-902).
+    root_file_writes = True
 
     def __init__(
         self,
@@ -460,6 +636,10 @@ class VercelEnvironment(SandboxEnvironment):
         snapshot_usage_factory: UsageFactory = VercelSnapshotReservation,
         services: Sequence[ComposeService] = (),
         recorder: CallRecorder | None = None,
+        source_image: str | None = None,
+        pull_credentials: tuple[str, str] | None = None,
+        copy_image: ImageCopier | None = None,
+        user_image_repository: str | None = None,
     ) -> None:
         """Check the spec and prepare the box without a network call.
 
@@ -478,11 +658,35 @@ class VercelEnvironment(SandboxEnvironment):
                 their size; ``start_services`` starts them.
             recorder: Writes each request of the in-box egress proxy into the
                 run record, or ``None`` for no proxy.
+            source_image: A user image in a neutral OCI registry, pinned by
+                digest. The box copies it into Vercel's registry before it
+                starts. ``None`` starts the box from the spec or default image.
+            pull_credentials: The (username, password) that read the source
+                image, or ``None`` for a public image.
+            copy_image: Copies the source image into Vercel's registry.
+            user_image_repository: The owner's image repository (SKY-888).
+                A source image needs it and must lie under it.
 
         Raises:
             SandboxSpecError: The spec is invalid, a protected box has no
-                operation key, or the services do not fit the largest box.
+                operation key, the services do not fit the largest box, or
+                the user image is not pinned by digest, has no owner
+                repository, lies outside it, or differs from the spec image.
+            SandboxFatalError: A user image comes with no image copier.
         """
+        if source_image is not None:
+            if not digest_image(source_image):
+                raise SandboxSpecError("A user image must be pinned by digest: name@sha256:<64 hex>.")
+            # Fail closed: the copy cache is keyed by owner, so a user image
+            # with no owner could reuse another owner's copy.
+            if user_image_repository is None:
+                raise SandboxSpecError("A user image needs the owner's image repository.")
+            if not in_repository(source_image, user_image_repository):
+                raise SandboxSpecError("The user image is not in the owner's image repository.")
+            if spec.image not in (None, source_image):
+                raise SandboxSpecError("The spec names an image other than the user image.")
+            if copy_image is None:
+                raise SandboxFatalError("The Vercel sandbox needs an image copier to start from a user image.")
         if budget is not None:
             if spec.operation_key is None:
                 raise SandboxSpecError("A protected Vercel sandbox needs an operation key.")
@@ -527,6 +731,11 @@ class VercelEnvironment(SandboxEnvironment):
         self._egress_log: str | None = None
         self._egress_rows = 0
         self._proxy_env: dict[str, str] = {}
+        self._source_image = source_image
+        self._pull_credentials = pull_credentials
+        self._copy_image = copy_image
+        self._user_image_repository = user_image_repository
+        self._copied_image: str | None = None
 
     @property
     def usage(self) -> Any | None:
@@ -641,9 +850,55 @@ class VercelEnvironment(SandboxEnvironment):
         """Return the image of the box.
 
         Returns:
-            The spec image, or the configured default.
+            The copy of the user image, else the spec image, else the
+            configured default.
         """
-        return self.spec.image or settings.vercel_sandbox_image
+        return self._copied_image or self.spec.image or settings.vercel_sandbox_image
+
+    async def _copy_source_image(self) -> str:
+        """Return the copy of the user image in Vercel's registry, and copy it once.
+
+        Boxes of the same owner that start at the same time wait for one copy,
+        also when their pull credentials differ. Each waiter is shielded: a cancel of one waiter
+        does not stop the copy while another box still waits for it. The copy
+        is cancelled only when its last waiter leaves.
+
+        Returns:
+            The copy's reference, pinned by digest.
+
+        Raises:
+            ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
+                returned no digest reference.
+        """
+        assert self._source_image is not None
+        assert self._copy_image is not None
+        assert self._user_image_repository is not None
+        key = (
+            self._source_image,
+            self._user_image_repository,
+            str(settings.vercel_team_id),
+            str(settings.vercel_project_id),
+        )
+        copied = _COPIED.get(key)
+        if copied is not None:
+            return copied
+        loop = asyncio.get_running_loop()
+        copy = _COPYING.get((key, loop))
+        if copy is None:
+            task = loop.create_task(_copy_image_once(self._copy_image, self._source_image, self._pull_credentials))
+            copy = _Copy(task)
+            _COPYING[(key, loop)] = copy
+            task.add_done_callback(functools.partial(_finish_copy, key, loop, copy))
+        copy.waiters += 1
+        try:
+            return await asyncio.shield(copy.task)
+        finally:
+            copy.waiters -= 1
+            if copy.waiters == 0 and not copy.task.done():
+                # A later box starts a new copy instead of joining this one.
+                if _COPYING.get((key, loop)) is copy:
+                    del _COPYING[(key, loop)]
+                copy.task.cancel()
 
     def _sdk_policy(self, policy: NetworkPolicy, *, update: bool) -> Any | None:
         """Build the SDK network policy of one Skynet policy.
@@ -656,8 +911,8 @@ class VercelEnvironment(SandboxEnvironment):
             The SDK policy, or ``None`` for the create default of open egress.
         """
         rules = {
-            host: (NetworkPolicyRule(transform=(NetworkPolicyTransform(headers=dict(headers)),)),)
-            for host, headers in self.spec.inject_headers.items()
+            host: tuple(rule for path, headers in prefixes.items() for rule in _header_rules(path, headers))
+            for host, prefixes in self.spec.inject_headers.items()
         }
         if policy.disabled:
             return SdkNetworkPolicy.deny_all()
@@ -819,7 +1074,11 @@ class VercelEnvironment(SandboxEnvironment):
             logger.warning("Could not record the egress requests of %s: %s", self.name, type(error).__name__)
 
     async def _start(self) -> None:
-        """Make the client, then wait for capacity, reserve and create the box."""
+        """Copy a user image, make the client, then wait for capacity, reserve and create the box."""
+        # A snapshot already holds the image's files, so its box needs no copy.
+        if self._source_image is not None and self.snapshot_id is None and self._copied_image is None:
+            with self.timings.phase("copy"):
+                self._copied_image = await self._copy_source_image()
         with self.timings.phase("create"):
             if self._client is None:
                 self._client = self._client_factory(self._capture)
@@ -1138,7 +1397,7 @@ class VercelEnvironment(SandboxEnvironment):
                 command runs, and the rest after it ends. The chunks of one
                 stream join to its full text.
             sudo: Run the command as root. Any other command runs under
-                ``NO_NEW_PRIVS``, so nothing it starts can reach root.
+                ``UNPRIVILEGED``, so nothing it starts can reach root or hold a capability.
 
         Returns:
             The exit code and the captured output.
@@ -1448,15 +1707,122 @@ class VercelEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The session stopped.
+            SandboxRejectedError: The box user could not write a file, or a
+                copy did not end by its deadline, for example at a planted FIFO.
+            TimeoutError: The SDK did not answer an upload command in time, or
+                a direct write did not end in ``WRITE_BATCH_TIMEOUT``.
         """
         session = self._require_session()
         cwd = self._cwd(session)
         with self._stop_guard():
+            direct = {}
+            copies = {}
             for path, text in files.items():
-                parent = path.rsplit("/", 1)[0] if "/" in path else ""
-                if parent:
-                    await session.fs.mkdir(parent, cwd=cwd, recursive=True)
-                await session.fs.write_text(path, text, cwd=cwd)
+                normal = posixpath.normpath(path)
+                if normal.startswith(DIRECT_WRITE_PREFIXES):
+                    direct[normal] = text
+                else:
+                    copies[path] = text
+            if direct:
+                async with asyncio.timeout(WRITE_BATCH_TIMEOUT):
+                    await self._write_batch(session, cwd, direct)
+            if copies:
+                await self._upload_as_box_user(session, cwd, copies)
+
+    async def _write_batch(self, session: Any, cwd: str, files: Mapping[str, str]) -> None:
+        """Write files with the file API in one request.
+
+        Args:
+            session: The SDK runtime session.
+            cwd: The working directory.
+            files: Maps each sandbox path to its text content.
+        """
+        async with session.fs.batch(cwd=cwd) as batch:
+            for path, text in files.items():
+                batch.write_text(path, text)
+
+    async def _upload_as_box_user(self, session: Any, cwd: str, files: Mapping[str, str]) -> None:
+        """Write files through a root-made stage folder, then copy each one to its path as the box user.
+
+        No ``fs.mkdir``: it gives the folder to uid 1000, an image user with
+        another uid cannot write there (SKY-901). The copy makes missing
+        folders as the box user.
+
+        Args:
+            session: The SDK runtime session.
+            cwd: The working directory.
+            files: Maps each sandbox path to its text content.
+        """
+        stage = f"{ROOT_UPLOAD_PREFIX}{uuid.uuid4().hex}"
+        # Root empties the stage and keeps it: the kept root folder holds the
+        # name, so a write that ends late cannot land in a folder that the box
+        # user made there (SKY-902).
+        remove = [root_empty_command(stage)]
+        try:
+            # Inside the try: the cleanup must empty a stage that the box made,
+            # also when the mkdir answer timed out.
+            await self._run_upload_step(session, cwd, [f"/bin/mkdir -m 0755 -- {stage}"], sudo=True)
+            await self._write_batch(
+                session, cwd, {f"{stage}/{index}": text for index, text in enumerate(files.values())}
+            )
+            await self._run_upload_step(session, cwd, [UPLOAD_SCRIPT, "upload", stage, *files], sudo=False)
+        except BaseException:
+            try:
+                # One attempt's limit, not three: a cancelled upload must not keep
+                # a box that does not answer busy for minutes.
+                async with asyncio.timeout(UPLOAD_KILL_AFTER + POLL_SLACK):
+                    await self._run_upload_step(session, cwd, remove, sudo=True)
+            except Exception:
+                # The upload already failed, and its own error matters more.
+                logger.warning("Sandbox %s could not empty the upload stage %s.", self.name, stage, exc_info=True)
+            raise
+        # The box user can read a left stage, which can hold a model key, so a
+        # failed cleanup fails the upload before any later command runs.
+        await self._run_upload_step(session, cwd, remove, sudo=True)
+
+    async def _run_upload_step(self, session: Any, cwd: str, args: Sequence[str], *, sudo: bool) -> None:
+        """Run one upload command in the box, and send it again when it never reached the box.
+
+        Args:
+            session: The SDK runtime session.
+            cwd: The working directory.
+            args: The script, then its ``$0`` and parameters.
+            sudo: The command runs as root.
+
+        Raises:
+            SandboxRejectedError: The box user's copy failed or the box killed
+                it at its deadline, for example because the box user could not
+                write a path. The same upload fails the same way in a fresh
+                box, so the bridge does not retry it in one.
+            SandboxInfraError: A root step failed: a box problem, which a
+                fresh box can fix.
+            TimeoutError: The SDK did not answer in time.
+        """
+        for attempt in range(1, EXEC_ATTEMPTS + 1):
+            if self._pacing is not None:
+                await self._pacing.reads.acquire()
+            try:
+                async with asyncio.timeout(UPLOAD_KILL_AFTER + POLL_SLACK):
+                    done = await session.run_process(
+                        *_bash(args, sudo=sudo), cwd=cwd, sudo=sudo, capture_output=True, kill_after=UPLOAD_KILL_AFTER
+                    )
+            except _CONNECT_ERRORS:
+                if attempt == EXEC_ATTEMPTS:
+                    raise
+                continue
+            if done.returncode != 0:
+                error = SandboxInfraError if sudo else SandboxRejectedError
+                # 127: the image lacks one of the fixed tool paths the upload runs.
+                missing = (
+                    [
+                        "The image must have /usr/bin/timeout, /usr/bin/setpriv, /bin/bash, /bin/cat, /bin/rm and /bin/mkdir."
+                    ]
+                    if done.returncode == 127
+                    else []
+                )
+                detail = " ".join([done.stderr.strip(), *missing]).strip()
+                raise error(f"A sandbox upload step exited with {done.returncode}: {detail}")
+            return
 
     async def download_file(self, path: str) -> str | None:
         """Read one text file from the box.

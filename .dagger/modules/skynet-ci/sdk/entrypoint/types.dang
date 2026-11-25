@@ -36,7 +36,7 @@ type ModuleTypes {
         )
         .withFunction(
           function("backend_gates", typeDef.withOptional(true).withKind(TypeDefKind.VOID_KIND))
-            .withDescription("Run ruff, the terraform script tests, requirements sync, Postgres and SLO gates.")
+            .withDescription("Run ruff, the terraform script tests, requirements sync, Postgres, .agents and SLO gates.")
             .withCheck
         )
         .withFunction(

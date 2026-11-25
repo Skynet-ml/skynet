@@ -2,9 +2,9 @@ Skynet は Optimize Anything です。すべての実行はリポジトリを最
 
 ## 共通のコントラクト
 
-すべての実行には、リポジトリ、`[run]` エントリーまたは `[target.<name>]` ステージを持つ `optimize.toml` ファイル、スコアラーがあります。`[run]` エントリーは、リポジトリの 1 つのバージョンを 1 つのケースで実行します。スコアラーは Python の関数です。エントリーの出力とケースを受け取ります。
+すべての実行には、リポジトリ、`[run]` エントリーまたは `[target.<name>]` ステージを持つ `ascent.toml` ファイル、スコアラーがあります。`[run]` エントリーは、リポジトリの 1 つのバージョンを 1 つのケースで実行します。スコアラーは Python の関数です。エントリーの出力とケースを受け取ります。
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 リポジトリのルートには、`def serve(input)` を持つ `serve.py` ファイルがあります。`[run]` エントリーは、専用のサンドボックスでこの関数を呼び出します。Skynet は実行の後、この関数を使って最も良いバージョンを提供します。
 
-スコアラーは別のサンドボックスで実行されます。そのサンドボックスはメトリクスファイルだけを保持し、バージョンのコードを保持しないため、スコアラーは `serve.py` をインポートできません。スコアラーには `output` を通してだけ、または `[target.<name>]` ステージへの `call()` を通してだけバージョンが見えます。`call` は `from skynet import call` でインポートします。`[run]` エントリーも `[target.<name>]` ステージもない場合、Skynet は `optimize.toml` ファイルを拒否します。
+スコアラーは別のサンドボックスで実行されます。そのサンドボックスはメトリクスファイルだけを保持し、バージョンのコードを保持しないため、スコアラーは `serve.py` をインポートできません。スコアラーには `output` を通してだけ、または `[target.<name>]` ステージへの `call()` を通してだけバージョンが見えます。`call` は `from openascent import call` でインポートします。`[run]` エントリーも `[target.<name>]` ステージもない場合、Skynet は `ascent.toml` ファイルを拒否します。
 
 > [!NOTE]
 > バージョンを書くコーディングエージェントは、スコアラーのソース、期待値、実行シークレットを見ることができません。
@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | 変数                 | 内容                                                                   |
 | -------------------- | ---------------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | ゲートウェイの URL。`APP_GATEWAY_URL` も同じ値を持ちます。             |
-| `APP_API_KEY`        | この実行専用のトークン。プロバイダーキーではありません。               |
-| `APP_MODEL`          | 送信するモデル名。実行のスコアラーモデルです。                         |
+| `OPENAI_BASE_URL`    | ゲートウェイの URL。`ASCENT_MODEL_URL` も同じ値を持ちます。            |
+| `ASCENT_MODEL_KEY`   | この実行専用のトークン。プロバイダーキーではありません。               |
+| `ASCENT_MODEL`       | 送信するモデル名。実行のスコアラーモデルです。                         |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK 用のゲートウェイの URL。                                 |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

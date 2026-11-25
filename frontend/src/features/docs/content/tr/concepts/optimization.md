@@ -2,9 +2,9 @@ Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. Bir 
 
 ## Ortak sözleşme
 
-Her çalıştırmanın bir deposu, `[run]` giriş noktası veya `[target.<name>]` aşaması içeren bir `optimize.toml` dosyası ve bir puanlayıcısı vardır. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı bir Python fonksiyonudur. Giriş noktasının çıktısını ve vakayı alır.
+Her çalıştırmanın bir deposu, `[run]` giriş noktası veya `[target.<name>]` aşaması içeren bir `ascent.toml` dosyası ve bir puanlayıcısı vardır. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı bir Python fonksiyonudur. Giriş noktasının çıktısını ve vakayı alır.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Deponun kökünde `def serve(input)` içeren bir `serve.py` dosyası vardır. `[run]` giriş noktası onu kendi sandbox'ında çağırır. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için onu kullanır.
 
-Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar, sürüm kodunu tutmaz, bu yüzden puanlayıcı `serve.py` dosyasını içe aktaramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. `[run]` giriş noktası veya `[target.<name>]` aşaması olmadan Skynet `optimize.toml` dosyasını reddeder.
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar, sürüm kodunu tutmaz, bu yüzden puanlayıcı `serve.py` dosyasını içe aktaramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from openascent import call` ile içe aktarın. `[run]` giriş noktası veya `[target.<name>]` aşaması olmadan Skynet `ascent.toml` dosyasını reddeder.
 
 > [!NOTE]
 > Sürümleri yazan kodlama ajanı, puanlayıcının kaynak kodunu, beklenen değerleri veya çalıştırma gizli anahtarlarını göremez.
@@ -37,9 +37,9 @@ Depo kodunuz ve puanlayıcınız, Skynet'in model ağ geçidi üzerinden bir mod
 
 | Değişken             | Ne tutar                                                           |
 | -------------------- | ------------------------------------------------------------------ |
-| `OPENAI_BASE_URL`    | Ağ geçidi URL'si. `APP_GATEWAY_URL` aynı değeri tutar.             |
-| `APP_API_KEY`        | Yalnızca bu çalıştırma için bir belirteç. Sağlayıcı anahtarı değildir. |
-| `APP_MODEL`          | Gönderilecek model adı. Çalıştırmanın puanlayıcı modelidir.        |
+| `OPENAI_BASE_URL`    | Ağ geçidi URL'si. `ASCENT_MODEL_URL` aynı değeri tutar.            |
+| `ASCENT_MODEL_KEY`   | Yalnızca bu çalıştırma için bir belirteç. Sağlayıcı anahtarı değildir. |
+| `ASCENT_MODEL`       | Gönderilecek model adı. Çalıştırmanın puanlayıcı modelidir.        |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK'ları için ağ geçidi URL'si.                          |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

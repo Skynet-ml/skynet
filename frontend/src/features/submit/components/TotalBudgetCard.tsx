@@ -16,7 +16,8 @@ import {
   WarningCircle,
 } from "@/shared/ui/icons";
 import { formatBudgetUsd, formatCentsUsd, type TokenSourceMode } from "@/features/billing";
-import { formatMsg, msg } from "@/shared/lib/messages";
+import { getSetupBilling } from "@/shared/lib/api";
+import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
@@ -24,18 +25,21 @@ import { cn } from "@/shared/lib/utils";
 import { centsToBudgetText, parseBudgetInput } from "@/shared/lib/budget-input";
 import { budgetShortfall } from "../lib/budget-limit";
 import { startingLimitCents } from "../lib/run-floor";
+import type { ExecutionBudget } from "@/shared/types/execution-budget";
 import type { WizardV2Context } from "../lib/wizard-v2";
 import { useExecutionBudget } from "../hooks/use-execution-budget";
 import { Segmented } from "@/shared/ui/segmented";
 import { StepCard } from "./blackbox/shared";
 
 /**
- * The one budget surface of both wizards: a spending limit that covers setup
- * checks and the optimization itself. A run has no upfront cost estimate; it
- * spends up to the limit and stops at the budget with its best version. The
- * card names the least the limit can be (what the run's boxes hold before
- * the first model call, plus spare for its first calls), and once the
- * budget exists, the server's ledger for it.
+ * The one budget surface of both wizards: a spending limit that covers the
+ * optimization. By default setup checks bill the account balance, not the
+ * limit (SKY-925); an account that turns off wallet setup billing counts them
+ * in the limit. The ledger shows the spend the limit counts. A run has no
+ * upfront cost estimate; it spends up to the limit and stops at the budget
+ * with its best version. The card names the least the limit can be (what the
+ * run's boxes hold before the first model call, plus spare for its first
+ * calls), and once the budget exists, the server's ledger for it.
  *
  * The limit can also be switched off: the run then draws on the account
  * balance until it finishes, and stops in place if that balance runs out. Each
@@ -51,6 +55,18 @@ type BudgetContext = Pick<
 };
 
 const BUDGET_STEP_CENTS = 100;
+
+/**
+ * The tooltip of the limit option. An account that turns off wallet setup
+ * billing counts setup checks in the limit (SKY-925). Until the setting loads,
+ * the card shows the default, which bills the balance. Once a budget exists,
+ * its own ``setup_in_total`` flag decides, because the server applies that flag.
+ */
+export function limitExplainerKey(setupFromWallet: boolean | null): MessageKey {
+  return setupFromWallet === false
+    ? "submit.budget.explainer.setup_in_limit"
+    : "submit.budget.explainer";
+}
 
 /** Why Continue holds while the spending limit sits under what the run needs to start. */
 export function belowFloorMessage(neededCents: number): string {
@@ -70,15 +86,17 @@ const BUDGET_STEP_BUTTON_CLASS =
 const ISOLATE_START = "⁦";
 const ISOLATE_END = "⁩";
 
-/** Add two server decimal strings exactly, without passing them through a float. */
-function sumDecimals(a: string, b: string): string {
-  const [aWhole = "0", aFraction = ""] = a.split(".");
-  const [bWhole = "0", bFraction = ""] = b.split(".");
-  const scale = Math.max(aFraction.length, bFraction.length);
-  const total =
-    BigInt(aWhole + aFraction.padEnd(scale, "0")) + BigInt(bWhole + bFraction.padEnd(scale, "0"));
-  const digits = total.toString().padStart(scale + 1, "0");
-  return scale === 0 ? digits : `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
+/**
+ * The spend and holds the limit counts, as the server reports them for
+ * ``available_cents``: ``run_spent_cents`` includes setup only for a
+ * ``setup_in_total`` budget (SKY-925). Before the budget is attached to a run,
+ * every hold is a setup check's, so the limit counts it only for a
+ * ``setup_in_total`` budget. The budget's own flag decides, not the account
+ * setting, which can change after the budget exists.
+ */
+export function runLedger(budget: ExecutionBudget): { spent: string; reserved: string } {
+  const countsHolds = budget.job_id != null || budget.setup_in_total;
+  return { spent: budget.run_spent_cents, reserved: countsHolds ? budget.reserved_cents : "0" };
 }
 
 const isZero = (amount: string) => !/[1-9]/.test(amount);
@@ -94,6 +112,19 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
   useEffect(() => {
     if (localMode && !budgetUncapped) setBudgetUncapped(true);
   }, [localMode, budgetUncapped, setBudgetUncapped]);
+  const [setupFromWallet, setSetupFromWallet] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (localMode) return;
+    let cancelled = false;
+    getSetupBilling()
+      .then((result) => {
+        if (!cancelled) setSetupFromWallet(result.from_wallet);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [localMode]);
 
   // The field is typed in dollars; the wizard state stays in cents. The field
   // owns its text so the user can clear it or leave a typo visible with its
@@ -169,8 +200,8 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
   const fieldHint = fieldError == null && parsed.kind === "empty" ? minimumMessage : null;
   const fieldMessage = fieldError ?? fieldHint;
 
-  const spent = budget ? sumDecimals(budget.setup_spent_cents, budget.run_spent_cents) : null;
-  const showLedger = !budgetUncapped && budget != null && spent != null;
+  const ledger = budget ? runLedger(budget) : null;
+  const showLedger = !budgetUncapped && budget != null && ledger != null;
   const pendingTotal =
     budget != null &&
     (budget.uncapped !== budgetUncapped ||
@@ -191,7 +222,7 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
               {
                 value: "limit",
                 label: msg("submit.budget.mode.limit"),
-                tip: msg("submit.budget.explainer"),
+                tip: msg(limitExplainerKey(budget ? !budget.setup_in_total : setupFromWallet)),
               },
               {
                 value: "uncapped",
@@ -286,19 +317,19 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
                 label={msg("submit.budget.remaining")}
                 value={ledgerAmount(budget.available_cents)}
               />
-              {!isZero(spent) && (
+              {!isZero(ledger.spent) && (
                 <Row
                   icon={ClockCounterClockwise}
                   label={msg("submit.budget.spent")}
-                  value={ledgerAmount(spent)}
+                  value={ledgerAmount(ledger.spent)}
                 />
               )}
-              {!isZero(budget.reserved_cents) && (
+              {!isZero(ledger.reserved) && (
                 <Row
                   icon={Lock}
                   label={msg("submit.budget.reserved")}
                   tip={msg("submit.budget.reserved_tip")}
-                  value={ledgerAmount(budget.reserved_cents)}
+                  value={ledgerAmount(ledger.reserved)}
                 />
               )}
             </dl>

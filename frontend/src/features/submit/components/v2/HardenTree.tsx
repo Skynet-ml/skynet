@@ -224,11 +224,13 @@ function scoreOf(payload: Record<string, unknown> | undefined): number | null {
  * Args:
  *   session: The attacker session.
  *   exploits: The session's claims.
+ *   minimize: Whether the metric treats a lower score as better.
  *
  * Returns:
- *   The highest score, or null when the session has none yet.
+ *   The lowest score for a minimize metric, else the highest; null when the
+ *   session has none yet.
  */
-export function bestScore(session: HardeningSession, exploits: HardeningExploit[]): number | null {
+export function bestScore(session: HardeningSession, exploits: HardeningExploit[], minimize = false): number | null {
   const scores = [
     ...exploits.map((e) => e.exploit_score ?? null),
     ...(session.transcript ?? []).flatMap((m) =>
@@ -237,7 +239,8 @@ export function bestScore(session: HardeningSession, exploits: HardeningExploit[
         .map((c) => scoreOf(c.payload)),
     ),
   ].filter((s): s is number => s !== null);
-  return scores.length ? Math.max(...scores) : null;
+  if (!scores.length) return null;
+  return minimize ? Math.min(...scores) : Math.max(...scores);
 }
 
 /** The base solution's score in the round, from any claim that measured it. */
@@ -409,8 +412,8 @@ export function HardenTree({
           {round.sessions.map((session, i) => {
             const exploits = sessionExploits(round.exploits, session.index);
             const status = nodeStatus(session, exploits, round.live);
-            const best = bestScore(session, exploits);
-            const beats = best !== null && base !== null && best > base;
+            const best = bestScore(session, exploits, job.minimize);
+            const beats = best !== null && base !== null && (job.minimize ? best < base : best > base);
             const last = i === round.sessions.length - 1 && !noise;
             return (
               <li key={session.index} role="treeitem" aria-selected={selected === session.index} className="relative ps-7">

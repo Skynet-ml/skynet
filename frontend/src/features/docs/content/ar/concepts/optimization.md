@@ -2,9 +2,9 @@ Skynet هو Optimize Anything: كل تشغيل يحسّن مستودعًا. يق
 
 ## العقد المشترك
 
-لكل تشغيل مستودع، وملف `optimize.toml` فيه `entry` في `[run]` أو مرحلة `[target.<name>]`، ومُقيِّم. يشغّل `entry` في `[run]` نسخة واحدة من المستودع على حالة واحدة. المُقيِّم دالة Python تتلقى مخرجات `entry` والحالة.
+لكل تشغيل مستودع، وملف `ascent.toml` فيه `entry` في `[run]` أو مرحلة `[target.<name>]`، ومُقيِّم. يشغّل `entry` في `[run]` نسخة واحدة من المستودع على حالة واحدة. المُقيِّم دالة Python تتلقى مخرجات `entry` والحالة.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 في جذر المستودع ملف `serve.py` فيه `def serve(input)`. يستدعيه `entry` في `[run]` في صندوق معزول خاص به. ويستخدمه Skynet لتقديم أفضل نسخة بعد التشغيل.
 
-يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس، ولا يحتوي كود النسخة، لذلك لا يستطيع المُقيِّم استيراد `serve.py`. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from skynet import call`. إذا لم يوجد `entry` في `[run]` ولا مرحلة `[target.<name>]`، يرفض Skynet ملف `optimize.toml`.
+يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس، ولا يحتوي كود النسخة، لذلك لا يستطيع المُقيِّم استيراد `serve.py`. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from openascent import call`. إذا لم يوجد `entry` في `[run]` ولا مرحلة `[target.<name>]`، يرفض Skynet ملف `ascent.toml`.
 
 > [!NOTE]
 > لا يستطيع وكيل البرمجة الذي يكتب النسخ رؤية مصدر المُقيِّم ولا القيم المتوقعة ولا أسرار التشغيل.
@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | المتغير              | ما يحتويه                                                  |
 | -------------------- | ---------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | عنوان URL للبوابة. يحتوي `APP_GATEWAY_URL` على القيمة نفسها. |
-| `APP_API_KEY`        | رمز (token) لهذا التشغيل فقط. وهو ليس مفتاح مزوّد.          |
-| `APP_MODEL`          | اسم النموذج الذي ترسله. وهو نموذج المُقيِّم في التشغيل.      |
+| `OPENAI_BASE_URL`    | عنوان URL للبوابة. يحتوي `ASCENT_MODEL_URL` على القيمة نفسها. |
+| `ASCENT_MODEL_KEY`   | رمز (token) لهذا التشغيل فقط. وهو ليس مفتاح مزوّد.          |
+| `ASCENT_MODEL`       | اسم النموذج الذي ترسله. وهو نموذج المُقيِّم في التشغيل.      |
 | `ANTHROPIC_BASE_URL` | عنوان URL للبوابة لحزم SDK من Anthropic.                    |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

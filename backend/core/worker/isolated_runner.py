@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import ctypes
 import hashlib
 import json
-import os
 import re
 import sys
 import threading
@@ -22,6 +22,7 @@ from core.service_gateway.optimization.blackbox.sandbox_runtime import (
     current_sandbox_runtime,
     sandbox_runtime_context,
 )
+from core.service_gateway.optimization.training_ground.run_react import use_tool_relay_token
 from core.worker.interaction import run_interaction
 from core.worker.preflight import run_dspy_preflight
 from core.worker.sandbox_protocol import SANDBOX_PROTOCOL
@@ -31,6 +32,7 @@ from core.worker.subprocess_runner import run_service_in_subprocess
 EVENT_PREFIX = "SKYNET_JOB_EVENT "
 INCOMPATIBLE_IMAGE_MESSAGE = "The sandbox image speaks an older protocol than this worker; rebuild the sandbox image."
 _CHECKPOINT_PATH = re.compile(r"(?:gepa/)?gepa_state\.bin\Z")
+_PR_SET_DUMPABLE = 4
 
 
 class EventQueue:
@@ -78,6 +80,25 @@ def _export_checkpoints(directory: Path, events: EventQueue, seen: dict[str, str
             seen[relative] = digest
 
 
+def _block_tracing() -> None:
+    """Stop same-user reads of this process's ``/proc/<pid>/environ`` and memory on Linux (SKY-880).
+
+    The model mailbox proxy starts this process with its address
+    (``APP_BUDGET_RELAY_URL``) in its start environment. A contained session
+    runs the metric command and the candidate's commands as this process's
+    user, and ``/proc/<pid>/environ`` shows the start environment even after
+    ``os.environ`` changes. A non-dumpable process refuses those reads to the
+    same user. The flag does not reach a command, because ``execve`` resets it.
+
+    Raises:
+        RuntimeError: When the kernel refuses the flag, so no command runs.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    if ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        raise RuntimeError(f"The guest could not become non-dumpable (errno {ctypes.get_errno()}).")
+
+
 def _forget_request(path: Path) -> None:
     """Remove the request file once it is in memory, so no proposer can read the metric from disk.
 
@@ -108,7 +129,7 @@ def _run_preflight(payload: dict[str, Any], preflight: dict[str, Any], events: E
 
     Args:
         payload: The guest request payload.
-        preflight: Scope and identity of the requested check.
+        preflight: Scope, identity and unchecked user-image roles of the requested check.
         events: Parent-owned event transport, for DSPy preview tokens.
 
     Returns:
@@ -126,6 +147,7 @@ def _run_preflight(payload: dict[str, Any], preflight: dict[str, Any], events: E
             scope=preflight["scope"],
             identity=preflight["identity"],
             runtime=runtime,
+            unchecked=tuple(preflight.get("unchecked") or ()),
         )
     return run_dspy_preflight(payload, preflight, lambda token: events.put({"type": "preview_token", **token}))
 
@@ -143,10 +165,11 @@ def main() -> None:
     if tools_route is not None:
         if not app_env("APP_BUDGET_RELAY_URL"):
             raise RuntimeError("The protected tool roster requires its isolated mailbox relay.")
-        os.environ["APP_TOOL_RELAY_TOKEN"] = str(tools_route["token"])
-    packages_route = document["payload"].pop("_skynet_packages_route", None)
-    if packages_route is not None:
-        os.environ["APP_PACKAGE_RELAY_TOKEN"] = str(packages_route["token"])
+        # In process only: os.environ reaches every child that copies it (SKY-880).
+        use_tool_relay_token(str(tools_route["token"]))
+    # Popped so user code never sees it. Nothing in the guest uses it: the
+    # parent gives package setup its own copy (SKY-880).
+    document["payload"].pop("_skynet_packages_route", None)
     preflight = document["payload"].pop("_preflight", None)
     interaction = document["payload"].pop("_interaction", None)
     directory = Path(document["payload"].get("_gepa_log_dir") or "checkpoints")
@@ -197,4 +220,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Not inside main: tests call it in the pytest process, which must stay dumpable.
+    _block_tracing()
     main()

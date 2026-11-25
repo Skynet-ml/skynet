@@ -1335,7 +1335,6 @@ class ModelGateway:
         """
         result = copy.deepcopy(payload)
         for key in (
-            "_skynet_target_route",
             "_skynet_tools_route",
             CONNECTOR_ROUTES_KEY,
             "_skynet_evaluator_route",
@@ -1377,9 +1376,6 @@ class ModelGateway:
             result["_budget_gateway_descriptor"] = {
                 key: value for key, value in self._descriptor.items() if key != PARENT_HOSTS_KEY
             }
-        target = result.get("target")
-        target_config = result.get("task_model_config") if isinstance(target, dict) else None
-        target_route: dict[str, str] | None = None
         models = []
         for key, role in (
             ("model_config", "task"),
@@ -1461,13 +1457,6 @@ class ModelGateway:
             economy_model = bool(extra.pop(ECONOMY_KEY, False))
             if source == "subscription":
                 route = self._register_subscription_config(config, role)
-                if config is target_config:
-                    target_name = str(target.get("model") or "").strip("/")
-                    if target_name not in {str(config.get("name") or "").strip("/"), route["model"]}:
-                        raise UnpricedOperationError(
-                            "The agent task model does not match its credential configuration."
-                        )
-                    target_route = route
                 cleaned = scrub_model_config(config)
                 config.clear()
                 config.update(cleaned)
@@ -1494,11 +1483,6 @@ class ModelGateway:
             )
             if upstream.slug == "custom":
                 route["byok_custom_endpoint"] = True
-            if config is target_config:
-                target_name = str(target.get("model") or "").strip("/")
-                if not target_name or target_name != str(config.get("name") or "").strip("/"):
-                    raise UnpricedOperationError("The agent task model does not match its credential configuration.")
-                target_route = route
             cleaned = scrub_model_config(config)
             config.clear()
             config.update(cleaned)
@@ -1521,20 +1505,6 @@ class ModelGateway:
                 # would retry as a second paid request while the first still runs.
                 config["extra"]["timeout"] = VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
             config.pop("base_url", None)
-        if isinstance(target, dict) and target.get("model"):
-            if target_route is not None:
-                result["_skynet_target_route"] = target_route
-            else:
-                if result.get("token_source") == "byok":
-                    raise UnpricedOperationError("A BYOK agent target needs an explicit verified model configuration.")
-                if result.get("token_source") == "subscription":
-                    raise UnpricedOperationError("A subscription agent target needs an explicit model configuration.")
-                result["_skynet_target_route"] = self.register(
-                    model=str(target["model"]).removeprefix("openrouter/"),
-                    api_key=managed_key,
-                    role="task",
-                    policy=ChargePolicy("managed_model"),
-                )
         return result
 
     def _register_subscription_config(self, config: Mapping[str, Any], role: str) -> dict[str, str]:

@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -47,9 +47,11 @@ from core.storage.models import (
     AgentStepModel,
     Base,
     BillingCustomerModel,
+    BlackboxAgentRunModel,
     ExecutionBudgetModel,
     ExecutionOperationModel,
     GepaCheckpointModel,
+    ImageBuildModel,
     JobModel,
     OptimizationShareGrantModel,
     ProgressEventModel,
@@ -89,6 +91,10 @@ class SQLiteJobStore(RemoteDBJobStore):
 _RECOVERY_IMAGE = "fixture@sha256:" + "a" * 64
 
 
+# Resume and restart refuse a stored text or agent run (SKY-834), so a funded run is a repository run.
+_REPO_TARGET = {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["src"]}}
+
+
 def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: pytest.MonkeyPatch) -> BudgetService:
     """Attach reconciled funding and a real pinned checkpoint to an existing test run.
 
@@ -112,6 +118,7 @@ def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: p
     budget = service.create("resume-owner", 20, idempotency_key=optimization_id)
     service.attach_to_job(budget.id, "resume-owner", optimization_id, expected_revision=budget.revision)
     payload = {
+        "target": _REPO_TARGET,
         "strategy": {"mode": "single", "engine": "gepa"},
         "dataset": [{"x": "sample"}],
         "execution_runtime": "vercel",
@@ -403,8 +410,13 @@ def test_delete_job_cascades_agent_runs(store: SQLiteJobStore) -> None:
         store: Disposable job store.
     """
     store.create_job("job-del-runs")
-    store.save_agent_run("job-del-runs", {"run_id": 1, "phase": "version", "status": "running"})
-    store.append_agent_run_transcript("job-del-runs", 1, "hi\n")
+    with Session(store._engine) as session:
+        session.add(
+            BlackboxAgentRunModel(
+                optimization_id="job-del-runs", run_id=1, phase="version", status="running", transcript="hi\n"
+            )
+        )
+        session.commit()
     before = store.get_agent_run("job-del-runs", 1)
     assert before is not None
     assert before["transcript"] == "hi\n"
@@ -454,6 +466,165 @@ def test_requeue_for_rerun_missing_id_returns_false(store: SQLiteJobStore) -> No
         store: Disposable job store.
     """
     assert store.requeue_for_rerun("ghost") is False
+
+
+def test_requeue_for_rerun_clears_the_pinned_box_images(store: SQLiteJobStore) -> None:
+    """A from-scratch rerun drops the box images, so it builds or pins them again (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.create_job("rr1")
+    store.pin_box_images("rr1", {"run": {"image": "registry/run@sha256:" + "a" * 64}})
+    store.update_job("rr1", status="failed")
+
+    assert store.requeue_for_rerun("rr1") is True
+
+    assert store.get_job("rr1")["box_images"] is None
+
+
+def test_pin_box_images_keeps_the_first_pin(store: SQLiteJobStore) -> None:
+    """A second start of the same run gets the images the first start pinned (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    first = {"run": {"image": "registry/run@sha256:" + "a" * 64}}
+    second = {"run": {"image": "registry/run@sha256:" + "b" * 64}}
+    store.create_job("pin1")
+
+    assert store.pin_box_images("pin1", first) == first
+    assert store.pin_box_images("pin1", second) == first
+    assert store.get_job("pin1")["box_images"] == first
+
+
+def test_pin_box_images_for_a_missing_run_raises(store: SQLiteJobStore) -> None:
+    """Pinning images for an unknown run raises KeyError.
+
+    Args:
+        store: Disposable job store.
+    """
+    with pytest.raises(KeyError):
+        store.pin_box_images("ghost", {"run": {"image": "x"}})
+
+
+def test_save_image_build_stores_the_row(store: SQLiteJobStore) -> None:
+    """A saved build returns its row id, and the row holds every field (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    build_id = store.save_image_build(
+        "alice", "sha256:in", builder="codebuild", image="registry/run@sha256:" + "a" * 64, size_bytes=42, log="ok"
+    )
+
+    session = store._get_session()
+    try:
+        row = session.get(ImageBuildModel, build_id)
+        assert row is not None
+        assert (row.username, row.input_hash, row.builder, row.image, row.size_bytes, row.log) == (
+            "alice",
+            "sha256:in",
+            "codebuild",
+            "registry/run@sha256:" + "a" * 64,
+            42,
+            "ok",
+        )
+    finally:
+        session.close()
+
+
+def test_find_image_build_returns_the_newest_finished_build(store: SQLiteJobStore) -> None:
+    """The lookup skips a failed build, another user and another hash, and picks the newest (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    old_id = store.save_image_build("alice", "sha256:in", builder="codebuild", image="img-old", size_bytes=1, log="")
+    new_id = store.save_image_build("alice", "sha256:in", builder="codebuild", image="img-new", size_bytes=2, log="")
+    failed_id = store.save_image_build("alice", "sha256:in", builder="codebuild", image=None, size_bytes=None, log="x")
+    store.save_image_build("bob", "sha256:in", builder="codebuild", image="img-bob", size_bytes=3, log="")
+    store.save_image_build("alice", "sha256:other", builder="codebuild", image="img-other", size_bytes=4, log="")
+    # Explicit times, because rows saved in one test can share a clock tick.
+    session = store._get_session()
+    try:
+        for row_id, day in ((old_id, 1), (new_id, 2), (failed_id, 3)):
+            row = session.get(ImageBuildModel, row_id)
+            assert row is not None
+            row.created_at = datetime(2026, 1, day, tzinfo=UTC)
+        session.commit()
+    finally:
+        session.close()
+
+    assert store.find_image_build("alice", "sha256:in") == {
+        "id": new_id,
+        "image": "img-new",
+        "builder": "codebuild",
+        "size_bytes": 2,
+    }
+    assert store.find_image_build("carol", "sha256:in") is None
+
+
+def test_find_image_build_ignores_only_failed_builds(store: SQLiteJobStore) -> None:
+    """A hash with only a failed build has no reusable image (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.save_image_build("alice", "sha256:in", builder="codebuild", image=None, size_bytes=None, log="fail")
+
+    assert store.find_image_build("alice", "sha256:in") is None
+
+
+def test_a_started_build_keeps_its_codebuild_id_until_the_result_is_saved(store: SQLiteJobStore) -> None:
+    """A started build is not reusable and holds its CodeBuild id; the result completes the same row (SKY-896).
+
+    Args:
+        store: Disposable job store.
+    """
+    row_id = store.start_image_build("alice", "sha256:in", builder="codebuild", codebuild_id="images:1")
+
+    assert store.find_image_build("alice", "sha256:in") is None
+    session = store._get_session()
+    try:
+        row = session.get(ImageBuildModel, row_id)
+        assert row is not None
+        assert (row.image, row.log, row.codebuild_id) == (None, "", "images:1")
+    finally:
+        session.close()
+
+    saved_id = store.save_image_build(
+        "alice", "sha256:in", builder="codebuild", image="img", size_bytes=7, log="ok", row_id=row_id
+    )
+
+    assert saved_id == row_id
+    session = store._get_session()
+    try:
+        rows = session.query(ImageBuildModel).all()
+        assert [(r.id, r.image, r.size_bytes, r.log, r.codebuild_id) for r in rows] == [(row_id, "img", 7, "ok", None)]
+    finally:
+        session.close()
+
+
+def test_a_failed_build_keeps_its_codebuild_id(store: SQLiteJobStore) -> None:
+    """A failure can come from a wait that ended before CodeBuild did, so its row keeps the id (SKY-896).
+
+    Args:
+        store: Disposable job store.
+    """
+    row_id = store.start_image_build("alice", "sha256:in", builder="codebuild", codebuild_id="images:1")
+
+    store.save_image_build(
+        "alice", "sha256:in", builder="codebuild", image=None, size_bytes=None, log="timed out", row_id=row_id
+    )
+
+    session = store._get_session()
+    try:
+        row = session.get(ImageBuildModel, row_id)
+        assert row is not None
+        assert (row.image, row.log, row.codebuild_id) == (None, "timed out", "images:1")
+    finally:
+        session.close()
 
 
 def test_get_jobs_status_by_ids_returns_map(store: SQLiteJobStore) -> None:
@@ -1238,6 +1409,27 @@ def test_list_jobs_prunes_result_to_summary_scalars(store: SQLiteJobStore) -> No
     assert by_id["lr-run"]["payload"] is None
     assert by_id["lr-pending"]["result"] is None
     assert store.get_job("lr-run")["result"] == full_result
+
+
+def test_pruned_result_keeps_the_metric_direction(store: SQLiteJobStore) -> None:
+    """List and analytics rows keep ``direction``, so readers sign a minimize gain right (SKY-750).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.create_job("lr-min", username="alice")
+    store.update_job(
+        "lr-min",
+        status="success",
+        result={"baseline_score": 10.0, "best_score": 8.0, "direction": "minimize", "versions": []},
+    )
+    expected = {"baseline_score": 10.0, "best_score": 8.0, "direction": "minimize"}
+
+    [listed] = store.list_jobs()
+    [scanned] = store.scan_jobs_for_analytics()
+
+    assert listed["result"] == expected
+    assert scanned["result"] == expected
 
 
 def test_shared_list_surfaces_prune_result_the_same_way(store: SQLiteJobStore) -> None:
@@ -2060,7 +2252,7 @@ def _fund_without_checkpoint(store: SQLiteJobStore, optimization_id: str) -> Bud
     store.update_job(
         optimization_id,
         username="restart-owner",
-        payload={"execution_budget_id": budget.id, "execution_budget_generation": 0},
+        payload={"target": _REPO_TARGET, "execution_budget_id": budget.id, "execution_budget_generation": 0},
         execution_budget_id=budget.id,
         execution_budget_generation=0,
     )
@@ -2940,6 +3132,45 @@ def test_immutable_columns_include_notification_and_idempotency_fields() -> None
     assert "notified_at" in remote_mod._IMMUTABLE_JOB_COLUMNS
     assert "notification_claims" in remote_mod._IMMUTABLE_JOB_COLUMNS
     assert "idempotency_key" in remote_mod._IMMUTABLE_JOB_COLUMNS
+
+
+def test_payload_targets_read_only_the_target_and_judge_members(store: SQLiteJobStore) -> None:
+    """The batch read returns each payload's target and judge, and nothing else (SKY-834).
+
+    Args:
+        store: Disposable job store.
+    """
+    for oid in ("repo", "text", "judge", "empty"):
+        store.create_job(oid)
+    store.update_job("repo", payload={"target": {"kind": "repo", "repo": {}}, "rows": [1, 2]})
+    store.update_job("text", payload={"target": {"kind": "text"}, "rows": [1]})
+    store.update_job("judge", payload={"judge": {"opening": True}})
+
+    assert store.payload_targets(["repo", "text", "judge", "empty", "missing"]) == {
+        "repo": {"target": {"kind": "repo", "repo": {}}},
+        "text": {"target": {"kind": "text"}},
+        "judge": {"judge": {"opening": True}},
+        "empty": None,
+    }
+    assert store.payload_targets([]) == {}
+
+
+def test_payload_targets_read_a_json_null_payload_as_no_payload(store: SQLiteJobStore) -> None:
+    """A JSON ``null`` payload reads as ``None``, as the full row reads it (SKY-834).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.create_job("nulled")
+    store.update_job("nulled", payload=None)
+    with Session(store._engine) as session:
+        stored = session.execute(
+            text("SELECT json_type(payload) FROM jobs WHERE optimization_id = 'nulled'")
+        ).scalar_one()
+
+    assert stored == "null"
+    assert store.get_job("nulled")["payload"] is None
+    assert store.payload_targets(["nulled"]) == {"nulled": None}
 
 
 def test_gepa_checkpoint_save_get_delete_roundtrip(store: SQLiteJobStore) -> None:

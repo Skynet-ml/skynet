@@ -257,7 +257,7 @@ class SkynetCi:
     @function
     @check
     async def backend_gates(self) -> None:
-        """Run ruff, the terraform script tests, requirements sync, Postgres and SLO gates."""
+        """Run ruff, the terraform script tests, requirements sync, Postgres, .agents and SLO gates."""
         postgres = (
             core()
             .container()
@@ -305,6 +305,24 @@ class SkynetCi:
                     "-q",
                 ]
             )
+            # The core shards set no APP_TEST_DB_URL, so these store tests skip
+            # there (SKY-445). The budget tests above use their own schemas, so
+            # the store tests share the database. grep picks up new store tests.
+            .with_env_variable(
+                "APP_TEST_DB_URL",
+                "postgresql://budget_test:budget_test@postgres:5432/budget_test",
+            )
+            .with_exec(
+                [
+                    "bash",
+                    "-c",
+                    "set -euo pipefail\n"
+                    "files=$(grep -rl --include='test_*.py' APP_TEST_DB_URL core | sort)\n"
+                    'test -n "$files"\n'
+                    "uv run pytest $files -q -rs",
+                ]
+            )
+            .with_exec(["uv", "run", "pytest", "../.agents", "-q"])
             .with_exec(
                 ["uv", "run", "pytest", "tests/unit/test_load_test_slo.py", "-q"]
             )

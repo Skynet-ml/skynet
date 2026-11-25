@@ -2,9 +2,9 @@ Skynet ist Optimize Anything: Jeder Durchlauf optimiert ein Repository. Eine Eng
 
 ## Der gemeinsame Vertrag
 
-Jeder Durchlauf hat ein Repository, eine Datei `optimize.toml` mit einem `[run]`-Eintrag oder einer Stufe `[target.<name>]` und einen Scorer. Der `[run]`-Eintrag führt eine Version des Repositorys auf einem Fall aus. Der Scorer ist eine Python-Funktion, die die Ausgabe des Eintrags und den Fall erhält.
+Jeder Durchlauf hat ein Repository, eine Datei `ascent.toml` mit einem `[run]`-Eintrag oder einer Stufe `[target.<name>]` und einen Scorer. Der `[run]`-Eintrag führt eine Version des Repositorys auf einem Fall aus. Der Scorer ist eine Python-Funktion, die die Ausgabe des Eintrags und den Fall erhält.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Das Repository hat im Stammverzeichnis eine Datei `serve.py` mit `def serve(input)`. Der `[run]`-Eintrag ruft sie in einer eigenen Sandbox-Box auf. Skynet stellt damit nach dem Durchlauf die beste Version bereit.
 
-Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält nur Ihre Metrikdateien und keinen Code der Version, daher kann der Scorer `serve.py` nicht importieren. Er sieht die Version nur über `output` oder über `call()` an eine Stufe `[target.<name>]`. Importieren Sie `call` mit `from skynet import call`. Ohne `[run]`-Eintrag oder Stufe `[target.<name>]` lehnt Skynet die Datei `optimize.toml` ab.
+Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält nur Ihre Metrikdateien und keinen Code der Version, daher kann der Scorer `serve.py` nicht importieren. Er sieht die Version nur über `output` oder über `call()` an eine Stufe `[target.<name>]`. Importieren Sie `call` mit `from openascent import call`. Ohne `[run]`-Eintrag oder Stufe `[target.<name>]` lehnt Skynet die Datei `ascent.toml` ab.
 
 > [!NOTE]
 > Der Coding-Agent, der die Versionen schreibt, sieht weder den Quelltext des Scorers noch die erwarteten Werte oder die Secrets des Durchlaufs.
@@ -37,9 +37,9 @@ Ihr Repository-Code und Ihr Scorer können über das Modell-Gateway von Skynet e
 
 | Variable             | Was sie enthält                                                  |
 | -------------------- | ---------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | Die URL des Gateways. `APP_GATEWAY_URL` enthält denselben Wert.  |
-| `APP_API_KEY`        | Ein Token nur für diesen Durchlauf. Es ist kein Anbieterschlüssel. |
-| `APP_MODEL`          | Der Modellname zum Senden. Es ist das Scorer-Modell des Durchlaufs. |
+| `OPENAI_BASE_URL`    | Die URL des Gateways. `ASCENT_MODEL_URL` enthält denselben Wert. |
+| `ASCENT_MODEL_KEY`   | Ein Token nur für diesen Durchlauf. Es ist kein Anbieterschlüssel. |
+| `ASCENT_MODEL`       | Der Modellname zum Senden. Es ist das Scorer-Modell des Durchlaufs. |
 | `ANTHROPIC_BASE_URL` | Die URL des Gateways für Anthropic-SDKs.                         |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

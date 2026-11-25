@@ -6,50 +6,14 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from core.config import Settings
-from core.exceptions import ServiceError
-
 from ..sandbox import (
-    _CREDENTIALS_MISSING,
-    AsyncBridgeRuntime,
     LocalSubprocessRuntime,
     LocalSubprocessSession,
     SandboxSpec,
-    scorer_runtime_from_settings,
 )
-
-_VERCEL_ENV = ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID")
-
-try:
-    import vercel.sandbox  # noqa: F401
-
-    _SDK_PRESENT = True
-except ImportError:
-    _SDK_PRESENT = False
-
-_needs_sdk = pytest.mark.skipif(not _SDK_PRESENT, reason="vercel-sandbox SDK not installed")
-
-
-def _settings(monkeypatch: pytest.MonkeyPatch, **values: Any) -> Settings:
-    """Build settings with every Vercel variable cleared from the environment first.
-
-    Ignores the developer's ``.env`` file too, so a locally configured
-    Vercel token cannot leak into the assertions.
-
-    Args:
-        monkeypatch: Pytest fixture.
-        **values: Settings fields to set.
-
-    Returns:
-        A fresh ``Settings`` instance.
-    """
-    for name in _VERCEL_ENV:
-        monkeypatch.delenv(name, raising=False)
-    return Settings(_env_file=None, **values)
 
 
 @pytest.fixture
@@ -148,24 +112,6 @@ def test_local_session_close_removes_the_directory_and_is_idempotent() -> None:
     box.close()
 
     assert not path.exists()
-
-
-def test_scorer_runtime_refuses_missing_managed_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing managed-sandbox credentials never fall back to the worker host."""
-    with pytest.raises(ServiceError) as excinfo:
-        scorer_runtime_from_settings(_settings(monkeypatch))
-
-    assert str(excinfo.value) == _CREDENTIALS_MISSING
-
-
-@_needs_sdk
-def test_scorer_runtime_prefers_vercel_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Configured scorers resolve to the managed Vercel provider through the sync bridge."""
-    creds = {"vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
-
-    runtime = scorer_runtime_from_settings(_settings(monkeypatch, **creds))
-    assert isinstance(runtime, AsyncBridgeRuntime)
-    assert runtime.provider == "vercel"
 
 
 def test_local_runtime_has_no_header_injecting_edge() -> None:

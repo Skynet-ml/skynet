@@ -14,12 +14,12 @@ def score(repo_path, case, output=None):
 | `case`      | dict입니다. `case["input"]`는 입력 필드를 담습니다. `case["expected"]`는 기댓값 또는 `None`을 담습니다 |
 | `output`    | `[run]` 엔트리가 케이스에 대해 반환한 값. 파일에 `[run]`이 없으면 `None` |
 
-리포지토리의 `optimize.toml` 파일에는 `[run]` 섹션 또는 `[target.<name>]` 스테이지가 있어야 합니다. `[run]`의 `entry`는 한 버전을 케이스 하나에 대해 자체 샌드박스에서 실행합니다. 둘 다 없는 파일은 Skynet이 거부합니다. 모든 버전이 같은 점수를 받기 때문입니다.
+리포지토리의 `ascent.toml` 파일에는 `[run]` 섹션 또는 `[target.<name>]` 스테이지가 있어야 합니다. `[run]`의 `entry`는 한 버전을 케이스 하나에 대해 자체 샌드박스에서 실행합니다. 둘 다 없는 파일은 Skynet이 거부합니다. 모든 버전이 같은 점수를 받기 때문입니다.
 
 - 함수 엔트리(예: `entry = "serve.py:serve"`)는 `case["input"]`를 인수로 받습니다. `output`은 그 반환값입니다.
-- 명령 엔트리(예: `entry = ["python", "-m", "pytest", "-q"]`)는 입력을 stdin의 JSON으로 받습니다. `output`은 `{"exit_code": ..., "stdout": "..."}`입니다.
+- 명령 엔트리(예: `entry = ["python", "run_tests.py"]`)는 `ASCENT_INPUT`의 경로에 있는 JSON 파일에서 `{"input": ...}`을 읽습니다. `ASCENT_OUTPUT`의 경로에 `{"output": ...}`을 씁니다. `output`은 `"output"` 아래의 값입니다. 명령이 출력하는 내용은 로그로만 갑니다.
 
-채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있습니다. 채점기는 버전의 코드를 가져오거나 실행할 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from skynet import call`로 가져옵니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
+채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있습니다. 채점기는 버전의 코드를 가져오거나 실행할 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from openascent import call`로 가져옵니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
 
 ## 반환값
 
@@ -69,7 +69,7 @@ GEPA와 Auto는 피드백 텍스트를 읽고 다음 버전을 작성합니다. 
 
 ### 정확히 일치
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -88,30 +88,40 @@ def score(repo_path, case, output=None):
 
 ### 리포지토리의 테스트 실행
 
-`[run]` 엔트리가 테스트를 실행합니다. 채점기는 종료 코드와 테스트 출력을 읽습니다.
+`[run]` 엔트리가 테스트를 실행합니다. 테스트가 실패하면 `pytest`는 0이 아닌 종료 코드로 끝나고, 0이 아닌 종료 코드는 케이스를 실패로 만듭니다. 그래서 래퍼 `run_tests.py`가 결과를 `ASCENT_OUTPUT`에 쓰고 0으로 종료합니다. 채점기는 그 결과를 읽습니다.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-`[run]` 엔트리가 어떤 케이스에서 실패하면 그 케이스에는 점수가 없습니다. 엔트리가 시작되지 않거나, 시간 제한을 넘기거나, 시그널로 멈추거나, 함수 엔트리가 값을 반환하기 전에 예외를 발생시키거나 종료하면 피드백은 `Run failed: …`이고, Skynet은 채점기를 호출하지 않습니다. 명령 엔트리의 0이 아닌 종료 코드는 실패가 아닙니다. 채점기는 그 값을 `output`으로 받습니다. 그런 케이스가 있는 버전에는 점수가 없습니다. 그 버전은 최고 버전이 될 수 없고, 어떤 `[outcome] target`에도 도달하지 않으며, pull request를 열지 않습니다. 실패를 숫자로 세야 한다면 프로그램에서 실패를 잡아 출력을 쓰고, 채점기가 그 출력에 점수를 매기게 하세요. [저장소 규칙](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)을 읽어 보세요.
+`[run]` 엔트리가 어떤 케이스에서 실패하면 그 케이스에는 점수가 없습니다. 엔트리가 시작되지 않거나, 시간 제한을 넘기거나, 시그널로 멈추거나, 함수 엔트리가 값을 반환하기 전에 예외를 발생시키거나 종료하면 피드백은 `Run failed: …`이고, Skynet은 채점기를 호출하지 않습니다. 명령 엔트리는 0이 아닌 종료 코드로 끝나거나 유효한 출력 파일을 쓰지 않을 때에도 실패합니다. 그런 케이스가 있는 버전에는 점수가 없습니다. 그 버전은 최고 버전이 될 수 없고, 어떤 `[outcome] target`에도 도달하지 않으며, pull request를 열지 않습니다. 실패를 숫자로 세야 한다면 프로그램에서 실패를 잡아 출력을 쓰고, 채점기가 그 출력에 점수를 매기게 하세요. [저장소 규칙](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)을 읽어 보세요.
 
 ### 모델을 심사자로 사용
 
-채점기는 모델을 호출할 수 있습니다. `skynet` 헬퍼 모듈에서 `llm`을 가져오세요. 호출은 Skynet의 모델 게이트웨이를 거쳐 실행의 채점기 모델로 갑니다.
+채점기는 모델을 호출할 수 있습니다. `openascent` 헬퍼 모듈에서 `llm`을 가져오세요. 호출은 Skynet의 모델 게이트웨이를 거쳐 실행의 채점기 모델로 갑니다.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -119,7 +129,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -133,12 +143,12 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-채점기는 `OPENAI_BASE_URL`, `APP_API_KEY`, `APP_MODEL` 환경 변수로 OpenAI 호환 클라이언트를 사용할 수도 있습니다. 게이트웨이는 실행의 채점기 모델만 받습니다.
+채점기는 `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY`, `ASCENT_MODEL` 환경 변수로 OpenAI 호환 클라이언트를 사용할 수도 있습니다. 게이트웨이는 실행의 채점기 모델만 받습니다.
 
 ## 모델 호출과 시크릿
 
 - Skynet 키로 하는 호출은 실행 예산에 대해 계량됩니다. 내 키(BYOK)를 쓰면 호출은 내 제공업체 키로 가며, Skynet 모델 요금은 없습니다. [예산과 결제](/docs/concepts/billing)를 읽어 보세요.
-- 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 `[metric] services`에 나열된 `[services.<name>]` 테이블이나 `[metric] mcp` 파일에 있는 서버를 통해서만 채점기에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 채점기는 `SKYNET_SERVICE_<NAME>_URL`의 URL로 요청을 보냅니다. Skynet은 샌드박스 밖에서 시크릿을 추가합니다.
+- 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 `[metric] services`에 나열된 `[services.<name>]` 테이블이나 `[metric] mcp` 파일에 있는 서버를 통해서만 채점기에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 채점기는 `ASCENT_SERVICE_<NAME>_URL`의 URL로 요청을 보냅니다. Skynet은 샌드박스 밖에서 시크릿을 추가합니다.
 - Skynet은 채점기 출력과 로그에서 시크릿 값을 숨깁니다.
 
 ## 제한

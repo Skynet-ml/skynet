@@ -140,7 +140,7 @@ def fund_account(username: str, cents: int = 1_000) -> None:
     """Give a live-server test account a paid balance so ``/optimize`` accepts it.
 
     The submit gate refuses an account with no spendable cents and new accounts
-    get no free grant, so live submit tests must seed the shared dev database
+    get no starting grant, so live submit tests must seed the shared dev database
     the server reads before they post a run.
 
     Args:

@@ -16,17 +16,24 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
+from ...billing import StripeBillingService
+from ...billing.budget_amounts import CENT_SCALE
+from ...billing.budgets import BudgetError, BudgetService
 from ...billing.byok_bridge import _model_config_dicts
 from ...billing.byok_vault import safe_connection_params
+from ...config import settings
 from ...i18n import request_locale, t_locale
 from ...models import BlackboxRunRequest, BlackboxScorer
+from ...models.blackbox import BLACKBOX_TARGET_REPO, TARGET_RETIRED
 from ...models.common import ModelConfig
+from ...service_gateway.optimization.blackbox.preflight import SCORER_NOT_CHECKED
 from ...storage.preflights import setup_seed
 from ..agent_engine import fill_proposer_host_cli
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from ..preflight_execution import (
+    SETUP_NOT_CHECKED,
     WizardPreflightCheck,
     WizardPreflightRequest,
     WizardPreflightResponse,
@@ -34,6 +41,7 @@ from ..preflight_execution import (
 )
 from ..preflight_progress import progress_observer
 from ..rate_limit import enforce_submission_rate
+from .execution_budgets import budget_http_error, require_funded_lease, require_one_lease
 from .submissions import (
     _admit_byok_models,
     _materialize_repo_cases,
@@ -59,6 +67,8 @@ FIXED_MESSAGE_CODES = {
     "Provider or sandbox usage is awaiting final confirmation.": "submit.preflight.usage_pending",
     "Provider or sandbox usage is still awaiting final confirmation.": "submit.preflight.usage_still_pending",
     "Previous provider or sandbox usage is awaiting final confirmation.": "submit.preflight.previous_usage_pending",
+    # New checks no longer emit this text: setup bills the balance (SKY-925).
+    # The entry stays so stored older results still localize.
     "The spending limit cannot cover setup.": "submit.preflight.budget_setup",
     "The total budget has no remaining allowance.": "submit.preflight.budget_exhausted",
     "The account has no available funds.": "submit.preflight.no_funds",
@@ -70,10 +80,13 @@ FIXED_MESSAGE_CODES = {
     "Setup execution failed.": "submit.preflight.execution_failed",
     "The runtime did not return setup evidence.": "submit.preflight.no_evidence",
     "Setup did not return a complete set of readiness checks.": "submit.preflight.incomplete_checks",
+    SETUP_NOT_CHECKED["run"]: "submit.preflight.run_setup_not_checked",
+    SETUP_NOT_CHECKED["metric"]: "submit.preflight.metric_setup_not_checked",
+    SCORER_NOT_CHECKED: "submit.preflight.scorer_not_checked",
 }
-# The budget texts with amounts in them (``billing.budgets._admit`` and
-# ``billing.runtime.BudgetRuntime._wait_cannot_help``); their groups become the
-# catalog message's params.
+# The budget texts with amounts in them; their groups become the catalog
+# message's params. New setup checks no longer produce these texts (SKY-925).
+# The patterns stay to localize stored results from earlier checks.
 BUDGET_LIMIT_MESSAGE = re.compile(
     r"The next operation needs up to (?P<needed>\$[\d,]+\.\d{2}), but only "
     r"(?P<remaining>\$[\d,]+\.\d{2}) of the (?P<limit>\$[\d,]+\.\d{2}) limit remain\."
@@ -158,6 +171,36 @@ def localize_preflight(response: WizardPreflightResponse, locale: str) -> Wizard
     return response.model_copy(update=update)
 
 
+def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any) -> None:
+    """Refuse a budget that cannot buy the run's first lease, as submit would.
+
+    An uncapped budget has no limit floor, but its first lease still draws on the balance.
+
+    Args:
+        request: The check request, with its budget.
+        user: Budget owner.
+        job_store: Store whose engine holds the budget and the wallet.
+
+    Raises:
+        DomainError: The budget's lookup error, or the refusal of
+            :func:`require_funded_lease`.
+    """
+    try:
+        budget = BudgetService(engine=job_store.engine).get(request.execution_budget_id, user.username)
+    except BudgetError as error:
+        raise budget_http_error(error) from error
+    # As at submit, local mode has no balance gate.
+    spendable = (
+        None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
+    )
+    if not budget.uncapped:
+        # Count the spend against the limit as submit does, so that a
+        # setup_in_total budget gets the same answer here and at submit.
+        require_funded_lease(budget.total_cents, spendable, spent_units=int(budget.limit_spent_cents * CENT_SCALE))
+    elif spendable is not None:
+        require_one_lease(spendable, from_balance=True)
+
+
 def checked_preflight(
     request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any
 ) -> WizardPreflightResponse:
@@ -171,6 +214,13 @@ def checked_preflight(
     Returns:
         The check result.
     """
+    target = request.payload.get("target")
+    # The evaluation check skips the run request model, so it refuses a retired target here (SKY-834).
+    # The refusal comes before the rate limit, so a refused request uses no slot.
+    if not isinstance(target, dict) or target.get("kind") != BLACKBOX_TARGET_REPO:
+        raise RequestValidationError(
+            [{"type": "value_error", "loc": ("body", "payload", "target"), "msg": TARGET_RETIRED, "input": target}]
+        )
     enforce_submission_rate(user.username)
     payload = copy.deepcopy(request.payload)
     payload["username"] = user.username
@@ -231,6 +281,9 @@ def checked_preflight(
         shinka = payload.get("shinka")
         novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
         _admit_byok_models(job_store, user.username, configs, reflection, novelty)
+    # Submit refuses this run, so it must not pay for a setup check first (SKY-923). Like submit, the
+    # check comes after the rate limit and the request checks, so both routes give the same refusal.
+    _require_budget_lease(request, user, job_store)
     return run_preflight(request.model_copy(update={"payload": payload}), user, job_store)
 
 

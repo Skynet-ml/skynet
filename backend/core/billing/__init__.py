@@ -33,7 +33,7 @@ from .openrouter_float import (
 )
 from .openrouter_keys import OpenRouterKeyProvisioner, inject_provisioned_openrouter_key
 from .service import (
-    FREE_GRANT_CENTS,
+    GRANT_CENTS,
     PACK_CENTS,
     LedgerRow,
     StripeBillingService,
@@ -43,7 +43,7 @@ from .service import (
 )
 
 __all__ = [
-    "FREE_GRANT_CENTS",
+    "GRANT_CENTS",
     "PACK_CENTS",
     "CliDispatcher",
     "FloatStatus",

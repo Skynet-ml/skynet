@@ -55,9 +55,9 @@ Unter [Engines](/docs/concepts/engines) erfahren Sie, wie Sie eine bestimmte Eng
 
 ## 5. Metrik & Ausführung
 
-Der letzte Schritt ist **Metrik & Ausführung**. Der Assistent schreibt den Scorer und die Datei `optimize.toml` für Sie. Sie können beide bearbeiten. Der `[run]`-Eintrag führt eine Version des Repositorys auf einem Fall aus. Der Scorer erhält die Ausgabe des Eintrags und den Fall:
+Der letzte Schritt ist **Metrik & Ausführung**. Der Assistent schreibt den Scorer und die Datei `ascent.toml` für Sie. Sie können beide bearbeiten. Der `[run]`-Eintrag führt eine Version des Repositorys auf einem Fall aus. Der Scorer erhält die Ausgabe des Eintrags und den Fall:
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

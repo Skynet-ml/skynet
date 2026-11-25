@@ -34,6 +34,7 @@ const {
 } = await import("./ToolResultCards");
 const { TOOL_ICONS, getToolMeta } = await import("../lib/tool-meta");
 const { formatTemplate } = await import("@/shared/lib/i18n");
+const { ascentTomlDiagnosticLines } = await import("@/shared/lib/api");
 const localeDir = new URL("../../../../../i18n/locales/ui/", import.meta.url);
 function catalog(locale: string): Record<string, string> {
   return createRequire(import.meta.url)(new URL(`${locale}.json`, localeDir).pathname) as Record<
@@ -85,6 +86,13 @@ function withMessages(messages: Record<string, string>, render: () => string): s
   } finally {
     globalThis.__APP_REQUEST_MESSAGES__ = before;
   }
+}
+
+/** Only the English ``ascent.toml`` mistake lines, so other labels still render as keys. */
+function setupCheckMessages(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(catalog("en")).filter(([key]) => key.startsWith("submit.setup_check.")),
+  );
 }
 
 void describe("tool result cards", () => {
@@ -165,7 +173,10 @@ void describe("tool result cards", () => {
     const whole = JSON.stringify({
       sha: "abcdef1234",
       commit: { message: "Big change" },
-      files: Array.from({ length: 500 }, (_, i) => ({ filename: `f${i}.py`, patch: "x".repeat(200) })),
+      files: Array.from({ length: 500 }, (_, i) => ({
+        filename: `f${i}.py`,
+        patch: "x".repeat(200),
+      })),
     });
     const tail = `\n\n[Truncated: the result has ${whole.length} characters and only the first 40000 are shown. Ask for a narrower path, file or query to see the rest.]`;
     const html = renderOpen(
@@ -259,7 +270,7 @@ void describe("tool result cards", () => {
   });
 
   void it("a write the tool refuses shows its refusal as a failure", () => {
-    const error = "Not a file you can write: 'run.py'. Write one of metric.py, optimize.toml.";
+    const error = "Not a file you can write: 'run.py'. Write one of metric.py, ascent.toml.";
     const html = renderOpen(
       <WorkspaceWriteCard call={call("write_workspace_file", { error }, { path: "run.py" })} />,
     );
@@ -267,21 +278,28 @@ void describe("tool result cards", () => {
     assert.match(html, /Not a file you can write/);
   });
 
-  void it("a saved optimize.toml with a parser error shows the error, yet the write succeeds", () => {
+  void it("a saved ascent.toml with parser errors shows each error, yet the write succeeds", () => {
     const text = "[run]\nname = 1\n";
     const result = {
-      wizard_state: { optimize_toml: text },
-      optimize_toml_error: { section: "run", key: "entry", message: "[run] entry is missing" },
+      wizard_state: { ascent_toml: text },
+      ascent_toml_diagnostics: [
+        { level: "error", line: 1, section: "run", key: "entry", message: "entry is missing" },
+        { level: "error", line: 2, section: "run", key: "name", message: "name is wrong" },
+      ],
     };
-    const html = renderOpen(
-      <WorkspaceWriteCard
-        call={call("write_workspace_file", result, { path: "optimize.toml", text })}
-      />,
+    const html = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <WorkspaceWriteCard
+          call={call("write_workspace_file", result, { path: "ascent.toml", text })}
+        />,
+      ),
     );
     assert.match(
       html,
-      /<p dir="auto" class="break-words text-\[var\(--danger\)\]">\[run\] entry is missing<\/p>/,
+      /\[run\.entry\]<\/code><span dir="auto" class="text-\[var\(--danger\)\]">Error at line 1: entry is missing<\/span>/,
     );
+    assert.match(html, /\[run\.name\]<\/code><span[^>]*>Error at line 2: name is wrong<\/span>/);
+    assert.match(html, /agent\.tool\.check_setup\.failed/);
     assert.match(html, /text-\[var\(--success\)\]">\+2</);
     assert.doesNotMatch(html, /aria-label="agent\.tool\.write_workspace_file\.title"/);
     assert.doesNotMatch(html, /line-clamp-4/);
@@ -427,30 +445,130 @@ void describe("tool result cards", () => {
     );
   });
 
-  void it("a setup check says ok or failed, and puts [section.key] before each error", () => {
+  void it("a toast lists ten diagnostics, errors first, then counts the rest (SKY-763)", () => {
+    const items = [
+      { level: "warning" as const, line: 1, message: "old style" },
+      ...Array.from({ length: 11 }, (_, i) => ({
+        level: "error" as const,
+        line: i + 2,
+        message: `bad ${i}`,
+      })),
+    ];
+    const text = withMessages(setupCheckMessages(), () => ascentTomlDiagnosticLines(items));
+    const lines = text.split("\n");
+    assert.equal(lines[0], "");
+    assert.equal(lines.length, 12);
+    assert.equal(lines[1], "Error at line 2: bad 0");
+    assert.equal(lines[10], "Error at line 11: bad 9");
+    assert.equal(lines[11], "And 2 more.");
+    assert.equal(
+      withMessages(setupCheckMessages(), () => ascentTomlDiagnosticLines(items.slice(0, 10))),
+      [
+        "",
+        "Error at line 2: bad 0",
+        ...items.slice(2, 10).map((d) => `Error at line ${d.line}: ${d.message}`),
+        "Warning at line 1: old style",
+      ].join("\n"),
+    );
+    assert.equal(ascentTomlDiagnosticLines([]), "");
+  });
+
+  void it("a toast adds the errors past the parser cap to the count (SKY-763)", () => {
+    const items = Array.from({ length: 12 }, (_, i) => ({
+      level: "error" as const,
+      line: i + 1,
+      message: `bad ${i}`,
+    }));
+    const many = withMessages(setupCheckMessages(), () => ascentTomlDiagnosticLines(items, 100));
+    assert.equal(many.split("\n").at(-1), "And 102 more.");
+    const few = withMessages(setupCheckMessages(), () =>
+      ascentTomlDiagnosticLines(items.slice(0, 3), 5),
+    );
+    assert.deepEqual(few.split("\n").slice(1), [
+      "Error at line 1: bad 0",
+      "Error at line 2: bad 1",
+      "Error at line 3: bad 2",
+      "And 5 more.",
+    ]);
+  });
+
+  void it("the save and setup check cards count the diagnostics the result leaves out (SKY-763)", () => {
+    const error = {
+      level: "error",
+      line: 1,
+      section: "run",
+      key: "entry",
+      message: "entry is missing",
+    };
+    const text = "[run]\n";
+    const saved = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <WorkspaceWriteCard
+          call={call(
+            "write_workspace_file",
+            {
+              wizard_state: { ascent_toml: text },
+              ascent_toml_diagnostics: [error],
+              ascent_toml_diagnostics_omitted: 580,
+            },
+            { path: "ascent.toml", text },
+          )}
+        />,
+      ),
+    );
+    assert.match(saved, />And 580 more\.<\/li>/);
+    const checked = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <SetupCheckCard
+          call={call("check_setup", { ok: false, errors: [error], errors_omitted: 19 })}
+        />,
+      ),
+    );
+    assert.match(checked, />And 19 more\.<\/li>/);
+    const whole = withMessages(setupCheckMessages(), () =>
+      renderOpen(<SetupCheckCard call={call("check_setup", { ok: false, errors: [error] })} />),
+    );
+    assert.doesNotMatch(whole, /more\.<\/li>/);
+  });
+
+  void it("a setup check says ok or failed, and puts [section.key] before each error and warning", () => {
     const ok = renderOpen(<SetupCheckCard call={call("check_setup", { ok: true, errors: [] })} />);
     assert.match(ok, /<span>agent\.tool\.check_setup\.ok<\/span>/);
     assert.doesNotMatch(ok, /agent\.tool\.check_setup\.failed/);
-    const bad = renderOpen(
-      <SetupCheckCard
-        call={call("check_setup", {
-          ok: false,
-          errors: [
-            { section: "run", key: "entry", message: "entry is missing" },
-            { section: "metric", message: "metric is wrong" },
-            { message: "no place" },
-          ],
-        })}
-      />,
+    const bad = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <SetupCheckCard
+          call={call("check_setup", {
+            ok: false,
+            errors: [
+              {
+                level: "error",
+                line: 4,
+                section: "run",
+                key: "entry",
+                message: "entry is missing",
+              },
+              { level: "error", line: null, section: "metric", message: "metric is wrong" },
+              { level: "warning", line: null, message: "no place" },
+            ],
+          })}
+        />,
+      ),
     );
     assert.match(
       bad,
       /text-\[var\(--danger\)\]"><svg[^>]*>.*?<\/svg>agent\.tool\.check_setup\.failed/,
     );
     assert.doesNotMatch(bad, /agent\.tool\.check_setup\.ok/);
-    assert.match(bad, /<code[^>]*>\[run\.entry\]<\/code><span[^>]*>entry is missing<\/span>/);
-    assert.match(bad, /<code[^>]*>\[metric\]<\/code><span[^>]*>metric is wrong<\/span>/);
-    assert.match(bad, /<li class="min-w-0"><span[^>]*>no place<\/span>/);
+    assert.match(
+      bad,
+      /<code[^>]*>\[run\.entry\]<\/code><span[^>]*>Error at line 4: entry is missing<\/span>/,
+    );
+    assert.match(bad, /<code[^>]*>\[metric\]<\/code><span[^>]*>Error: metric is wrong<\/span>/);
+    assert.match(
+      bad,
+      /<li class="min-w-0 break-words"><span dir="auto" class="text-\[var\(--warning\)\]">Warning: no place<\/span>/,
+    );
   });
 
   void it("a run lifecycle call with no status fails; the run id shows 8 characters", () => {
@@ -513,6 +631,20 @@ void describe("tool result cards", () => {
     assert.match(all, />1 runs</);
     assert.doesNotMatch(all, / of /);
     assert.match(all, /<span dir="auto">My run<\/span>/);
+  });
+
+  void it("a run list shows a better minimize run as a gain (SKY-750)", () => {
+    const rows = [
+      {
+        optimization_id: "0123456789ab",
+        baseline_test_metric: 10,
+        optimized_test_metric: 5,
+        metric_improvement: 5,
+      },
+    ];
+    const html = renderOpen(<JobListCard call={call("list_jobs", { items: rows, total: 1 })} />);
+    assert.match(html, /\+5\.0%/);
+    assert.doesNotMatch(html, /-5\.0%/);
   });
 
   void it("job logs show only the newest 400 lines but count all of them", () => {

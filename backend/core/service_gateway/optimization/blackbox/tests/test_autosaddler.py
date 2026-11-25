@@ -39,7 +39,6 @@ from core.service_gateway.optimization.blackbox.protocol import (
     EvalServer,
     ModelReply,
     RepoSeed,
-    Result,
     Task,
     ToolCall,
 )
@@ -419,27 +418,14 @@ def _record_children(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen[s
     return children
 
 
-def _no_native_box(*_: Any) -> Any:
-    """Fail the test: the loop path must not ship the run to a native box.
-
-    Args:
-        *_: The native box's arguments; not used.
-
-    Raises:
-        AssertionError: Always.
-    """
-    raise AssertionError("The loop path called run_native_engine.")
-
-
-def test_the_loop_path_never_calls_the_native_box(
+def test_the_loop_path_runs_the_child_in_the_worker(
     owner: tuple[User, int],
     engine: Engine,
     step_log: StepLogStore,
     trees: TreeStore,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A context with the loop's calls runs the child in the worker, and never the native box.
+    """A context with the loop's calls runs the child in the worker.
 
     Args:
         owner: Alice and her budget generation.
@@ -447,9 +433,7 @@ def test_the_loop_path_never_calls_the_native_box(
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Makes the native box fail the test.
     """
-    monkeypatch.setattr(autosaddler, "run_native_engine", _no_native_box)
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
 
@@ -458,38 +442,16 @@ def test_the_loop_path_never_calls_the_native_box(
     assert result.best_candidate == "seedx"
 
 
-def test_a_context_with_no_worker_host_runs_the_native_box_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Until the SKY-728 cutover, a context with no model, command or tree call runs the native box once.
+def test_a_context_with_no_worker_host_is_refused(tmp_path: Path) -> None:
+    """A context with no model, command or tree call fails closed: no native box runs the engine (SKY-728).
 
     Args:
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Replaces the native box with a recorder.
     """
-    calls: list[tuple[str, Task, EvalServer, EngineContext]] = []
-    expected = Result(best_candidate="native", best_score=1.0, total_evals=1)
-
-    def native(engine_id: str, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
-        """Record the call and return a native result.
-
-        Args:
-            engine_id: The engine's name.
-            task: The task.
-            server: The eval server.
-            ctx: The context.
-
-        Returns:
-            The native result.
-        """
-        calls.append((engine_id, task, server, ctx))
-        return expected
-
-    monkeypatch.setattr(autosaddler, "run_native_engine", native)
     task, server, ctx = Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), make_ctx(str(tmp_path))
 
-    assert AutoSaddlerEngine().run(task, server, ctx) is expected
-    assert calls == [("autosaddler", task, server, ctx)]
+    with pytest.raises(ServiceError, match="only on the worker engine loop"):
+        AutoSaddlerEngine().run(task, server, ctx)
 
 
 def test_the_worker_flag_matches_the_runner() -> None:
@@ -509,14 +471,14 @@ def test_a_hidden_path_is_not_visible_to_the_engine(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
     """
-    hidden = hidden_hashes(["eval", "optimize.toml"])
+    hidden = hidden_hashes(["eval", "ascent.toml"])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
     # put_files refuses a hidden path, so the test stores the seed straight in the tree store, as the run does.
     tree = trees.put_tree(
         RUN_ID,
         [
             TreeEntry("eval", "tree", _tree(trees, "metric.py", "secret")),
-            TreeEntry("optimize.toml", "file", trees.put_blob(RUN_ID, b"secret")),
+            TreeEntry("ascent.toml", "file", trees.put_blob(RUN_ID, b"secret")),
             TreeEntry("src", "tree", _tree(trees, "a.py", "a")),
         ],
     )

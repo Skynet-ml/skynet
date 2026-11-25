@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` 是请求中输入字段的 dict。
 - 返回值必须可以序列化为 JSON。dict 会成为 `outputs`。其他任何值会成为 `{"output": value}`。
-- `serve.py` 可以使用 `skynet` 辅助模块中的 `llm` 调用模型。它不会获得运行的密钥。
+- `serve.py` 可以使用 `openascent` 辅助模块中的 `llm` 调用模型。它不会获得运行的密钥。
 
 Skynet 在与运行相同的受保护沙箱中运行最佳版本。**用量** 标签页包含两个部分：
 
@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 响应包含 `outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged` 和 `budget`。
 
 > [!TIP]
-> 每次调用单独计费，从调用者的余额中扣除。`max_cost_cents` 设置这一次调用最多可以花费的金额，单位为美分。如果你再次发送相同的 `Idempotency-Key`，Skynet 不会再次对该调用收费。
+> 每次调用单独计费，从调用者的余额中扣除。`max_cost_cents` 是可选的。它以美分为单位，记录你对这一次调用接受的最高金额。调用的上限由你的余额决定。如果你再次发送相同的 `Idempotency-Key`，Skynet 不会再次对该调用收费。
 
 关于身份验证和其他端点，请阅读 [API](/docs/api)。
 

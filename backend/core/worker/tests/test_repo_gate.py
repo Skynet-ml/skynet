@@ -1,4 +1,4 @@
-"""Tests for the preflight gate that refuses optimize.toml settings a run's sandbox cannot give."""
+"""Tests for the preflight gate that refuses ascent.toml settings a run's sandbox cannot give."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ import io
 import tarfile
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from core.billing import env_connectors
+from core.connectors.github_repo import RepoSnapshot
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
 from core.service_gateway.optimization.blackbox.repo_constraints import (
@@ -17,7 +19,7 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     parse_constraints,
 )
-from core.worker import repo_gate
+from core.worker import repo_gate, repo_staging
 from core.worker.repo_gate import GateFailure, RepoGateError, check_hidden, check_repository, sandbox_place
 from core.worker.repo_staging import hidden_path_labels, hidden_repo_paths
 
@@ -81,8 +83,107 @@ def test_a_file_with_no_version_fails_unless_the_run_started(tmp_path: Path) -> 
     assert check_repository(archive, (), place="local", require_version=False) == []
 
 
+def test_a_started_run_reads_an_older_form_and_a_new_run_refuses_it(tmp_path: Path) -> None:
+    """The gate reads the tree as its staging did: a started run accepts ``" bot/ "`` (SKY-760)."""
+    raw = b'version = 1\n[paths]\neditable = [" bot/ "]\n[run]\nentry = "run.py:main"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    with pytest.raises(ConstraintsError, match="must be written 'bot'"):
+        check_repository(archive, (), place="local")
+    assert check_repository(archive, (), place="local", require_version=False) == []
+
+
+def _stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, bytes], environment: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Stage a run over a tree holding ``files``, with the fetch and the secrets faked.
+
+    Args:
+        tmp_path: Scratch folder for the fetched tree.
+        monkeypatch: Pytest monkeypatch.
+        files: Root-relative path to bytes.
+        environment: The environment an earlier attempt recorded; ``None`` stages a new run.
+
+    Returns:
+        The environment that staging recorded.
+    """
+    fetch = tmp_path / f"fetch-{len(list(tmp_path.glob('fetch-*')))}"
+    fetch.mkdir()
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
+    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
+    monkeypatch.setattr(
+        repo_staging,
+        "fetch_snapshot",
+        lambda repository, pinned, token, workdir: RepoSnapshot(
+            commit=pinned, archive=_archive(fetch, files), readonly_paths=(), size_bytes=1
+        ),
+    )
+    repo: dict[str, Any] = {"repository": "acme/app", "branch": "main", "commit": "c" * 40, "editable_paths": ["."]}
+    if environment is not None:
+        repo["environment"] = environment
+    staged_payload, staged = repo_staging.stage_repository(
+        {"target": {"kind": "repo", "repo": repo}}, username="alice", binding_id="b", engine=None
+    )
+    staged.cleanup()
+    return staged_payload["target"]["repo"]["environment"]
+
+
+_STAGED = b'version = 1\n[paths]\neditable = ["bot"]\n[run]\nentry = "run.py:main"\n'
+
+
+def test_staging_reads_an_older_form_only_for_a_started_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment means the run started under the older reader, so staging accepts ``" bot/ "`` (SKY-760)."""
+    recorded = _stage(tmp_path, monkeypatch, {CONSTRAINTS_FILE: _STAGED})
+    older = {CONSTRAINTS_FILE: _STAGED.replace(b'"bot"', b'" bot/ "')}
+
+    with pytest.raises(ConstraintsError, match="must be written 'bot'"):
+        _stage(tmp_path, monkeypatch, older)
+    assert _stage(tmp_path, monkeypatch, older, recorded)["editable_paths"] == ["bot"]
+
+
+def test_a_resumed_run_may_newly_protect_only_its_compose_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The package also protects the compose file, so a run recorded without it resumes; other changes are refused."""
+    raw = _STAGED + b'[sandbox]\ncompose = "compose.yaml"\n'
+    files = {
+        CONSTRAINTS_FILE: raw,
+        "compose.yaml": b"services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n",
+    }
+    recorded = _stage(tmp_path, monkeypatch, files)
+    assert recorded["protected_paths"] == [CONSTRAINTS_FILE, "compose.yaml"]
+    # Skynet's older reader recorded only the contract file as protected.
+    older = {**recorded, "protected_paths": [CONSTRAINTS_FILE]}
+
+    assert _stage(tmp_path, monkeypatch, files, older)["protected_paths"] == [CONSTRAINTS_FILE, "compose.yaml"]
+    wider = {**recorded, "protected_paths": [CONSTRAINTS_FILE, "compose.yaml", "bot/eval"]}
+    with pytest.raises(ConstraintsError, match=r"\(protected_paths\)"):
+        _stage(tmp_path, monkeypatch, files, wider)
+    with pytest.raises(ConstraintsError, match=r"\(editable_paths\)"):
+        _stage(tmp_path, monkeypatch, files, {**older, "editable_paths": ["lib"]})
+
+
+def test_a_resumed_run_resumes_when_the_package_moves_its_compose_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The older reader kept a protected compose file in the user's order; the package moves it ahead."""
+    raw = _STAGED.replace(b"[run]", b'protected = ["data", "compose.yaml"]\n[run]') + (
+        b'[sandbox]\ncompose = "compose.yaml"\n'
+    )
+    files = {
+        CONSTRAINTS_FILE: raw,
+        "compose.yaml": b"services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n",
+    }
+    recorded = _stage(tmp_path, monkeypatch, files)
+    assert recorded["protected_paths"] == [CONSTRAINTS_FILE, "compose.yaml", "data"]
+    older = {**recorded, "protected_paths": [CONSTRAINTS_FILE, "data", "compose.yaml"]}
+
+    assert _stage(tmp_path, monkeypatch, files, older)["protected_paths"] == recorded["protected_paths"]
+    with pytest.raises(ConstraintsError, match=r"\(protected_paths\)"):
+        _stage(tmp_path, monkeypatch, files, {**recorded, "protected_paths": [CONSTRAINTS_FILE, "compose.yaml"]})
+
+
 def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
-    """No optimize.toml asks for nothing."""
+    """No ascent.toml asks for nothing."""
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []
 
 
@@ -117,7 +218,7 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
             key="[services.maps] secrets",
             place="cloud",
             reason=(
-                "The service maps in optimize.toml needs the secret GOOGLE_MAPS_API_KEY, but this run has "
+                "The service maps in ascent.toml needs the secret GOOGLE_MAPS_API_KEY, but this run has "
                 "no secret with that name. Add the secret to the run or remove the name from the file."
             ),
             code=I18nKey.REPO_GATE_MISSING_SECRET,
@@ -159,9 +260,81 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_outcome_minimums_pass_because_the_run_end_judges_them(tmp_path: Path, raw: bytes, place: str) -> None:
-    """The run end checks each [outcome.require] minimum on the final score, so the gate lets it through (SKY-692)."""
+def test_outcome_limits_pass_because_the_run_end_judges_them(tmp_path: Path, raw: bytes, place: str) -> None:
+    """The run end checks each [outcome.require] limit on the final score, so the gate lets it through (SKY-692)."""
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_metric_direction_passes_because_the_run_obeys_it(tmp_path: Path, place: str) -> None:
+    """The eval server, the run end and the pull request read [metric] direction, so the gate lets it through (SKY-750)."""
+    raw = b'version = 1\n[metric]\ndirection = "minimize"\n[run]\nentry = "run.py:main"\n'
+
+    assert "metric.direction" in repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_metric_scores_passes_because_the_run_obeys_it(
+    tmp_path: Path, place: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engines and the run end read each [metric.scores] direction, so the gate lets it through (SKY-775)."""
+    raw = (
+        b'version = 1\n[metric.scores]\ncost_usd = "minimize"\n[run]\nentry = "run.py:main"\n'
+        b"[outcome.require]\ncost_usd = 0.05\n"
+    )
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    assert "metric.scores" in repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
+    monkeypatch.setitem(repo_gate.ENFORCED, place, repo_gate.ENFORCED[place] - {"metric.scores"})  # type: ignore[index]
+    assert [failure.key for failure in check_repository(archive, (), place=place)] == ["[metric.scores]"]  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_metric_setup_passes_because_the_metric_setup_box_runs_it(
+    tmp_path: Path, place: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metric setup box runs [metric] setup once, so the gate lets it through (SKY-740)."""
+    raw = b'version = 1\n[metric]\nfiles = ["eval"]\nsetup = "make -C eval"\n[run]\nentry = "run.py:main"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    assert "metric.setup" in repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
+    # The gate reads the key: without it in ENFORCED, the same file is refused.
+    monkeypatch.setitem(repo_gate.ENFORCED, place, repo_gate.ENFORCED[place] - {"metric.setup"})  # type: ignore[index]
+    assert check_repository(archive, (), place=place) != []  # type: ignore[arg-type]
+
+
+_DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("raw", "keys"),
+    [
+        (
+            f'version = 1\n[run]\nentry = "run.py:main"\nimage = "python@{_DIGEST}"\n'
+            f'[metric]\nimage = "python@{_DIGEST}"\n'.encode(),
+            {"run.image", "metric.image"},
+        ),
+        (
+            b'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n'
+            b'dockerfile = "box/Dockerfile"\n[metric]\ndockerfile = "box/Dockerfile"\n',
+            {"run.dockerfile", "metric.dockerfile"},
+        ),
+    ],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_box_images_pass_because_staging_builds_and_checks_them(
+    tmp_path: Path, raw: bytes, keys: set[str], place: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging pins or builds each [run] and [metric] image and checks it first, so the gate lets it through (SKY-737)."""
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "box/Dockerfile": b"FROM python:3.12\n"})
+
+    assert keys <= repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
+    monkeypatch.setitem(repo_gate.ENFORCED, place, repo_gate.ENFORCED[place] - keys)  # type: ignore[index]
+    assert check_repository(archive, (), place=place) != []  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -174,7 +347,7 @@ def test_outcome_minimums_pass_because_the_run_end_judges_them(tmp_path: Path, r
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_a_file_without_outcome_minimums_passes(tmp_path: Path, raw: bytes, place: str) -> None:
+def test_a_file_without_outcome_limits_passes(tmp_path: Path, raw: bytes, place: str) -> None:
     """The run stops at [outcome] target (SKY-691); an empty [outcome] or a [tool.<name>] table asks for nothing."""
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
@@ -620,7 +793,7 @@ def test_a_metric_path_that_matches_no_file_fails(tmp_path: Path) -> None:
 
 
 def test_each_leak_names_the_setting_of_its_hidden_path(tmp_path: Path) -> None:
-    """A leaked ``optimize.toml`` or cases file names its own setting, not ``[metric] files`` (SKY-446)."""
+    """A leaked ``ascent.toml`` or cases file names its own setting, not ``[metric] files`` (SKY-446)."""
     files = {CONSTRAINTS_FILE: b"v\n", "data/cases.jsonl": b"{}\n", "eval/metric.py": b"m\n", "src/app.py": b"x\n"}
     original = _archive(tmp_path, files)
     (tmp_path / "agent").mkdir()
@@ -670,7 +843,7 @@ cases = "data/cases.jsonl"
 
 
 def test_hidden_path_labels_names_the_setting_of_every_hidden_path() -> None:
-    """Each scoring-side path maps to the ``optimize.toml`` setting that hides it (SKY-446)."""
+    """Each scoring-side path maps to the ``ascent.toml`` setting that hides it (SKY-446)."""
     constraints = parse_constraints(_LABELLED_TOML)
 
     assert hidden_path_labels(constraints) == {
@@ -723,8 +896,8 @@ def test_a_staged_leak_carries_the_label_from_hidden_path_labels(tmp_path: Path)
 @pytest.mark.parametrize(
     ("visible", "hidden"),
     [
-        (".mcp.json", ("optimize.toml", ".optimize/exploits")),
-        (".MCP.json", ("optimize.toml", ".optimize/exploits", ".mcp.json")),
+        (".mcp.json", ("ascent.toml", ".optimize/exploits")),
+        (".MCP.json", ("ascent.toml", ".optimize/exploits", ".mcp.json")),
     ],
     ids=["exact-case", "case-variant"],
 )
@@ -977,3 +1150,20 @@ def test_a_metric_folder_counts_as_metric_files(tmp_path: Path) -> None:
     files = {**_REPO_MODULES, "eval/score.py": b"from util import util\n"}
 
     assert repo_gate.metric_import_warnings(_archive(tmp_path, files), ["eval"]) == []
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [b'"eval/score.py:grade"', b'["bash", "eval/metric.sh"]'],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_metric_entry_passes_the_gate(tmp_path: Path, entry: bytes, place: str) -> None:
+    """The metric box runs a Python or a command ``[metric] entry`` in every place (SKY-738)."""
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n[metric]\nfiles = ["eval"]\nentry = ' + entry + b"\n"
+    files = {
+        CONSTRAINTS_FILE: raw,
+        "eval/score.py": b"def grade(repo_path): return 1.0\n",
+        "eval/metric.sh": b"exit 0\n",
+    }
+
+    assert check_repository(_archive(tmp_path, files), (), place=place) == []  # type: ignore[arg-type]

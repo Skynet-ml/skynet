@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.server
 import json
 import logging
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -63,7 +66,7 @@ from ..repo_scorer import (
     _scrub,
     _StageRelay,
 )
-from ..repo_workspace import CandidateBox, RepoBoxSource, RepoWorkspace
+from ..repo_workspace import WORK_DIR, CandidateBox, RepoBoxSource, RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
@@ -74,21 +77,42 @@ from ..rule_judge import (
 )
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_contract import SandboxSession
+from ..sandbox_scorer import ScorerGateway
 from ..scorer import normalize_score
 from ..service import run_blackbox_optimization
 from ..tree_sandbox import BoxSession
+from .mocks import FakeGateway
 from .test_repo_workspace import _archive, _patch
 
-# The metric box holds no repository file, so the [run] entry prints what
+# The metric box holds no repository file, so the [run] entry's output is what
 # the metric scores: the version's source, then the file setup built (SKY-398).
-SCORER_RUN = ("sh", "-c", "cat src/app.py; echo ---; cat built.txt")
+# It writes that output to ASCENT_OUTPUT, as every command entry does (SKY-757).
+SCORER_RUN = (
+    "python3",
+    "-c",
+    "import json, os; text = open('src/app.py').read() + '---\\n' + open('built.txt').read();"
+    " json.dump({'output': text}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
+)
+
+
+def _wrapped(command: str) -> tuple[str, ...]:
+    """Make a shell command a ``[run]`` entry with the documented wrapper line (SKY-757).
+
+    Args:
+        command: The shell command, whose printed text goes to the logs.
+
+    Returns:
+        A command entry whose output is ``{"exit_code": <the command's exit code>}``.
+    """
+    return ("sh", "-c", f'{command} > /dev/null; echo "{{\\"output\\": {{\\"exit_code\\": $?}}}}" > "$ASCENT_OUTPUT"')
+
 
 SCORER = """
 import json
 import os
 
 def score(repo_path, case=None, output=None):
-    source, built = output["stdout"].split("---\\n")
+    source, built = output.split("---\\n")
     value = int(source.split("=")[1])
     return {
         "score": value / 10,
@@ -182,6 +206,37 @@ def test_scores_the_baseline_and_a_version(scored: tuple[RepoScorer, Path, Path]
         "small": {"score": pytest.approx(0.35), "feedback": "small ok"},
         "large": {"score": pytest.approx(1.4), "feedback": "large ok"},
     }
+
+
+def test_the_metric_runs_on_the_python_that_the_image_check_reported(tmp_path: Path) -> None:
+    """A ``[metric]`` user image scores with the trusted Python its ``ascent check --image`` gave (SKY-737)."""
+    marker = tmp_path / "checked-python-ran"
+    python = tmp_path / "image" / "python"
+    python.parent.mkdir()
+    python.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command="cat src/app.py > built.txt",
+            secrets={},
+            metric_image="metric@sha256:" + "b" * 64,
+            metric_python=str(python),
+        ),
+        SCORER,
+        timeout_seconds=60,
+        run_entry=SCORER_RUN,
+    )
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.1)
+    finally:
+        scorer.close()
+    assert marker.exists()
 
 
 def test_the_scorer_opens_its_candidate_and_metric_boxes_through_the_box_source(
@@ -435,7 +490,7 @@ def _labels_judge(
         ),
         judge,
         timeout_seconds=60,
-        run_entry=("python3", "src/app.py"),
+        run_entry=_wrapped("python3 src/app.py"),
     )
     return scorer, archive
 
@@ -664,11 +719,11 @@ def _ruled(tmp_path: Path, hook: _StubJudge | None = None) -> tuple[RepoScorer, 
             protected_paths=["eval"],
         ),
         "def score(repo_path, case, output):\n"
-        "    value = int(output['stdout'].split('=')[1])\n"
+        "    value = int(output.split('=')[1])\n"
         "    return {'score': value / 10, 'feedback': 'value read'}\n",
         timeout_seconds=60,
         rule_judge=judge,
-        run_entry=("cat", "src/app.py"),
+        run_entry=("sh", "-c", 'printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"'),
     )
     return scorer, archive, events, judge
 
@@ -683,7 +738,7 @@ def test_a_blocked_version_gets_only_the_fixed_message(tmp_path: Path) -> None:
         assert events == [
             {
                 "kind": EVENT_BLOCK,
-                "rule": "optimize.toml [paths]",
+                "rule": "ascent.toml [paths]",
                 "reason": "'eval/labels.csv' is protected by the repository rules ([paths] protected).",
             }
         ]
@@ -1030,7 +1085,13 @@ STAGE_TREE = {
 STAGES = {
     "double": TargetStage(entry="src/stages.py:double", timeout=30),
     "shout": TargetStage(
-        entry=("python3", "-c", "import json, sys; print(json.dumps(json.load(sys.stdin).upper()))"), timeout=30
+        entry=(
+            "python3",
+            "-c",
+            "import json, os; value = json.load(open(os.environ['ASCENT_INPUT']))['input'];"
+            " json.dump({'output': value.upper()}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
+        ),
+        timeout=30,
     ),
     "broken": TargetStage(entry="src/stages.py:broken", timeout=30),
     "slow": TargetStage(entry="src/stages.py:slow", timeout=1),
@@ -1139,7 +1200,7 @@ def _stage_scorer(
 def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
     """The scorer calls two stages; each stage box runs the scored version, and every box closes."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    doubled = call('double', {'v': 3})\n"
         "    return {'score': doubled['v'] / 10, 'feedback': call('shout', 'hi')}\n"
@@ -1163,7 +1224,7 @@ def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
 
 def test_the_guest_waits_as_long_as_a_stage_box_may_live(tmp_path: Path) -> None:
     """The guest's wait covers the stage layout and the scorer, so it never stops before the parent answers."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
     try:
@@ -1176,7 +1237,7 @@ def test_the_guest_waits_as_long_as_a_stage_box_may_live(tmp_path: Path) -> None
 
 def test_one_stage_is_enough(tmp_path: Path) -> None:
     """A run with one stage opens one box for each evaluation."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
     try:
@@ -1197,7 +1258,7 @@ def test_one_stage_is_enough(tmp_path: Path) -> None:
 def test_stage_failures_reach_the_scorer_as_stage_errors(tmp_path: Path, name: str, expected: str) -> None:
     """A failed stage, a stage past its timeout and an unknown name each raise ``StageError``."""
     code = (
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         f"        call({name!r}, 3)\n"
@@ -1218,7 +1279,7 @@ def test_each_stage_call_is_recorded_with_its_status_and_no_secret(tmp_path: Pat
     """A good and a failed stage call each write one ``stage`` run call (E28)."""
     code = (
         "import os\n"
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    for name in ('double', 'broken'):\n"
         "        try:\n"
@@ -1350,7 +1411,7 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
         entry=("python3", "-c", f"import sys; sys.stderr.write({secret!r} + 'B' * 490); sys.exit(1)"), timeout=30
     )
     code = (
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         "        call('failing', 1)\n"
@@ -1376,6 +1437,158 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
     for text in (call["failure_reason"], call["response"], feedback):
         assert "0123456789" not in text
         assert "[secret]" in text
+
+
+def test_a_failed_command_stage_gives_the_metric_its_cause_with_the_secret_masked(tmp_path: Path) -> None:
+    """A command stage that echoes a secret to stdout and stderr and exits 2 reaches the metric as ``Stage 'x' failed: <cause>`` (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"echo 'shown {secret}'; echo 'leaked {secret}' >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "stdout: shown [secret]" in feedback
+    assert "stderr: leaked [secret]" in feedback
+    assert secret not in feedback
+
+
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"printf '{secret}%0791d\\n' 0 >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: " in feedback
+    assert "9876" not in feedback
+
+
+_LONG_SECRET = "tok-" + "".join(f"{i:03d}" for i in range(40))
+# 60 copies pass the box's 4,000-character bound, and 4,000 is no whole number
+# of copies, so the box's cut splits one copy (SKY-757).
+_REPEAT_SECRET = f"for i in $(seq 60); do printf '%s' '{_LONG_SECRET}' >&2; done"
+
+
+def _no_part_of_the_long_secret(text: str) -> bool:
+    """Say whether no 8-character piece of ``_LONG_SECRET`` is in the text.
+
+    Args:
+        text: The feedback to check.
+
+    Returns:
+        ``True`` when the text holds no part of the secret.
+    """
+    return not any(_LONG_SECRET[i : i + 8] in text for i in range(len(_LONG_SECRET) - 7))
+
+
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut before it masks the log (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", f"{_REPEAT_SECRET}; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": _LONG_SECRET}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: [secret]" in feedback
+    assert _no_part_of_the_long_secret(feedback)
+
+
+# Each script writes an output file whose OpenAscent cause quotes a secret in a
+# form the mask misses: a head cut of a number, or a key as a repr (SKY-757).
+_QUOTED_SECRETS = [
+    pytest.param(
+        "4111222233334444",
+        'printf \'{"output": %s%se400}\' "$(printf \'1%.0s\' $(seq 30))" 4111222233334444 > "$ASCENT_OUTPUT"',
+        ("4111222233", "22223333", "33334444"),
+        id="number",
+    ),
+    pytest.param(
+        "ab\\cd\\efgh",
+        'printf \'%s\' \'{"ab\\\\cd\\\\efgh": 1, "ab\\\\cd\\\\efgh": 2}\' > "$ASCENT_OUTPUT"',
+        ("efgh", "\\cd"),
+        id="repr-key",
+    ),
+]
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_a_stage_error(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A stage whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", script), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": secret}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert f"Stage 'failing' failed: {runner.INVALID_JSON_CAUSE[:40]}" in feedback
+    assert not [piece for piece in pieces if piece in feedback]
+
+
+def test_a_command_stage_runs_on_the_base_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command stage's runner starts with the base python3, not the one [setup] put first on PATH (SKY-757)."""
+    marker = tmp_path / "base-python-ran"
+    base = tmp_path / "base" / "python3"
+    base.parent.mkdir()
+    base.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    base.chmod(0o755)
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(base))
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': call('shout', 'hi')}\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"shout": STAGES["shout"]})
+    try:
+        assert scorer.score("")["feedback"] == "HI"
+    finally:
+        scorer.close()
+    assert marker.exists()
 
 
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1542,7 +1755,7 @@ def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
 def test_a_partial_line_before_a_call_does_not_hide_the_frame(tmp_path: Path) -> None:
     """A scorer that prints without a newline before ``call`` still gets the stage's answer."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    print('x', end='', flush=True)\n"
         "    return {'score': call('double', {'v': 2})['v'] / 10, 'feedback': 'ok'}\n"
@@ -1561,7 +1774,7 @@ def test_calls_reach_their_stage_while_another_thread_prints(tmp_path: Path) -> 
     """A thread that keeps printing partial lines never makes a call wait for the scorer timeout."""
     code = (
         "import threading\n"
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    stop = threading.Event()\n"
         "    def chatter():\n"
@@ -1590,7 +1803,7 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
     """Four calls to one stage overlap, each in its own process, up to ``max_concurrency``."""
     code = (
         "from concurrent.futures import ThreadPoolExecutor\n"
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    with ThreadPoolExecutor(4) as pool:\n"
         "        values = list(pool.map(lambda value: call('slow', value), [1.5] * 4))\n"
@@ -1613,7 +1826,7 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
 
 def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(tmp_path: Path) -> None:
     """Each answer write moves every file's change time, yet a clean version keeps its score."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
     scorer, _ = _stage_scorer(
         tmp_path,
         code,
@@ -1631,7 +1844,7 @@ def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(
 def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_path: Path) -> None:
     """A version that changes a protected file gets no score, named once, before the metric calls a stage."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    total = sum(call('double', {'v': v})['v'] for v in (1, 2, 3))\n"
         "    return {'score': total / 100, 'feedback': 'ok'}\n"
@@ -1644,7 +1857,7 @@ def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_pat
         {"double": STAGES["double"]},
         scorer_runtime=_WriteTouchingRuntime(),
         protected_paths=("judge",),
-        run_entry=("sh", "-c", "echo 9 > judge/labels.csv"),
+        run_entry=_wrapped("echo 9 > judge/labels.csv"),
     )
     try:
         with pytest.raises(RepoScoreError, match=r"'judge/labels\.csv' is protected") as caught:
@@ -1679,7 +1892,7 @@ def test_a_metric_stage_answer_skips_the_protected_file_check(tmp_path: Path, mo
         return real(self, path, text)
 
     monkeypatch.setattr(CandidateBox, "answer", answer)
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
     scorer, _ = _stage_scorer(
         tmp_path,
         code,
@@ -2174,7 +2387,7 @@ import urllib.request
 def score(repo_path, case=None):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request(
-        os.environ["SKYNET_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
+        os.environ["ASCENT_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
         data=b'{"text": "hi"}',
         headers={"Content-Type": "application/json", "Authorization": "Bearer guessed"},
         method="POST",
@@ -2285,7 +2498,7 @@ import urllib.request
 
 
 def run(value):
-    url = os.environ.get("SKYNET_SERVICE_JUDGE_API_URL")
+    url = os.environ.get("ASCENT_SERVICE_JUDGE_API_URL")
     seen = {
         "key_in_env": any(v in ("judge-secret-value", "other-value") for v in os.environ.values()),
         "service_url": url is not None,
@@ -2577,7 +2790,7 @@ def test_a_lost_stage_budget_stop_answer_still_stops_the_evaluation(
     """
     monkeypatch.setattr(_StageRelay, "_run", _stop_the_stage)
     _refuse_answer_writes(monkeypatch, _write_error(503)[1])
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v']}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v']}\n"
     scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"double": STAGES["double"]})
     scorer._timeout_seconds = 3
     scorer.raw_provider_errors = judge
@@ -2700,7 +2913,7 @@ def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -
 @pytest.mark.parametrize(
     ("name", "status", "message"),
     [
-        ("nope", 404, "Service 'nope' is not in optimize.toml. Add a [services.nope] table."),
+        ("nope", 404, "Service 'nope' is not in ascent.toml. Add a [services.nope] table."),
         ("github", 403, "only services with a url go through the relay"),
     ],
 )
@@ -2719,11 +2932,11 @@ def test_unknown_services_and_catalog_connectors_are_refused(name: str, status: 
     ("name", "status", "message"),
     [
         ("judge", 403, "Service 'judge' is not listed for the [metric] role."),
-        ("Judge", 404, "Service 'Judge' is not in optimize.toml. Add a [services.Judge] table."),
-        ("JUDGE", 404, "Service 'JUDGE' is not in optimize.toml."),
-        ("judge/x", 404, "Service 'judge/x' is not in optimize.toml."),
-        ("../judge", 404, "Service '../judge' is not in optimize.toml."),
-        ("", 404, "is not in optimize.toml."),
+        ("Judge", 404, "Service 'Judge' is not in ascent.toml. Add a [services.Judge] table."),
+        ("JUDGE", 404, "Service 'JUDGE' is not in ascent.toml."),
+        ("judge/x", 404, "Service 'judge/x' is not in ascent.toml."),
+        ("../judge", 404, "Service '../judge' is not in ascent.toml."),
+        ("", 404, "is not in ascent.toml."),
     ],
 )
 def test_a_name_that_only_looks_like_a_declared_service_is_unknown(
@@ -3882,7 +4095,7 @@ def test_an_mcp_name_and_a_service_name_never_cross(echo: _Echo) -> None:
     assert mcp["error"].endswith("MCP server 'judge' is not in .mcp.json, the [run] MCP file. Add it there.")
     assert service == {
         "status": 404,
-        "error": "Service 'search' is not in optimize.toml. Add a [services.search] table.",
+        "error": "Service 'search' is not in ascent.toml. Add a [services.search] table.",
     }
     assert echo.paths == []
 
@@ -4057,7 +4270,7 @@ def lookup(value):
     # Long enough that parallel calls in one stage box overlap.
     time.sleep(1.0)
     body = value["body"].encode() if value.get("body") else None
-    url = os.environ["SKYNET_MCP_SEARCH_URL"] + value.get("path", "")
+    url = os.environ["ASCENT_MCP_SEARCH_URL"] + value.get("path", "")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Keep)
     try:
         with opener.open(urllib.request.Request(url, data=body, method="POST" if body else "GET")) as response:
@@ -4069,19 +4282,21 @@ def lookup(value):
         "body": text,
         "key_in_env": "JUDGE_KEY" in os.environ,
         "span": [started, time.time()],
-        "url": os.environ["SKYNET_MCP_SEARCH_URL"],
-        "config": json.load(open(os.environ["SKYNET_MCP_CONFIG"])),
+        "url": os.environ["ASCENT_MCP_SEARCH_URL"],
+        "config": json.load(open(os.environ["ASCENT_MCP_CONFIG"])),
     }
 """
 _LOOKUP_COMMAND = (
     "python3",
     "-c",
-    "import json, sys; sys.path.insert(0, 'src'); import lookup; print(json.dumps(lookup.lookup(json.load(sys.stdin))))",
+    "import json, os, sys; sys.path.insert(0, 'src'); import lookup;"
+    " value = json.load(open(os.environ['ASCENT_INPUT']))['input'];"
+    " json.dump({'output': lookup.lookup(value)}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
 )
 _LOOKUP_SCORER = (
     "import json\n"
     "from concurrent.futures import ThreadPoolExecutor\n"
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}, {'path': '/events'}]\n"
     "    with ThreadPoolExecutor(3) as pool:\n"
@@ -4142,7 +4357,7 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
 _TWO_LOOKUPS_SCORER = (
     "import json\n"
     "from concurrent.futures import ThreadPoolExecutor\n"
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}]\n"
     "    with ThreadPoolExecutor(2) as pool:\n"
@@ -4205,7 +4420,7 @@ def test_a_budget_stop_in_a_stages_mcp_call_stops_the_evaluation(
 
     monkeypatch.setattr(repo_scorer, "relay_request", stop)
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         "        return {'score': call('lookup', {'body': '{}'})['status'] / 1000, 'feedback': 'ran'}\n"
@@ -4796,12 +5011,157 @@ def test_run_failed_scrub_drops_metric_runner_and_library_frames() -> None:
     assert _scrub(text.removeprefix("Run failed: "), root, ("eval",)) == "RuntimeError: broke"
 
 
-def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: Path) -> None:
-    """A command's exit code and stdout reach the metric; a nonzero exit is not a run failure (E38)."""
+def _shell_run_scorer(tmp_path: Path, script: str, secrets: Mapping[str, str] | None = None) -> RepoScorer:
+    """Build a local scorer whose ``[run] entry`` is ``sh src/run.sh`` and whose metric echoes the output (SKY-757).
+
+    Args:
+        tmp_path: Scratch folder.
+        script: The body of ``src/run.sh``.
+        secrets: The run's secrets.
+
+    Returns:
+        The scorer; the caller closes it.
+    """
     metric = "import json\ndef score(repo_path, case, output):\n    return {'score': 0.5, 'feedback': json.dumps(output, sort_keys=True)}\n"
-    archive = _archive(
-        tmp_path, {"src/app.py": "x = 1\n", "src/cmd.py": "import sys\nprint(sys.stdin.read())\nsys.exit(3)\n"}
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.sh": script})
+    return RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets=dict(secrets or {}),
+        ),
+        metric,
+        timeout_seconds=60,
+        run_entry=("sh", "src/run.sh"),
+        run_timeout=10.0,
     )
+
+
+def test_a_shell_command_entry_reads_ascent_input_and_its_output_file_reaches_the_metric(tmp_path: Path) -> None:
+    """A real shell ``[run]`` command reads ``ASCENT_INPUT`` and writes ``ASCENT_OUTPUT``; its prints stay out (SKY-757)."""
+    script = (
+        "echo 'a debug line'\n"
+        'test -z "$(cat)"\n'
+        'printf \'{"output": {"seen": %s}}\' "$(cat "$ASCENT_INPUT")" > "$ASCENT_OUTPUT"\n'
+    )
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": {"q": 1}, "expected": 2})
+    finally:
+        scorer.close()
+    assert result["score"] == pytest.approx(0.5)
+    assert json.loads(result["feedback"]) == {"seen": {"input": {"q": 1}}}
+
+
+def test_the_wrapper_line_passes_a_nonzero_exit_code_to_the_metric(tmp_path: Path) -> None:
+    """The documented wrapper line turns a failing tool's exit code into the output (SKY-757)."""
+    script = 'python3 -c "import sys; sys.exit(3)" > log.txt\necho "{\\"output\\": {\\"exit_code\\": $?}}" > "$ASCENT_OUTPUT"\n'
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": None})
+    finally:
+        scorer.close()
+    assert json.loads(result["feedback"]) == {"exit_code": 3}
+
+
+def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
+    """A command that prints its answer and writes no output file is a run failure that shows the print, and the metric is not called."""
+    scorer = _shell_run_scorer(tmp_path, "echo '{\"output\": 1}'\n")
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"] == (
+        "Run failed: The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+        '\nstdout: {"output": 1}'
+    )
+
+
+def test_a_failed_command_with_long_stdout_and_stderr_keeps_its_cause(tmp_path: Path) -> None:
+    """Full stderr and stdout tails still leave the cause in the run feedback (SKY-757)."""
+    script = 'for i in $(seq 300); do echo "out line $i"; echo "err line $i" >&2; done\nexit 1\n'
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert result["feedback"].endswith("out line 300")
+    assert "err line 300\nstdout: " in result["feedback"]
+
+
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut, and the cause stays (SKY-757)."""
+    secret = "run-secret-value-9876"
+    scorer = _shell_run_scorer(tmp_path, f"printf '{secret}%0791d\\n' 0 >&2\nexit 1\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: " in result["feedback"]
+    assert "9876" not in result["feedback"]
+
+
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut, and the cause stays (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, f"{_REPEAT_SECRET}\nexit 1\n", {"JUDGE_KEY": _LONG_SECRET})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: [secret]" in result["feedback"]
+    assert _no_part_of_the_long_secret(result["feedback"])
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_the_run_feedback(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A [run] command whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, script + "\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: " + runner.INVALID_JSON_CAUSE)
+    assert not [piece for piece in pieces if piece in result["feedback"]]
+
+
+def test_a_long_cause_and_long_logs_still_start_the_run_feedback_with_the_cause(tmp_path: Path) -> None:
+    """The cause keeps its head, so the feedback's tail cut never drops it (SKY-757)."""
+    keys = ", ".join(f'"unknown_key_{i:02d}": 1' for i in range(60))
+    script = (
+        'for i in $(seq 100); do echo "out line $i"; echo "err line $i" >&2; done\n'
+        f"printf '%s' '{{\"output\": 1, {keys}}}' > \"$ASCENT_OUTPUT\"\n"
+    )
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The run output is not in the valid form:")
+    assert "\nstderr: " in result["feedback"]
+    assert result["feedback"].endswith("out line 100")
+
+
+def test_a_function_entry_keeps_the_end_of_its_traceback_in_the_run_feedback(tmp_path: Path) -> None:
+    """A function entry's error takes no command cut, so the exception line at its end stays (SKY-757)."""
+    frames = "".join(f"def frame_{i}(case):\n    return frame_{i + 1}(case)  # {'padding ' * 8}\n" for i in range(6))
+    source = frames + "def frame_6(case):\n    return {}['missing']\n\ndef run(case):\n    return frame_0(case)\n"
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/cand.py": source})
+    metric = "def score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': 'ran'}\n"
     scorer = RepoScorer(
         RepoWorkspace(
             runtime=LocalSubprocessRuntime(),
@@ -4814,15 +5174,16 @@ def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: 
         ),
         metric,
         timeout_seconds=60,
-        run_entry=("python3", "src/cmd.py"),
+        run_entry="src/cand.py:run",
         run_timeout=10.0,
     )
     try:
-        result = scorer.score("", {"input": {"q": 1}, "expected": 2})
+        result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == pytest.approx(0.5)
-    assert json.loads(result["feedback"]) == {"exit_code": 3, "stdout": '{"q": 1}\n'}
+    assert result["score"] is None
+    assert len(result["feedback"]) > runner.COMMAND_CAUSE_CHARS
+    assert result["feedback"].rstrip().endswith("KeyError: 'missing'")
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
@@ -5137,6 +5498,102 @@ def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: 
         scorer.close()
 
 
+class _CdpathRuntime(LocalSubprocessRuntime):
+    """Local runtime whose candidate runs see a ``CDPATH`` with a decoy work folder in it."""
+
+    def __init__(self, decoy: Path) -> None:
+        """Keep the decoy folder.
+
+        Args:
+            decoy: The folder that ``CDPATH`` names.
+        """
+        super().__init__()
+        self.decoy = decoy
+        self.commands: list[str] = []
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a local box whose candidate runs export ``CDPATH`` first.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The wrapped box.
+        """
+        session = super().open(spec)
+        decoy, commands = self.decoy, self.commands
+
+        class _Cdpath:
+            def __getattr__(self, name: str) -> Any:
+                """Pass every other attribute to the local box.
+
+                Args:
+                    name: The attribute.
+
+                Returns:
+                    The local box's attribute.
+                """
+                return getattr(session, name)
+
+            def run(self, command: str, **options: Any) -> Any:
+                """Run the command; a candidate run gets ``CDPATH`` set to the decoy.
+
+                Args:
+                    command: The shell command.
+                    **options: The run options.
+
+                Returns:
+                    The command's result.
+                """
+                if runner.CANDIDATE_FLAG in command:
+                    commands.append(command)
+                    command = f"export CDPATH={shlex.quote(str(decoy))}; {command}"
+                return session.run(command, **options)
+
+        return _Cdpath()
+
+
+def test_an_image_cdpath_cannot_move_the_root_supervisor_to_another_folder(tmp_path: Path) -> None:
+    """The root supervisor's ``cd`` is absolute, so a ``CDPATH`` decoy work folder is never used (SKY-737)."""
+    decoy = tmp_path / "decoy"
+    (decoy / WORK_DIR / "src").mkdir(parents=True)
+    (decoy / WORK_DIR / "src" / "cand.py").write_text("def echo(value):\n    return 'DECOY'\n")
+    runtime = _CdpathRuntime(decoy)
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert "DECOY" not in json.dumps(result)
+    assert runtime.commands
+    targets = [re.findall(r"\bcd (\S+)", command) for command in runtime.commands]
+    assert all(len(found) == 1 and found[0].startswith("/") and found[0].endswith(f"/{WORK_DIR}") for found in targets)
+    assert not any("PWD" in command for command in runtime.commands)
+
+
+@pytest.mark.parametrize("user_image", [True, False])
+def test_the_root_supervisor_falls_back_to_the_path_python3_only_without_a_user_image(
+    tmp_path: Path, user_image: bool
+) -> None:
+    """In a user image the supervisor runs only the base Python, never a ``python3`` that PATH finds (SKY-737).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+        user_image: Whether the workspace runs a user ``[run]`` image.
+    """
+    runtime = _CdpathRuntime(tmp_path / "decoy")
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    scorer._workspace.user_run_image = user_image
+    try:
+        scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert runtime.commands
+    for command in runtime.commands:
+        assert f"p={shlex.quote(repo_scorer._BASE_PYTHON)}" in command
+        assert ("p=python3" in command) is not user_image
+
+
 def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:
     """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751).
 
@@ -5187,3 +5644,378 @@ def test_the_root_supervisor_refuses_a_changed_runner_file(tmp_path: Path) -> No
     assert "The supervisor file changed before it ran." in done.stderr
     path.write_text(repo_scorer.RUNNER_SOURCE, encoding="utf-8")
     assert subprocess.run([*boot, "--help"], capture_output=True, timeout=60, check=False).stderr.find(b"changed") == -1
+
+
+@pytest.mark.parametrize("value", [None, "/etc/box.cnf", "/dev/null"], ids=["unset", "set", "image-dev-null"])
+def test_the_root_supervisor_hashes_without_the_image_openssl_config(tmp_path: Path, value: str | None) -> None:
+    """The whole root process, after the hash too, reads no image OpenSSL config (SKY-737).
+
+    An image without ``_hashlib`` first loads OpenSSL at the runner's ``import ssl``,
+    after the hash, so the runner body must still see ``/dev/null``. The body also
+    gets the box's own value in ``_box_openssl_conf``, for the entry.
+    """
+    source = "import os, ssl\nprint(repr(os.environ.get('OPENSSL_CONF')), repr(_box_openssl_conf))\n"
+    path = tmp_path / "runner.py"
+    path.write_text(source, encoding="utf-8")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    env = {name: item for name, item in os.environ.items() if name != "OPENSSL_CONF"}
+    if value is not None:
+        env["OPENSSL_CONF"] = value
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", repo_scorer._SUPERVISOR_BOOT, str(path), digest],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+        env=env,
+    )
+
+    assert repo_scorer._SUPERVISOR_BOOT.index("'/dev/null'") < repo_scorer._SUPERVISOR_BOOT.index("import hashlib")
+    assert done.stdout == f"'/dev/null' {value!r}\n"
+
+
+_BASH_METRIC = """#!/usr/bin/env bash
+set -euo pipefail
+if grep -q 'x = 7' "$ASCENT_INPUT"; then
+  echo '{"score": 0.7, "feedback": "seven", "scores": {"exact": {"score": 1}}}' > "$ASCENT_OUTPUT"
+else
+  echo '{"score": 0.1, "feedback": "not seven"}' > "$ASCENT_OUTPUT"
+fi
+"""
+
+
+def _command_scorer(
+    tmp_path: Path,
+    metric: str,
+    monkeypatch: pytest.MonkeyPatch,
+    metric_setup: str | None = None,
+    entry: str = "eval/metric.sh",
+) -> tuple[RepoScorer, Path]:
+    """Build a scorer whose ``[metric] entry`` is a bash command in the hidden ``eval`` folder (SKY-738).
+
+    Args:
+        tmp_path: Scratch folder.
+        metric: The text of ``eval/metric.sh``.
+        monkeypatch: Puts this interpreter's folder first on ``PATH``, since the box's
+            ``python3`` must run the OpenAscent package.
+        metric_setup: The ``[metric] setup`` command, or None (SKY-740).
+        entry: The bash script that ``[metric] entry`` runs.
+
+    Returns:
+        The scorer and its archive.
+    """
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.sh": metric})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+            metric_setup=metric_setup,
+        ),
+        "",
+        timeout_seconds=60,
+        run_entry=("sh", "-c", 'printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"'),
+        metric_entry=("bash", entry),
+    )
+    return scorer, archive
+
+
+def test_a_bash_metric_scores_each_version_through_the_local_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real bash ``[metric] entry`` reads the ``[run]`` output and scores the baseline and a version (SKY-738)."""
+    scorer, archive = _command_scorer(tmp_path, _BASH_METRIC, monkeypatch)
+    try:
+        baseline = scorer.score("")
+        improved = scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 7\n"}), {"input": 1})
+    finally:
+        scorer.close()
+
+    assert (baseline["score"], baseline["feedback"]) == (pytest.approx(0.1), "not seven")
+    assert (improved["score"], improved["feedback"]) == (pytest.approx(0.7), "seven")
+    assert improved["scores"] == {"exact": {"score": pytest.approx(1.0), "feedback": ""}}
+
+
+def test_a_metric_setup_builds_the_bash_metric_once_and_each_score_uses_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[metric] setup`` builds the metric one time; each score runs the built file (SKY-740).
+
+    The build writes ``eval/built.sh`` from the checked-in source and adds one line to
+    ``eval/builds.log``. The built metric puts that line count in its feedback, so two
+    scores that both say ``builds=1`` prove that the setup ran once and its files stayed.
+    """
+    template = (
+        "builds=$(wc -l < eval/builds.log | tr -d ' ')\n"
+        'echo "{\\"score\\": 0.7, \\"feedback\\": \\"builds=$builds\\"}" > "$ASCENT_OUTPUT"\n'
+    )
+    build = "cp eval/metric.sh eval/built.sh && echo built >> eval/builds.log"
+    scorer, archive = _command_scorer(tmp_path, template, monkeypatch, metric_setup=build, entry="eval/built.sh")
+    try:
+        first = scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 7\n"}), {"input": 1})
+        second = scorer.score(_patch(tmp_path / "v2", archive, {"src/app.py": "x = 7\n"}), {"input": 2})
+    finally:
+        scorer.close()
+
+    assert (first["score"], first["feedback"]) == (pytest.approx(0.7), "builds=1")
+    assert second["feedback"] == "builds=1"
+
+
+@pytest.mark.parametrize(
+    ("metric", "message"),
+    [
+        ("echo secret-stderr >&2\nexit 4\n", "exited with a nonzero code (4)"),
+        ("exit 0\n", "wrote no result file at ASCENT_OUTPUT"),
+        ('echo nope > "$ASCENT_OUTPUT"\n', "result file is not valid JSON"),
+        ('echo \'{"feedback": "x"}\' > "$ASCENT_OUTPUT"\n', "does not have the valid form"),
+    ],
+)
+def test_a_failed_bash_metric_gives_no_score_and_names_the_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metric: str, message: str
+) -> None:
+    """Each failure raises Skynet's fixed message for its cause; the command's stderr stays out of it."""
+    scorer, _ = _command_scorer(tmp_path, metric, monkeypatch)
+    try:
+        with pytest.raises(RepoScoreError, match=re.escape(message)) as caught:
+            scorer.score("")
+    finally:
+        scorer.close()
+
+    assert "secret-stderr" not in str(caught.value)
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_metric_answer_leaves_no_part_of_a_secret_in_the_server_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    secret: str,
+    script: str,
+    pieces: tuple[str, ...],
+) -> None:
+    """A command metric whose answer is not valid JSON logs the fixed cause, which quotes no file (SKY-757)."""
+    scorer, _ = _command_scorer(tmp_path, script + "\n", monkeypatch)
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="result file is not valid JSON"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+    assert runner.INVALID_JSON_CAUSE in caplog.text
+    assert not [piece for piece in pieces if piece in caplog.text]
+
+
+# Calls the double stage with curl, checks each refused call and the error text of the
+# time-out and no-output stages, and scores the doubled value (SKY-767).
+_STAGE_BASH_METRIC = """set -euo pipefail
+post() { curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST -d "$2" "$1"; }
+doubled=$(curl -sf --noproxy '*' -X POST -d '{"input": {"v": 3}}' "$ASCENT_STAGE_DOUBLE_URL")
+unknown=$(post "${ASCENT_LOG_URL%/log}/stage/shout" '{"input": "hi"}')
+broken=$(post "$ASCENT_STAGE_BROKEN_URL" '{"input": 1}')
+slow=$(post "$ASCENT_STAGE_SLOW_URL" '{"input": 5}')
+slow_error=$(cat body.out)
+empty=$(post "$ASCENT_STAGE_EMPTY_URL" '{"input": 1}')
+empty_error=$(cat body.out)
+python3 - "$doubled" "$unknown" "$broken" "$slow" "$empty" "${ASCENT_STAGE_SHOUT_URL-unset}" \
+  "$slow_error" "$empty_error" <<'PY'
+import json, os, sys
+doubled, unknown, broken, slow, empty, shout, slow_error, empty_error = sys.argv[1:]
+feedback = f"unknown={unknown} broken={broken} slow={slow} empty={empty} shout={shout}"
+for name, body in (("slow", slow_error), ("empty", empty_error)):
+    feedback += f"\\n{name}: {json.loads(body)['error']}"
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"score": json.loads(doubled)["output"]["v"] / 10, "feedback": feedback}, f)
+PY
+"""
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls its stages with curl")
+def test_a_bash_metric_calls_a_stage_with_curl_and_a_stage_outside_the_run_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real bash metric reaches ``[target.double]`` at its URL; other stages and failed stages answer an error."""
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    stages = {name: STAGES[name] for name in ("double", "broken", "slow")}
+    # A command stage that writes no ASCENT_OUTPUT gives no valid output.
+    stages["empty"] = TargetStage(entry=("true",), timeout=30)
+    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.sh": _STAGE_BASH_METRIC})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+        ),
+        "",
+        timeout_seconds=60,
+        run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"'),
+        metric_entry=("bash", "eval/metric.sh"),
+        stages=stages,
+        stage_runtime=RecordingRuntime(),
+        stage_archive=_archive(tmp_path / "stage", STAGE_TREE),
+    )
+    try:
+        baseline = scorer.score("")
+        version = scorer.score(
+            _patch(tmp_path / "v1", archive, {"src/stages.py": STAGE_TREE["src/stages.py"].replace("2", "3")})
+        )
+    finally:
+        scorer.close()
+
+    assert baseline["score"] == pytest.approx(0.6)
+    statuses, slow, empty = baseline["feedback"].split("\n")
+    assert statuses == "unknown=404 broken=502 slow=502 empty=502 shout=unset"
+    assert slow == "slow: Stage 'slow' passed its 1s timeout."
+    assert empty.startswith("empty: Stage 'empty' failed: The command wrote no output file.")
+    assert version["score"] == pytest.approx(0.9)
+
+
+# Asks the judge model once and scores 1 when the model answered; its env must hold no key.
+_MODEL_BASH_METRIC = """set -euo pipefail
+keys=$(env | grep -c sk-metric-key || true)
+status=$(curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST \\
+  -d "{\\"model\\": \\"$ASCENT_MODEL\\", \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"hi\\"}]}" \\
+  "$ASCENT_MODEL_URL/chat/completions")
+printf '{"score": 1, "feedback": "keys=%s status=%s"}' "$keys" "$status" > "$ASCENT_OUTPUT"
+"""
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls the model with curl")
+def test_a_command_metric_gets_the_model_key_by_file_and_not_in_its_box_command_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metric box command env holds no key; the runner takes it from the call's key file (SKY-767)."""
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    commands: list[tuple[str, dict[str, str]]] = []
+    run = LocalSubprocessSession.run
+
+    def recorded(self: LocalSubprocessSession, command: str, **kwargs: Any) -> Any:
+        """Record each box command and its env, then run it."""
+        commands.append((command, dict(kwargs.get("env") or {})))
+        return run(self, command, **kwargs)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", recorded)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.sh": _MODEL_BASH_METRIC})
+    with FakeGateway(reply="judged") as fake:
+        scorer = RepoScorer(
+            RepoWorkspace(
+                runtime=LocalSubprocessRuntime(),
+                spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+                archive=archive,
+                editable_paths=["src"],
+                readonly_paths=[],
+                setup_command=None,
+                secrets={},
+                hidden_paths=["eval"],
+            ),
+            "",
+            timeout_seconds=60,
+            gateway=ScorerGateway(url=fake.url, model="judge-model", api_key="sk-metric-key", billing_model="judge"),
+            run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"'),
+            metric_entry=("bash", "eval/metric.sh"),
+        )
+        try:
+            result = scorer.score("")
+        finally:
+            scorer.close()
+    metric_envs = [env for command, env in commands if repo_scorer.METRIC_RUNNER_PATH in command]
+
+    assert result["feedback"] == "keys=0 status=200"
+    assert [request["authorization"] for request in fake.requests] == ["Bearer sk-metric-key"]
+    assert len(metric_envs) == 1
+    assert ENV_API_KEY not in metric_envs[0]
+    assert "sk-metric-key" not in json.dumps(metric_envs[0])
+
+
+def _case_file(path: str) -> str | None:
+    """Name the kind of a per-case file that the scorer writes into a box, or ``None`` for any other file.
+
+    Args:
+        path: The written path, relative to the box.
+
+    Returns:
+        ``runner``, ``ascent``, ``key`` or ``input``, or ``None``.
+    """
+    if path in (repo_scorer.RUNNER_PATH, repo_scorer.METRIC_RUNNER_PATH):
+        return "runner"
+    if path.startswith((f"{repo_scorer.RUN_ASCENT_DIR}/", f"{repo_scorer.METRIC_ASCENT_DIR}/")):
+        return "ascent"
+    return {runner.MODEL_KEY_FILE: "key", runner.INPUT_FILE: "input"}.get(path.rsplit("/", 1)[-1])
+
+
+@pytest.mark.parametrize(
+    ("commands", "expected"),
+    [
+        (False, [{"runner", "input"}, {"runner", "input"}]),
+        (True, [{"runner", "ascent", "input"}, {"runner", "ascent", "key", "input"}]),
+    ],
+    ids=["python-entries", "command-entries-with-model-key"],
+)
+def test_each_box_gets_its_case_files_in_one_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: bool, expected: list[set[str]]
+) -> None:
+    """One case writes its runner, OpenAscent, model key and input files in one call for each box (SKY-913).
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        commands: Command ``[run]`` and metric entries, with a model route, instead of Python ones.
+        expected: The kinds of files in each case write: the candidate box's, then the metric box's.
+    """
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    writes: list[list[str]] = []
+    write = LocalSubprocessSession.write_files
+
+    def recorded(self: LocalSubprocessSession, files: Mapping[str, str]) -> None:
+        """Record each write's paths, then write.
+
+        Args:
+            self: The session.
+            files: The files to write.
+        """
+        writes.append(list(files))
+        write(self, files)
+
+    monkeypatch.setattr(LocalSubprocessSession, "write_files", recorded)
+    metric = 'printf \'{"score": 1, "feedback": "ok"}\' > "$ASCENT_OUTPUT"\n'
+    archive = _archive(tmp_path, {"src/cand.py": "def run(value):\n    return value\n", "eval/metric.sh": metric})
+    with FakeGateway(reply="judged") as fake:
+        scorer = RepoScorer(
+            RepoWorkspace(
+                runtime=LocalSubprocessRuntime(),
+                spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+                archive=archive,
+                editable_paths=["src"],
+                readonly_paths=[],
+                setup_command=None,
+                secrets={},
+                hidden_paths=["eval"],
+            ),
+            "" if commands else "def score(repo_path, case=None, output=None):\n    return {'score': 1.0}\n",
+            timeout_seconds=60,
+            gateway=(
+                ScorerGateway(url=fake.url, model="judge-model", api_key="sk-metric-key", billing_model="judge")
+                if commands
+                else None
+            ),
+            run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"') if commands else "src/cand.py:run",
+            metric_entry=("bash", "eval/metric.sh") if commands else "eval/metric.py:score",
+        )
+        try:
+            assert scorer.score("", {"input": 1})["score"] == pytest.approx(1.0)
+        finally:
+            scorer.close()
+    case_writes = [kinds for kinds in ({_case_file(path) for path in paths} - {None} for paths in writes) if kinds]
+
+    assert case_writes == expected

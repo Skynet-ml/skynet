@@ -443,7 +443,7 @@ def build_remote_mcp(
             str,
             Field(
                 pattern=REPO_SECRET_NAME_PATTERN,
-                description="The environment variable name, as in the ${NAME} placeholder in optimize.toml.",
+                description="The environment variable name, as in the ${NAME} placeholder in ascent.toml.",
             ),
         ],
     ) -> dict[str, Any]:

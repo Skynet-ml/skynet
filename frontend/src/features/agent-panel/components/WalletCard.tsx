@@ -9,7 +9,6 @@ import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import type { AgentToolCall } from "@/shared/ui/agent/types";
 
 import { ToolCallRow } from "./ToolCallRow";
-import { StatTile } from "./result-card-atoms";
 import { walletView, type WalletView } from "../lib/wallet-view";
 
 interface WalletCardProps {
@@ -32,8 +31,7 @@ function buildSummary(view: WalletView | null, isRunning: boolean): string | nul
 
 /**
  * Result card for ``get_wallet_for_agent`` — the caller's spendable balance in
- * dollars (free grant + paid balance) as a headline, a free-grant / paid-balance
- * split, and the most recent ledger entries. In the Mac app it shows the linked
+ * dollars as a headline and the most recent ledger entries. In the Mac app it shows the linked
  * account's hosted balance, or a sign-in prompt when no account is linked.
  */
 export function WalletCard({ call }: WalletCardProps) {
@@ -75,32 +73,11 @@ export function WalletCard({ call }: WalletCardProps) {
     return <ToolCallRow call={call} summary={summary} customBody={customBody} />;
   }
 
-  const { grant, usage } = view;
+  const { usage } = view;
 
   const customBody = (
     <div className="space-y-3">
       {headline}
-
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-        {/* Only legacy accounts still hold a grant — hide the tile when the
-            account never had one. */}
-        {(grant.cents_total ?? 0) > 0 && (
-          <StatTile
-            label={msg("auto.features.agent.panel.components.walletcard.free_grant")}
-            value={
-              grant.cents_remaining == null
-                ? null
-                : `${fmtUsd(grant.cents_remaining)} / ${fmtUsd(grant.cents_total ?? 0)}`
-            }
-            valueDir="ltr"
-          />
-        )}
-        <StatTile
-          label={msg("auto.features.agent.panel.components.walletcard.paid_balance")}
-          value={fmtUsd(view.paidCents)}
-          valueDir="ltr"
-        />
-      </dl>
 
       {usage.length > 0 && (
         <div className="space-y-1">

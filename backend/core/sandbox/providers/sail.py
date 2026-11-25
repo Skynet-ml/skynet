@@ -6,6 +6,18 @@ from ``harbor/environments/sail.py``. Changes:
 
 - The provider implements the async ``SandboxEnvironment`` contract. The
   factory refuses it in production (``production_allowed=False``).
+- A box with a budget is protected (SKY-554). It reserves its whole
+  lifetime before the create, checks the created box against its funding,
+  and settles Sail's reported spend after the terminate, also after a
+  failed or cancelled start. The SDK retries a create under one
+  idempotency key, so a create error alone does not prove that no box
+  exists. After a failed create the provider looks up the box by its name,
+  which gets a random suffix: a found box is terminated and settled, and the
+  hold is released only when Sail clearly refused the create and the lookup
+  finds no box. A failed start returns its error once the box is gone.
+  Sail shows the spend minutes after the terminate, so the spend wait and
+  the settle go on in a background task after ``stop()`` returns. Sail has no lifetime extension, so
+  the box never extends its funding.
 - The provider adds no retry of its own (SKY-406 D3, D10). An SDK error
   maps to ``SandboxInfraError``, because the SDK error classes are not known.
 - The start and run phase timeouts bound the create and each command. A
@@ -18,9 +30,10 @@ from ``harbor/environments/sail.py``. Changes:
   ends a box that a lost process never stops.
 - The spec sizes map to ``Sailbox.size_for``. The spec image comes from a
   registry; ``DEFAULT_IMAGE`` is used when the spec names none.
-- ``stop_job_sandboxes`` terminates the Sailboxes that this process started
-  for the job. Sail has no list call in the Harbor code, so boxes of other
-  processes end only at their lifetime limit.
+- ``stop_job_sandboxes`` stops the Sailboxes that this process started for
+  the job at the same time. Sail has no list
+  call in the Harbor code, so boxes of other processes end only at their
+  lifetime limit.
 - Harbor's Dockerfile and compose builds, the DinD strategy, directory
   transfer, attach and sleep-on-stop are left out.
 """
@@ -29,16 +42,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import io
 import logging
 import math
 import shlex
 import uuid
-from collections.abc import Awaitable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
-from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
+from core.billing.budgets import BudgetError
+from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
+from core.billing.sail_usage import USAGE
+
+from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxError, SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..resources import ResourceMode, SandboxSpec
@@ -71,15 +90,36 @@ _TIMEOUT_EXIT_CODE = 124
 
 SAIL_CAPABILITIES = EnvironmentCapabilities(
     name="sail",
+    billable=True,
     network_modes=frozenset(NetworkMode),
     dynamic_network_policy=True,
 )
 
 # Process-local: the sweep sees only the boxes that this process started.
 _JOB_BOXES: dict[str, set[SailEnvironment]] = {}
+# The Sail create docs list these statuses as answers that make no box. 429
+# and 409 are left out: the SDK retries a create under one idempotency key,
+# so an earlier attempt can still run or have made the box when a retry gets
+# the 429 or the 409. A refused create still releases its hold only when the
+# name lookup finds no box.
+_REFUSED_CREATE_STATUSES = frozenset({400, 401, 402, 403, 404, 413, 422})
+# InvalidArgumentError comes from the SDK's argument checks, and
+# ImageBuildError from the image build, both before the create request. A
+# TypeError is left out: it can also come from reading the answer after
+# Sail made the box.
+_REFUSED_CREATE_ERRORS = frozenset(
+    {"InvalidArgumentError", "PermissionDeniedError", "NotFoundError", "ImageBuildError"}
+)
+# The SDK 0.17.2 status (``SailboxStatus``) of a box that can no longer
+# spend. "failed" is left out: a failed box may still hold billable state
+# disk until Sail deletes it.
+_GONE_STATUSES = frozenset({"terminated"})
 # Strong references to the creates that outlive their start, and to the
 # terminate calls of their late boxes, so the event loop does not drop them.
 _LATE_TASKS: set[asyncio.Future[Any]] = set()
+# Strong references to the spend waits that outlive their stop(), so the
+# event loop does not drop them.
+_SPEND_TASKS: set[asyncio.Future[None]] = set()
 
 
 @contextlib.contextmanager
@@ -103,6 +143,26 @@ def _mapped(action: str) -> Iterator[None]:
         raise SandboxInfraError(f"Sail could not {action}: {type(error).__name__}.") from error
 
 
+def _refused_create(error: BaseException | None) -> bool:
+    """Tell whether a create failure shows that Sail made no box.
+
+    The SDK maps no HTTP status to an error class, so the check uses the
+    class name and the ``status_code`` attribute. This check alone never
+    frees a hold; the name lookup must also find no box.
+
+    Args:
+        error: The SDK error of the create, or ``None``.
+
+    Returns:
+        True when no box can exist for the create.
+    """
+    if error is None:
+        return False
+    if type(error).__name__ in _REFUSED_CREATE_ERRORS:
+        return True
+    return getattr(error, "status_code", None) in _REFUSED_CREATE_STATUSES
+
+
 async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
     """Wait for a cleanup call for at most ``STOP_TIMEOUT`` seconds.
 
@@ -121,20 +181,22 @@ async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
     return True
 
 
-def _terminate_late(create: asyncio.Future[Any]) -> None:
+def _terminate_late(create: asyncio.Future[Any], hold_key: str | None) -> None:
     """Terminate the box of a create that outlives its start, when it arrives.
 
     Args:
         create: The create task. It can still run or be done already.
+        hold_key: The operation key of the box's hold, or ``None`` for an unprotected box.
     """
     _LATE_TASKS.add(create)
-    create.add_done_callback(_on_late_create)
+    create.add_done_callback(functools.partial(_on_late_create, hold_key))
 
 
-def _on_late_create(create: asyncio.Future[Any]) -> None:
+def _on_late_create(hold_key: str | None, create: asyncio.Future[Any]) -> None:
     """Start the terminate call for the box of a late create.
 
     Args:
+        hold_key: The operation key of the box's hold, or ``None`` for an unprotected box.
         create: The finished create task.
     """
     _LATE_TASKS.discard(create)
@@ -144,9 +206,86 @@ def _on_late_create(create: asyncio.Future[Any]) -> None:
     if error is not None:
         logger.warning("A late Sailbox create failed: %s", type(error).__name__)
         return
-    terminate = asyncio.ensure_future(_bounded(create.result().terminate.aio(), "terminate a late Sailbox"))
+    sailbox = create.result()
+    if hold_key is not None:
+        # The ledger keeps the first pending evidence and refuses a change,
+        # so only this log ties the hold to the box for a reconcile.
+        logger.warning("Sail terminates the late box %s of the pending hold %s.", sailbox.sailbox_id, hold_key)
+    terminate = asyncio.ensure_future(_bounded(sailbox.terminate.aio(), "terminate a late Sailbox"))
     _LATE_TASKS.add(terminate)
     terminate.add_done_callback(_LATE_TASKS.discard)
+
+
+def _release_late(reserving: asyncio.Future[Any]) -> None:
+    """Release the hold of a reserve that outlives its teardown, when it arrives.
+
+    The create starts only after the reserve returns, so no box exists for
+    this hold.
+
+    Args:
+        reserving: The reserve call. It can still run or be done already.
+    """
+    _LATE_TASKS.add(reserving)
+    reserving.add_done_callback(_on_late_reserve)
+
+
+def _on_late_reserve(reserving: asyncio.Future[Any]) -> None:
+    """Start the release call for the hold of a late reserve.
+
+    Args:
+        reserving: The finished reserve call.
+    """
+    _LATE_TASKS.discard(reserving)
+    if reserving.cancelled() or reserving.exception() is not None:
+        return
+    release = asyncio.ensure_future(asyncio.to_thread(reserving.result().release, refused=False))
+    _LATE_TASKS.add(release)
+    release.add_done_callback(_on_late_release)
+
+
+def _on_late_release(release: asyncio.Future[Any]) -> None:
+    """Log a failed release of a late hold, which then stays for the ledger sweep.
+
+    Args:
+        release: The finished release call.
+    """
+    _LATE_TASKS.discard(release)
+    if not release.cancelled() and release.exception() is not None:
+        logger.warning("Sail could not release a late hold: %s", type(release.exception()).__name__)
+
+
+async def _settle_spend(usage: Any) -> None:
+    """Wait for the spend of a terminated box, then settle its hold once.
+
+    The teardown hands the hold to this task and keeps no reference, so no
+    retry path can settle it again. A spend that does not arrive, a failed
+    read or a cancel keeps the hold pending.
+
+    Args:
+        usage: The usage reservation of the terminated box.
+    """
+    try:
+        spend = await usage.final_spend()
+    except BaseException:
+        # A failed pending call must not replace the first error or a cancel.
+        try:
+            await asyncio.to_thread(usage.pending)
+        except Exception as pending_error:
+            logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
+        raise
+    # settle_spend marks the hold pending itself when it fails.
+    await asyncio.to_thread(usage.settle_spend, spend)
+
+
+def _on_spend_done(task: asyncio.Future[None]) -> None:
+    """Forget a finished spend wait and log its failure.
+
+    Args:
+        task: The finished spend task.
+    """
+    _SPEND_TASKS.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("Sail sandbox usage stays pending: %s", type(task.exception()).__name__)
 
 
 def _egress_policy(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> Any:
@@ -208,20 +347,44 @@ class SailEnvironment(SandboxEnvironment):
 
     capabilities = SAIL_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, timeouts: PhaseTimeouts | None = None) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        timeouts: PhaseTimeouts | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = USAGE.reserve,
+    ) -> None:
         """Check the spec and prepare the create call.
 
         Args:
             spec: The sandbox to open.
             timeouts: The phase timeouts; ``None`` sets no start or run limit.
+            budget: The ``BudgetRuntime`` that funds the box, or ``None``.
+            usage_factory: Makes the usage reservation of a protected box.
 
         Raises:
-            SandboxSpecError: The spec breaks a provider rule.
+            SandboxSpecError: The spec breaks a provider rule, or a protected
+                box has no operation key.
         """
+        if budget is not None and spec.operation_key is None:
+            raise SandboxSpecError("A protected Sail sandbox needs an operation key.")
         super().__init__(spec)
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._billing_call: asyncio.Future[Any] | None = None
+        self._pending_marked = False
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
-        self._name = spec.name or f"skynet-{uuid.uuid4().hex[:12]}"
+        # Sail lists old terminated boxes too, so the lookup after a failed
+        # create needs a name that no earlier box of the same spec has.
+        if spec.name is None:
+            self._name = f"skynet-{uuid.uuid4().hex[:12]}"
+        elif budget is not None:
+            self._name = f"{spec.name}-{uuid.uuid4().hex[:8]}"
+        else:
+            self._name = spec.name
         self._job_id = spec.tags.get(JOB_TAG)
         self._sailbox: Any = None
         self._create_task: asyncio.Future[Any] | None = None
@@ -229,7 +392,9 @@ class SailEnvironment(SandboxEnvironment):
         self._settling = False
         self._started = False
         self._terminated = False
-        self._stop_task: asyncio.Future[None] | None = None
+        self._create_failed = False
+        self._create_refused = False
+        self._stop_task: asyncio.Future[list[Exception]] | None = None
 
     @classmethod
     def preflight(cls) -> None:
@@ -267,7 +432,13 @@ class SailEnvironment(SandboxEnvironment):
         try:
             await self._starting
         except BaseException as error:
-            await self.stop()
+            # Wait for the teardown but not through stop(): a settle failure
+            # would hide the start error. It stays for a later stop() call.
+            # The spend wait goes on in a background task, so the teardown
+            # ends once the box is gone.
+            if self._stop_task is None:
+                self._stop_task = asyncio.ensure_future(self._teardown())
+            await asyncio.wait({self._stop_task})
             task = asyncio.current_task()
             if isinstance(error, asyncio.CancelledError) and task is not None and not task.cancelling():
                 raise SandboxInfraError("The Sail sandbox stopped during its start.") from None
@@ -284,8 +455,10 @@ class SailEnvironment(SandboxEnvironment):
         """
         spec = self.spec
         limit = self._start_limit
+        await self._reserve()
+        deadline = asyncio.timeout(limit)
         try:
-            async with asyncio.timeout(limit) as deadline:
+            async with deadline:
                 with _mapped("find the Sail app"):
                     app = await App.find.aio(APP_NAME, mint_if_missing=True)
                 with _mapped("prepare the Sailbox"):
@@ -301,19 +474,87 @@ class SailEnvironment(SandboxEnvironment):
                     }
                     if limit is not None:
                         params["image_build_timeout"] = math.ceil(limit)
-                self._create_task = asyncio.ensure_future(Sailbox.create.aio(**params))
+                if self._usage is not None:
+                    self._usage.begin_create(self._name)
                 try:
                     with _mapped("create the Sailbox"):
+                        # Inside the mapping, so an argument error that the SDK
+                        # raises before any request is seen as a refused create.
+                        create = self._create_task = asyncio.ensure_future(Sailbox.create.aio(**params))
                         # The shield keeps the create running through a cancel,
                         # so the grace below can still get the box handle.
-                        self._keep(await asyncio.shield(self._create_task))
+                        self._keep(await asyncio.shield(create))
                 except asyncio.CancelledError:
                     await self._settle_create()
                     raise
+                except SandboxInfraError as error:
+                    self._create_failed = True
+                    self._create_refused = _refused_create(error.__cause__)
+                    raise
+                if self._usage is not None:
+                    await self._confirm(self._usage)
         except TimeoutError:
-            if not deadline.expired():
+            if limit is None or not deadline.expired():
                 raise
             raise StartTimeoutError(limit) from None
+
+    async def _reserve(self) -> None:
+        """Reserve the whole lifetime of a protected box before the create.
+
+        Raises:
+            BudgetReached: The budget cannot pay for the box.
+            UsagePendingError: The box was already dispatched elsewhere.
+            SandboxSpecError: Skynet cannot price the size or lifetime of the box.
+        """
+        if self._budget is None or self._usage is not None:
+            return
+        with _mapped("prepare the Sailbox"):
+            request = self._usage_request()
+        reserving = asyncio.ensure_future(
+            asyncio.to_thread(self._usage_factory, self._budget, request, operation_key=self.spec.operation_key)
+        )
+        # The thread cannot be cancelled and may still reserve after a stop,
+        # so the teardown waits for this call and settles what it returns.
+        self._billing_call = reserving
+        try:
+            self._usage = await asyncio.shield(reserving)
+        except UnpricedOperationError as error:
+            raise SandboxSpecError(f"Skynet cannot fund this Sailbox: {error}") from error
+
+    def _usage_request(self) -> dict[str, Any]:
+        """Build the request that the reservation prices.
+
+        Returns:
+            The lifetime, the size arguments of the create call, the image and
+            the network of the box.
+        """
+        spec = self.spec
+        return {
+            "lifetime_ms": math.ceil(spec.lifetime_seconds) * 1000,
+            "size": None,
+            "memory_limit_gib": None,
+            "disk_limit_gib": None,
+            **_size_parameters(spec),
+            "image": spec.image or DEFAULT_IMAGE,
+            "network_disabled": spec.network_disabled,
+            "allowed_hosts": sorted(spec.allowed_hosts),
+        }
+
+    async def _confirm(self, usage: Any) -> None:
+        """Check the created box against its funding.
+
+        The create handle carries no limits, so the full box is read first.
+
+        Args:
+            usage: The usage reservation of the box.
+
+        Raises:
+            UsagePendingError: The box is larger than its funding.
+            SandboxInfraError: Sail could not read the box.
+        """
+        with _mapped("read the Sailbox"):
+            sailbox = await Sailbox.get.aio(self._sailbox.sailbox_id)
+        await asyncio.to_thread(usage.confirm_created, sailbox)
 
     async def _settle_create(self) -> None:
         """Give a cancelled create ``CREATE_GRACE`` seconds to return the box.
@@ -330,12 +571,15 @@ class SailEnvironment(SandboxEnvironment):
         try:
             sailbox = await asyncio.wait_for(asyncio.shield(task), CREATE_GRACE)
         except asyncio.CancelledError:
-            _terminate_late(task)
+            _terminate_late(task, self.spec.operation_key if self._budget is not None else None)
             logger.warning("A second cancel came during the Sailbox create grace.")
         except TimeoutError:
-            _terminate_late(task)
+            _terminate_late(task, self.spec.operation_key if self._budget is not None else None)
             logger.warning("Sail did not return a cancelled Sailbox create within the grace.")
         except Exception as error:
+            # The failure does not prove that no box exists, so the settle
+            # looks the box up by its name. It is never a refusal.
+            self._create_failed = True
             logger.warning("A cancelled Sailbox create failed: %s", type(error).__name__)
         else:
             self._keep(sailbox)
@@ -489,13 +733,34 @@ class SailEnvironment(SandboxEnvironment):
             )
 
     async def stop(self) -> None:
-        """Terminate the Sailbox once. Safe to call again and before start."""
+        """Terminate the Sailbox once and hand its reservation to the spend task. Safe to call again and before start.
+
+        The call returns once the terminate is confirmed. It does not wait
+        for the spend: a background task settles the reservation later.
+
+        Raises:
+            UsagePendingError: The box did not terminate, or the ledger call
+                failed, so the reservation stays pending.
+            BudgetError: The ledger refused the settlement.
+        """
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._teardown())
-        await asyncio.shield(self._stop_task)
+        errors = await asyncio.shield(self._stop_task)
+        # The callers of one teardown share its list, so only the first one
+        # raises its failure, and a later teardown cannot clear it.
+        if errors:
+            raise errors.pop()
 
-    async def _teardown(self) -> None:
-        """End a running start, then terminate the Sailbox."""
+    async def _teardown(self) -> list[Exception]:
+        """End a running start, terminate the Sailbox, then settle its reservation.
+
+        The start and reserve waits share ``CREATE_GRACE + STOP_TIMEOUT``.
+
+        Returns:
+            The settle failure of this teardown, or an empty list.
+        """
+        loop = asyncio.get_running_loop()
+        waits_end = loop.time() + CREATE_GRACE + STOP_TIMEOUT
         starting = self._starting
         if starting is not None and not starting.done():
             # A stop during the start: end the create first, so its box handle
@@ -504,32 +769,247 @@ class SailEnvironment(SandboxEnvironment):
             # grace before the handle arrives.
             if not self._settling:
                 starting.cancel()
-            with contextlib.suppress(BaseException):
-                await asyncio.wait_for(asyncio.shield(starting), CREATE_GRACE + STOP_TIMEOUT)
+            try:
+                await asyncio.wait({starting}, timeout=waits_end - loop.time())
+            except BaseException:
+                # A cancel of the teardown here must still release a hold
+                # that the reserve thread returns now or later.
+                billing, self._billing_call = self._billing_call, None
+                if billing is not None and self._usage is None:
+                    _release_late(billing)
+                # Nothing is terminated or settled yet, so a later stop() can
+                # run a fresh teardown instead of the cancelled one.
+                self._stop_task = None
+                if self._usage is not None and self._create_task is None:
+                    # No create was sent, so no box can exist for this hold.
+                    usage, self._usage = self._usage, None
+                    release = asyncio.ensure_future(asyncio.to_thread(usage.release, refused=False))
+                    _LATE_TASKS.add(release)
+                    release.add_done_callback(_on_late_release)
+                elif self._usage is not None:
+                    # A box can exist once the create is sent; keep its hold
+                    # pending until a later stop() settles it.
+                    await self._pend_after_cancel(self._usage)
+                raise
+        billing, self._billing_call = self._billing_call, None
+        if billing is not None:
+            # The reserve thread cannot be cancelled. A hold that arrives after
+            # this wait, or after a cancel of the teardown, is released later.
+            try:
+                await asyncio.wait({billing}, timeout=max(0.0, waits_end - loop.time()))
+            except BaseException:
+                # The reserve can finish at the moment of the cancel; its hold
+                # still needs a release, and a finished call is fine here.
+                if self._usage is None:
+                    _release_late(billing)
+                # Nothing is terminated or settled yet, so a later stop() can
+                # run a fresh teardown instead of the cancelled one.
+                self._stop_task = None
+                raise
+            if not billing.done():
+                _release_late(billing)
+            if billing.done() and self._usage is None and not billing.cancelled() and billing.exception() is None:
+                self._usage = billing.result()
         sailbox, self._sailbox = self._sailbox, None
-        if sailbox is None:
+        if sailbox is not None:
+            try:
+                self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
+            except BaseException:
+                # The box can still run, so its hold stays pending. A later
+                # stop(), or the job sweep, gets the handle and the usage, to
+                # terminate and settle.
+                self._sailbox = sailbox
+                await self._pend_after_cancel(self._usage)
+                raise
+            if not self._terminated:
+                # The box can still run, so a later stop() or the job sweep
+                # needs the handle to try the terminate again.
+                self._keep(sailbox)
+                self._stop_task = None
+            else:
+                job_id = self._job_id
+                boxes = _JOB_BOXES.get(job_id) if job_id is not None else None
+                if job_id is not None and boxes is not None:
+                    boxes.discard(self)
+                    if not boxes:
+                        del _JOB_BOXES[job_id]
+        error = await self._settle(sailbox)
+        return [error] if error is not None else []
+
+    async def _settle(self, sailbox: Any) -> Exception | None:
+        """Release, keep pending or start the settle of the reservation of a protected box.
+
+        A box that did not terminate can still run and spend, so its hold
+        stays pending. A terminated box goes to ``_settle_spend``. Only the
+        ledger calls use threads. A failure keeps the reservation pending,
+        and ``stop()`` raises it.
+
+        Args:
+            sailbox: The SDK handle of the box, or ``None`` when no box came back.
+
+        Returns:
+            The failure that keeps the reservation pending, or ``None``.
+        """
+        usage, self._usage = self._usage, None
+        if usage is None:
+            return None
+        kept = False
+        try:
+            if sailbox is None and self._create_failed:
+                sailbox = await self._find_failed_create(usage)
+            if sailbox is None:
+                await asyncio.to_thread(usage.release, refused=self._create_failed and self._create_refused)
+                return None
+            # A concurrent stop() can terminate the box during the bind below,
+            # so this teardown acts only on the outcome it saw itself.
+            terminated = self._terminated
+            if not terminated:
+                # The box can still run. Keep its handle, its job entry and its
+                # usage before any ledger call can fail, so a later stop() or
+                # the job sweep terminates and settles it; a found box of a
+                # failed create has no handle yet.
+                self._keep(sailbox)
+                self._usage = usage
+                self._stop_task = None
+                kept = True
+            if usage.sailbox_id is None:
+                # A create in its grace returns the handle without a confirm.
+                await asyncio.to_thread(usage.bind, sailbox.sailbox_id)
+            if not terminated:
+                if self._usage is not usage:
+                    # A later teardown took the usage during the bind, so that
+                    # teardown settles the hold, with one spend task.
+                    return None
+                await self._mark_pending(usage)
+                raise UsagePendingError("The Sailbox did not terminate, so its usage stays pending.")
+            # Sail shows the spend minutes after the terminate, longer than a
+            # stop may take, so a task that owns the hold waits for it.
+            task = asyncio.ensure_future(_settle_spend(usage))
+            _SPEND_TASKS.add(task)
+            task.add_done_callback(_on_spend_done)
+            return None
+        except Exception as error:
+            if kept and self._usage is not usage:
+                # A later teardown took the usage during the bind and owns the
+                # hold now, so this failure must not mark it or reach a caller.
+                logger.warning("Sail sandbox %s bind failed after a later stop: %s", self._name, type(error).__name__)
+                return None
+            logger.warning("Sail sandbox %s usage stays pending: %s", self._name, type(error).__name__)
+            # Any error, a BudgetError too, can come before a pending call;
+            # record the hold as pending, best effort, so it is reconciled.
+            if not self._pending_marked:
+                try:
+                    await self._mark_pending(usage)
+                except Exception as pending_error:
+                    logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
+            if isinstance(error, UsagePendingError | BudgetError):
+                return error
+            pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+            pending.__cause__ = error
+            return pending
+        except BaseException:
+            # A cancel during a ledger call must not leave the hold reserved.
+            # stop() shields the teardown, so only an event-loop shutdown
+            # cancels here; a terminated box then keeps a pending hold with no
+            # spend task, and reconciliation settles it.
+            await self._pend_after_cancel(usage)
+            raise
+
+    async def _mark_pending(self, usage: Any) -> None:
+        """Keep the hold pending once, so no path marks it twice.
+
+        The ledger keeps the first pending evidence and refuses a change, and
+        a retried teardown can come here again, so the flag lives as long as
+        the box.
+
+        Args:
+            usage: The usage reservation of the box.
+        """
+        if self._pending_marked:
             return
-        boxes = _JOB_BOXES.get(self._job_id) if self._job_id is not None else None
-        if boxes is not None:
-            boxes.discard(self)
-            if not boxes:
-                del _JOB_BOXES[self._job_id]
-        self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
+        self._pending_marked = True
+        try:
+            await asyncio.to_thread(usage.pending)
+        except Exception:
+            # The mark did not happen, so a later path must try it again. A
+            # cancel keeps the flag: the thread still runs the call.
+            self._pending_marked = False
+            raise
+
+    async def _pend_after_cancel(self, usage: Any) -> None:
+        """Keep the hold pending, best effort, after a cancel ends the teardown.
+
+        Args:
+            usage: The usage reservation of the box, or ``None`` when there is none.
+        """
+        # A cancelled task cannot run again, so a later stop() needs a new one.
+        # The pending flag stays set, so that teardown never marks the hold again.
+        self._stop_task = None
+        if usage is None or self._pending_marked:
+            return
+        try:
+            await self._mark_pending(usage)
+        except Exception as pending_error:
+            logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
+
+    async def _find_failed_create(self, usage: Any) -> Any:
+        """Look up the box of a failed create by its name, and terminate it.
+
+        Args:
+            usage: The usage reservation of the box.
+
+        Returns:
+            The SDK handle of the box, or ``None`` when Sail lists no box with the name.
+
+        Raises:
+            UsagePendingError: The lookup failed, or it found more than one box.
+        """
+        try:
+            listed = await asyncio.wait_for(Sailbox.list.aio(name=self._name), STOP_TIMEOUT)
+        except Exception as error:
+            await self._mark_pending(usage)
+            raise UsagePendingError("Sail could not list boxes after a failed create, so the hold stays.") from error
+        # Only a box with this exact name can belong to this create; never
+        # terminate another box that the list returns.
+        found = [box for box in list(listed) if box.name == self._name]
+        if not found:
+            return None
+        # Together, so several boxes still take one STOP_TIMEOUT.
+        results = await asyncio.gather(*(_bounded(box.terminate.aio(), "terminate the Sailbox") for box in found))
+        # A box that Sail lists as terminated cannot spend, even when this
+        # terminate call fails.
+        self._terminated = all(ended or box.status in _GONE_STATUSES for box, ended in zip(found, results, strict=True))
+        if len(found) > 1:
+            await self._mark_pending(usage)
+            raise UsagePendingError("Sail lists more than one box with the name, so the hold stays.")
+        return found[0]
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
-        """Terminate every Sailbox that this process started for the job.
+        """Stop every Sailbox that this process started for the job, all at the same time.
+
+        Each stop can wait up to ``STOP_TIMEOUT`` for its terminate, so the
+        stops run together and the waits overlap.
 
         Args:
             job_id: The job tag value.
 
         Returns:
             The number of Sailboxes that were terminated. A box that fails to
-            terminate is logged and the sweep goes on.
+            terminate or settle is logged and the sweep goes on.
+
+        Raises:
+            Exception: The first stop error that is not a usage or budget error.
         """
-        stopped = 0
-        for env in list(_JOB_BOXES.get(job_id, ())):
-            await env.stop()
-            if env._terminated:
-                stopped += 1
-        return stopped
+        envs = list(_JOB_BOXES.get(job_id, ()))
+        results = await asyncio.gather(*(env.stop() for env in envs), return_exceptions=True)
+        unexpected: BaseException | None = None
+        for env, result in zip(envs, results, strict=True):
+            if isinstance(result, UsagePendingError | BudgetError):
+                # The hold stays pending for reconciliation; the sweep goes on.
+                logger.warning("Sail sandbox %s usage stays pending: %s", env._name, type(result).__name__)
+            elif isinstance(result, BaseException) and unexpected is None:
+                unexpected = result
+        if unexpected is not None:
+            raise unexpected
+        return sum(1 for env in envs if env._terminated)

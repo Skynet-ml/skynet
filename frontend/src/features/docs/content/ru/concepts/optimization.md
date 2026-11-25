@@ -2,9 +2,9 @@ Skynet — это Optimize Anything: каждый запуск оптимизи�
 
 ## Общий контракт
 
-У каждого запуска есть репозиторий, файл `optimize.toml` с точкой входа `[run]` или этапом `[target.<name>]` и оценщик. Точка входа `[run]` запускает одну версию репозитория на одном примере. Оценщик — это функция Python, которая получает вывод точки входа и пример.
+У каждого запуска есть репозиторий, файл `ascent.toml` с точкой входа `[run]` или этапом `[target.<name>]` и оценщик. Точка входа `[run]` запускает одну версию репозитория на одном примере. Оценщик — это функция Python, которая получает вывод точки входа и пример.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 В корне репозитория есть файл `serve.py` с `def serve(input)`. Точка входа `[run]` вызывает его в своей отдельной песочнице. После запуска Skynet обслуживает через него лучшую версию.
 
-Оценщик работает в отдельной песочнице. В ней есть только ваши файлы метрики и нет кода версии, поэтому оценщик не может импортировать `serve.py`. Он видит версию только через `output` или через `call()` к этапу `[target.<name>]`. Импортируйте `call` так: `from skynet import call`. Без точки входа `[run]` или этапа `[target.<name>]` Skynet отклоняет файл `optimize.toml`.
+Оценщик работает в отдельной песочнице. В ней есть только ваши файлы метрики и нет кода версии, поэтому оценщик не может импортировать `serve.py`. Он видит версию только через `output` или через `call()` к этапу `[target.<name>]`. Импортируйте `call` так: `from openascent import call`. Без точки входа `[run]` или этапа `[target.<name>]` Skynet отклоняет файл `ascent.toml`.
 
 > [!NOTE]
 > Агент для кода, который пишет версии, не видит исходный код оценщика, ожидаемые значения и секреты запуска.
@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | Переменная           | Что содержит                                                   |
 | -------------------- | -------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | URL шлюза. `APP_GATEWAY_URL` содержит то же значение.          |
-| `APP_API_KEY`        | Токен только для этого запуска. Это не ключ провайдера.        |
-| `APP_MODEL`          | Имя модели для запроса. Это модель оценщика этого запуска.     |
+| `OPENAI_BASE_URL`    | URL шлюза. `ASCENT_MODEL_URL` содержит то же значение.         |
+| `ASCENT_MODEL_KEY`   | Токен только для этого запуска. Это не ключ провайдера.        |
+| `ASCENT_MODEL`       | Имя модели для запроса. Это модель оценщика этого запуска.     |
 | `ANTHROPIC_BASE_URL` | URL шлюза для SDK Anthropic.                                   |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

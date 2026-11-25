@@ -264,12 +264,74 @@ entry = "src/run.py:main"
 """
 
 
-def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
+def test_a_valid_ascent_toml_checks_ok(wizard_client: TestClient) -> None:
     """A file the parser accepts comes back ok with no errors."""
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML})
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _VALID_TOML})
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "errors": []}
+    assert resp.json() == {"ok": True, "errors": [], "hidden": 0, "metric_command": None, "proposer_command": None}
+
+
+@pytest.mark.parametrize(
+    ("metric", "command"),
+    [
+        (
+            '[metric]\nfiles = ["eval"]\nentry = ["cargo", "run", "--manifest-path", "eval/Cargo.toml"]\n',
+            ["cargo", "run", "--manifest-path", "eval/Cargo.toml"],
+        ),
+        ('[metric]\nentry = "eval/score.py:grade"\n', None),
+        ("", None),
+    ],
+)
+def test_the_check_names_the_metric_command_only_for_a_command_entry(
+    wizard_client: TestClient, metric: str, command: list[str] | None
+) -> None:
+    """A command ``[metric] entry`` comes back as its argv; a Python entry or none gives null (SKY-770)."""
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _VALID_TOML + metric})
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "ok": True,
+        "errors": [],
+        "hidden": 0,
+        "metric_command": command,
+        "proposer_command": None,
+    }
+
+
+def test_a_bad_file_names_no_metric_command(wizard_client: TestClient) -> None:
+    """A file the parser refuses names no command, so the wizard still asks for metric.py (SKY-770)."""
+    text = _VALID_TOML + '[metric]\nentry = ["bash", "metric.sh"]\n'
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert resp.json()["metric_command"] is None
+
+
+def test_the_check_names_the_proposer_command_of_the_file(wizard_client: TestClient) -> None:
+    """A ``[proposer] entry`` comes back as its argv, so the picker offers it first (SKY-771)."""
+    text = _VALID_TOML + '[proposer]\nentry = ["python", "agent/propose.py"]\n'
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "ok": True,
+        "errors": [],
+        "hidden": 0,
+        "metric_command": None,
+        "proposer_command": ["python", "agent/propose.py"],
+    }
+
+
+def test_a_bad_file_names_no_proposer_command(wizard_client: TestClient) -> None:
+    """A file the parser refuses names no proposer, so the picker stays as it is (SKY-771)."""
+    text = 'version = 1\n[proposer]\nentry = ["python", "agent/propose.py"]\n'
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert resp.json()["proposer_command"] is None
 
 
 @pytest.mark.parametrize(
@@ -287,24 +349,68 @@ def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
         ("[paths\n", None, None, "is not valid TOML"),
     ],
 )
-def test_a_bad_optimize_toml_returns_the_error_and_its_place(
+def test_a_bad_ascent_toml_returns_the_error_and_its_place(
     wizard_client: TestClient, text: str, section: str | None, key: str | None, message: str
 ) -> None:
-    """A parser error comes back with the section and key the editor shows it next to."""
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+    """A parser error comes back first, with the section and key the editor shows it next to."""
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is False
-    [error] = body["errors"]
-    assert (error["section"], error["key"]) == (section, key)
+    error = body["errors"][0]
+    assert (error["level"], error["section"], error["key"]) == ("error", section, key)
     assert message in error["message"]
+
+
+# Three mistakes in three sections, on lines 4, 6 and 8.
+_THREE_MISTAKES = """version = 1
+[run]
+entry = "a.py:f"
+bogus = 1
+[metric]
+entry = 5
+[paths]
+editable = 3
+"""
+
+
+def test_a_file_with_three_mistakes_returns_each_with_its_level_and_line(wizard_client: TestClient) -> None:
+    """One check returns every mistake, each with its level and line, in the parser's order (SKY-763)."""
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _THREE_MISTAKES})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert [(e["level"], e["line"], e["section"], e["key"]) for e in body["errors"]] == [
+        ("error", 4, "run", "bogus"),
+        ("error", 8, "paths", "editable"),
+        ("error", 6, "metric", "entry"),
+    ]
+    assert body["errors"][0]["message"] == "ascent.toml: [run] bogus is not a supported setting."
+
+
+# 600 unsupported keys: the parser lists 500 errors, adds one summary item and hides 100 (SKY-763).
+_OVER_THE_CAP = 'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n' + "".join(
+    f"k{i} = 1\n" for i in range(600)
+)
+
+
+def test_a_file_past_the_parser_cap_lists_500_errors_and_counts_the_hidden_ones(wizard_client: TestClient) -> None:
+    """The route drops the parser's summary item and gives the hidden count, so the client counts right (SKY-763)."""
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _OVER_THE_CAP})
+
+    body = resp.json()
+    assert body["ok"] is False
+    assert len(body["errors"]) == 500
+    assert body["hidden"] == 100
+    assert not any("not shown" in e["message"] for e in body["errors"])
 
 
 def test_a_lone_surrogate_in_the_text_is_a_parser_error_not_a_crash(wizard_client: TestClient) -> None:
     """JSON can carry a lone surrogate that UTF-8 cannot encode; the parser refuses it as bad text."""
     body = '{"text": "instructions = \\"\\ud800\\"\\n"}'
-    resp = wizard_client.post("/wizard/optimize-toml/check", content=body, headers={"content-type": "application/json"})
+    resp = wizard_client.post("/wizard/ascent-toml/check", content=body, headers={"content-type": "application/json"})
 
     assert resp.status_code == 200
     assert resp.json()["ok"] is False

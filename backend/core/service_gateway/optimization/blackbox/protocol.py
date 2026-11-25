@@ -13,7 +13,7 @@ import logging
 import math
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -37,6 +37,9 @@ Candidate = str | dict[str, str]
 SideInfo = dict[str, Any]
 ScorerFn = Callable[[Candidate, Any], tuple[float | None, SideInfo]]
 EvalListener = Callable[["EvalServer", float | None], None]
+# SKY-775: a named score of a ``[metric.scores]`` minimize name carries this key with ``"minimize"``.
+# The value stays the metric's own, so people and API clients see it raw; only engine shaping flips it.
+SCORE_DIRECTION_KEY = "direction"
 
 # Side info ``status`` of a case the metric or scorer crashed on. That case has
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
@@ -224,6 +227,22 @@ class ScorerAbortError(RuntimeError):
     """
 
 
+class FileTooLargeError(Exception):
+    """Raised by a capped ``read_file`` of the engine context when a tree file is larger than the cap."""
+
+    def __init__(self, path: str, size: int, max_bytes: int) -> None:
+        """Keep the file's size and the cap.
+
+        Args:
+            path: The ``/``-separated path that the caller asked for.
+            size: The file's length in bytes.
+            max_bytes: The cap of the read.
+        """
+        super().__init__(f"file {path} has {size} bytes, more than the cap of {max_bytes}")
+        self.size = size
+        self.max_bytes = max_bytes
+
+
 def candidate_key(candidate: Candidate) -> str:
     """Return a stable identity string for a candidate.
 
@@ -404,9 +423,9 @@ class ToolCall(TypedDict):
     """One tool call that a model reply asks for, in the engine loop's flat form.
 
     ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
-    parsed JSON object, or the raw text when the model sent text that is not a JSON object, or
-    :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for text, so the model can
-    correct its call.
+    parsed JSON object, or the raw text when the model sent text that is not a JSON object or that holds a lone
+    surrogate, or :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for text, so the model
+    can correct its call.
     """
 
     id: str
@@ -436,17 +455,75 @@ def openai_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
     ]
 
 
+def escape_surrogates(text: str) -> str:
+    """Write each lone surrogate of a text as its ``\\uXXXX`` escape, so the text encodes as UTF-8.
+
+    A model can send the JSON escape of a lone surrogate. The step log stores UTF-8, which has no surrogates, so
+    one such reply would stop the run at its commit (SKY-821). Other text stays as it is.
+
+    Args:
+        text: The text from the model.
+
+    Returns:
+        The text with no lone surrogate.
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _has_surrogate(value: Any) -> bool:
+    """Return whether a parsed JSON value holds a lone surrogate in a key or a text, at any depth.
+
+    Args:
+        value: The parsed value.
+
+    Returns:
+        Whether the value cannot encode as UTF-8.
+    """
+    if isinstance(value, str):
+        return escape_surrogates(value) != value
+    if isinstance(value, dict):
+        return any(_has_surrogate(key) or _has_surrogate(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_has_surrogate(item) for item in value)
+    return False
+
+
+def safe_tool_call(call: ToolCall) -> ToolCall:
+    """Return a tool call with no lone surrogate, so its step commits; a safe call stays as it is.
+
+    Arguments that hold one become their JSON text, which writes it as an escape, so the engine refuses only this
+    call. The id and the name get their surrogates escaped.
+
+    Args:
+        call: The tool call from the model client.
+
+    Returns:
+        The call that the step log can store.
+    """
+    arguments = call["arguments"]
+    if isinstance(arguments, str):
+        arguments = escape_surrogates(arguments)
+    elif _has_surrogate(arguments):
+        arguments = escape_surrogates(json.dumps(arguments, default=str, ensure_ascii=False))
+    return {
+        "id": escape_surrogates(call["id"]) if isinstance(call["id"], str) else call["id"],
+        "name": escape_surrogates(call["name"]) if isinstance(call["name"], str) else call["name"],
+        "arguments": arguments,
+    }
+
+
 def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
 
     Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
-    call keeps the raw text instead. ``arguments`` that are already a dict stay as they are. Missing or empty
-    ``arguments`` become ``{}``. Any other value, such as a list or a number, becomes its JSON text, so the call
-    keeps the value and the arguments stay a dict or text. Text or a value, a dict included, that nests more than
-    ``MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
-    only that call. Deep text must not reach the transcript: a later call would read it again, raise
-    :class:`RecursionError` and fail every later model call in the session. The bound is a fixed count, not the
-    stack, so the same reply always gives the same calls.
+    call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
+    already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
+    list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
+    JSON whose parsed object holds a lone surrogate keeps its raw text, and :func:`safe_tool_call` makes each call
+    safe for the step log. Text or a value, a dict included, that nests more than ``MAX_ARGUMENTS_DEPTH`` levels
+    becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses only that call. Deep text must not
+    reach the transcript: a later call would read it again, raise :class:`RecursionError` and fail every later model
+    call in the session. The bound is a fixed count, not the stack, so the same reply always gives the same calls.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -481,11 +558,11 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
             except RecursionError:
                 # The depth check counts levels, not stack frames; a deep caller stack can still overflow.
                 arguments = TOO_DEEP_ARGUMENTS
-            except ValueError:
+            except (TypeError, ValueError):
                 arguments = raw
             else:
-                arguments = parsed if isinstance(parsed, dict) else raw
-        calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
+                arguments = parsed if isinstance(parsed, dict) and not _has_surrogate(parsed) else raw
+        calls.append(safe_tool_call({"id": call["id"], "name": function["name"], "arguments": arguments}))
     return calls
 
 
@@ -508,7 +585,7 @@ class RepoSeed:
     the folder itself. When the seed hides paths of its own, the tree must also have no other symlink loop and no
     other symlink that names an absolute path or a path that leaves the tree, since the loop cannot tell what it
     reaches. A candidate may change a constrained path, but only within the rules of the constraints file
-    (``optimize.toml``). The engine loop does not enforce the editable, read-only and constrained paths; the
+    (``ascent.toml``). The engine loop does not enforce the editable, read-only and constrained paths; the
     caller enforces them where it accepts a candidate.
     """
 
@@ -543,13 +620,24 @@ class CallModel(Protocol):
 class RunCommand(Protocol):
     """Run one command in a box over a tree, as one step of the worker engine loop."""
 
-    def __call__(self, tree_id: str, command: str, grants: tuple[Grant, ...] = ()) -> tuple[CommandResult, str]:
+    def __call__(
+        self,
+        tree_id: str,
+        command: str,
+        grants: tuple[Grant, ...] = (),
+        *,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[CommandResult, str]:
         """Run a command over a tree.
 
         Args:
             tree_id: The tree the command starts from.
             command: The shell command.
             grants: The box's network grants; empty means no network.
+            timeout_seconds: The limit of the command; ``None`` keeps the sandbox's limit.
+            env: Extra environment for this command only, such as the run's scoped model key. The step log does
+                not keep it.
 
         Returns:
             The command's result and the tree id after it.
@@ -560,12 +648,16 @@ class RunCommand(Protocol):
 class PutFiles(Protocol):
     """Write files over a tree with no box."""
 
-    def __call__(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
+    def __call__(
+        self, files: Mapping[str, bytes], base_tree_id: str | None = None, *, executables: Collection[str] = ()
+    ) -> str:
         """Write files over a base tree.
 
         Args:
             files: The file bytes by ``/``-separated path.
             base_tree_id: The tree to start from; ``None`` starts from an empty tree.
+            executables: The written paths to make executable; another written file keeps an existing
+                executable mode.
 
         Returns:
             The new tree id.
@@ -573,15 +665,37 @@ class PutFiles(Protocol):
         ...
 
 
+class ReadFile(Protocol):
+    """Read one file of a tree with no box, with an optional byte cap."""
+
+    def __call__(self, tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
+        """Read a file.
+
+        Args:
+            tree_id: The tree.
+            path: The ``/``-separated path of the file.
+            max_bytes: The most bytes to load; ``None`` loads the file at any size. A file above the cap
+                does not load.
+
+        Returns:
+            The file bytes, or ``None`` when the path is missing, hidden, or not a file or executable.
+
+        Raises:
+            FileTooLargeError: When the file has more than ``max_bytes`` bytes.
+        """
+        ...
+
+
 class ListFiles(Protocol):
     """List the files under one folder of a tree with no box."""
 
-    def __call__(self, tree_id: str, path: str = "") -> list[str] | None:
+    def __call__(self, tree_id: str, path: str = "", *, executable: bool = False) -> list[str] | None:
         """List the files below a folder.
 
         Args:
             tree_id: The tree.
             path: The ``/``-separated folder; ``""`` is the tree's root.
+            executable: List only the executables.
 
         Returns:
             The sorted file paths, or ``None`` when the folder is missing or hidden.
@@ -605,11 +719,6 @@ class EngineContext:
     # AutoSaddler, ShinkaEvolve generations); ``None``
     # runs until the scorer budget is spent.
     max_iterations: int | None = None
-    # How many cases an engine may score at once. Only pays off when the
-    # scorer itself runs elsewhere (one sandbox per case); 1 for text targets.
-    concurrency: int = 1
-    # "harness · model" the proposer is told it writes for, on agent targets.
-    target_label: str | None = None
     # Job-level progress sink. Engines that can narrate their run (GEPA via
     # the trajectory watcher) stream candidate events through it live.
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None
@@ -617,12 +726,16 @@ class EngineContext:
     call_model: CallModel | None = None
     run_command: RunCommand | None = None
     put_files: PutFiles | None = None
-    read_file: Callable[[str, str], bytes | None] | None = None
+    read_file: ReadFile | None = None
     list_files: ListFiles | None = None
+    # The content id of each visible file of a tree, by path; equal ids mean equal bytes.
+    file_ids: Callable[[str], dict[str, str]] | None = None
     repo_seed: RepoSeed | None = None
     # The job id a child engine's forwarded log records carry as ``sandbox_owner``; the worker's log router
     # keeps only its own job's records.
     log_owner: str | None = None
+    # Commits ``work()``'s JSON object as one step under ``key``; a resume gives the committed object back.
+    record_step: Callable[[Mapping[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]] | None = None
 
 
 class Engine(Protocol):
@@ -656,6 +769,10 @@ class EvalServer:
     evaluations can never overspend, and the bookkeeping is locked.
     """
 
+    # SKY-750: every engine maximizes. A minimize run negates each score here,
+    # so the records, the means and the best version are all on the engines'
+    # scale; :meth:`raw_score` turns a value back into the metric's own score.
+
     def __init__(
         self,
         scorer: ScorerFn,
@@ -663,6 +780,8 @@ class EvalServer:
         max_evals: int,
         parent: EvalServer | None = None,
         on_eval: EvalListener | None = None,
+        direction: str = "maximize",
+        score_directions: Mapping[str, str] | None = None,
     ) -> None:
         """Create a server over ``scorer`` with a cap of ``max_evals`` calls.
 
@@ -670,9 +789,14 @@ class EvalServer:
             scorer: Callable scoring ``(candidate, case)`` → ``(score, side_info)``.
             max_evals: Maximum scorer calls this server will make.
             parent: Server whose budget this one is a slice of, if any.
-            on_eval: Listener called with ``(server, score)`` after each root eval.
+            on_eval: Listener called with ``(server, raw score)`` after each root eval.
+            direction: ``"maximize"`` or ``"minimize"``; a lane follows its root's direction.
+            score_directions: ``[metric.scores]``: the direction of each named score it names.
+                A lane follows its root's directions.
         """
         self._scorer = scorer
+        self._sign = -1.0 if direction == "minimize" else 1.0
+        self._minimized = frozenset(name for name, way in (score_directions or {}).items() if way == "minimize")
         self.max_evals = max_evals
         self._parent = parent
         self._on_eval = on_eval
@@ -699,6 +823,22 @@ class EvalServer:
             return own
         return min(own, self._parent.remaining)
 
+    @property
+    def minimizes(self) -> bool:
+        """Return whether the run wants the lowest score (``[metric] direction = "minimize"``)."""
+        return self._root._sign < 0
+
+    def raw_score(self, score: float | None) -> float | None:
+        """Turn an engine-scale score into the metric's own score; the same call turns it back.
+
+        Args:
+            score: A score from this server, or ``None``.
+
+        Returns:
+            The score with the run's sign: unchanged for a maximize run, negated for a minimize run.
+        """
+        return None if score is None else self._root._sign * score
+
     def lane(self, max_evals: int) -> EvalServer:
         """Open a sub-budget of at most ``max_evals`` calls against this server.
 
@@ -718,8 +858,9 @@ class EvalServer:
             example: The case to score it on, or ``None`` when there are no cases.
 
         Returns:
-            The score and the scorer's side information. A metric error case
-            returns ``None`` with ``status: metric_error``.
+            The engine-scale score (see :meth:`raw_score`) and the scorer's
+            side information. A metric error case returns ``None`` with
+            ``status: metric_error``.
 
         Raises:
             BudgetExhaustedError: When no scorer calls remain.
@@ -734,7 +875,7 @@ class EvalServer:
         if score is None:
             logger.debug("scorer eval %d/%d %s: %s", root.used, root.max_evals, METRIC_ERROR, side_info.get("error"))
         else:
-            logger.debug("scorer eval %d/%d score=%.3f", root.used, root.max_evals, score)
+            logger.debug("scorer eval %d/%d score=%.3f", root.used, root.max_evals, root.raw_score(score))
         self._account(candidate, score, side_info)
         return score, side_info
 
@@ -748,14 +889,14 @@ class EvalServer:
             candidate: The version that was scored, or ``None`` when the
                 caller cannot name it; an unnamed evaluation is counted but
                 not recorded in the version history.
-            score: The score it got, or ``None`` when the metric crashed.
+            score: The metric's own score, or ``None`` when the metric crashed.
             side_info: What the metric said about it.
 
         Raises:
             BudgetExhaustedError: When no scorer calls remain.
         """
         self._reserve()
-        self._account(candidate, score, side_info or {})
+        self._account(candidate, self.raw_score(score), side_info or {})
 
     def _account(self, candidate: Candidate | None, score: float | None, side_info: SideInfo) -> None:
         """Record a reserved evaluation in every server of the chain and notify the listener.
@@ -775,7 +916,7 @@ class EvalServer:
             server = server._parent
         if root._on_eval is not None:
             with root._lock:
-                root._on_eval(root, score)
+                root._on_eval(root, root.raw_score(score))
 
     def _reserve(self) -> None:
         """Claim one scorer call here and in every ancestor, or claim nothing.
@@ -830,7 +971,28 @@ class EvalServer:
         failed_run = is_run_failed(side_info) and (score is None or not math.isfinite(score))
         if score is None or is_metric_error(side_info) or failed_run:
             return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
-        return score, side_info
+        return self._sign * score, self._mark_directions(side_info)
+
+    def _mark_directions(self, side_info: SideInfo) -> SideInfo:
+        """Mark each minimize named score of ``side_info`` with :data:`SCORE_DIRECTION_KEY`.
+
+        Args:
+            side_info: What the scorer returned next to the score.
+
+        Returns:
+            ``side_info`` itself when no named score minimizes, else a copy whose minimize
+            named scores are ``{"score", "feedback", "direction": "minimize"}`` with the raw score.
+        """
+        named = side_info.get("scores")
+        if not self._minimized or not isinstance(named, dict) or not self._minimized.intersection(named):
+            return side_info
+        marked = {}
+        for name, entry in named.items():
+            if name in self._minimized:
+                entry = dict(entry) if isinstance(entry, dict) else {"score": entry, "feedback": ""}
+                entry[SCORE_DIRECTION_KEY] = "minimize"
+            marked[name] = entry
+        return {**side_info, "scores": marked}
 
     def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
         """Fold ``score`` into the candidate's running mean and keep its latest side info.
@@ -880,8 +1042,8 @@ class EvalServer:
             candidate: The version to look up.
 
         Returns:
-            Its mean score across the cases scored so far, or ``None`` when it
-            was not scored or hit a metric error.
+            Its engine-scale mean across the cases scored so far, or ``None``
+            when it was not scored or hit a metric error.
         """
         record = self._records.get(candidate_key(candidate))
         return None if record is None else record.mean_score
@@ -914,7 +1076,10 @@ class EvalServer:
 
     @property
     def best_candidate(self) -> Candidate | None:
-        """Return the candidate with the highest mean score, if any was scored without a metric error."""
+        """Return the candidate with the highest engine-scale mean, if any was scored without a metric error.
+
+        For a minimize run that is the version with the lowest raw mean.
+        """
         scored = [record for record in self._records.values() if record.mean_score is not None]
         if not scored:
             return None
@@ -922,6 +1087,6 @@ class EvalServer:
 
     @property
     def best_score(self) -> float | None:
-        """Return the highest mean score recorded, if any."""
+        """Return the highest engine-scale mean recorded, if any."""
         best = self.best_candidate
         return None if best is None else self.mean_score(best)

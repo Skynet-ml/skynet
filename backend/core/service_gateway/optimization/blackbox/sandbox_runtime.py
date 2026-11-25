@@ -57,6 +57,7 @@ from .sandbox_contract import (
     SandboxRuntime,
     SandboxSession,
     SandboxSpec,
+    UserImage,
     _pump,
 )
 from .sandbox_log import logged_command
@@ -75,8 +76,7 @@ COVERAGE_SLICE_SECONDS = 600
 _LOCAL_ENV_PASSTHROUGH = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 _LOCAL_KILLED_EXIT_CODE = 137
 _BUDGET_RELAY_ENV = "APP_BUDGET_RELAY_URL"
-_TOOL_RELAY_ENV = "APP_TOOL_RELAY_TOKEN"
-_RELAY_ENDPOINT_ENVS = ("OPENAI_BASE_URL", "APP_GATEWAY_URL")
+_RELAY_ENDPOINT_ENVS = ("OPENAI_BASE_URL", "ASCENT_MODEL_URL")
 
 
 # Scorer workspaces live under their own root, apart from proposer workspaces
@@ -95,7 +95,11 @@ _RUNTIME_OVERRIDE: contextvars.ContextVar[SandboxRuntime | None] = contextvars.C
 
 
 def current_sandbox_runtime() -> SandboxRuntime | None:
-    """Return the trusted runtime bound to this isolated child or setup request."""
+    """Return the trusted runtime bound to this isolated child or setup request.
+
+    Returns:
+        The bound runtime, or None when no runtime is bound.
+    """
     return _RUNTIME_OVERRIDE.get()
 
 
@@ -197,7 +201,11 @@ class LocalSubprocessSession:
 
     @property
     def path(self) -> Path:
-        """Return the working directory."""
+        """Return the working directory.
+
+        Returns:
+            The working directory.
+        """
         return self._dir
 
     def _resolve(self, path: str) -> Path:
@@ -321,6 +329,21 @@ def _kill_process_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
 
 
+def _refuse_gpu(spec: SandboxSpec, runtime: str) -> None:
+    """Refuse a spec with a GPU type on a runtime that cannot start a GPU box.
+
+    Args:
+        spec: The box spec.
+        runtime: Names the runtime in the error.
+
+    Raises:
+        ServiceError: The spec asks for a GPU.
+    """
+    if spec.gpu is not None:
+        # Refused, not ignored: a box without its GPU would run the step on the wrong hardware.
+        raise ServiceError(f"The {runtime} sandbox cannot start a box with GPU type {spec.gpu!r}.")
+
+
 class LocalSubprocessRuntime:
     """Sandbox runtime whose boxes are temp directories on the worker host."""
 
@@ -334,7 +357,11 @@ class LocalSubprocessRuntime:
 
         Returns:
             The session over the new directory.
+
+        Raises:
+            ServiceError: The spec asks for a GPU.
         """
+        _refuse_gpu(spec, "local")
         return LocalSubprocessSession(spec)
 
 
@@ -346,7 +373,7 @@ class ContainedSubprocessRuntime:
     contained = True
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
-        """Open a local workspace while retaining only parent-issued relay capabilities.
+        """Open a local workspace whose commands reach models only through the parent's mailbox.
 
         Args:
             spec: Command environment and lifetime already covered by the outer sandbox.
@@ -355,15 +382,16 @@ class ContainedSubprocessRuntime:
             A temporary subprocess session inside the current sandbox.
 
         Raises:
-            ServiceError: When the outer supervisor did not install its model mailbox.
+            ServiceError: When the spec asks for a GPU, or the outer supervisor did not install its model mailbox.
         """
+        _refuse_gpu(spec, "contained")
         relay = app_env(_BUDGET_RELAY_ENV)
         if not relay:
             raise ServiceError("Contained execution requires the protected model mailbox.")
+        # No tool relay token: only the guest's own ReAct tools use it, and every
+        # process of a session runs as the guest's user, so a metric command could
+        # read it from another command's /proc/<pid>/environ (SKY-880).
         environment = _contained_environment(spec.env, relay)
-        tool_token = app_env(_TOOL_RELAY_ENV)
-        if tool_token:
-            environment.update(with_legacy_env({_TOOL_RELAY_ENV: tool_token}))
         return LocalSubprocessSession(replace(spec, env=environment), protected_relay=relay)
 
 
@@ -434,6 +462,7 @@ class AsyncBridgeSession:
         spec = session.environment.spec
         # Static provider knowledge, never box output, so a version cannot change it (TS-1).
         self.root_has_capabilities: bool = getattr(type(session.environment), "root_has_capabilities", True)
+        self.root_file_writes: bool = getattr(type(session.environment), "root_file_writes", False)
         # ``logged_command`` redacts these values and routes the output to the job.
         self._env = dict(spec.env)
         self.log_owner = spec.tags.get(JOB_TAG)
@@ -586,13 +615,18 @@ class AsyncBridgeSession:
 class AsyncBridgeRuntime:
     """Open sandboxes of one async ``core.sandbox`` provider through the sync bridge (SKY-419)."""
 
-    def __init__(self, provider: str, *, image: str | None = None, docker_bin: str | None = None) -> None:
+    def __init__(
+        self, provider: str, *, image: str | None = None, docker_bin: str | None = None, copy_image: Any = None
+    ) -> None:
         """Bind the runtime to a provider and check that this build can load it.
 
         Args:
             provider: A provider name from ``core.sandbox.factory.PROVIDERS``.
             image: The default image of a provider that takes one (Docker).
             docker_bin: The Docker CLI path of the Docker provider.
+            copy_image: Copies a user image into the registry of a provider
+                that starts only from its own (Vercel); ``None`` when there is
+                no copier, so that provider refuses user images.
 
         Raises:
             SandboxFatalError: The provider is unknown, missing from this
@@ -603,15 +637,80 @@ class AsyncBridgeRuntime:
         self._capabilities = provider_class.capabilities
         # No capability flag names compose services, so the constructor says
         # whether this provider can start them.
-        self._runs_services = "services" in inspect.signature(provider_class).parameters
+        parameters = inspect.signature(provider_class).parameters
+        self._runs_services = "services" in parameters
+        # The same check for user images (SKY-891): a provider that takes a
+        # source image copies it into its own registry, so it needs a copier;
+        # a provider that takes only pull credentials pulls the image itself.
+        self._copies_user_images = "source_image" in parameters
+        self._pulls_user_images = "pull_credentials" in parameters
+        self._copy_image = copy_image
         self.injects_headers = self._capabilities.injects_headers
+        # The warm box lease reads this to refuse a GPU step before it claims a box (SKY-804).
+        self.gpu_types = self._capabilities.gpu_types
         self._sweep_options: dict[str, Any] = {} if docker_bin is None else {"docker_bin": docker_bin}
         self._options: dict[str, Any] = {**self._sweep_options, **({} if image is None else {"image": image})}
 
     @property
     def supports_snapshots(self) -> bool:
-        """Return whether this provider can save and start from after-setup snapshots."""
+        """Return whether this provider can save and start from after-setup snapshots.
+
+        Returns:
+            True when the provider supports after-setup snapshots.
+        """
         return self._capabilities.snapshots
+
+    @property
+    def copies_user_images(self) -> bool:
+        """Return whether this provider copies a user image into its own registry (SKY-891).
+
+        Returns:
+            True for a provider that starts a box from its own copy, which
+            needs the owner's image repository.
+        """
+        return self._copies_user_images
+
+    @property
+    def accepts_user_images(self) -> bool:
+        """Return whether a box of this provider can start from a spec's user image (SKY-891).
+
+        Returns:
+            True for a provider that pulls the image itself, or for one that
+            copies it into its own registry when this runtime has a copier.
+        """
+        if self._copies_user_images:
+            return self._copy_image is not None
+        return self._pulls_user_images
+
+    def _user_image_options(self, image: UserImage) -> dict[str, Any]:
+        """Return the provider options that start one box from a user image.
+
+        Args:
+            image: The box's user image.
+
+        Returns:
+            The fresh pull credentials, and for a copying provider the source
+            image, the owner's repository and the copier.
+
+        Raises:
+            ServiceError: The runtime cannot start a user image, or the
+                registry gave no pull credentials.
+        """
+        if not self.accepts_user_images:
+            raise ServiceError(f"The {self._capabilities.name} sandbox cannot start a box from a user image.")
+        try:
+            credentials = image.credentials() if image.credentials is not None else None
+        except Exception as error:
+            # Only the type: a registry message can echo a token.
+            raise ServiceError(
+                f"Could not get the pull credentials of the image {image.reference}: {type(error).__name__}."
+            ) from None
+        options: dict[str, Any] = {"pull_credentials": credentials}
+        if self._copies_user_images:
+            options.update(
+                source_image=image.reference, user_image_repository=image.repository, copy_image=self._copy_image
+            )
+        return options
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
         """Create and start a sandbox per ``spec``.
@@ -645,6 +744,8 @@ class AsyncBridgeRuntime:
             extra["services"] = tuple(spec.services)
         if spec.snapshot_id is not None and self._capabilities.snapshots:
             extra["snapshot_id"] = spec.snapshot_id
+        if spec.user_image is not None:
+            extra.update(self._user_image_options(spec.user_image))
         with _bridge_errors():
             environment = create_environment(self.provider, _async_spec(spec), **self._options, **extra)
             return AsyncBridgeSession(open_session(environment))
@@ -677,8 +778,8 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
         spec: The blackbox spec.
 
     Returns:
-        The same sandbox, with ``vcpus`` moved into the resource request and
-        the Skynet sandbox tag added.
+        The same sandbox, with ``vcpus`` moved into the resource request,
+        ``gpu`` as the GPU type and the Skynet sandbox tag added.
     """
     return AsyncSandboxSpec(
         lifetime_seconds=spec.lifetime_seconds,
@@ -692,6 +793,7 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
         allowed_hosts=spec.allowed_hosts,
         operation_key=spec.operation_key,
         private=spec.private,
+        gpu_type=spec.gpu,
     )
 
 

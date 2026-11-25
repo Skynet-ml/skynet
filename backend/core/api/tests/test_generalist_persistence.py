@@ -174,7 +174,7 @@ def persistence_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, Eng
 def _fund(engine: Engine) -> None:
     """Give the test identity a purchased balance to pass the 402 balance gate.
 
-    There is no free allowance, so any turn that should stream must be backed by
+    There is no starting balance, so any turn that should stream must be backed by
     an explicitly funded account.
     """
     with Session(engine) as session:

@@ -29,7 +29,7 @@ from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandbox
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from ..service_gateway.optimization.blackbox.sandbox_log import stream_logger as sandbox_stream_logger
 from ..service_gateway.optimization.blackbox.sandbox_runtime import sandbox_runtime_context
-from ..service_gateway.optimization.blackbox.service import run_blackbox_optimization
+from ..service_gateway.optimization.blackbox.service import LoopBinding, run_blackbox_optimization
 from ..service_gateway.optimization.budget_stop import BudgetReached
 from ..service_gateway.optimization.llm_error import (
     LlmErrorCapture,
@@ -37,7 +37,7 @@ from ..service_gateway.optimization.llm_error import (
     reset_llm_error,
 )
 from ..service_gateway.react_compat import configure_native_tool_calling
-from .constants import EVENT_AGENT_RUN, EVENT_LOG, EVENT_PROGRESS, EVENT_RESULT, EVENT_TERMINAL
+from .constants import EVENT_LOG, EVENT_PROGRESS, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 
 
@@ -50,16 +50,6 @@ def safe_queue_put(event_queue: Any, event: dict[str, Any]) -> None:
     """
     with contextlib.suppress(Exception):
         event_queue.put(event)
-
-
-def _emit_agent_run_event(event_queue: Any, run: dict[str, Any]) -> None:
-    """Forward one sandboxed agent run's record, or a piece of its live transcript, to the parent.
-
-    Args:
-        event_queue: The shared queue used to talk to the parent.
-        run: A full record keyed by ``run_id``, or ``{"run_id", "transcript_delta"}``.
-    """
-    safe_queue_put(event_queue, {"type": EVENT_AGENT_RUN, "run": run})
 
 
 def _emit_progress_event(event_queue: Any, message: str, metrics: dict[str, Any]) -> None:
@@ -132,6 +122,7 @@ def run_service_in_subprocess(
     payload_dict: dict[str, Any],
     artifact_id: str,
     event_queue: Any,
+    loop: LoopBinding | None = None,
 ) -> None:
     """Execute a repository optimization in the child process, streaming events back to the parent.
 
@@ -154,6 +145,7 @@ def run_service_in_subprocess(
             for resumable runs, the ``_gepa_log_dir`` path the worker owns.
         artifact_id: ID used to attach progress and logs to the right job.
         event_queue: Shared multiprocessing queue back to the parent.
+        loop: The worker's engine loop, when :mod:`core.worker.loop_host` runs the job there instead of in a box.
     """
     payload_dict = dict(payload_dict)
     stable_job_id = payload_dict.pop("_job_id", artifact_id)
@@ -213,7 +205,6 @@ def run_service_in_subprocess(
         payload_dict = dict(payload_dict)
         optimization_type = payload_dict.pop("_optimization_type", OPTIMIZATION_TYPE_BLACKBOX)
         gepa_log_dir_path = payload_dict.pop("_gepa_log_dir", None)
-        target_route = payload_dict.pop("_skynet_target_route", None)
         evaluator_route = payload_dict.pop("_skynet_evaluator_route", None)
         repo_snapshot = payload_dict.pop(REPO_SNAPSHOT_KEY, None)
         budget_gateway_descriptor = payload_dict.pop("_budget_gateway_descriptor", None)
@@ -233,10 +224,9 @@ def run_service_in_subprocess(
             artifact_id=stable_job_id,
             progress_callback=progress_callback,
             gepa_log_dir_path=gepa_log_dir_path,
-            agent_run_sink=partial(_emit_agent_run_event, event_queue),
-            target_route=target_route,
             evaluator_route=evaluator_route,
             repo_snapshot=repo_snapshot,
+            loop=loop,
         )
         safe_queue_put(
             event_queue,

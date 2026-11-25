@@ -140,6 +140,13 @@ interface EffortSliderProps {
   hintFor: (level: string | null) => string;
   /** The fast mode toggle; absent when the model does not take fast mode. */
   fast?: { on: boolean; onChange: (on: boolean) => void } | null;
+  /**
+   * The level reset picks for a model whose default runs without thinking.
+   * Given, the track has no default stop and starts at the lowest level.
+   */
+  defaultLevel?: string;
+  /** Shows the reset button; the model settings dialog hides it. */
+  showReset?: boolean;
 }
 
 /**
@@ -158,13 +165,17 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
       modelsOpen = false,
       hintFor,
       fast,
+      defaultLevel,
+      showReset = true,
     },
     ref,
   ) {
-    const stops = sliderStops(efforts);
+    const withDefault = defaultLevel === undefined;
+    const stops = sliderStops(efforts, withDefault);
     const index = Math.max(0, stops.indexOf(value));
     const level = stops[index] ?? null;
-    const fill = effortFill(efforts, level);
+    const resetTo = defaultLevel ?? null;
+    const fill = effortFill(efforts, level, withDefault);
     const motion = fillMotion(fill);
     const charge = effortCharge(efforts, level, useReducedMotion());
     // Each step up remounts the burst, so its flash and spray play once.
@@ -275,35 +286,31 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
               </span>
             </button>
           ) : (
-            <div className="flex min-w-0 flex-1 flex-col items-center">
-              {levelLabel}
-            </div>
+            <div className="flex min-w-0 flex-1 flex-col items-center">{levelLabel}</div>
           )}
-          <TooltipButton side="top" tooltip={msg("agent.model_menu.effort_reset")}>
-            <button
-              type="button"
-              aria-label={msg("agent.model_menu.effort_reset")}
-              aria-disabled={level === null}
-              onClick={() => {
-                if (level !== null) onChange(null);
-              }}
-              className={cn(
-                "flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors",
-                "hover:bg-accent/60 hover:text-foreground aria-disabled:opacity-40",
-                "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
-              )}
-            >
-              <ArrowCounterClockwise aria-hidden className="size-4" />
-            </button>
-          </TooltipButton>
-
+          {showReset && (
+            <TooltipButton side="top" tooltip={msg("agent.model_menu.effort_reset")}>
+              <button
+                type="button"
+                aria-label={msg("agent.model_menu.effort_reset")}
+                aria-disabled={level === resetTo}
+                onClick={() => {
+                  if (level !== resetTo) onChange(resetTo);
+                }}
+                className={cn(
+                  "flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors",
+                  "hover:bg-accent/60 hover:text-foreground aria-disabled:opacity-40",
+                  "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
+                )}
+              >
+                <ArrowCounterClockwise aria-hidden className="size-4" />
+              </button>
+            </TooltipButton>
+          )}
         </div>
 
         {!onPickModel && modelName ? (
-          <span
-            className="max-w-full truncate px-1.5 py-0 text-sm text-muted-foreground"
-            dir="ltr"
-          >
+          <span className="max-w-full truncate px-1.5 py-0 text-sm text-muted-foreground" dir="ltr">
             {modelName}
           </span>
         ) : null}
@@ -327,7 +334,7 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
           })}
           aria-describedby={hintId}
           onKeyDown={(e) => {
-            const next = stepEffort(efforts, level, e.key, isRtl(e.currentTarget));
+            const next = stepEffort(efforts, level, e.key, isRtl(e.currentTarget), withDefault);
             if (next === undefined) return;
             // Radix reads arrows as menu moves (Left closes the submenu).
             e.preventDefault();
@@ -509,7 +516,6 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
         <p id={hintId} className="sr-only">
           {hintFor(level)}
         </p>
-
       </div>
     );
   },

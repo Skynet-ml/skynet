@@ -55,9 +55,9 @@ Lisez [Moteurs](/docs/concepts/engines) pour choisir un moteur précis.
 
 ## 5. Métrique et exécution
 
-La dernière étape est **Métrique et exécution**. L'assistant rédige l'évaluateur et le fichier `optimize.toml` pour vous. Vous pouvez les modifier. L'entrée `[run]` exécute une version du dépôt sur un cas. L'évaluateur reçoit la sortie de l'entrée et le cas :
+La dernière étape est **Métrique et exécution**. L'assistant rédige l'évaluateur et le fichier `ascent.toml` pour vous. Vous pouvez les modifier. L'entrée `[run]` exécute une version du dépôt sur un cas. L'évaluateur reçoit la sortie de l'entrée et le cas :
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

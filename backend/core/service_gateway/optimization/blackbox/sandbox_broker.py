@@ -147,6 +147,7 @@ class ParentSandboxSession:
         """
         self._session = session
         self.root_has_capabilities: bool = getattr(session, "root_has_capabilities", True)
+        self.root_file_writes: bool = getattr(session, "root_file_writes", False)
         self._command_runner = command_runner
         self._box = box
         self._on_close = on_close
@@ -287,11 +288,24 @@ class _ParentSandboxRuntime:
             The box.
 
         Raises:
-            ServiceError: When the spec asks for hosts the run was not funded for.
+            ServiceError: When the spec asks for a GPU, or for hosts the run was not funded for.
         """
+        if spec.gpu is not None:
+            # The parent's boxes use one fixed runtime profile with no GPU.
+            raise ServiceError(f"The parent's box cannot start with GPU type {spec.gpu!r}.")
         if not set(spec.allowed_hosts) <= set(self._allowed_hosts):
             raise ServiceError("The parent's box cannot reach hosts this run was not funded for.")
         return self._broker._open_parent(spec)
+
+    @property
+    def accepts_user_images(self) -> bool:
+        """Return whether a box opened here can start from the spec's user image (SKY-891)."""
+        return bool(getattr(self._broker._runtime, "accepts_user_images", False))
+
+    @property
+    def copies_user_images(self) -> bool:
+        """Return whether a box opened here starts from a copy of the user image (SKY-891)."""
+        return bool(getattr(self._broker._runtime, "copies_user_images", False))
 
     @property
     def max_lifetime_seconds(self) -> float:
@@ -551,7 +565,9 @@ class SandboxBroker:
             self._runtime.open(
                 SandboxSpec(
                     lifetime_seconds=_duration(spec.lifetime_seconds, self._maximum),
-                    image=self._image,
+                    # A user image replaces the broker's image only through the
+                    # runtime, which refuses it when it cannot pull or copy it.
+                    image=spec.user_image.reference if spec.user_image is not None else self._image,
                     vcpus=self._vcpus,
                     tags=self._tags,
                     network_disabled=not hosts,
@@ -559,6 +575,7 @@ class SandboxBroker:
                     operation_key=spec.operation_key,
                     services=spec.services,
                     snapshot_id=spec.snapshot_id if self._snapshots_live() else None,
+                    user_image=spec.user_image,
                 )
             ),
             self._parent_command_runner,

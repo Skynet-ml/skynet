@@ -18,6 +18,7 @@ export type AppPageId =
   | "submit"
   | "explore"
   | "storage"
+  | "download"
   | "terms"
   | "privacy";
 
@@ -94,6 +95,14 @@ export const APP_PAGES: readonly AppPage[] = [
     href: "/storage",
     label: { key: "app.shell.search.storage" },
     keywordsKey: "app.shell.search.kw.storage",
+    group: "navigate",
+  },
+  {
+    id: "download",
+    href: "/download",
+    label: { key: "downloads.title" },
+    descriptionKey: "downloads.intro",
+    keywordsKey: "downloads.search_keywords",
     group: "navigate",
   },
   {

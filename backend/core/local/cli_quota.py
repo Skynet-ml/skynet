@@ -11,7 +11,7 @@ windows. This is the whole account's use, not only Skynet's.
   its own token. Skynet never sends or writes the refresh token. When the
   refresh does not help, the read gives ``reconnect``.
 - Codex: a short ``codex app-server`` session answers ``account/rateLimits/read``.
-  :func:`use_codex_reset` uses one of the account's free limit resets with
+  :func:`use_codex_reset` uses one of the account's limit resets with
   ``account/rateLimitResetCredit/consume``, only when the user asks for it.
 
 Neither read starts a model turn, so neither uses the subscription. The
@@ -80,7 +80,7 @@ def _quota(
         models: ``{name, used_percent, resets_at}`` for each limit that covers
             only some models.
         products: ``{name, percent}``: the share of this week's use in each product.
-        credits: Codex's credit balance and free limit resets (see :func:`_credits`), or ``None``.
+        credits: Codex's credit balance and limit resets (see :func:`_credits`), or ``None``.
 
     Returns:
         ``{status, windows, account, models, products, credits}``.
@@ -121,7 +121,7 @@ def _credits(*, balance: Any, resets_available: Any, resets_expire_at: str | Non
 
     Args:
         balance: The credits left, which Codex uses after a plan limit.
-        resets_available: How many free limit resets the account has.
+        resets_available: How many limit resets the account has.
         resets_expire_at: The ISO UTC time the first of them expires.
 
     Returns:
@@ -489,7 +489,7 @@ _CODEX_RESET_OUTCOMES = frozenset({"reset", "nothingToReset", "noCredit", "alrea
 
 
 def use_codex_reset(settings: Settings) -> str:
-    """Use one of the Codex account's free limit resets.
+    """Use one of the Codex account's limit resets.
 
     Codex picks the next available reset. The next quota read asks Codex
     again, so the panel shows the refilled limits.

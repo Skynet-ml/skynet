@@ -209,6 +209,8 @@ export interface HardeningJob {
   live_sessions?: HardeningSession[];
   /** Null until the noise check after the last round runs. */
   noise?: HardeningNoise | null;
+  /** True when the metric treats a lower score as better. Set after staging; jobs from before SKY-867 lack it. */
+  minimize?: boolean;
 }
 
 export interface CreateHardeningJobRequest {

@@ -85,7 +85,7 @@ class _FakeLm:
 
 
 def test_enforce_llm_balance_rejects_fresh_account(engine: Engine) -> None:
-    """A brand-new account has no free allowance and is refused with a 402."""
+    """A brand-new account has no starting balance and is refused with a 402."""
     with pytest.raises(DomainError) as err:
         enforce_llm_balance(_StubStore(engine), "new@x.io")
     assert err.value.status_code == 402

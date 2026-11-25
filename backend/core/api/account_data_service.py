@@ -14,18 +14,35 @@ Two deliberate exceptions to "hard delete everything":
   and audit basis, so the identity link is severed to a PII-free tombstone
   token, unique to each deletion, while the rows themselves survive.
   The wallet (``billing_customers``) is also *closed*: its spendable balance
-  and free grant go to zero, and a ``closure`` ledger row records the
+  and grant go to zero, and a ``closure`` ledger row records the
   forfeited balance.
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-This module makes no outside call. The tree purge here only locks, marks and
-plans the account's step log packs; the router deletes the unused packs from
-the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
-OpenRouter, or any other provider; severing the local link is the whole of
-the operation.
-Deprovisioning the upstream Stripe customer or OpenRouter runtime key is left
-to a follow-up.
+The registry call deletes the account's whole repository from the user image
+registry. It runs after every main-database statement and before the step log
+shard purge, because neither has a rollback and images can be rebuilt. With a registry,
+the deletion refuses while a run of the account is not finished, or while a
+worker still holds a live lease on it (SKY-891). The Vercel copies of the
+account's images go next, with one delete of the account's Vercel registry
+repository (SKY-895). Known gap: each worker keeps its in-memory copy cache
+until it restarts. A cached copy names a source digest that only a rebuild of
+the same bytes can make again, and its box then fails to start, so the cache
+cannot leak an image. An expired lease does not prove that the run's CodeBuild
+image build ended, so the deletion also stops each build that still has a
+stored CodeBuild id, and refuses until CodeBuild reports each one complete
+(SKY-896). Known gap: a worker killed between the build start and the id's
+commit leaves a build with no id. So does a failed id commit whose best-effort
+StopBuild also fails. Known gap: the active-run check covers only the runs
+that exist when the deletion reads them. A run that the user submits during the
+deletion is not locked out, so its image build can push after the repository
+delete and make the repository again.
+
+The tree purge here only locks, marks and plans the account's step log packs;
+the router deletes the unused packs from the tree bucket after the commit
+(SKY-733). Nothing here calls Stripe, OpenRouter, or any other provider;
+severing the local link is the whole of the operation. Deprovisioning the
+upstream Stripe customer or OpenRouter runtime key is left to a follow-up.
 """
 
 from __future__ import annotations
@@ -33,8 +50,9 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -44,6 +62,9 @@ from sqlalchemy.orm import Session
 from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
+from ..sandbox.image_build import codebuild_client, stop_unfinished_builds
+from ..sandbox.image_registry import ImageRegistry, image_owner, image_registry
+from ..sandbox.vcr_copy import delete_copies
 from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
@@ -64,6 +85,7 @@ from ..storage.models import (
     DesktopLinkCodeModel,
     DesktopLinkModel,
     DesktopTokenModel,
+    ImageBuildModel,
     JobEmbeddingModel,
     JobModel,
     McpAuthCodeModel,
@@ -76,6 +98,7 @@ from ..storage.models import (
     OptimizationShareLinkModel,
     PackageRegistryPreferenceModel,
     PushSubscriptionModel,
+    SetupBillingPreferenceModel,
     SetupDraftModel,
     SlackConnectionModel,
     TaggingSessionModel,
@@ -93,8 +116,13 @@ from ..storage.models import (
     WebAuthnChallengeModel,
     WebAuthnCredentialModel,
 )
+from .routers.constants import TERMINAL_STATUSES
 
 EXPORT_FORMAT = "skynet-account-export/v2"
+# CodeBuild ends every build within its hard limits: 36 hours of build time and
+# 8 hours in the queue. An older stored build id is complete, so the deletion
+# does not read it, also when CodeBuild no longer lets the API read it (SKY-896).
+BUILD_ID_MAX_AGE = timedelta(hours=48)
 
 
 @dataclass
@@ -199,6 +227,7 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
 
     registry_row = session.get(PackageRegistryPreferenceModel, username)
     privacy_row = session.get(ModelPrivacyPreferenceModel, username)
+    setup_billing_row = session.get(SetupBillingPreferenceModel, username)
     engine_row = session.get(AgentEnginePreferenceModel, username)
     notification_row = session.get(NotificationPreferenceModel, username)
     notification_settings = settings_from_row(notification_row)
@@ -512,12 +541,27 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         "slack": slack,
         "notification_preferences": notification_preferences,
         "model_privacy": {"data_policy": privacy_row.data_policy if privacy_row is not None else "deny"},
+        "setup_billing": {"from_wallet": setup_billing_row.from_wallet if setup_billing_row is not None else True},
         "agent_engine": {"engine": engine_row.engine if engine_row is not None else None},
         "package_registry": {"index_url": registry_row.index_url if registry_row else "https://pypi.org/simple"},
     }
 
 
-def delete_account(session: Session, username: str) -> AccountDeletionSummary:
+class AccountRunsActiveError(Exception):
+    """Refuse an account deletion while one of the account's runs is not finished (SKY-891).
+
+    A run in progress can still push to the user image registry after the
+    repository delete. The registry then makes the repository again, and the
+    pushed layers outlive the account with no row that names them. A cancelled
+    run counts as in progress while its worker holds a live lease, because the
+    worker stops its image build only later. A CodeBuild image build that is not
+    complete also counts, because its worker can be dead (SKY-896).
+    """
+
+
+def delete_account(
+    session: Session, username: str, *, registry_for: Callable[[], ImageRegistry | None] | None = None
+) -> AccountDeletionSummary:
     """Purge everything owned by ``username`` within the given session.
 
     Runs entirely inside the caller's transaction (the caller commits), so a
@@ -534,12 +578,25 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     Args:
         session: An open session on the store's engine; the caller commits.
         username: The caller's lowercased-email identity.
+        registry_for: Return the user image registry, or ``None`` when this
+            deployment has none. ``None`` reads the deployment's settings, which
+            need only the repository prefix, since deletes use no pull role.
+            It is called once, before any row is deleted.
 
     Returns:
         Counts of hard-deleted and anonymized rows. The summary also holds the
         tree purge, whose unused packs the caller deletes after the commit.
 
     Raises:
+        AccountRunsActiveError: The deployment has a user image registry and
+            one of the account's runs is not in a terminal status, or a worker
+            still holds a live lease on it, or CodeBuild does not report one of
+            the account's image builds as complete; nothing is deleted.
+        ImageBuildError: A CodeBuild read or stop failed; nothing is deleted.
+        ImageRegistryError: The user image registry or Vercel's registry
+            refused to delete the account's repository, or the registry
+            settings are set but not usable; nothing in the main database or
+            the step log shards is deleted.
         TreePurgeError: When the account has tree packs to delete and
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
@@ -571,10 +628,44 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         result = session.execute(statement, execution_options={"synchronize_session": False})
         anonymized += result.rowcount or 0
 
+    registry = (registry_for or (lambda: image_registry(pull=False)))()
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
     # The job locks, then the run rows and budgets, in the same order as a run delete and a resume;
     # another order deadlocks with a concurrent delete or resume of one of these runs (SKY-733).
     deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
+    # Read after the job locks, so a worker that changes a status commits first. Nothing
+    # cancels the runs here: a running build could push again after the repository delete.
+    # A cancel marks the run first and its worker stops the build later, so a run whose worker
+    # still holds a live lease also blocks. An expired lease only means that the worker stopped
+    # renewing it: a hard-killed worker can leave its CodeBuild build running (SKY-896).
+    if registry is not None and job_ids:
+        active = session.scalar(
+            select(JobModel.optimization_id)
+            .where(JobModel.optimization_id.in_(job_ids))
+            .where(
+                JobModel.status.not_in([status.value for status in TERMINAL_STATUSES])
+                | (JobModel.claimed_by.is_not(None) & (JobModel.lease_expires_at > datetime.now(UTC)))
+            )
+            .limit(1)
+        )
+        if active is not None:
+            raise AccountRunsActiveError
+    if registry is not None:
+        build_ids = list(
+            session.scalars(
+                select(ImageBuildModel.codebuild_id).where(
+                    ImageBuildModel.username == username,
+                    ImageBuildModel.codebuild_id.is_not(None),
+                    ImageBuildModel.created_at > datetime.now(UTC) - BUILD_ID_MAX_AGE,
+                )
+            )
+        )
+        # The stops are not rolled back with a refused deletion; a stopped build is what the user wants.
+        if build_ids:
+            # The ImageRegistry protocol has no Region; the ECR registry has one, the same as the builds'.
+            codebuild = codebuild_client(getattr(registry, "region", None))
+            if not stop_unfinished_builds(codebuild, build_ids):
+                raise AccountRunsActiveError
     if job_ids:
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
@@ -671,6 +762,7 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
     _run_delete(delete(ChatMediaModel).where(ChatMediaModel.username == username))
+    _run_delete(delete(ImageBuildModel).where(ImageBuildModel.username == username))
     _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
     _run_delete(delete(NotificationModel).where(NotificationModel.username == username))
@@ -678,6 +770,7 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(SlackConnectionModel).where(SlackConnectionModel.username == username))
     _run_delete(delete(UserConnectorModel).where(UserConnectorModel.username == username))
     _run_delete(delete(ModelPrivacyPreferenceModel).where(ModelPrivacyPreferenceModel.username == username))
+    _run_delete(delete(SetupBillingPreferenceModel).where(SetupBillingPreferenceModel.username == username))
     _run_delete(delete(AgentEnginePreferenceModel).where(AgentEnginePreferenceModel.username == username))
 
     _run_delete(delete(PackageRegistryPreferenceModel).where(PackageRegistryPreferenceModel.username == username))
@@ -733,10 +826,21 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     _run_delete(delete(UserModel).where(UserModel.email == username))
 
+    # The registry has no rollback, so its delete runs after every main-database statement. It runs
+    # before the shard purge: a refused delete then rolls the main database back and leaves every
+    # shard row, so the account loses nothing that a rebuild cannot restore. The whole repository goes
+    # with every image and tag, the build cache included, because its layers hold the user's source; a
+    # build can push and then stop before it records a row. A deployment with no registry makes no
+    # call (SKY-891).
+    # The Vercel copies come only from this registry, so a deployment with no registry has none (SKY-895).
+    if registry is not None:
+        registry.delete_repository(image_owner(username))
+        delete_copies(image_owner(username))
+
     # The other step log shards commit here, as the last step before the caller's main commit, so every
     # main-database statement above already ran when they commit. The databases have no two-phase commit:
     # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
-    # deletes it. purge_user ran every check that can fail the deletion before this point.
+    # deletes it. purge_user and the registry delete ran every other check that can fail the deletion.
     deleted += tree_purge.purge_user_shards(trees)
 
     return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)

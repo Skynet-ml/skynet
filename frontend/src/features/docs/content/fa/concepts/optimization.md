@@ -2,9 +2,9 @@ Skynet همان Optimize Anything است: هر اجرا یک مخزن را به�
 
 ## قرارداد مشترک
 
-هر اجرا یک مخزن، یک فایل `optimize.toml` با یک `entry` در `[run]` یا یک مرحلهٔ `[target.<name>]`، و یک امتیازدهنده دارد. `entry` بخش `[run]` یک نسخه از مخزن را روی یک مورد اجرا می‌کند. امتیازدهنده یک تابع Python است که خروجی `entry` و مورد را می‌گیرد.
+هر اجرا یک مخزن، یک فایل `ascent.toml` با یک `entry` در `[run]` یا یک مرحلهٔ `[target.<name>]`، و یک امتیازدهنده دارد. `entry` بخش `[run]` یک نسخه از مخزن را روی یک مورد اجرا می‌کند. امتیازدهنده یک تابع Python است که خروجی `entry` و مورد را می‌گیرد.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 مخزن در ریشهٔ خود یک فایل `serve.py` با `def serve(input)` دارد. `entry` بخش `[run]` آن را در جعبهٔ ایزولهٔ خودش فراخوانی می‌کند. Skynet پس از اجرا با آن بهترین نسخه را سرویس می‌دهد.
 
-امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه اجرا می‌شود. این جعبه فقط فایل‌های معیار شما را دارد و هیچ کدی از نسخه ندارد، پس امتیازدهنده نمی‌تواند `serve.py` را import کند. نسخه را فقط از طریق `output`، یا از طریق `call()` به یک مرحلهٔ `[target.<name>]` می‌بیند. تابع `call` را با `from skynet import call` import کنید. بدون یک `entry` در `[run]` یا یک مرحلهٔ `[target.<name>]`، Skynet فایل `optimize.toml` را رد می‌کند.
+امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه اجرا می‌شود. این جعبه فقط فایل‌های معیار شما را دارد و هیچ کدی از نسخه ندارد، پس امتیازدهنده نمی‌تواند `serve.py` را import کند. نسخه را فقط از طریق `output`، یا از طریق `call()` به یک مرحلهٔ `[target.<name>]` می‌بیند. تابع `call` را با `from openascent import call` import کنید. بدون یک `entry` در `[run]` یا یک مرحلهٔ `[target.<name>]`، Skynet فایل `ascent.toml` را رد می‌کند.
 
 > [!NOTE]
 > عامل کدنویسی که نسخه‌ها را می‌نویسد نمی‌تواند کد منبع امتیازدهنده، مقدارهای مورد انتظار یا رازهای اجرا را ببیند.
@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | متغیر                | چه چیزی را نگه می‌دارد                                     |
 | -------------------- | ---------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | نشانی دروازه. `APP_GATEWAY_URL` همان مقدار را نگه می‌دارد. |
-| `APP_API_KEY`        | یک توکن فقط برای این اجرا. کلید ارائه‌دهنده نیست.           |
-| `APP_MODEL`          | نام مدلی که باید بفرستید. این مدل امتیازدهندهٔ اجراست.      |
+| `OPENAI_BASE_URL`    | نشانی دروازه. `ASCENT_MODEL_URL` همان مقدار را نگه می‌دارد. |
+| `ASCENT_MODEL_KEY`   | یک توکن فقط برای این اجرا. کلید ارائه‌دهنده نیست.           |
+| `ASCENT_MODEL`       | نام مدلی که باید بفرستید. این مدل امتیازدهندهٔ اجراست.      |
 | `ANTHROPIC_BASE_URL` | نشانی دروازه برای SDKهای Anthropic.                         |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

@@ -24,6 +24,7 @@ from core.service_gateway.optimization.blackbox import remote_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult
 from core.worker import vercel_dspy
 from core.worker.isolated_runner import SANDBOX_PROTOCOL
+from core.worker.repo_staging import ENVIRONMENT_KEY, REPO_SNAPSHOT_KEY
 
 # A finished black-box run's result.
 REAL_RESULT: dict = {"baseline_score": 0.5, "best_score": 0.75, "best_candidate": "Answer the question carefully."}
@@ -37,6 +38,7 @@ REAL_RUN_PAYLOAD: dict = {
     "scorer": {"kind": "python", "metric_code": "def score(candidate, case=None): return 1.0"},
     "reflection_model_config": {"name": "openai/gpt-5.4-nano"},
     "_optimization_type": "blackbox",
+    "target": {"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"]}},
 }
 
 _PROGRESS = {
@@ -161,6 +163,13 @@ class FakeGateway:
         """Report a fixed ledger allowance for a payload without a ceiling."""
         return 100
 
+    def allow_guest_hosts(self, hosts: tuple[str, ...]) -> None:
+        """Accept the proposer hosts that staging grants.
+
+        Args:
+            hosts: Hosts the staged repository allows, unused.
+        """
+
     def detach_sandbox(self) -> None:
         """Report that no sandbox broker is bound to this fixture."""
 
@@ -187,6 +196,43 @@ def protect_dispatch(store: Any, context: MagicMock) -> None:
     patch("core.worker.engine.ModelGateway", FakeGateway).start()
     patch("core.worker.engine.mp.get_context", return_value=context).start()
     patch("core.worker.engine.BackgroundWorker._close_budget_gateway", return_value=({}, None)).start()
+    for patcher in repo_staging_patches():
+        patcher.start()
+
+
+def repo_staging_patches() -> list[Any]:
+    """Build the patches that stand in for the clone, the setup gate and the publish.
+
+    Every run optimizes a repository (SKY-834), so a funded dispatch test
+    stages one without a checkout.
+
+    Returns:
+        Unstarted patchers for the worker's repository steps.
+    """
+    return [
+        patch("core.worker.engine.stage_repository", side_effect=_stage),
+        patch("core.worker.engine.check_repository", return_value=[]),
+        patch("core.worker.engine.infer_repo_setup", return_value=None),
+        patch("core.worker.engine.bind_repo_scorer"),
+        patch("core.worker.engine.publish_improvement"),
+        patch("core.worker.engine.BackgroundWorker._record_repo_commit"),
+        patch("core.worker.engine.BackgroundWorker._record_repo_environment", return_value=None),
+    ]
+
+
+def _stage(payload: dict[str, Any], **_kwargs: Any) -> tuple[dict[str, Any], MagicMock]:
+    """Leave the payload as the real staging step does, with no checkout.
+
+    Args:
+        payload: The run payload.
+        **_kwargs: The staging options, unused.
+
+    Returns:
+        The staged payload and a stand-in staged repository.
+    """
+    payload["target"]["repo"].update({ENVIRONMENT_KEY: {}, "commit": "0" * 40})
+    payload[REPO_SNAPSHOT_KEY] = {}
+    return payload, MagicMock()
 
 
 SESSION_STOPPED = "The Vercel sandbox session stopped: SandboxApiError"

@@ -105,6 +105,7 @@ import { ColorThemeControl } from "./ColorThemeControl";
 import { OptimizationDefaults } from "./OptimizationDefaults";
 import { PackageRegistrySetting } from "./PackageRegistrySetting";
 import { SecurityTab } from "./SecurityTab";
+import { SetupBillingSetting } from "./SetupBillingSetting";
 import { SETTINGS_TABS, visibleSettingsTabs, type SettingsTab } from "../lib/tabs";
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { isLocalMode } from "@/shared/lib/runtime-env";
@@ -117,6 +118,8 @@ function WizardTab() {
     <div className="space-y-1">
       <PackageRegistrySetting />
       <OptimizationDefaults />
+      {/* Local budgets are uncapped and check no balance, so the setting changes nothing there. */}
+      {!isLocalMode() && <SetupBillingSetting />}
     </div>
   );
 }

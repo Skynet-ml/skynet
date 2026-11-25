@@ -8,10 +8,10 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 # carries the optimizer itself, so this is the only contract the two share; bump
 # it whenever either shape changes, even by an added field: the image silently
 # drops a field its models do not know (``test_sandbox_protocol`` pins the shapes).
-SANDBOX_PROTOCOL = 18
+SANDBOX_PROTOCOL = 22
 
-# Older image protocols that read this worker's guest request the same way, so a
-# deploy keeps its pinned image until the image is rebuilt. Protocol 13 added
+# Only the current protocol is readable: every older image must be rebuilt. The
+# notes below record what each older protocol added. Protocol 13 added
 # ``conversation_id``, which the submit route clears before it stores the run.
 # Protocol 14 added ``target.repo.draft_files`` and ``draft_base``: the parent
 # writes the drafts into the staged tree and removes both fields before the
@@ -33,8 +33,29 @@ SANDBOX_PROTOCOL = 18
 # command: it skips ``setup`` and ``ASCENT_TASK``, and AutoSaddler reflect
 # sessions get no default agent. The worker refuses every image before 18 for
 # a run with a file proposer.
-# The worker sends an older image the image's own protocol number.
-READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, SANDBOX_PROTOCOL})
+# Protocol 19 (SKY-738) added ``scorer.command_metric`` and runs the contract
+# file's ``[metric] entry``. A run with the default entry reads the same on an
+# older image. A command entry sends no metric code, and an older image refuses
+# that request at validation with an unclear error, so the worker refuses every
+# image before 19 for a run with ``scorer.command_metric``.
+# Protocol 20 (SKY-750) does not change the request shape. The image at 20
+# reads the staged snapshot's ``outcome.direction`` and negates a minimize
+# run's scores for the engines. An older image ignores the key and maximizes,
+# so the worker refuses every image before 20 for a minimize run.
+# Protocol 21 (SKY-775) does not change the request shape. The image at 21
+# reads the staged snapshot's ``outcome.scores`` (``[metric.scores]``), judges
+# a minimize named score's ``[outcome.require]`` limit as a maximum, and writes
+# the verdict as ``requirements_passed`` and ``failed_requirements``. An older
+# image judges every limit as a minimum and writes the old verdict keys, so the
+# worker refuses every image before 21 for a run with an ``[outcome.require]``
+# limit or a minimize named score.
+# Protocol 22 (SKY-776) does not change the request shape. It renames the model
+# variables of every box to ``ASCENT_MODEL_URL``, ``ASCENT_MODEL`` and
+# ``ASCENT_MODEL_KEY``, and the task file variable to ``ASCENT_TASK``, with no
+# transition period. A worker and an image with different names must never run
+# together, so the worker reads no image before 22 (until 22, it read 12-21).
+# The probe refuses every image before 22, so the worker sends no older protocol number.
+READABLE_PROTOCOLS = frozenset({SANDBOX_PROTOCOL})
 
 # The first protocol whose image writes the run end verdict of ``[outcome]``.
 # A later bump that keeps the verdict must not refuse the images at this one.
@@ -42,3 +63,12 @@ OUTCOME_VERDICT_PROTOCOL = 16
 
 # The first protocol whose image runs the contract file's ``[proposer] entry``.
 FILE_PROPOSER_PROTOCOL = 18
+
+# The first protocol whose image reads ``scorer.command_metric``.
+COMMAND_METRIC_PROTOCOL = 19
+
+# The first protocol whose image obeys ``[metric] direction = "minimize"``.
+DIRECTION_PROTOCOL = 20
+
+# The first protocol whose image obeys ``[metric.scores]``.
+SCORE_DIRECTION_PROTOCOL = 21

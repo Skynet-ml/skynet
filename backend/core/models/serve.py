@@ -40,7 +40,9 @@ class ServeRequest(BaseModel):
         ge=1,
         le=1_000_000_000,
         strict=True,
-        description="Maximum cents authorized for this one invocation; required for protected runs.",
+        description=(
+            "Optional. The most cents the caller accepts for this one invocation. The account balance bounds the call."
+        ),
     )
 
     @model_validator(mode="before")

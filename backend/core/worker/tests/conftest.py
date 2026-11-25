@@ -31,8 +31,8 @@ class FakeJobStore:
         self._notified: set[str] = set()
         self.append_log_calls: list[dict[str, Any]] = []
         self.record_progress_calls: list[tuple[str, str | None, dict[str, Any]]] = []
-        self.agent_run_calls: list[tuple[str, str, Any]] = []
         self.requeue_calls: list[dict[str, Any]] = []
+        self.image_builds: list[dict[str, Any]] = []
 
     def claim_completion_notification(self, optimization_id: str) -> bool:
         """Atomically claim the notification right for ``optimization_id``.
@@ -150,6 +150,56 @@ class FakeJobStore:
             job["sandbox_image"] = image
         return str(job["sandbox_image"])
 
+    def pin_box_images(self, optimization_id: str, images: dict[str, Any]) -> dict[str, Any]:
+        """Record the user image of each box of a run, keeping any earlier pin.
+
+        Args:
+            optimization_id: The run about to open its boxes.
+            images: The box image facts by role, used only when none is pinned.
+
+        Returns:
+            The box images every box of this run must boot from.
+
+        Raises:
+            KeyError: When no job with the given ID exists.
+        """
+        if optimization_id not in self._jobs:
+            raise KeyError(optimization_id)
+        job = self._jobs[optimization_id]
+        if job.get("box_images") is None:
+            job["box_images"] = images
+        return dict(job["box_images"])
+
+    def find_image_build(self, username: str, input_hash: str) -> dict[str, Any] | None:
+        """Return the newest finished build of a user's Dockerfile with this input hash.
+
+        Args:
+            username: The run's owner.
+            input_hash: The build's input hash.
+
+        Returns:
+            The build, or ``None`` when no finished build matches.
+        """
+        for build in reversed(self.image_builds):
+            if (build["username"], build["input_hash"]) == (username, input_hash) and build["image"]:
+                return build
+        return None
+
+    def save_image_build(self, username: str, input_hash: str, **fields: Any) -> str:
+        """Keep one build and return its id.
+
+        Args:
+            username: The run's owner.
+            input_hash: The build's input hash.
+            **fields: Builder, image, size and log.
+
+        Returns:
+            The new build's id.
+        """
+        build_id = f"build-{len(self.image_builds) + 1}"
+        self.image_builds.append({"id": build_id, "username": username, "input_hash": input_hash, **fields})
+        return build_id
+
     def append_log(
         self,
         optimization_id: str,
@@ -212,22 +262,3 @@ class FakeJobStore:
         """
         self._progress.setdefault(optimization_id, []).append((message, metrics))
         self.record_progress_calls.append((optimization_id, message, metrics))
-
-    def save_agent_run(self, optimization_id: str, run: dict[str, Any]) -> None:
-        """Record a full agent run row for assertions.
-
-        Args:
-            optimization_id: ID of the job the run belongs to.
-            run: The run record.
-        """
-        self.agent_run_calls.append((optimization_id, "save", run))
-
-    def append_agent_run_transcript(self, optimization_id: str, run_id: int, text: str) -> None:
-        """Record a transcript delta for assertions.
-
-        Args:
-            optimization_id: ID of the job the run belongs to.
-            run_id: The run's ordinal.
-            text: The transcript piece.
-        """
-        self.agent_run_calls.append((optimization_id, "append", (run_id, text)))

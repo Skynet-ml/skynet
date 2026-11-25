@@ -15,14 +15,15 @@ import { useHardening } from "../../hooks/use-hardening";
 import { IdeWorkspace } from "../../ide/IdeWorkspace";
 import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-files";
 import { workspaceTexts } from "../../lib/ide-workspace";
-import { contractMetricEntry } from "../../lib/repo-run";
+import { metricCommandText } from "../../lib/repo-run";
 import { withScorerImports } from "../../lib/scorer-dependencies";
 import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
 import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
 
-const OPTIMIZE_TOML = "optimize.toml";
+// The ascent.toml setting that names the metric; code, so never translated.
+const METRIC_ENTRY = "[metric] entry";
 
 const HOST_ORIGIN: Record<RepoHost, string> = {
   github: "https://github.com",
@@ -72,7 +73,7 @@ function repoSource(repository: string, ref: string, host: RepoHost): RepoSource
  * the overview, which holds Run, so the run button never covers the editors.
  */
 export function MetricStep({ page, onBack }: { page: number; onBack: () => void }) {
-  const { state, patchWorkspace, setWorkspaceFile, guided } = useWizardV2();
+  const { state, patchWorkspace, setWorkspaceFile, guided, metricCommand } = useWizardV2();
   const { task, workspace } = state;
 
   const repoDraft = !repoIssue(task.repo) ? task.repo : null;
@@ -102,8 +103,9 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     onStep && (agent?.agentBusy ?? false),
     agent?.agentWritingFields ?? [],
   );
-  // One job for the hardening screen and the overview's line about it.
-  const hardening = useHardening(onStep && page >= 1);
+  // One job for the hardening screen and the overview's line about it. Hardening
+  // attacks a Python metric, so a command metric has none (SKY-770).
+  const hardening = useHardening(onStep && page >= 1 && !metricCommand);
 
   // The sandbox still injects `llm` for old scorers; making the import
   // explicit as the user leaves the code keeps it honest about what it calls.
@@ -114,11 +116,8 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     if (code !== metricCode) setMetricCode(code);
   }, [page, metricCode, setMetricCode]);
 
-  // A contract that names its own metric needs no metric.py; the screen says which one runs (SKY-749).
-  const metricEntry = contractMetricEntry(
-    workspace.files[OPTIMIZE_TOML],
-    agent?.repoBase?.get(OPTIMIZE_TOML),
-  );
+  // The section name is code: isolated LTR, so RTL text does not flip its brackets.
+  const [commandBefore, commandAfter = ""] = msg("submit.v2.metric.command").split("{entry}");
 
   // A repository run's setup is the agentic IDE: the chat beside its changes,
   // which the user edits in place.
@@ -145,13 +144,21 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     <div className="flex h-full min-h-0 flex-col">
       {/* Clip, not hide: a hidden box still scrolls when the editor takes focus. */}
       <WizardScreen active={page === 0} className="flex flex-col overflow-clip">
-        {metricEntry && (
-          <p className="shrink-0 border-b border-border/60 px-4 py-2 text-sm text-muted-foreground">
-            {msg("submit.v2.metric.repo_entry")}{" "}
-            <bdi className="break-all font-mono text-foreground" dir="ltr">
-              {metricEntry}
-            </bdi>
-          </p>
+        {/* A contract that names a metric command needs no metric.py (SKY-770). */}
+        {metricCommand && (
+          <div className="shrink-0 border-b border-border/60 px-4 py-2 text-sm text-muted-foreground">
+            <p>
+              {commandBefore}
+              <bdi className="font-mono text-foreground" dir="ltr">
+                {METRIC_ENTRY}
+              </bdi>
+              {commandAfter}{" "}
+              <bdi className="break-all font-mono text-foreground" dir="ltr">
+                {metricCommandText(metricCommand)}
+              </bdi>
+            </p>
+            {workspace.metricCode.trim() && <p>{msg("submit.v2.metric.command_ignores_code")}</p>}
+          </div>
         )}
         <div className="flex min-h-0 flex-1 flex-col">
           {agentic ? (
@@ -173,16 +180,20 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
         </div>
       </WizardScreen>
       <WizardScreen active={page === 1} className="overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
-        <HardenMetricScreen
-          active={onStep && page === 1}
-          guided={guided}
-          onBack={onBack}
-          hardening={hardening}
-          reflectionModel={state.optimizer.reflectionModel ?? null}
-        />
+        {metricCommand ? (
+          <p className="text-sm text-muted-foreground">{msg("submit.v2.metric.command_no_hardening")}</p>
+        ) : (
+          <HardenMetricScreen
+            active={onStep && page === 1}
+            guided={guided}
+            onBack={onBack}
+            hardening={hardening}
+            reflectionModel={state.optimizer.reflectionModel ?? null}
+          />
+        )}
       </WizardScreen>
       <WizardScreen active={page === 2} className="flex flex-col overflow-hidden">
-        <RunOverview state={state} guided={guided} hardening={hardening.job} />
+        <RunOverview state={state} guided={guided} hardening={metricCommand ? null : hardening.job} />
       </WizardScreen>
     </div>
   );

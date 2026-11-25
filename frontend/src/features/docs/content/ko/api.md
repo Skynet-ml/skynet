@@ -100,7 +100,7 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -113,7 +113,7 @@ entry = "serve.py:serve"
 - `target.repo.editable_paths`는 옵티마이저가 변경할 수 있는 파일과 폴더의 목록입니다. `"."`는 리포지토리 전체를 뜻합니다.
 - `target.repo.commit`은 선택 사항입니다. 40자 SHA입니다. 없으면 Skynet은 브랜치의 최신 커밋을 사용합니다.
 - `target.repo.secrets`는 선택 사항입니다. 각 시크릿에는 `name`과 `value`가 있습니다. 시크릿은 `[services.<name>]`의 헤더나 역할의 `mcp` 파일에 있는 서버를 통해서만 코드나 채점기에 전달되며, 환경 변수로는 전달되지 않습니다.
-- `scorer.metric_code`는 `score(repo_path, case, output=None)`를 정의합니다. `output`은 `[run]` 엔트리가 케이스에 대해 반환한 값입니다. `optimize.toml` 탭은 예시 리포지토리의 `[run]` 엔트리를 보여 줍니다. `scorer.model`은 코드와 채점기가 모델 게이트웨이를 통해 호출할 수 있는 모델입니다.
+- `scorer.metric_code`는 `score(repo_path, case, output=None)`를 정의합니다. `output`은 `[run]` 엔트리가 케이스에 대해 반환한 값입니다. `ascent.toml` 탭은 예시 리포지토리의 `[run]` 엔트리를 보여 줍니다. `scorer.model`은 코드와 채점기가 모델 게이트웨이를 통해 호출할 수 있는 모델입니다.
 - `strategy.mode`는 `auto`(기본값) 또는 `single`입니다. `single`이면 `strategy.engine`을 `GET /blackbox/engines`가 반환한 엔진 이름 하나로 설정합니다.
 - `max_cost_cents`는 이 실행의 지출 한도이며 단위는 미국 센트입니다.
 - `is_private`의 기본값은 `false`입니다. 실행을 비공개로 유지하려면 `true`로 설정합니다.

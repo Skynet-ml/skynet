@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ...billing.service import FREE_GRANT_CENTS, free_grant_cents
+from ...billing.service import GRANT_CENTS, grant_cents
 from ...config import settings
 from ...local.cli_probe import clear_probe_cache
 from ...models.blackbox import HOST_CLI_AUTO_KEY, BlackboxProposer
@@ -343,14 +343,14 @@ def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) 
         WizardPreflightCheck(
             key="setup",
             status="failed",
-            message="The service jira in optimize.toml is not a connector.",
-            message_code="repo_gate.unknown_connector",
-            message_params={"service": "jira", "known": "github, linear"},
+            message="The service jira in ascent.toml needs the secret JIRA_TOKEN.",
+            message_code="repo_gate.missing_secret",
+            message_params={"service": "jira", "secret": "JIRA_TOKEN"},
         ),
         WizardPreflightCheck(
             key="setup",
             status="failed",
-            message="optimize.toml sets proposer.network.",
+            message="ascent.toml sets proposer.network.",
             message_code="repo_gate.unenforced_local",
             message_params={"key": "proposer.network"},
         ),
@@ -369,7 +369,7 @@ def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) 
     body = resp.json()
     assert body["code"] == "submission.validation_failed"
     assert body["params"]["failures"] == [
-        {"key": "repo_gate.unknown_connector", "params": {"service": "jira", "known": "github, linear"}},
+        {"key": "repo_gate.missing_secret", "params": {"service": "jira", "secret": "JIRA_TOKEN"}},
         {"key": "repo_gate.unenforced_local", "params": {"key": "proposer.network"}},
         {"key": "workflow.validation_failed", "params": {"error": "Traceback: raw internal text"}},
     ]
@@ -542,10 +542,10 @@ def test_local_mode_grants_the_local_credit(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch: Pytest fixture used to set local mode.
     """
     monkeypatch.setattr(settings, "local_grant_cents", 12_345)
-    assert free_grant_cents() == FREE_GRANT_CENTS
+    assert grant_cents() == GRANT_CENTS
 
     monkeypatch.setattr(settings, "local_mode", True)
-    assert free_grant_cents() == 12_345
+    assert grant_cents() == 12_345
 
 
 def _execution_request(**overrides: Any) -> WizardPreflightRequest:
@@ -662,7 +662,7 @@ def test_hosted_wizard_check_refuses_local_only_work(monkeypatch: pytest.MonkeyP
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {**payload, "scorer": _VALID_SCORER},
+                "payload": {**payload, "scorer": _VALID_SCORER, "target": {"kind": "repo"}},
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },

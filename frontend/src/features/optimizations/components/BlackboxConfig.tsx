@@ -188,7 +188,7 @@ export function runProposerLabel(
 }
 
 /**
- * The score that stops a run's search: `[outcome] target` from optimize.toml
+ * The score that stops a run's search: `[outcome] target` from ascent.toml
  * (SKY-691), or the retired `budget.stop_at_score` that runs stored before it carry.
  */
 export function runStopScore(

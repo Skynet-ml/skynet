@@ -16,12 +16,19 @@ registerHooks({
   },
 });
 
-const { initialWizardV2State, emptyRepoDraft, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
+const { initialWizardV2State, emptyRepoDraft, fileProposerCommand, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { contractMetricEntry, contractMissing, finishedHardeningJobId, repoBaseText, repoRunRequest } = await import(
-  "./repo-run.ts"
-);
+const {
+  LITELLM_TO_BYOK_PROVIDER,
+  contractMissing,
+  contractText,
+  finishedHardeningJobId,
+  metricCommandText,
+  repoBaseText,
+  repoRunRequest,
+} = await import("./repo-run.ts");
+const { BYOK_PROVIDERS, litellmProviderForByok } = await import("../../billing/lib/byok.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
 const { HARNESS_DEFAULT_PICK, harnessPickerValue, pickHarness, proposerHeader } = await import("./engine-contract.ts");
 
@@ -103,6 +110,19 @@ test("a repository run sends no harness until the user picks one (SKY-753)", () 
 
   const state = repoState();
   state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
+});
+
+test("the contract file's proposer sends no agent; a picked agent is sent (SKY-771)", () => {
+  const state = repoState();
+  assert.notEqual(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"], "autoresearch"), null);
+  const fromFile = repoRunRequest(state, options)!.proposer!;
+  assert.equal("harness" in fromFile, false);
+  assert.equal("run_command" in fromFile, false);
+  assert.equal("install_command" in fromFile, false);
+
+  state.optimizer.proposer = pickHarness(state.optimizer.proposer, "pi");
+  assert.equal(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"], "autoresearch"), null);
   assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
 });
 
@@ -357,14 +377,14 @@ test("a hosted run sends no hardening job id", async () => {
   assert.equal(reads, 0);
 });
 
-test("a run whose contract names its own metric sends no hardening job id (SKY-749)", async () => {
+test("a run whose contract names a metric command sends no hardening job id (SKY-770)", async () => {
   let reads = 0;
   const read = async () => {
     reads += 1;
     return { id: "job-1", status: "done" } as never;
   };
   // The job hardened metric.py, which the run does not use.
-  assert.equal(await finishedHardeningJobId("local", "draft-1", read, "metric.py:score"), null);
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read, ["node", "score.js"]), null);
   assert.equal(reads, 0);
 });
 
@@ -403,7 +423,7 @@ const SERVICES_TOML = [
 
 test("a repository run sends the saved secrets its services name, by id, to their host only", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [{ name: "SEARCH_KEY", value: "typed", allowedHosts: "api.search.example" }] };
   const savedSecrets = [
     { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["maps.googleapis.com"] },
@@ -422,7 +442,7 @@ test("a repository run sends the saved secrets its services name, by id, to thei
 
 test("a saved secret goes only to a host its owner approved, never to the host an edited toml names", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const savedSecrets = [
     // Approved for another host: an agent pointed the toml elsewhere.
@@ -440,7 +460,7 @@ test("a saved secret goes only to a host its owner approved, never to the host a
 
 test("a saved secret approved for a *.suffix goes to a host under it with that approved entry", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const savedSecrets = [
     { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["*.googleapis.com"] },
@@ -456,7 +476,7 @@ test("a saved secret approved for a *.suffix goes to a host under it with that a
 
 test("a repository run with no saved secret for its services sends only the typed ones", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const request = repoRunRequest(state, { ...options, savedSecrets: [{ id: "x", name: "UNUSED_KEY" }] });
   assert.ok(request);
@@ -533,10 +553,10 @@ test("a repository run sends the draft's repository files and omits them when th
   assert.equal("draft_files" in none.target.repo, false);
 
   const state = repoState();
-  state.workspace.files = { "src/app.py": "x = 2\n", "optimize.toml": "version = 1\n" };
+  state.workspace.files = { "src/app.py": "x = 2\n", "ascent.toml": "version = 1\n" };
   assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, {
     "src/app.py": "x = 2\n",
-    "optimize.toml": "version = 1\n",
+    "ascent.toml": "version = 1\n",
   });
 });
 
@@ -554,16 +574,16 @@ test("a repository run sends the drafts' base commit only with the drafts", () =
   assert.equal("draft_base" in repoRunRequest(state, options)!.target.repo, false);
 });
 
-test("a repository run never sends an empty optimize.toml draft", () => {
+test("a repository run never sends an empty ascent.toml draft", () => {
   const state = repoState();
-  state.workspace.files = { "optimize.toml": " \n", "src/app.py": "x = 2\n" };
+  state.workspace.files = { "ascent.toml": " \n", "src/app.py": "x = 2\n" };
   assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, { "src/app.py": "x = 2\n" });
 
-  state.workspace.files = { "optimize.toml": "" };
+  state.workspace.files = { "ascent.toml": "" };
   assert.equal("draft_files" in repoRunRequest(state, options)!.target.repo, false);
 });
 
-test("the Metric screen holds only when neither the draft nor the repository has optimize.toml", () => {
+test("the Metric screen holds only when neither the draft nor the repository has ascent.toml", () => {
   assert.equal(contractMissing("", ""), true);
   assert.equal(contractMissing(undefined, "  \n"), true);
   assert.equal(contractMissing("version = 1\n", ""), false);
@@ -572,9 +592,9 @@ test("the Metric screen holds only when neither the draft nor the repository has
   assert.equal(contractMissing("", undefined), false);
 });
 
-test("only a repository read that found no optimize.toml holds the Metric screen", () => {
+test("only a repository read that found no ascent.toml holds the Metric screen", () => {
   const holds = (result: { text: string } | { issue: string } | null) =>
-    contractMissing("", repoBaseText("optimize.toml", result));
+    contractMissing("", repoBaseText("ascent.toml", result));
   assert.equal(holds({ issue: "missing" }), true);
   assert.equal(holds({ issue: "binary" }), false);
   assert.equal(holds({ issue: "too_large" }), false);
@@ -584,33 +604,45 @@ test("only a repository read that found no optimize.toml holds the Metric screen
   assert.equal(repoBaseText("src/a.py", null), "");
 });
 
-test("the metric entry comes from the draft optimize.toml, else from the repository's file (SKY-749)", () => {
-  const named = 'version = 1\n\n[metric]\nentry = "metric.py:score"  # the scorer\n';
-  assert.equal(contractMetricEntry(named, undefined), "metric.py:score");
-  assert.equal(contractMetricEntry("", named), "metric.py:score");
-  assert.equal(contractMetricEntry(undefined, "[metric]\nentry = 'node score.js'\n"), "node score.js");
-  // A draft replaces the repository's whole file, so its own entry is the only one.
-  assert.equal(contractMetricEntry("version = 1\n", named), null);
-  // Only the [metric] table names the metric.
-  assert.equal(contractMetricEntry('[run]\nentry = "run.py:main"\n', undefined), null);
-  assert.equal(contractMetricEntry('[metric.extra]\nentry = "x.py:f"\n', undefined), null);
-  assert.equal(contractMetricEntry('[metric]\n# entry = "metric.py:score"\n', undefined), null);
-  assert.equal(contractMetricEntry('[metric]\nentry = "  "\n', undefined), null);
-  // An array-of-tables header ends the [metric] table too.
-  assert.equal(contractMetricEntry('[metric]\nfiles = ["a"]\n[[tool.x]]\nentry = "y"\n', undefined), null);
-  assert.equal(contractMetricEntry(undefined, undefined), null);
+test("the contract text is the draft ascent.toml, else the repository's file (SKY-770)", () => {
+  const repo = 'version = 1\n[metric]\nentry = ["node", "eval/score.js"]\n';
+  assert.equal(contractText("version = 1\n", repo), "version = 1\n");
+  assert.equal(contractText("  \n", repo), repo);
+  assert.equal(contractText(undefined, repo), repo);
+  assert.equal(contractText(undefined, undefined), "");
 });
 
-test("a run whose contract names a metric entry sends no metric code (SKY-749)", () => {
+test("the metric command reads as one line, with odd words quoted (SKY-770)", () => {
+  assert.equal(metricCommandText(["cargo", "run", "--bin", "score"]), "cargo run --bin score");
+  assert.equal(metricCommandText(["sh", "-c", "go run ./eval"]), 'sh -c "go run ./eval"');
+});
+
+test("a run whose contract names a metric command sends no metric code (SKY-770)", () => {
   const state = repoState();
   state.workspace.metricCode = "";
   assert.equal(repoRunRequest(state, options), null);
-  const request = repoRunRequest(state, { ...options, metricEntry: "metric.py:score" });
+  const command = ["cargo", "run", "--bin", "score"];
+  const request = repoRunRequest(state, { ...options, metricCommand: command });
   assert.deepEqual(request?.scorer, {
     kind: "python",
+    command_metric: true,
     timeout_seconds: state.workspace.metricTimeoutSeconds,
   });
-  // The contract's metric wins over wizard code, so the run scores with one metric.
-  const withCode = repoRunRequest(repoState(), { ...options, metricEntry: "metric.py:score" });
+  // The contract's command wins over wizard code, so the run scores with one metric.
+  const withCode = repoRunRequest(repoState(), { ...options, metricCommand: command });
   assert.equal(withCode?.scorer.metric_code, undefined);
+  assert.equal(withCode?.scorer.command_metric, true);
+  // No command (a Python entry, or none) sends metric.py as today.
+  const python = repoRunRequest(repoState(), { ...options, metricCommand: null });
+  assert.equal(python?.scorer.command_metric, undefined);
+  assert.ok(python?.scorer.metric_code);
+});
+
+test("the LiteLLM to BYOK map is the exact reverse of the billing bridge", () => {
+  const reverse = Object.fromEntries(
+    BYOK_PROVIDERS.map((p) => [litellmProviderForByok(p.slug), p.slug]).filter(
+      ([prefix, slug]) => prefix !== slug,
+    ),
+  );
+  assert.deepEqual({ ...LITELLM_TO_BYOK_PROVIDER }, reverse);
 });

@@ -90,9 +90,6 @@ from .sandbox_runtime import (
     _SHELL_FLAGS as _SHELL_FLAGS,
 )
 from .sandbox_runtime import (
-    _TOOL_RELAY_ENV as _TOOL_RELAY_ENV,
-)
-from .sandbox_runtime import (
     CODEX_REQUIREMENTS as CODEX_REQUIREMENTS,
 )
 from .sandbox_runtime import (
@@ -155,7 +152,7 @@ from .sandbox_runtime import (
 )
 
 # The SDK is a declared dependency, but an image built from an older
-# requirements file must degrade to "agent targets unavailable", not
+# requirements file must degrade to "cloud sandbox unavailable", not
 # fail to import the worker.
 try:
     from vercel import sandbox as vercel_sandbox
@@ -303,26 +300,6 @@ def sandbox_runtime_from_settings(settings: Settings) -> SandboxRuntime | None:
     if settings.local_mode:
         return AsyncBridgeRuntime("docker", image=settings.local_sandbox_image or None, docker_bin=settings.docker_bin)
     return AsyncBridgeRuntime("vercel")
-
-
-def scorer_runtime_from_settings(settings: Settings) -> SandboxRuntime:
-    """Return the current contained runtime, or the deployment's sandbox (Docker in local mode).
-
-    Args:
-        settings: The backend settings.
-
-    Returns:
-        The managed runtime scorers open their workspaces with.
-
-    Raises:
-        ServiceError: When the managed sandbox is not configured.
-    """
-    if current_sandbox_runtime() is not None:
-        return current_sandbox_runtime()
-    runtime = sandbox_runtime_from_settings(settings)
-    if runtime is not None:
-        return runtime
-    raise ServiceError(sandbox_unavailable_reason(settings) or _CREDENTIALS_MISSING)
 
 
 # SKY-486 moved the local and bridge runtimes to ``sandbox_runtime``. Tests still

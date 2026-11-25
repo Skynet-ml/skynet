@@ -1151,6 +1151,7 @@ def test_the_sweep_closes_a_hold_that_an_earlier_close_left_open(
     [
         ({"kind": "remote", "url": "https://score.example", "metric_code": "x"}, True, "hardening.no_python_metric"),
         ({"kind": "python"}, True, "hardening.no_python_metric"),
+        ({"kind": "python", "metric_code": "x", "command_metric": True}, True, "hardening.no_python_metric"),
         (None, False, "hardening.no_managed_models"),
         (
             {**_SCORER, "model": {"name": "openai/gpt-4o-mini", "token_source": "byok", "extra": {}}},
@@ -1231,7 +1232,7 @@ def test_a_byok_scorer_without_a_usable_key_ends_with_a_stable_key(
 
 
 def _compose_tree(root: Path) -> Path:
-    """Write a trusted tree whose optimize.toml names one compose service, ``db``.
+    """Write a trusted tree whose ascent.toml names one compose service, ``db``.
 
     Args:
         root: The folder to write the tree in.
@@ -1241,22 +1242,22 @@ def _compose_tree(root: Path) -> Path:
     """
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.py").write_text("VALUE = 1\n")
-    (root / "optimize.toml").write_text(
+    (root / "ascent.toml").write_text(
         'version = 1\n[sandbox]\ncompose = "compose.yaml"\n[run]\nentry = "src/app.py:main"\n'
     )
     (root / "compose.yaml").write_text("services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n")
     return root
 
 
-# A drafted fix that renames the compose service, and one that breaks optimize.toml.
+# A drafted fix that renames the compose service, and one that breaks ascent.toml.
 _RENAME_SERVICE_FIX = (
     "diff --git a/compose.yaml b/compose.yaml\n"
     "--- a/compose.yaml\n+++ b/compose.yaml\n"
     "@@ -1,4 +1,4 @@\n services:\n-  db:\n+  evil:\n     image: postgres:16\n     command: postgres -D /data\n"
 )
 _BREAK_CONSTRAINTS_FIX = (
-    "diff --git a/optimize.toml b/optimize.toml\n"
-    "--- a/optimize.toml\n+++ b/optimize.toml\n"
+    "diff --git a/ascent.toml b/ascent.toml\n"
+    "--- a/ascent.toml\n+++ b/ascent.toml\n"
     '@@ -1,5 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n-[run]\n-entry = "src/app.py:main"\n'
     "+not = [valid\n"
 )
@@ -1268,7 +1269,7 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     """A BYOK scorer model gets its saved key at run time, and each scorer box of a pass has its own key.
 
     Every box starts the unfixed trusted tree's ``[sandbox] compose`` services: a drafted fix that renames
-    the service or breaks optimize.toml changes neither the services nor the score.
+    the service or breaks ascent.toml changes neither the services nor the score.
     """
     budget_id = _budget(engine)
     job = _seed(
@@ -1448,13 +1449,14 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
 
 
 # The metric adds the [metric] file's key to the [run] output, so a score
-# proves that the metric box got both.
+# proves that the metric box got both. The [run] command writes the version's
+# source as its output to ASCENT_OUTPUT (SKY-757).
 _METRIC_TREE_SCORER = {
     "metric_code": (
         "from pathlib import Path\n"
         "def score(repo_path, case=None, output=None):\n"
         "    key = int((Path(repo_path) / 'eval' / 'key.txt').read_text())\n"
-        "    value = int(output['stdout'].split('=')[1])\n"
+        "    value = int(output.split('=')[1])\n"
         "    return {'score': key * 10 + value, 'feedback': 'read'}\n"
     )
 }
@@ -1476,8 +1478,9 @@ def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     (trusted / "eval").mkdir()
     (trusted / "src" / "app.py").write_text("VALUE = 3\n")
     (trusted / "eval" / "key.txt").write_text("1\n")
-    (trusted / "optimize.toml").write_text(
-        'version = 1\n[run]\nentry = ["cat", "src/app.py"]\n[metric]\nfiles = ["eval/key.txt"]\n'
+    (trusted / "run.sh").write_text('printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"\n')
+    (trusted / "ascent.toml").write_text(
+        'version = 1\n[run]\nentry = ["sh", "run.sh"]\n[metric]\nfiles = ["eval/key.txt"]\n'
     )
 
     class LocalGateway:
@@ -1547,7 +1550,7 @@ def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
 def test_the_runner_reads_the_trusted_tree_with_the_staging_version_rule(
     engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_version: bool
 ) -> None:
-    """A started pass opens on an optimize.toml with no version; a new pass refuses it (SKY-690).
+    """A started pass opens on an ascent.toml with no version; a new pass refuses it (SKY-690).
 
     Args:
         engine: The test database.
@@ -1561,7 +1564,7 @@ def test_the_runner_reads_the_trusted_tree_with_the_staging_version_rule(
     (trusted / "src").mkdir(parents=True)
     (trusted / "src" / "app.py").write_text("VALUE = 1\n")
     (trusted / "intent.md").write_text("Keep the app fast.\n")
-    (trusted / "optimize.toml").write_text('instructions = "intent.md"\n[run]\nentry = "src/app.py:main"\n')
+    (trusted / "ascent.toml").write_text('instructions = "intent.md"\n[run]\nentry = "src/app.py:main"\n')
 
     class Gateway:
         """Protects nothing and opens no box."""
@@ -1673,7 +1676,7 @@ def _tool(name: str, **args: Any) -> list[dict[str, Any]]:
 
 
 def _session_runner(
-    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch, *, feedback: str = "ok"
+    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch, *, feedback: str = "ok", minimize: bool = False
 ) -> tuple[RepoHardeningRunner, list[str], list[str]]:
     """Build a runner with a fake gateway and lane boxes that record their lane.
 
@@ -1682,6 +1685,7 @@ def _session_runner(
         dispatch: The fake ``dispatch_guest``.
         monkeypatch: Swaps the Pi turn for a fake one.
         feedback: The feedback each box's score gives.
+        minimize: True when the metric's lower score is better.
 
     Returns:
         The runner, the lanes opened and the lanes closed.
@@ -1703,6 +1707,7 @@ def _session_runner(
         commit="c0ffee",
         applied_fixes=(),
         secrets={},
+        minimize=minimize,
     )
     opened: list[str] = []
     closed: list[str] = []
@@ -1790,6 +1795,46 @@ def test_attack_runs_one_session_for_each_brief_in_its_own_lane_box(
     assert all(("def score(): return 1" in p) == (view == "white_box") for p in prompts)
     tool_text = json.dumps([b["messages"] for b in bodies if "tools" in b])
     assert "eval/metric.py" not in tool_text
+
+
+def test_attack_asks_to_lower_the_score_of_a_minimize_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A minimize job tells the lead agent and every session that a hack lowers the score (SKY-750)."""
+    prompts: list[str] = []
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent with one brief, and the session with a patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        if len(body["messages"]) == 1:
+            prompts.append(body["messages"][0]["content"])
+        if "tools" not in body:
+            return _reply('{"briefs": ["brief one"]}')
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch, minimize=True)
+    try:
+        runner.attack(
+            round_index=1,
+            view="black_box",
+            model="openai/m",
+            exploits_path=tmp_path / "none",
+            budget_usd=None,
+            sessions=1,
+        )
+    finally:
+        runner.close()
+
+    assert len(prompts) == 2
+    assert "try to lower this repository's metric" in prompts[0]
+    assert "a change that lowers this repository's metric" in prompts[1]
 
 
 def test_a_session_sees_metric_feedback_without_hidden_traceback_frames(
@@ -2108,3 +2153,140 @@ def test_a_reclaim_clears_the_live_sessions_of_a_lapsed_pass(engine: Engine) -> 
     assert second is not None
     assert second[2].live_sessions == []
     assert _row(engine, job.id).job["live_sessions"] == []
+
+
+def test_a_trusted_tree_with_a_command_metric_entry_refuses_hardening(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attackers and fixes edit Python metric code, so a command ``[metric] entry`` stops the pass (SKY-738)."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.sh").write_text("exit 0\n")
+    (trusted / "ascent.toml").write_text(
+        'version = 1\n[run]\nentry = ["cat", "x"]\n[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/metric.sh"]\n'
+    )
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    with pytest.raises(ValueError, match="needs a Python metric"), opened:
+        pass
+
+
+def test_a_trusted_tree_with_a_user_box_image_refuses_hardening(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pass scores in Skynet's image, so a ``[metric] image`` stops it before any box opens (SKY-737)."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.py").write_text("def score(output, expected=None):\n    return 1.0\n")
+    (trusted / "ascent.toml").write_text(
+        'version = 1\n[run]\nentry = ["cat", "x"]\n[metric]\nfiles = ["eval"]\nentry = "eval/metric.py:score"\n'
+        f'image = "registry.example/metric@sha256:{"a" * 64}"\n'
+    )
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    with pytest.raises(ValueError, match="user image"), opened:
+        pass

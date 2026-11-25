@@ -13,7 +13,7 @@ import {
   extractCandidates,
   extractMinibatch,
 } from "../lib/extract-events";
-import { layoutTrajectory } from "../lib/layout";
+import { layoutTrajectory, minimizesRun } from "../lib/layout";
 import {
   agentRunKey,
   buildClimb,
@@ -77,6 +77,7 @@ export interface MetaHarnessPanelProps {
 export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessPanelProps) {
   const live = isLive(job);
   const optimizationId = job.optimization_id;
+  const minimize = minimizesRun(job);
 
   const { candidates, caseScores, minibatch, agentRuns } =
     useMemo(() => {
@@ -91,8 +92,8 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
     }, [job.progress_events]);
   const runsByCell = useMemo(() => indexAgentRuns(agentRuns), [agentRuns]);
   const fullModel = useMemo(
-    () => buildClimb(candidates, caseScores, agentRuns),
-    [candidates, caseScores, agentRuns],
+    () => buildClimb(candidates, caseScores, agentRuns, minimize),
+    [candidates, caseScores, agentRuns, minimize],
   );
   const maxVersion = useMemo(
     () => fullModel.versions.reduce((last, version) => Math.max(last, version.index), 0),
@@ -111,9 +112,14 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
     return buildClimb(
       candidates.filter((candidate) => kept.has(candidate.candidate_id)),
       caseScores.filter((scored) => scored.trial <= versionFilter),
+      [],
+      minimize,
     );
-  }, [fullModel, candidates, caseScores, versionFilter]);
-  const treeLayout = useMemo(() => layoutTrajectory(candidates), [candidates]);
+  }, [fullModel, candidates, caseScores, versionFilter, minimize]);
+  const treeLayout = useMemo(
+    () => layoutTrajectory(candidates, [], minimize),
+    [candidates, minimize],
+  );
   // The version being scored answers to its trial number, which is also the
   // candidate id it gets once complete, so a selection on it carries over.
   const pendingId = live && fullModel.pending !== null ? String(fullModel.pending.index) : null;

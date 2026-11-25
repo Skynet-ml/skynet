@@ -19,21 +19,21 @@ export interface RepoRunOptions {
   maxCostCents: number | null;
   /** The secrets saved on the account of the run's server, with their approved hosts; never values. */
   savedSecrets?: ReadonlyArray<{ id: string; name: string; allowed_hosts?: string[] }>;
-  /** The `[metric] entry` the run's optimize.toml names (`contractMetricEntry`), if any. */
-  metricEntry?: string | null;
+  /** The command the run's ascent.toml names in `[metric] entry`, from the contract check; null for none. */
+  metricCommand?: readonly string[] | null;
 }
 
-const OPTIMIZE_TOML = "optimize.toml";
+const ASCENT_TOML = "ascent.toml";
 const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
 /**
- * Whether a repository run has no optimize.toml contract, so its Metric
+ * Whether a repository run has no ascent.toml contract, so its Metric
  * screen holds (SKY-693). Every new run needs one, in the draft or in the
  * repository.
  *
  * Args:
- *   draft: The draft's optimize.toml text, if any.
- *   repoFile: The repository's optimize.toml text ("" when it has none), or
+ *   draft: The draft's ascent.toml text, if any.
+ *   repoFile: The repository's ascent.toml text ("" when it has none), or
  *     undefined while the read loads or no pane reads it.
  *
  * Returns:
@@ -45,31 +45,31 @@ export function contractMissing(draft: string | undefined, repoFile: string | un
 }
 
 /**
- * The metric that the run's optimize.toml names in `[metric] entry` (SKY-749).
- * The draft file replaces the repository's whole file, so a draft with text is
- * the only one read.
+ * The ascent.toml text the run uses. The draft file replaces the
+ * repository's whole file, so a draft with text is the only one read.
  *
  * Args:
- *   draft: The draft's optimize.toml text, if any.
- *   repoFile: The repository's optimize.toml text, or undefined while unknown.
+ *   draft: The draft's ascent.toml text, if any.
+ *   repoFile: The repository's ascent.toml text, or undefined while unknown.
  *
  * Returns:
- *   The entry, for example `metric.py:score`, or null when the file names none.
+ *   The text, or "" when neither file has text yet.
  */
-export function contractMetricEntry(draft: string | undefined, repoFile: string | undefined): string | null {
-  const toml = draft?.trim() ? draft : (repoFile ?? "");
-  let inMetric = false;
-  for (const line of toml.split("\n")) {
-    const header = /^\s*(\[\[?)([^[\]]+)\]\]?\s*(?:#.*)?$/.exec(line);
-    if (header) {
-      inMetric = header[1] === "[" && header[2]?.trim() === "metric";
-      continue;
-    }
-    if (!inMetric) continue;
-    const entry = /^\s*entry\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(line);
-    if (entry) return (entry[1] ?? entry[2] ?? "").trim() || null;
-  }
-  return null;
+export function contractText(draft: string | undefined, repoFile: string | undefined): string {
+  return draft?.trim() ? draft : (repoFile ?? "");
+}
+
+/**
+ * The `[metric] entry` command as one line, for the Metric step (SKY-770).
+ *
+ * Args:
+ *   command: The command list the contract check returned.
+ *
+ * Returns:
+ *   The words joined by spaces; a word with a space or a quote is quoted.
+ */
+export function metricCommandText(command: readonly string[]): string {
+  return command.map((word) => (/^[^\s"'\\]+$/.test(word) ? word : JSON.stringify(word))).join(" ");
 }
 
 /**
@@ -80,7 +80,7 @@ export function contractMetricEntry(draft: string | undefined, repoFile: string 
  *   result: The read's result, or null when the read failed.
  *
  * Returns:
- *   The file's text. With no text, "" for most files; for optimize.toml, ""
+ *   The file's text. With no text, "" for most files; for ascent.toml, ""
  *   only when the read found no file, else undefined, so an unreadable or
  *   failed read leaves the contract decision to the server.
  */
@@ -89,17 +89,17 @@ export function repoBaseText(
   result: { text: string } | { issue: string } | null,
 ): string | undefined {
   if (result && "text" in result) return result.text;
-  if (path !== OPTIMIZE_TOML) return "";
+  if (path !== ASCENT_TOML) return "";
   return result?.issue === "missing" ? "" : undefined;
 }
 
 /**
- * The `${NAME}` secrets that optimize.toml's `[services.<name>]` entries send,
+ * The `${NAME}` secrets that ascent.toml's `[services.<name>]` entries send,
  * each with the one host it goes to (E52, E53). A secret that two services use
  * goes to the last one's host, as on the server.
  *
  * Args:
- *   toml: The optimize.toml text.
+ *   toml: The ascent.toml text.
  *
  * Returns:
  *   Each secret name mapped to its host; a service with no valid url adds none.
@@ -142,16 +142,16 @@ function serviceSecretHosts(toml: string): Map<string, string> {
 
 /**
  * The saved secrets a run sends by id, so a secret saved once (in the chat
- * card or in Settings) serves every run whose optimize.toml names it (SKY-641).
+ * card or in Settings) serves every run whose ascent.toml names it (SKY-641).
  * A secret the user typed for this run wins over a saved one.
  *
- * An agent can edit optimize.toml, so its host is only a request. A saved
+ * An agent can edit ascent.toml, so its host is only a request. A saved
  * secret goes only when a host the user approved for it covers that host, and
  * the server checks the same list again. A secret with no approved host (saved
  * before SKY-641) is never sent.
  *
  * Args:
- *   toml: The optimize.toml text.
+ *   toml: The ascent.toml text.
  *   saved: The account's saved secrets; names, ids and approved hosts only.
  *   typed: The names of the secrets typed for this run.
  *
@@ -183,21 +183,23 @@ const hasModel = (config: ModelConfig | null): config is ModelConfig =>
  * The repository run's scorer. The hardening job sends the same scorer, so its
  * runner scores with the run's metric (SKY-378).
  *
- * A contract that names its own metric sends no code: the run scores with
- * that entry, and the run attaches no hardening job (SKY-749).
+ * A contract whose `[metric] entry` is a command sends no code: the metric
+ * box runs that command, even when `metric.py` has text, and the run
+ * attaches no hardening job (SKY-770). A Python entry runs `metric.py`.
  *
  * Args:
  *   workspace: The wizard's workspace, with `metric.py` and its model.
- *   metricEntry: The `[metric] entry` the contract names, if any.
+ *   metricCommand: The `[metric] entry` command, or null for none.
  *
  * Returns:
- *   The scorer, or null while `metric.py` is empty and the contract names no metric.
+ *   The scorer, or null while `metric.py` is empty and the contract names no command.
  */
 function repoRunScorer(
   workspace: WizardV2State["workspace"],
-  metricEntry: string | null = null,
+  metricCommand: readonly string[] | null = null,
 ): BlackboxScorer | null {
-  if (metricEntry) return { kind: "python", timeout_seconds: workspace.metricTimeoutSeconds };
+  if (metricCommand)
+    return { kind: "python", command_metric: true, timeout_seconds: workspace.metricTimeoutSeconds };
   if (!workspace.metricCode.trim()) return null;
   const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
   return {
@@ -251,8 +253,9 @@ function modelPrefix(name: string): string | null {
 
 // The server's LITELLM_TO_BYOK_PROVIDER (backend/core/provider_registry.py), the
 // reverse of BYOK_TO_LITELLM_PROVIDER in features/billing/lib/byok.ts. A copy,
-// because the repo-run test loader cannot import a feature's index.
-const LITELLM_TO_BYOK_PROVIDER: Readonly<Record<string, string>> = {
+// because the repo-run test loader cannot import a feature's index. repo-run.test.ts
+// pins it to byok.ts, and test_provider_registry_parity.py pins byok.ts to the server.
+export const LITELLM_TO_BYOK_PROVIDER: Readonly<Record<string, string>> = {
   gemini: "google",
   together_ai: "together",
   cohere_chat: "cohere",
@@ -298,24 +301,24 @@ function withByokProvider(metric: ModelConfig, reflection: ModelConfig): ModelCo
 /** The repository run request, or null while the wizard cannot run it yet. */
 export function repoRunRequest(
   state: WizardV2State,
-  { username, tokenSource, maxCostCents, savedSecrets = [], metricEntry = null }: RepoRunOptions,
+  { username, tokenSource, maxCostCents, savedSecrets = [], metricCommand = null }: RepoRunOptions,
 ): BlackboxRunRequest | null {
   const { task, inputs, optimizer, workspace, meta } = state;
   const repo = task.repo;
   if (!repo || !hasModel(optimizer.reflectionModel)) return null;
-  const scorer = repoRunScorer(workspace, metricEntry);
+  const scorer = repoRunScorer(workspace, metricCommand);
   if (!scorer) return null;
   const auto = optimizer.choice === "auto";
   const engine = optimizer.choice as BlackboxEngineId;
   const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
   const secrets = repo.secrets ?? [];
-  // An empty optimize.toml would replace the repository's own file, so it is not sent.
+  // An empty ascent.toml would replace the repository's own file, so it is not sent.
   const draftFiles = Object.fromEntries(
-    Object.entries(workspace.files).filter(([path, text]) => path !== OPTIMIZE_TOML || text.trim()),
+    Object.entries(workspace.files).filter(([path, text]) => path !== ASCENT_TOML || text.trim()),
   );
   const fromAccount = savedServiceSecrets(
-    workspace.files[OPTIMIZE_TOML] ?? "",
+    workspace.files[ASCENT_TOML] ?? "",
     savedSecrets,
     new Set(secrets.map((secret) => secret.name.trim())),
   );
@@ -357,7 +360,7 @@ export function repoRunRequest(
         commit: repo.commit.trim() || null,
         editable_paths: editablePaths,
         ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
-        // optimize.toml and every repository file the setup changed; metric.py goes as the scorer.
+        // ascent.toml and every repository file the setup changed; metric.py goes as the scorer.
         ...(Object.keys(draftFiles).length > 0 && { draft_files: draftFiles }),
         // The run refuses drafts read at another commit than the one it starts from.
         ...(Object.keys(draftFiles).length > 0 &&
@@ -400,27 +403,27 @@ const FINISHED_HARDENING: ReadonlySet<HardeningStatus> = new Set(["clean_stop", 
  * Hardening runs only on the local backend, so a hosted run's worker cannot
  * find the job; a hosted run sends no id and ships no suite.
  *
- * The hardening job hardens the wizard's metric.py. A contract that names its
- * own metric scores with that entry instead, so the job's suite would make
- * claims about a metric the run never used (SKY-749).
+ * The hardening job hardens the wizard's metric.py. A contract whose metric
+ * is a command scores with that command instead, so the job's suite would
+ * make claims about a metric the run never used (SKY-770).
  *
  * Args:
  *   runOn: The backend the run goes to.
  *   draftId: The setup's hardening draft id, or null when it never had one.
  *   read: Reads the draft's newest hardening job from the local backend.
- *   metricEntry: The `[metric] entry` the contract names, if any.
+ *   metricCommand: The `[metric] entry` command, or null for none.
  *
  * Returns:
- *   The job id, or null for a hosted run, a contract metric entry, a setup
+ *   The job id, or null for a hosted run, a command metric, a setup
  *   with no finished job, or a failed read; the run then submits without one.
  */
 export async function finishedHardeningJobId(
   runOn: ApiSource,
   draftId: string | null,
   read: (draftId: string) => Promise<HardeningJob | null>,
-  metricEntry: string | null = null,
+  metricCommand: readonly string[] | null = null,
 ): Promise<string | null> {
-  if (runOn !== "local" || !draftId || metricEntry) return null;
+  if (runOn !== "local" || !draftId || metricCommand) return null;
   try {
     const job = await read(draftId);
     return job && FINISHED_HARDENING.has(job.status) ? job.id : null;

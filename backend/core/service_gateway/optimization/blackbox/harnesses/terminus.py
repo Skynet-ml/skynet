@@ -101,12 +101,7 @@ from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
 
 GATEWAY_URL = {gateway_url!r}
-SECRET_NAMES = ("APP_API_KEY", "SKYNET_API_KEY")
-
-
-def _env(name):
-    \"\"\"Return ``APP_<name>``, or the legacy ``SKYNET_<name>`` when only that is set.\"\"\"
-    return os.environ.get("APP_" + name) or os.environ.get("SKYNET_" + name) or ""
+SECRET_NAMES = ("ASCENT_MODEL_KEY",)
 
 
 class LocalShell:
@@ -191,12 +186,12 @@ def _stop(signum, frame):
 
 async def _run(scratch):
     \"\"\"Run the agent to completion and print one Pi-shaped ``message_end`` event.\"\"\"
-    api_key, model = _env("API_KEY"), _env("MODEL")
+    api_key, model = os.environ.get("ASCENT_MODEL_KEY", ""), os.environ.get("ASCENT_MODEL", "")
     if not GATEWAY_URL or not api_key or not model:
         sys.exit("The Terminus harness needs the gateway URL, the gateway token and a model.")
     if shutil.which("tmux") is None:
         sys.exit("The Terminus harness needs tmux on PATH; add it to the box image.")
-    prompt = Path(_env("PROMPT_FILE")).read_text(encoding="utf-8")
+    prompt = Path(os.environ["ASCENT_TASK"]).read_text(encoding="utf-8")
     tmux_dir = scratch / "tmux"
     tmux_dir.mkdir()
     (scratch / "logs").mkdir()

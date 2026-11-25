@@ -70,6 +70,7 @@ import {
   canReview,
   cycleTone,
   enableProblem,
+  gainIsBetter,
   modelChanges,
   modelLabels,
   refreshDelayMs,
@@ -153,9 +154,11 @@ function errorText(err: unknown): string {
 export function ContinuousTab({
   optimizationId,
   source,
+  minimize = false,
 }: {
   optimizationId: string;
   source?: ApiSource;
+  minimize?: boolean;
 }) {
   const [state, setState] = useState<ContinuousState | null>(null);
   const [turnedOn, setTurnedOn] = useState(false);
@@ -304,7 +307,7 @@ export function ContinuousTab({
   if (state.plan.status === "waiting" || state.plan.status === "ended") {
     return <NotStartedView plan={state.plan} busy={busy} remove={remove} />;
   }
-  return <PlanView plan={state.plan} busy={busy} act={act} source={source} />;
+  return <PlanView plan={state.plan} busy={busy} act={act} source={source} minimize={minimize} />;
 }
 
 function StatusLabel({ tone, children }: { tone: "success" | "muted"; children: React.ReactNode }) {
@@ -400,11 +403,12 @@ function DeleteButton({ busy, remove }: { busy: boolean; remove: Remove }) {
   );
 }
 
-function PlanView({ plan, busy, act, source }: {
+function PlanView({ plan, busy, act, source, minimize }: {
   plan: ContinuousPlan;
   busy: boolean;
   act: Act;
   source?: ApiSource;
+  minimize: boolean;
 }) {
   const paused = plan.status === "paused";
   const [editing, setEditing] = useState<ScheduleRule | null>(null);
@@ -415,7 +419,15 @@ function PlanView({ plan, busy, act, source }: {
     <Card className="mt-4 overflow-hidden py-0">
       <CardContent className="divide-y divide-border/50 p-0">
         {pending.map((cycle) => (
-          <ReviewCard key={cycle.id} plan={plan} cycle={cycle} busy={busy} act={act} source={source} />
+          <ReviewCard
+            key={cycle.id}
+            plan={plan}
+            cycle={cycle}
+            busy={busy}
+            act={act}
+            source={source}
+            minimize={minimize}
+          />
         ))}
 
         <div className="space-y-2 p-5 sm:p-6">
@@ -569,7 +581,7 @@ function PlanView({ plan, busy, act, source }: {
               ) : (
                 <ol className="divide-y divide-border/50 border-t border-border/50">
                   {plan.cycles.map((cycle) => (
-                    <CycleRow key={cycle.id} cycle={cycle} source={source} />
+                    <CycleRow key={cycle.id} cycle={cycle} source={source} minimize={minimize} />
                   ))}
                 </ol>
               )}
@@ -692,7 +704,15 @@ function ModelName({ id, label, muted }: { id: string; label: string; muted?: bo
   );
 }
 
-function ScoreChange({ cycle, size }: { cycle: ContinuousCycle; size: "lg" | "sm" }) {
+function ScoreChange({
+  cycle,
+  size,
+  minimize,
+}: {
+  cycle: ContinuousCycle;
+  size: "lg" | "sm";
+  minimize: boolean;
+}) {
   const gain = scoreGain(cycle);
   if (gain == null) return null;
   const incumbent = formatScore(cycle.incumbent_score);
@@ -717,7 +737,7 @@ function ScoreChange({ cycle, size }: { cycle: ContinuousCycle; size: "lg" | "sm
           dir="ltr"
           className={cn(
             "text-sm font-medium",
-            gain > 0 ? "text-[var(--success)]" : "text-[var(--danger)]",
+            gainIsBetter(gain, minimize) ? "text-[var(--success)]" : "text-[var(--danger)]",
           )}
         >
           {gain > 0 ? "+" : "−"}
@@ -734,12 +754,14 @@ function ReviewCard({
   busy,
   act,
   source,
+  minimize,
 }: {
   plan: ContinuousPlan;
   cycle: ContinuousCycle;
   busy: boolean;
   act: Act;
   source?: ApiSource;
+  minimize: boolean;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 bg-primary/[0.05] p-5 animate-in fade-in-0 slide-in-from-top-2 [animation-duration:400ms] [animation-timing-function:cubic-bezier(0.16,1,0.3,1)] motion-reduce:animate-none sm:p-6">
@@ -749,7 +771,7 @@ function ReviewCard({
         {msg("continuous_tab.review.title")}
       </h3>
       <div className="flex flex-wrap items-center gap-2">
-        <ScoreChange cycle={cycle} size="lg" />
+        <ScoreChange cycle={cycle} size="lg" minimize={minimize} />
         <span className="flex items-center">
           <CycleChanges cycle={cycle} />
           {cycle.optimization_id && <RunLink id={cycle.optimization_id} source={source} />}
@@ -788,7 +810,15 @@ function ReviewCard({
   );
 }
 
-function CycleRow({ cycle, source }: { cycle: ContinuousCycle; source?: ApiSource }) {
+function CycleRow({
+  cycle,
+  source,
+  minimize,
+}: {
+  cycle: ContinuousCycle;
+  source?: ApiSource;
+  minimize: boolean;
+}) {
   const StatusIcon = STATUS_ICONS[cycle.status] ?? CircleNotch;
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5 px-5 py-2.5 sm:grid-cols-[8.5rem_9rem_minmax(0,1fr)_auto] sm:px-6">
@@ -808,7 +838,7 @@ function CycleRow({ cycle, source }: { cycle: ContinuousCycle; source?: ApiSourc
         {formatWhen(cycle.created_at)}
       </span>
       <span className="col-start-1 min-w-0 sm:col-start-auto">
-        <ScoreChange cycle={cycle} size="sm" />
+        <ScoreChange cycle={cycle} size="sm" minimize={minimize} />
       </span>
       <span className="col-start-2 row-span-3 row-start-1 flex items-center sm:col-start-auto sm:row-span-1 sm:row-start-auto">
         <CycleChanges cycle={cycle} />

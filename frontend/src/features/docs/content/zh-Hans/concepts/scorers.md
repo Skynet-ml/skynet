@@ -14,12 +14,12 @@ def score(repo_path, case, output=None):
 | `case`      | 一个 dict。`case["input"]` 包含输入字段。`case["expected"]` 包含期望值，或为 `None` |
 | `output`    | `[run]` 入口为该用例返回的内容；如果文件没有 `[run]`，则为 `None` |
 
-仓库的 `optimize.toml` 文件必须有一个 `[run]` 部分或一个 `[target.<name>]` 阶段。`[run]` 的 `entry` 在自己的沙箱中，对一个用例运行一个版本。如果两者都没有，Skynet 会拒绝该文件，因为每个版本都会得到相同的分数。
+仓库的 `ascent.toml` 文件必须有一个 `[run]` 部分或一个 `[target.<name>]` 阶段。`[run]` 的 `entry` 在自己的沙箱中，对一个用例运行一个版本。如果两者都没有，Skynet 会拒绝该文件，因为每个版本都会得到相同的分数。
 
 - 函数入口，例如 `entry = "serve.py:serve"`，以 `case["input"]` 作为参数。`output` 是它的返回值。
-- 命令入口，例如 `entry = ["python", "-m", "pytest", "-q"]`，从 stdin 以 JSON 形式接收输入。`output` 是 `{"exit_code": ..., "stdout": "..."}`。
+- 命令入口，例如 `entry = ["python", "run_tests.py"]`，从 `ASCENT_INPUT` 路径下的 JSON 文件读取 `{"input": ...}`。它把 `{"output": ...}` 写入 `ASCENT_OUTPUT` 路径。`output` 是 `"output"` 下的值。命令打印的内容只进入日志。
 
-评分器在另一个独立的沙箱中运行。该沙箱只包含你的指标文件。评分器不能导入或运行版本的代码。它只能通过 `output`，或通过对 `[target.<name>]` 阶段的 `call()` 看到版本。用 `from skynet import call` 导入 `call`。请阅读[优化的工作原理](/docs/concepts/optimization)。
+评分器在另一个独立的沙箱中运行。该沙箱只包含你的指标文件。评分器不能导入或运行版本的代码。它只能通过 `output`，或通过对 `[target.<name>]` 阶段的 `call()` 看到版本。用 `from openascent import call` 导入 `call`。请阅读[优化的工作原理](/docs/concepts/optimization)。
 
 ## 返回值
 
@@ -69,7 +69,7 @@ GEPA 和 Auto 会读取反馈文本来编写下一个版本。请说明哪里错
 
 ### 精确匹配
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -88,30 +88,40 @@ def score(repo_path, case, output=None):
 
 ### 运行仓库的测试
 
-`[run]` 入口运行测试。评分器读取退出码和测试输出。
+`[run]` 入口运行测试。有测试失败时，`pytest` 以非零退出码结束，而非零退出码会让该案例失败。因此包装脚本 `run_tests.py` 把结果写入 `ASCENT_OUTPUT`，并以 0 退出。评分器读取这个结果。
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-当 `[run]` 入口在某个案例上失败时，该案例没有分数。如果入口无法启动、超时或被信号停止，或者函数入口在返回之前抛出异常或退出，反馈是 `Run failed: …`，Skynet 不会调用评分器。命令入口的非零退出码不算失败：评分器会在 `output` 中收到它。包含这种案例的版本没有分数。它不能成为最佳版本，不会达到任何 `[outcome] target`，也不会打开 pull request。如果失败必须算作一个数字，请在你的程序中捕获失败，写出一个输出，再让评分器为它评分。请阅读[仓库规则](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
+当 `[run]` 入口在某个案例上失败时，该案例没有分数。如果入口无法启动、超时或被信号停止，或者函数入口在返回之前抛出异常或退出，反馈是 `Run failed: …`，Skynet 不会调用评分器。命令入口以非零退出码结束，或没有写出有效的输出文件时，也会失败。包含这种案例的版本没有分数。它不能成为最佳版本，不会达到任何 `[outcome] target`，也不会打开 pull request。如果失败必须算作一个数字，请在你的程序中捕获失败，写出一个输出，再让评分器为它评分。请阅读[仓库规则](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
 
 ### 用模型作为评判
 
-评分器可以调用模型。从 `skynet` 辅助模块导入 `llm`。调用会通过 Skynet 的模型网关，发送到本次运行的评分器模型。
+评分器可以调用模型。从 `openascent` 辅助模块导入 `llm`。调用会通过 Skynet 的模型网关，发送到本次运行的评分器模型。
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -119,7 +129,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -133,12 +143,12 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-评分器也可以使用任何兼容 OpenAI 的客户端，配合 `OPENAI_BASE_URL`、`APP_API_KEY` 和 `APP_MODEL` 环境变量。网关只接受本次运行的评分器模型。
+评分器也可以使用任何兼容 OpenAI 的客户端，配合 `OPENAI_BASE_URL`、`ASCENT_MODEL_KEY` 和 `ASCENT_MODEL` 环境变量。网关只接受本次运行的评分器模型。
 
 ## 模型调用和密钥
 
 - 使用 Skynet 密钥的调用会计入运行预算。使用你自己的密钥（BYOK）时，调用计到你的提供商密钥上，Skynet 不收取模型费用。请阅读[计费](/docs/concepts/billing)。
-- 评分器不会以环境变量的形式收到运行密钥。密钥只能通过 `[metric] services` 列出的 `[services.<name>]` 表，或 `[metric] mcp` 文件中的服务器，传给评分器。把密钥以 `${NAME}` 的形式写在该表的 `headers` 中。评分器把请求发送到 `SKYNET_SERVICE_<NAME>_URL` 中的 URL。Skynet 在沙箱外添加密钥。
+- 评分器不会以环境变量的形式收到运行密钥。密钥只能通过 `[metric] services` 列出的 `[services.<name>]` 表，或 `[metric] mcp` 文件中的服务器，传给评分器。把密钥以 `${NAME}` 的形式写在该表的 `headers` 中。评分器把请求发送到 `ASCENT_SERVICE_<NAME>_URL` 中的 URL。Skynet 在沙箱外添加密钥。
 - Skynet 会在评分器输出和日志中隐藏密钥的值。
 
 ## 限制

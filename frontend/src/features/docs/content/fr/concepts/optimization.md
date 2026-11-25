@@ -2,9 +2,9 @@ Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Un mote
 
 ## Le contrat commun
 
-Chaque exécution comporte un dépôt, un fichier `optimize.toml` avec une entrée `[run]` ou une étape `[target.<name>]`, et un évaluateur. L'entrée `[run]` exécute une version du dépôt sur un cas. L'évaluateur est une fonction Python qui reçoit la sortie de l'entrée et le cas.
+Chaque exécution comporte un dépôt, un fichier `ascent.toml` avec une entrée `[run]` ou une étape `[target.<name>]`, et un évaluateur. L'entrée `[run]` exécute une version du dépôt sur un cas. L'évaluateur est une fonction Python qui reçoit la sortie de l'entrée et le cas.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Le dépôt contient à sa racine un fichier `serve.py` avec `def serve(input)`. L'entrée `[run]` l'appelle dans sa propre boîte de sandbox. Skynet l'utilise pour servir la meilleure version après l'exécution.
 
-L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte contient seulement vos fichiers de métrique et aucun code de la version, donc l'évaluateur ne peut pas importer `serve.py`. Il voit la version seulement à travers `output`, ou à travers `call()` vers une étape `[target.<name>]`. Importez `call` avec `from skynet import call`. Sans entrée `[run]` ni étape `[target.<name>]`, Skynet refuse le fichier `optimize.toml`.
+L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte contient seulement vos fichiers de métrique et aucun code de la version, donc l'évaluateur ne peut pas importer `serve.py`. Il voit la version seulement à travers `output`, ou à travers `call()` vers une étape `[target.<name>]`. Importez `call` avec `from openascent import call`. Sans entrée `[run]` ni étape `[target.<name>]`, Skynet refuse le fichier `ascent.toml`.
 
 > [!NOTE]
 > L'agent de code qui rédige les versions ne peut voir ni le source de l'évaluateur, ni les valeurs attendues, ni les secrets de l'exécution.
@@ -37,9 +37,9 @@ Le code de votre dépôt et votre évaluateur peuvent appeler un modèle via la 
 
 | Variable             | Ce qu'elle contient                                                   |
 | -------------------- | --------------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | L'URL de la passerelle. `APP_GATEWAY_URL` contient la même valeur.    |
-| `APP_API_KEY`        | Un jeton pour cette exécution seulement. Ce n'est pas une clé de fournisseur. |
-| `APP_MODEL`          | Le nom du modèle à envoyer. C'est le modèle de l'évaluateur de l'exécution. |
+| `OPENAI_BASE_URL`    | L'URL de la passerelle. `ASCENT_MODEL_URL` contient la même valeur.   |
+| `ASCENT_MODEL_KEY`   | Un jeton pour cette exécution seulement. Ce n'est pas une clé de fournisseur. |
+| `ASCENT_MODEL`       | Le nom du modèle à envoyer. C'est le modèle de l'évaluateur de l'exécution. |
 | `ANTHROPIC_BASE_URL` | L'URL de la passerelle pour les SDK Anthropic.                        |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

@@ -13,17 +13,14 @@ registerHooks({
   },
 });
 
-const { economyEligible, keepEconomy, prepareModelConfig, runnableEffort, usesEffortSlider } =
-  await import("./model-config.ts");
-
-void test("only a local CLI model gets the effort slider", () => {
-  assert.equal(usesEffortSlider("subscription", true), true);
-  // With no default level, the slider's default stop would turn thinking off.
-  assert.equal(usesEffortSlider("subscription", false), false);
-  assert.equal(usesEffortSlider("byok", true), false);
-  assert.equal(usesEffortSlider("managed", true), false);
-  assert.equal(usesEffortSlider(undefined, true), false);
-});
+const {
+  economyEligible,
+  keepEconomy,
+  prepareModelConfig,
+  runnableEffort,
+  startingParams,
+  temperatureMax,
+} = await import("./model-config.ts");
 
 void test("a saved level becomes the level the backend runs for the CLI", () => {
   const opus45 = ["low", "medium", "high"];
@@ -79,4 +76,54 @@ test("a model picked in the dialog keeps the picker's economy choice", () => {
   const picked = { name: "anthropic/claude-default" };
   assert.equal(keepEconomy(picked, managed).economy_mode, true);
   assert.equal("economy_mode" in keepEconomy({ ...picked, economy_mode: true }, null), false);
+});
+
+void test("a picked model starts at its own temperature and a capped output limit", () => {
+  assert.deepEqual(
+    startingParams({
+      value: "x-ai/grok",
+      default_temperature: 0.7,
+      max_output_tokens: 8192,
+      takes_temperature: true,
+    }),
+    { temperature: 0.7, max_tokens: 8192 },
+  );
+  assert.deepEqual(
+    startingParams({
+      value: "acme/m",
+      default_temperature: null,
+      max_output_tokens: 128000,
+      takes_temperature: true,
+    }),
+    { temperature: 1, max_tokens: 32768 },
+  );
+});
+
+void test("a picked model whose listing carries no data starts with both fields empty", () => {
+  assert.deepEqual(startingParams({ value: "acme/m" }), {
+    temperature: undefined,
+    max_tokens: undefined,
+  });
+  assert.deepEqual(startingParams({ value: "acme/m", takes_temperature: null }), {
+    temperature: undefined,
+    max_tokens: undefined,
+  });
+});
+
+void test("a picked model's temperature stays in its range, and none goes to a model that takes none", () => {
+  assert.equal(temperatureMax("openrouter/anthropic/claude-opus-4.5"), 1);
+  assert.equal(temperatureMax("anthropic/claude-sonnet-5"), 1);
+  assert.equal(temperatureMax("openrouter/openai/gpt-6"), 2);
+  assert.equal(
+    startingParams({
+      value: "anthropic/claude-x",
+      default_temperature: 1.5,
+      takes_temperature: true,
+    }).temperature,
+    1,
+  );
+  assert.equal(
+    startingParams({ value: "openai/gpt-6", takes_temperature: false }).temperature,
+    undefined,
+  );
 });

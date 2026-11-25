@@ -480,7 +480,7 @@ def test_repo_secrets_are_vaulted_at_submit_and_resolved_only_in_the_parent(harn
 
 
 def test_saved_secret_goes_only_to_a_host_its_owner_approved(harness: _Harness) -> None:
-    """Refuse a run host that is not in the secret's stored list, as an edited optimize.toml would ask (SKY-641)."""
+    """Refuse a run host that is not in the secret's stored list, as an edited ascent.toml would ask (SKY-641)."""
     vault = ProtectedCredentialVault(engine=harness.engine)
     binding_id = harness.execution_budget(key="repo-secret-hosts")
     store = SavedSecretStore(harness.engine)

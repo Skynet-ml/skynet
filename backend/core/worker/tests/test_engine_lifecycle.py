@@ -33,7 +33,6 @@ from core.exceptions import INFRASTRUCTURE_INTERRUPTION
 from core.storage.base import JobStore
 from core.storage.models import JobModel
 from core.worker.constants import (
-    EVENT_AGENT_RUN,
     EVENT_ERROR,
     EVENT_LOG,
     EVENT_PROGRESS,
@@ -108,29 +107,6 @@ def test_drain_routes_progress_event_to_record_progress(
     assert opt_id == "opt-1"
     assert evt_name == "iter_done"
     assert metrics == {"score": 0.8}
-
-
-def test_drain_routes_agent_run_rows_and_deltas_to_the_store(
-    worker: BackgroundWorker,
-    store: FakeJobStore,
-) -> None:
-    """A run row is saved, a transcript delta appended, and a malformed run ignored."""
-    store.seed_job("opt-1")
-    q = _make_fake_queue(
-        {"type": EVENT_AGENT_RUN, "run": {"run_id": 1, "status": "running", "transcript": ""}},
-        {"type": EVENT_AGENT_RUN, "run": {"run_id": 1, "transcript_delta": "hi\n"}},
-        {"type": EVENT_AGENT_RUN, "run": {"run_id": "bogus"}},
-        {"type": EVENT_AGENT_RUN, "run": None},
-    )
-
-    _result, error, drained = worker._drain_subprocess_events("opt-1", q)
-
-    assert error is None
-    assert drained == 4
-    assert store.agent_run_calls == [
-        ("opt-1", "save", {"run_id": 1, "status": "running", "transcript": ""}),
-        ("opt-1", "append", (1, "hi\n")),
-    ]
 
 
 def test_drain_routes_log_event_to_append_log(

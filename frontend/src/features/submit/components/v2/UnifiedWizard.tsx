@@ -15,7 +15,7 @@ import { toast } from "react-toastify";
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";
 import { useAddFundsAction, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
-import { checkOptimizeToml } from "@/shared/lib/api";
+import { ascentTomlDiagnosticLines, checkAscentToml } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -24,8 +24,8 @@ import { ExecutionBudgetProvider } from "../../hooks/use-execution-budget";
 import { WizardV2Provider, useWizardV2Shell, v2Text } from "../../hooks/use-unified-wizard";
 import {
   budgetContinueBlock,
-  budgetShortfall,
-  limitMissing,
+  limitHoldsContinue,
+  metricStepHeld,
   runBalance,
   type BudgetShortfall,
 } from "../../lib/budget-limit";
@@ -66,12 +66,21 @@ const SHORTFALL_TOAST_ID = "submit-budget-shortfall";
 // A stalled check must not hold Continue silently; the timeout shows a toast.
 const SETUP_CHECK_TIMEOUT_MS = 15_000;
 const SETUP_CHECK_TOAST_ID = "submit-setup-check";
-const OPTIMIZE_TOML = "optimize.toml";
+const SETUP_WARNINGS_TOAST_ID = "submit-setup-warnings";
+const ASCENT_TOML = "ascent.toml";
 
-// A second failed press shows its own error, not the first one's.
-function setupToast(text: string) {
-  if (toast.isActive(SETUP_CHECK_TOAST_ID)) toast.update(SETUP_CHECK_TOAST_ID, { render: text });
-  else toast.error(text, { toastId: SETUP_CHECK_TOAST_ID });
+// A second press shows its own text in place of the first one's, not a second toast.
+// An undefined autoClose takes the container's default, also on an update.
+function setupToast(
+  text: string,
+  id = SETUP_CHECK_TOAST_ID,
+  show = toast.error,
+  autoClose?: false,
+) {
+  // A check can give many diagnostics, one on each line of the text (SKY-763).
+  const render = <span className="whitespace-pre-line">{text}</span>;
+  if (toast.isActive(id)) toast.update(id, { render, autoClose });
+  else show(render, { toastId: id, autoClose });
 }
 
 function shortfallMessage(shortfall: BudgetShortfall): string {
@@ -166,15 +175,15 @@ function UnifiedWizardFrame() {
   );
   // The stepper holds too: no step past a held Continue, and never the
   // metric step while the run can't start, from wherever the user stands.
-  const runShort = useMemo(
+  const metricHeld = useMemo(
     () =>
-      floorCents != null &&
-      budgetShortfall(floorCents, {
-        uncapped: budgetUncapped,
-        limit: maxCostCents,
-        balance,
-      }) !== null,
-    [floorCents, budgetUncapped, maxCostCents, balance],
+      metricStepHeld(
+        floorCents,
+        { uncapped: budgetUncapped, limit: maxCostCents, balance },
+        w.costSettled,
+        w.limitCleared,
+      ),
+    [floorCents, budgetUncapped, maxCostCents, balance, w.costSettled, w.limitCleared],
   );
   const { openTo } = useSettingsModal();
   const addFunds = useAddFundsAction();
@@ -191,11 +200,11 @@ function UnifiedWizardFrame() {
     (beforeMetric || (LIMIT_SCREENS as readonly string[]).includes(visibleScreen));
   const [waitingOn, setWaitingOn] = useState<string | null>(null);
   if (waitingOn !== null && waitingOn !== visibleScreen) setWaitingOn(null);
-  // A repository run's optimize.toml must parse before the user leaves the
+  // A repository run's ascent.toml must parse before the user leaves the
   // code screen. The server holds the agent's own moves on the same check.
   const setupText =
     visibleScreen === "metric" && w.state.task.repo
-      ? (w.state.workspace.files[OPTIMIZE_TOML] ?? "")
+      ? (w.state.workspace.files[ASCENT_TOML] ?? "")
       : "";
   // Every new run needs a contract (SKY-693). Only a repository read that found
   // no file holds here. With no Changes pane, a read still loading, or a read
@@ -204,7 +213,7 @@ function UnifiedWizardFrame() {
   const noContract =
     visibleScreen === "metric" &&
     !!w.state.task.repo &&
-    contractMissing(setupText, repoBase?.get(OPTIMIZE_TOML));
+    contractMissing(setupText, repoBase?.get(ASCENT_TOML));
   const screenRef = useRef(visibleScreen);
   const setupTextRef = useRef(setupText);
   useLayoutEffect(() => {
@@ -231,21 +240,35 @@ function UnifiedWizardFrame() {
           withoutFile();
           return Promise.resolve();
         }
-        return checkOptimizeToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then(
-          (result) => {
-            if (screenRef.current !== screen) return;
-            // The file changed while the check ran, so its answer is stale.
-            if (setupTextRef.current !== text) return run(setupTextRef.current);
-            if (result.ok) {
-              toast.dismiss(SETUP_CHECK_TOAST_ID);
-              then();
-              return;
+        return checkAscentToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then((result) => {
+          if (screenRef.current !== screen) return;
+          // The file changed while the check ran, so its answer is stale.
+          if (setupTextRef.current !== text) return run(setupTextRef.current);
+          // The lead sentence stands alone; each diagnostic starts its own line.
+          const lines = ascentTomlDiagnosticLines(result.errors, result.hidden);
+          if (result.ok) {
+            toast.dismiss(SETUP_CHECK_TOAST_ID);
+            // A warning blocks nothing, so the wizard says it and moves on.
+            if (!lines) toast.dismiss(SETUP_WARNINGS_TOAST_ID);
+            else {
+              setupToast(
+                formatMsg("submit.setup_check.warnings", { p1: lines }),
+                SETUP_WARNINGS_TOAST_ID,
+                toast.warning,
+              );
             }
-            setupToast(
-              formatMsg("submit.setup_check.invalid", { p1: result.errors[0]?.message ?? "" }),
-            );
-          },
-        );
+            then();
+            return;
+          }
+          toast.dismiss(SETUP_WARNINGS_TOAST_ID);
+          // Up to ten lines take longer to read than the default delay (SKY-763).
+          setupToast(
+            formatMsg("submit.setup_check.invalid", { p1: lines }),
+            SETUP_CHECK_TOAST_ID,
+            toast.error,
+            false,
+          );
+        });
       };
       run(setupText)
         .catch(() => setupToast(msg("submit.setup_check.unavailable")))
@@ -268,7 +291,8 @@ function UnifiedWizardFrame() {
         setWaitingOn(visibleScreen);
         return;
       }
-      if (limitMissing(visibleScreen, { uncapped: budgetUncapped, limit: maxCostCents, balance })) {
+      const choice = { uncapped: budgetUncapped, limit: maxCostCents, balance };
+      if (limitHoldsContinue(visibleScreen, choice, w.limitCleared, beforeMetric, current)) {
         toast.error(msg("submit.budget.error.empty"), { toastId: SHORTFALL_TOAST_ID });
         return;
       }
@@ -299,6 +323,8 @@ function UnifiedWizardFrame() {
       inputsOpen,
       pricing,
       visibleScreen,
+      w.limitCleared,
+      beforeMetric,
       budgetUncapped,
       maxCostCents,
       balance,
@@ -359,11 +385,8 @@ function UnifiedWizardFrame() {
         step !== undefined &&
         (steps.indexOf(step) > position || (step === current && target > page));
       const open = inputsOpen && !pricing && shortfall === null;
-      // The stepper's own hold: no jump into the metric step while costs are unsettled.
-      const held =
-        step !== undefined &&
-        (runShort || !w.costSettled) &&
-        WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
+      // The stepper's own hold on the metric step (``metricStepHeld``).
+      const held = step !== undefined && metricHeld && WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
       // A step on the way with a problem (an optimizer that no longer fits
       // the data, a stale check) holds the jump, so Continue shows it.
       const blocked =
@@ -385,8 +408,7 @@ function UnifiedWizardFrame() {
       inputsOpen,
       pricing,
       shortfall,
-      runShort,
-      w.costSettled,
+      metricHeld,
       agentForward,
       goTo,
       canEnter,
@@ -479,7 +501,6 @@ function UnifiedWizardFrame() {
     return () => window.removeEventListener("keydown", onKey);
   }, [forward, back, submitting, lastScreen]);
 
-  const metricHeld = runShort || !w.costSettled;
   const reachable = (step: WizardStepId) =>
     WIZARD_STAGE[step] <= WIZARD_STAGE[current] ||
     (shortfall === null && !(metricHeld && WIZARD_STAGE[step] >= WIZARD_STAGE.metric));

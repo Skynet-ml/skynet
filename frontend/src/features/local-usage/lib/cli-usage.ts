@@ -39,14 +39,14 @@ export interface CliProductShare {
   percent: number;
 }
 
-/** Codex's credits and free limit resets. Each field is null when Codex does not send it. */
+/** Codex's credits and limit resets. Each field is null when Codex does not send it. */
 export interface CliCredits {
   balance: number | null;
   resets_available: number | null;
   resets_expire_at: string | null;
 }
 
-/** What Codex answered when the user used a free limit reset; `error` means no clear answer. */
+/** What Codex answered when the user used a limit reset; `error` means no clear answer. */
 export type CodexResetOutcome =
   | "reset"
   | "nothingToReset"

@@ -27,8 +27,8 @@ A host that runs an engine on the loop must follow this contract. It calls
 ends before it replays every committed step raises
 :class:`StepDivergedError` there. Its model client bills no call itself, and
 raises :class:`ModelCallBilledError` for a provider failure that the provider
-billed (see the ``model`` argument of :class:`EngineLoop`). No host calls the
-loop yet: SKY-728 (remove the one-box run path) connects it.
+billed (see the ``model`` argument of :class:`EngineLoop`). The production
+host is :mod:`core.worker.loop_host` (SKY-829).
 
 A loop that cannot go on raises :class:`LoopStoppedError`: its replay
 diverged, its run lost the fence, no lease is left, the budget refused the
@@ -68,10 +68,12 @@ definitions and gives a :class:`ModelReply` with the text, the tool calls and
 the cost; the tools are part of the prompt hash that a replay matches.
 :meth:`EngineLoop.model` is the same call with no tools, and gives only the
 text. :meth:`EngineLoop.put_files`, :meth:`EngineLoop.read_file` and
-:meth:`EngineLoop.list_files` write, read and list trees with no box. A tree
+:meth:`EngineLoop.list_files` write, read and list trees with no box, and
+:meth:`EngineLoop.file_ids` gives the content id of each file. A read
+with ``max_bytes`` refuses a larger file before it loads (SKY-818). A tree
 write is no step: a tree id is the hash of its content, so a resume that
 writes the same files gets the same tree. The loop gets the run's hidden-path
-hashes once, when it is built, and ``read_file``, ``list_files`` and every
+hashes once, when it is built, and ``read_file``, ``list_files``, ``file_ids`` and every
 candidate box leave those paths out; no caller can turn that off. The loop
 always hides ``.optimize/exploits`` the same way, as the native runtime hides
 the exploit suite from the proposer. A tree with a symlink at a hidden path,
@@ -98,6 +100,16 @@ caller's :class:`RepoSeed` on the :class:`EngineContext`. The engine's seed
 names the seed tree without its hidden paths. The raw seed tree id is a hash
 of the hidden content too, so the engine never gets it.
 
+:meth:`EngineLoop.evaluate` runs a caller's own evaluation, such as one call of
+the run's repository scorer, and commits its JSON result as a step with no
+cost. The evaluation's boxes bill through the run's budget runtime, not the
+lease. A replay gives the committed result, so a resume does not run or pay for
+the evaluation again. An error of the evaluation commits nothing and stops the
+loop; a result that the engine must see as a failure goes in the result. An
+:class:`InfrastructureInterruptionError` or a pending usage of the evaluation,
+and a pending usage of any step, stops it with :class:`LoopInterruptedError`:
+the worker puts the run back in the queue, and the resume runs that work again.
+
 Each Auto lane is its own agent. The ``lane`` usage tag already follows a lane
 into the threads that it starts, so the tag names the agent: ``loop/<lane>``.
 Calls outside a lane go to the root agent, ``loop``. Other writers of the run's
@@ -112,7 +124,7 @@ import hashlib
 import json
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -129,7 +141,8 @@ from ..billing.operation_pricing import UnpricedOperationError
 from ..billing.runtime import UsagePendingError
 from ..billing.usage_tags import LANE_KEY, current_tags
 from ..constants import HARDENING_EXPLOITS_DIR
-from ..sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
+from ..exceptions import InfrastructureInterruptionError
+from ..sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, HeaderRules, resolve_grants
 from ..sandbox.trees import (
     BoxFailureError,
     BoxSource,
@@ -146,11 +159,14 @@ from ..service_gateway.optimization.blackbox.protocol import (
     Candidate,
     EngineContext,
     EvalServer,
+    FileTooLargeError,
     ModelReply,
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
+    escape_surrogates,
     nests_deeper,
+    safe_tool_call,
     text_nests_deeper,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
@@ -161,7 +177,7 @@ from ..service_gateway.optimization.blackbox.tree_sandbox import (
     TreeSandbox,
 )
 from ..storage.models import AgentStepModel
-from ..storage.step_log_store import StepFenceError, step_id_for
+from ..storage.step_log_store import ObjectTooLargeError, StepFenceError, step_id_for
 from ..storage.tree_store import TreeEntry, TreeStore, is_git_part
 from .actors import Agent, LeaseExhaustedError, Run, StepResult, cost_text, ledger_cents
 from .step_recovery import last_committed_step, still_owns_run
@@ -209,6 +225,13 @@ class LoopStoppedError(ScorerAbortError):
     Its replay diverged, its run lost the fence, no lease is left, the budget refused the work, a model call
     cost more than its bound, the run or the step log is closed, a step failed outside its own work, or an agent
     could not open because its committed log has a gap or the step log read fails.
+    """
+
+
+class LoopInterruptedError(LoopStoppedError, InfrastructureInterruptionError):
+    """The loop stopped on a failure that can pass, such as a scorer outage or a pending usage.
+
+    The worker marks it as an interruption, so the run goes back to the queue and its resume replays the log.
     """
 
 
@@ -367,7 +390,7 @@ def _call(record: dict[str, Any]) -> str:
         record: The committed step.
 
     Returns:
-        ``model``, ``run``, ``score`` or ``room``.
+        ``model``, ``run``, ``score``, ``room`` or ``evaluate``.
     """
     if record["kind"] == "model":
         return "model"
@@ -398,7 +421,7 @@ class EngineLoop:
         model: ModelCall,
         model_max_cents: Decimal | int | str,
         run_dir: Path,
-        registry: Mapping[str, Mapping[str, str]] | None = None,
+        registry: HeaderRules | None = None,
         hidden_hashes: Mapping[str, str] | None = None,
     ) -> None:
         """Bind the loop to its run and its step layers.
@@ -478,7 +501,7 @@ class EngineLoop:
         """Return the engine context of the loop: each model call and each command commits a step.
 
         Concurrency is 1: a step's place in the log must not depend on thread timing. ``read_file``,
-        ``list_files`` and ``run_command`` leave out the loop's hidden paths, as :meth:`server` does. The
+        ``list_files``, ``file_ids`` and ``run_command`` leave out the loop's hidden paths, as :meth:`server` does. The
         context's ``repo_seed`` names the seed tree without its hidden paths, and keeps the seed's path rules.
 
         Args:
@@ -508,7 +531,6 @@ class EngineLoop:
             return EngineContext(
                 reflection_lm=self.model,
                 run_dir=str(self.run_dir),
-                concurrency=1,
                 remaining_cost_usd=self.remaining_cost_usd,
                 call_model=self.call_model,
                 run_command=self.run,
@@ -516,6 +538,8 @@ class EngineLoop:
                 read_file=self.read_file,
                 list_files=self.list_files,
                 log_owner=self._run.run_id,
+                file_ids=self.file_ids,
+                record_step=self.evaluate,
                 **fields,
             )
 
@@ -604,7 +628,8 @@ class EngineLoop:
         "input_schema"}`` (:class:`ToolDefinition`). A returned tool call is ``{"id", "name", "arguments"}``
         (:class:`ToolCall`), with ``arguments`` as a dict, as raw text when it is not a JSON object, or as
         ``TOO_DEEP_ARGUMENTS`` when it nests too deep. The model client converts with :func:`openai_tools` and
-        :func:`tool_calls_from_openai`.
+        :func:`tool_calls_from_openai`. The step stores each lone surrogate of the reply as an escape, and arguments
+        that hold one as their JSON text.
 
         Args:
             prompt: The prompt text or messages.
@@ -661,10 +686,13 @@ class EngineLoop:
                         cost = error.cost_cents if isinstance(error, ModelCallBilledError) else Decimal(0)
                         return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, cost)
                     replies.append(reply)
-                    body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
-                    if reply.tool_calls:
-                        body["tool_calls"] = [_bounded_call(call) for call in reply.tool_calls]
+                    # Model output is untrusted: a lone surrogate in it would fail the UTF-8 commit and stop the
+                    # run (SKY-821).
+                    body: dict[str, Any] = {"prompt_sha256": digest, "text": escape_surrogates(reply.text or "")}
                     try:
+                        if reply.tool_calls:
+                            # safe_tool_call recurses, so the depth bound runs first (SKY-817).
+                            body["tool_calls"] = [safe_tool_call(_bounded_call(call)) for call in reply.tool_calls]
                         _check_reply(body, reply.cost_cents)
                     except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:
                         failures.append(error)
@@ -691,7 +719,9 @@ class EngineLoop:
                     raise ModelCallFailedError(type(failures[0]).__name__, cost_cents=cost) from failures[0]
                 return _reply(committed)
 
-    def put_files(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
+    def put_files(
+        self, files: Mapping[str, bytes], base_tree_id: str | None = None, *, executables: Collection[str] = ()
+    ) -> str:
         """Write files over a tree with no box, and return the new tree's id.
 
         This is no step: it commits nothing, opens no box and costs nothing. The tree id is the hash of the
@@ -705,6 +735,7 @@ class EngineLoop:
         Args:
             files: The file bytes by ``/``-separated path; a file keeps an existing executable mode.
             base_tree_id: The tree to start from; ``None`` starts from an empty tree.
+            executables: The written paths to make executable.
 
         Returns:
             The new tree id.
@@ -725,23 +756,34 @@ class EngineLoop:
                 # every part is checked before the first write.
                 if any(part in {"", ".", ".."} or "\0" in part or is_git_part(part) for part in path.split("/")):
                     raise ValueError(f"bad tree entry name in path {path!r}")
-            tree_id = self._put_tree(base_tree_id, {tuple(path.split("/")): data for path, data in files.items()})
+            tree_id = self._put_tree(
+                base_tree_id, {tuple(path.split("/")): data for path, data in files.items()}, frozenset(executables)
+            )
             if base_tree_id in self._run_outputs:
                 self._run_outputs.add(tree_id)
             return tree_id
 
-    def read_file(self, tree_id: str, path: str) -> bytes | None:
+    def read_file(self, tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
         """Read one file of a tree with no box, unless the loop hides it.
+
+        A file can be large: a box output may hold up to ``core.sandbox.trees.MAX_TREE_BYTES``, and ``put_files``
+        has no limit. With ``max_bytes``, the tree store compares the file's length to the cap in the same lookup
+        that finds the bytes, and a file above the cap never loads. Like a read with no cap, this is no step: the
+        blob id is the hash of the file's bytes, so the same tree and path give the same size and the same answer
+        on a resume, before and after the flush.
 
         Args:
             tree_id: The tree.
             path: The ``/``-separated path of the file.
+            max_bytes: The most bytes to load; ``None`` loads the file at any size.
 
         Returns:
             The file bytes, or ``None`` when the path is hidden, has a ``.git`` part in any letter case, or is not a
             file or executable in the tree.
 
         Raises:
+            FileTooLargeError: When the file has more than ``max_bytes`` bytes. A hidden path gives ``None``
+                first, so the error never tells the size of a hidden file.
             LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
                 :meth:`_check_links` tells; the loop keeps it.
             LookupError: When the run cannot see the tree or one of its folders.
@@ -755,14 +797,18 @@ class EngineLoop:
             entry = None if folder is None else self._entries(folder).get(name)
             if entry is None or entry.mode not in {"file", "exec"}:
                 return None
-            return self._trees.get_blob(self._run.run_id, entry.object_id)
+            try:
+                return self._trees.get_blob(self._run.run_id, entry.object_id, max_bytes)
+            except ObjectTooLargeError as error:
+                raise FileTooLargeError(path, error.size, max_bytes) from None
 
-    def list_files(self, tree_id: str, path: str = "") -> list[str] | None:
+    def list_files(self, tree_id: str, path: str = "", *, executable: bool = False) -> list[str] | None:
         """List the files under one folder of a tree with no box, and leave out the paths that the loop hides.
 
         Args:
             tree_id: The tree.
             path: The ``/``-separated folder; ``""`` or ``.`` is the tree's root.
+            executable: List only the executables.
 
         Returns:
             The sorted paths of the files and executables below the folder, at any depth, from the tree's root,
@@ -785,8 +831,29 @@ class EngineLoop:
             # A folder left empty by the filter is gone from the box too, so it is missing here as well (SKY-353).
             if folder is None or (parts and not self._has_visible(folder, prefix)):
                 return None
-            files = self._files(folder, prefix)
+            files = self._files(folder, prefix, executable)
             return sorted(name for name in files if hashed_kind(self._hidden, name) is None)
+
+    def file_ids(self, tree_id: str) -> dict[str, str]:
+        """Map each file of a tree to its content id with no box, and leave out the paths that the loop hides.
+
+        Two files with the same content id have the same bytes, so a caller can find the changed files of two trees
+        without reading a blob.
+
+        Args:
+            tree_id: The tree.
+
+        Returns:
+            The content id of each file and executable, by ``/``-separated path from the tree's root.
+
+        Raises:
+            LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
+                :meth:`_check_links` tells; the loop keeps it.
+            LookupError: When the run cannot see the tree or one of its folders.
+        """
+        with self._stops():
+            self._check_links(tree_id)
+            return {path: oid for path, oid in self._file_ids(tree_id, "") if hashed_kind(self._hidden, path) is None}
 
     def remaining_cost_usd(self) -> float:
         """Read the run budget's room, and commit it as one step with no cost and no box.
@@ -833,11 +900,80 @@ class EngineLoop:
                     raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
                 return float(Decimal(rooms[0]) / 100)
 
+    def evaluate(self, key: Mapping[str, Any], work: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Run one caller evaluation, such as a repository scorer call, and commit its JSON result as one step.
+
+        The step has no lease cost: the evaluation's boxes bill through the run's budget runtime. A replay gives
+        the committed result and does not run ``work``, so a resume does not pay for the evaluation again.
+
+        Args:
+            key: What the evaluation is of, such as the candidate and the case; a replay must ask with the same key.
+            work: Runs the evaluation and returns its result as a JSON object. A result that the engine must see
+                as a failure goes in the object, since an error of ``work`` stops the loop.
+
+        Returns:
+            The result; on a replay, the committed result, with no work.
+
+        Raises:
+            StepDivergedError: When the committed step at this place is not an evaluation with this key.
+            LoopStoppedError: When the loop stopped, the key or the result is not JSON, the run is fenced or
+                closed, the agent cannot open, ``work`` raises, or the commit fails.
+            LoopInterruptedError: When ``work`` raises an :class:`InfrastructureInterruptionError` or a
+                :class:`UsagePendingError`.
+            BudgetReached: From ``work``, with no step: the run stops on the budget, and a resume runs it again.
+        """
+        with self._stops():
+            try:
+                digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
+            except (TypeError, ValueError) as error:
+                raise LoopStoppedError(
+                    f"The evaluation key cannot be hashed: {type(error).__name__}: {error}"
+                ) from error
+            log = self._log()
+            with log.lock:
+                record = self._replayed(log, "evaluate", {"key_sha256": digest})
+                if record is not None:
+                    return dict(record["body"]["result"])
+                self._check_owner()
+                run = self._run
+                try:
+                    result = work()
+                    # A result that does not commit as JSON fails the same way on a resume, so it stops here.
+                    json.dumps(result)
+                except LoopStoppedError:
+                    raise
+                except (InfrastructureInterruptionError, UsagePendingError) as error:
+                    # The evaluation can pass on a new try, so the run requeues and the resume runs it again.
+                    raise LoopInterruptedError(
+                        f"The evaluation was interrupted: {type(error).__name__}: {error}"
+                    ) from error
+                except Exception as error:
+                    raise LoopStoppedError(f"The evaluation failed: {type(error).__name__}: {error}") from error
+                if not isinstance(result, dict):
+                    raise LoopStoppedError(f"The evaluation gave a {type(result).__name__}, not a JSON object.")
+                try:
+                    step_id = log.agent.commit_unpaid(
+                        "command",
+                        run.grant_list_id,
+                        lambda: (
+                            {"call": "evaluate", "key_sha256": digest, "result": result},
+                            self._trees.put_tree(run.run_id, []),
+                        ),
+                    )
+                    # The engine acts on the result only once its step can never be lost, as for a model reply.
+                    self._durable(step_id)
+                except Exception as error:
+                    raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
+                return result
+
     def run(
         self,
         tree_id: str,
         command: str,
         grants: tuple[Grant, ...] = (),
+        *,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Run one command in a box over a tree, as one ``command`` step.
 
@@ -850,6 +986,9 @@ class EngineLoop:
             tree_id: The tree the command starts from.
             command: The shell command.
             grants: The box's network grants; empty means no network.
+            timeout_seconds: The limit of the command; ``None`` keeps the sandbox's limit.
+            env: Extra environment for this command only. It can hold a scoped model key, so the step's identity
+                and record leave it out.
 
         Returns:
             The command's result and the tree id after it; on a replay, the committed ones, with no box.
@@ -886,6 +1025,8 @@ class EngineLoop:
                         command,
                         grants,
                         refuse=self._holds_hidden,
+                        timeout_seconds=timeout_seconds,
+                        env=env,
                     ),
                 )
                 self._run_outputs.add(after)
@@ -936,7 +1077,8 @@ class EngineLoop:
 
         Raises:
             LoopStoppedError: The kept stop, with its own type, such as :class:`StepDivergedError`; or a new one
-                when the run lost the fence or the budget stopped it.
+                when the run lost the fence or the budget stopped it, a :class:`LoopInterruptedError` for a
+                pending usage.
         """
         stopped = self._stopped
         if stopped is not None:
@@ -948,6 +1090,9 @@ class EngineLoop:
         except LoopStoppedError as error:
             self._stop(error)
             raise
+        except UsagePendingError as error:
+            # Pending usage settles later, so the run must go back to the queue, not end.
+            raise self._stop(LoopInterruptedError(f"{type(error).__name__}: {error}")) from error
         except _STOP_ERRORS as error:
             raise self._stop(LoopStoppedError(f"{type(error).__name__}: {error}")) from error
 
@@ -1315,12 +1460,13 @@ class EngineLoop:
             tree_id = entry.object_id
         return tree_id
 
-    def _files(self, tree_id: str, prefix: str) -> Iterator[str]:
+    def _files(self, tree_id: str, prefix: str, executable: bool = False) -> Iterator[str]:
         """Give the paths of the files and executables in a folder, at any depth.
 
         Args:
             tree_id: The folder's tree id.
             prefix: The folder's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
+            executable: Give only the executables.
 
         Yields:
             Each file path from the tree's root.
@@ -1330,11 +1476,36 @@ class EngineLoop:
         """
         for name, entry in self._entries(tree_id).items():
             if entry.mode == "tree":
-                yield from self._files(entry.object_id, f"{prefix}{name}/")
-            elif entry.mode in {"file", "exec"}:
+                yield from self._files(entry.object_id, f"{prefix}{name}/", executable)
+            elif entry.mode == "exec" or (entry.mode == "file" and not executable):
                 yield f"{prefix}{name}"
 
-    def _put_tree(self, tree_id: str | None, files: Mapping[tuple[str, ...], bytes], prefix: str = "") -> str:
+    def _file_ids(self, tree_id: str, prefix: str) -> Iterator[tuple[str, str]]:
+        """Give the path and content id of each file and executable in a folder, at any depth.
+
+        Args:
+            tree_id: The folder's tree id.
+            prefix: The folder's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
+
+        Yields:
+            Each file path from the tree's root, with its content id.
+
+        Raises:
+            LookupError: When the run cannot see the folder or one below it.
+        """
+        for name, entry in self._entries(tree_id).items():
+            if entry.mode == "tree":
+                yield from self._file_ids(entry.object_id, f"{prefix}{name}/")
+            elif entry.mode in {"file", "exec"}:
+                yield f"{prefix}{name}", entry.object_id
+
+    def _put_tree(
+        self,
+        tree_id: str | None,
+        files: Mapping[tuple[str, ...], bytes],
+        executables: frozenset[str],
+        prefix: str = "",
+    ) -> str:
         """Write files over one tree level, and each changed folder below it.
 
         An unchanged folder loses its ``.git`` entries too, so the new tree holds none, as :func:`_shown` tells.
@@ -1342,6 +1513,7 @@ class EngineLoop:
         Args:
             tree_id: The tree of this level; ``None`` for an empty one.
             files: The file bytes by path parts below this level.
+            executables: The written paths from the tree's root to make executable.
             prefix: This level's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
 
         Returns:
@@ -1364,7 +1536,8 @@ class EngineLoop:
             # folder writes below that file; so only a folder that a file replaces can hold one more.
             if old is not None and old.mode == "tree":
                 self._refuse_hidden(old, f"{prefix}{name}")
-            mode = "exec" if old is not None and old.mode == "exec" else "file"
+            executable = f"{prefix}{name}" in executables or (old is not None and old.mode == "exec")
+            mode = "exec" if executable else "file"
             entries[name] = TreeEntry(name, mode, self._trees.put_blob(self._run.run_id, data))
             written.add(name)
         if clash := written & folders.keys():
@@ -1372,7 +1545,7 @@ class EngineLoop:
         for name, nested in folders.items():
             old = entries.get(name)
             base = old.object_id if old is not None and old.mode == "tree" else None
-            entries[name] = TreeEntry(name, "tree", self._put_tree(base, nested, f"{prefix}{name}/"))
+            entries[name] = TreeEntry(name, "tree", self._put_tree(base, nested, executables, f"{prefix}{name}/"))
         for name, entry in entries.items():
             if entry.mode == "tree" and name not in folders:
                 entries[name] = TreeEntry(name, "tree", self._without_git(entry.object_id))
@@ -1529,7 +1702,7 @@ class EngineLoop:
 
         Args:
             log: The agent's log.
-            call: ``model``, ``run``, ``score`` or ``room``.
+            call: ``model``, ``run``, ``score``, ``room`` or ``evaluate``.
             fingerprint: The body fields that the committed step must hold.
             tree_id: The tree that a committed score step must name.
             grant_list_id: The grant-list id that a committed box step must name.

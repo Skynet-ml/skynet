@@ -64,6 +64,7 @@ from .models import (
     BlackboxAgentRunModel,
     ConversationEmbeddingModel,
     GepaCheckpointModel,
+    ImageBuildModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -507,6 +508,7 @@ def _result_summary_columns() -> tuple[Any, ...]:
         result["runtime_seconds"].as_string(),
         result["baseline_score"].as_string(),
         result["best_score"].as_string(),
+        result["direction"].as_string(),
     )
 
 
@@ -530,6 +532,7 @@ def _assemble_result_summary(values: Any) -> dict[str, Any] | None:
         r_runtime,
         r_baseline_score,
         r_best_score,
+        r_direction,
     ) = values
     if result_null:
         return None
@@ -539,6 +542,8 @@ def _assemble_result_summary(values: Any) -> dict[str, Any] | None:
         ("runtime_seconds", _json_float(r_runtime)),
         ("baseline_score", _json_float(r_baseline_score)),
         ("best_score", _json_float(r_best_score)),
+        # The readers recompute metric_improvement; a minimize run needs its direction (SKY-750).
+        ("direction", r_direction if r_direction in ("maximize", "minimize") else None),
     )
     return {key: value for key, value in result_pairs if value is not None}
 
@@ -1099,6 +1104,7 @@ class RemoteDBJobStore:
                 "recovery": job.recovery,
                 "code_version": job.code_version,
                 "sandbox_image": job.sandbox_image,
+                "box_images": job.box_images,
                 "stored_bytes": job.stored_bytes or 0,
                 "accumulated_runtime_seconds": job.accumulated_runtime_seconds or 0.0,
             },
@@ -1712,25 +1718,6 @@ class RemoteDBJobStore:
         self._evict_job_counters(optimization_ids)
         return int(deleted or 0)
 
-    def save_agent_run(self, optimization_id: str, run: dict[str, Any]) -> None:
-        """Persist (or replace) one sandboxed agent run's record.
-
-        Args:
-            optimization_id: Owning job id.
-            run: The record as the job's recorder sends it, keyed by ``run_id``.
-        """
-        self._agent_runs.save(optimization_id, run)
-
-    def append_agent_run_transcript(self, optimization_id: str, run_id: int, text: str) -> None:
-        """Add a piece of live transcript to a sandboxed agent run.
-
-        Args:
-            optimization_id: Owning job id.
-            run_id: The run's ordinal within the job.
-            text: The new transcript text.
-        """
-        self._agent_runs.append_transcript(optimization_id, run_id, text)
-
     def get_agent_run(self, optimization_id: str, run_id: int) -> dict[str, Any] | None:
         """Return one sandboxed agent run's record, or ``None``.
 
@@ -1836,6 +1823,45 @@ class RemoteDBJobStore:
             pair_index: Checkpoint key; ``-1`` for a run.
         """
         self._checkpoints.delete(optimization_id, pair_index)
+
+    def payload_targets(self, optimization_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Read only the ``target`` and ``judge`` members of each payload, in one query.
+
+        The list rows load without the payload. This read gives the retired-target
+        check what it needs, without the multi-MB training set (SKY-834).
+
+        Args:
+            optimization_ids: Jobs to read.
+
+        Returns:
+            For each id found, a payload that holds only its ``target`` and ``judge``
+            members, or ``None`` when the job has no payload. A SQL ``NULL`` and a
+            JSON ``null`` payload both give ``None``, as the full row reads them.
+        """
+        if not optimization_ids:
+            return {}
+        # The type function reads the JSON kind without serializing the multi-MB payload.
+        json_type = func.jsonb_typeof if self._engine.dialect.name == "postgresql" else func.json_type
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(
+                    JobModel.optimization_id,
+                    json_type(JobModel.payload),
+                    JobModel.payload["target"],
+                    JobModel.payload["judge"],
+                )
+                .filter(JobModel.optimization_id.in_(optimization_ids))
+                .all()
+            )
+        finally:
+            session.close()
+        return {
+            oid: None
+            if kind in (None, "null")
+            else {key: value for key, value in (("target", target), ("judge", judge)) if value is not None}
+            for oid, kind, target, judge in rows
+        }
 
     def has_gepa_checkpoint(self, optimization_id: str) -> bool:
         """Return whether any resumable GEPA checkpoint exists for ``optimization_id``.
@@ -2334,6 +2360,132 @@ class RemoteDBJobStore:
         finally:
             session.close()
 
+    def pin_box_images(self, optimization_id: str, images: dict[str, Any]) -> dict[str, Any]:
+        """Record the user image of each box of a run, keeping any earlier pin (SKY-737).
+
+        Args:
+            optimization_id: The run about to open its boxes.
+            images: The box image facts by role (``run``, ``metric``), used only when none is pinned.
+
+        Returns:
+            The box images every box of this run must boot from.
+
+        Raises:
+            KeyError: When the job row does not exist.
+        """
+        session = self._get_session()
+        try:
+            job = (
+                session.query(JobModel)
+                .filter(JobModel.optimization_id == optimization_id)
+                .with_for_update()
+                .one_or_none()
+            )
+            if job is None:
+                raise KeyError(optimization_id)
+            if job.box_images is None:
+                job.box_images = images  # type: ignore[assignment]
+                session.commit()
+            return dict(job.box_images or {})
+        finally:
+            session.close()
+
+    def find_image_build(self, username: str, input_hash: str) -> dict[str, Any] | None:
+        """Return the newest finished build of a user's Dockerfile with this input hash.
+
+        Args:
+            username: The run's owner; a build is never reused for another user.
+            input_hash: The ``sha256:`` hash of the build inputs.
+
+        Returns:
+            ``{"id", "image", "builder", "size_bytes"}``, or None when no finished build matches.
+        """
+        session = self._get_session()
+        try:
+            row = (
+                session.query(ImageBuildModel)
+                .filter(
+                    ImageBuildModel.username == username,
+                    ImageBuildModel.input_hash == input_hash,
+                    ImageBuildModel.image.isnot(None),
+                )
+                .order_by(ImageBuildModel.created_at.desc())
+                .first()
+            )
+            if row is None:
+                return None
+            return {"id": row.id, "image": row.image, "builder": row.builder, "size_bytes": row.size_bytes}
+        finally:
+            session.close()
+
+    def start_image_build(self, username: str, input_hash: str, *, builder: str, codebuild_id: str) -> str:
+        """Store a build of a user's Dockerfile that CodeBuild started, with no result yet (SKY-896).
+
+        Account deletion stops the build by its id when the worker dies before it records the result.
+
+        Args:
+            username: The run's owner.
+            input_hash: The ``sha256:`` hash of the build inputs.
+            builder: The builder kind, for example ``codebuild``.
+            codebuild_id: The CodeBuild build id.
+
+        Returns:
+            The row id, which :meth:`save_image_build` takes to record the result.
+        """
+        session = self._get_session()
+        try:
+            row = ImageBuildModel(
+                username=username, input_hash=input_hash, builder=builder, log="", codebuild_id=codebuild_id
+            )
+            session.add(row)
+            session.commit()
+            return str(row.id)
+        finally:
+            session.close()
+
+    def save_image_build(
+        self,
+        username: str,
+        input_hash: str,
+        *,
+        builder: str,
+        image: str | None,
+        size_bytes: int | None,
+        log: str,
+        row_id: str | None = None,
+    ) -> str:
+        """Store one build of a user's Dockerfile and its full log.
+
+        Args:
+            username: The run's owner.
+            input_hash: The ``sha256:`` hash of the build inputs.
+            builder: The builder kind, for example ``codebuild``.
+            image: The pinned image, or None for a failed build.
+            size_bytes: The image size, or None for a failed build.
+            log: The full build log.
+            row_id: The row of :meth:`start_image_build` to complete, or None for a new row.
+                A built image clears the row's CodeBuild id; a failed build keeps it.
+
+        Returns:
+            The row id, which the run record names as the build log reference.
+        """
+        session = self._get_session()
+        try:
+            row = session.get(ImageBuildModel, row_id) if row_id is not None else None
+            if row is None:
+                row = ImageBuildModel(username=username, input_hash=input_hash, builder=builder)
+                session.add(row)
+            row.image = image
+            row.size_bytes = size_bytes
+            row.log = log
+            # A failure can come from a wait that ended before CodeBuild did, so keep the id to stop it.
+            if image is not None:
+                row.codebuild_id = None
+            session.commit()
+            return str(row.id)
+        finally:
+            session.close()
+
     def requeue_for_rerun(self, optimization_id: str) -> bool:
         """Reset a terminal job in place for a clean from-scratch re-run.
 
@@ -2378,6 +2530,7 @@ class RemoteDBJobStore:
             job.attempts = 0  # type: ignore[assignment]
             job.automatic_resumes = 0  # type: ignore[assignment]
             job.sandbox_image = None  # type: ignore[assignment]
+            job.box_images = None  # type: ignore[assignment]
             job.claimed_by = None  # type: ignore[assignment]
             job.claimed_at = None  # type: ignore[assignment]
             job.lease_expires_at = None  # type: ignore[assignment]

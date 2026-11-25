@@ -21,7 +21,7 @@ from ..github_create_repo import (
 from ..github_publish import BEST_BRANCH, RepoPublishError, push_candidates
 
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
-_FILES = {"optimize.toml": "[paths]\neditable = ['program/']\n", "program/pipeline.py": "PROMPT = 'a'\n"}
+_FILES = {"ascent.toml": "[paths]\neditable = ['program/']\n", "program/pipeline.py": "PROMPT = 'a'\n"}
 
 
 def _git(cwd: Path, *arguments: str) -> str:

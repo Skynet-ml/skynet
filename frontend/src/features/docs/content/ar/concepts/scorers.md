@@ -14,12 +14,12 @@ def score(repo_path, case, output=None):
 | `case`      | dict. يحتوي `case["input"]` على حقول الإدخال. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` |
 | `output`    | ما أرجعه `entry` في `[run]` للحالة، أو `None` إذا لم يحتوِ الملف على `[run]` |
 
-يجب أن يحتوي ملف `optimize.toml` في المستودع على قسم `[run]` أو مرحلة `[target.<name>]`. يشغّل `entry` في `[run]` نسخة واحدة على حالة واحدة، في صندوق معزول خاص به. يرفض Skynet الملف الذي لا يحتوي أيًّا منهما، لأن كل نسخة ستحصل على الدرجة نفسها.
+يجب أن يحتوي ملف `ascent.toml` في المستودع على قسم `[run]` أو مرحلة `[target.<name>]`. يشغّل `entry` في `[run]` نسخة واحدة على حالة واحدة، في صندوق معزول خاص به. يرفض Skynet الملف الذي لا يحتوي أيًّا منهما، لأن كل نسخة ستحصل على الدرجة نفسها.
 
 - مدخل من نوع دالة، مثل `entry = "serve.py:serve"`، يتلقى `case["input"]` كوسيطة. و`output` هو قيمة الإرجاع منه.
-- مدخل من نوع أمر، مثل `entry = ["python", "-m", "pytest", "-q"]`، يتلقى الإدخال بصيغة JSON على stdin. و`output` هو `{"exit_code": ..., "stdout": "..."}`.
+- مدخل من نوع أمر، مثل `entry = ["python", "run_tests.py"]`، يقرأ `{"input": ...}` من ملف JSON في المسار الموجود في `ASCENT_INPUT`. ويكتب `{"output": ...}` في المسار الموجود في `ASCENT_OUTPUT`. و`output` هو القيمة تحت `"output"`. وما يطبعه الأمر يذهب إلى السجلات فقط.
 
-يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس. لا يستطيع المُقيِّم استيراد كود النسخة ولا تشغيله. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from skynet import call`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
+يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس. لا يستطيع المُقيِّم استيراد كود النسخة ولا تشغيله. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from openascent import call`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
 
 ## قيمة الإرجاع
 
@@ -69,7 +69,7 @@ def score(repo_path, case, output=None):
 
 ### تطابق تام
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -88,30 +88,40 @@ def score(repo_path, case, output=None):
 
 ### تشغيل اختبارات المستودع
 
-يشغّل `entry` في `[run]` الاختبارات. ويقرأ المُقيِّم رمز الخروج ومخرجات الاختبارات.
+يشغّل `entry` في `[run]` الاختبارات. ينتهي `pytest` برمز خروج غير صفري عندما يفشل اختبار، ورمز الخروج غير الصفري يُفشل الحالة. لذلك يكتب المُغلِّف `run_tests.py` النتيجة في `ASCENT_OUTPUT` وينتهي بالرمز 0. ويقرأ المُقيِّم تلك النتيجة.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-عندما يفشل `entry` في `[run]` على حالة، لا تحصل تلك الحالة على درجة. إذا لم يبدأ `entry`، أو تجاوز المهلة، أو أوقفته إشارة، أو إذا رفع `entry` من نوع الدالة استثناءً أو خرج قبل أن يُرجع قيمة، تكون الملاحظات `Run failed: …`، ولا يستدعي Skynet المُقيِّم. رمز الخروج غير الصفري لـ `entry` من نوع الأمر ليس فشلًا: يتلقاه المُقيِّم في `output`. النسخة التي فيها حالة كهذه لا تحصل على درجة. لا يمكن أن تكون أفضل نسخة، ولا تصل إلى أي `[outcome] target`، ولا تفتح أي pull request. إذا كان يجب أن يُحسب الفشل رقمًا، فالتقط الفشل في برنامجك، واكتب مخرجًا، ودع المُقيِّم يعطيه درجة. اقرأ [قواعد المستودع](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+عندما يفشل `entry` في `[run]` على حالة، لا تحصل تلك الحالة على درجة. إذا لم يبدأ `entry`، أو تجاوز المهلة، أو أوقفته إشارة، أو إذا رفع `entry` من نوع الدالة استثناءً أو خرج قبل أن يُرجع قيمة، تكون الملاحظات `Run failed: …`، ولا يستدعي Skynet المُقيِّم. ويفشل `entry` من نوع الأمر أيضًا عندما ينتهي برمز خروج غير صفري أو لا يكتب ملف مخرجات صالحًا. النسخة التي فيها حالة كهذه لا تحصل على درجة. لا يمكن أن تكون أفضل نسخة، ولا تصل إلى أي `[outcome] target`، ولا تفتح أي pull request. إذا كان يجب أن يُحسب الفشل رقمًا، فالتقط الفشل في برنامجك، واكتب مخرجًا، ودع المُقيِّم يعطيه درجة. اقرأ [قواعد المستودع](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### النموذج كحَكَم
 
-يمكن للمُقيِّم استدعاء نموذج. استورد `llm` من الوحدة المساعدة `skynet`. يمرّ الاستدعاء عبر بوابة النماذج في Skynet إلى نموذج المُقيِّم في التشغيل.
+يمكن للمُقيِّم استدعاء نموذج. استورد `llm` من الوحدة المساعدة `openascent`. يمرّ الاستدعاء عبر بوابة النماذج في Skynet إلى نموذج المُقيِّم في التشغيل.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -119,7 +129,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -133,12 +143,12 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-يمكن للمُقيِّم أيضًا استخدام أي عميل متوافق مع OpenAI مع متغيرات البيئة `OPENAI_BASE_URL` و`APP_API_KEY` و`APP_MODEL`. تقبل البوابة نموذج المُقيِّم في التشغيل فقط.
+يمكن للمُقيِّم أيضًا استخدام أي عميل متوافق مع OpenAI مع متغيرات البيئة `OPENAI_BASE_URL` و`ASCENT_MODEL_KEY` و`ASCENT_MODEL`. تقبل البوابة نموذج المُقيِّم في التشغيل فقط.
 
 ## استدعاءات النماذج والأسرار
 
 - تُقاس الاستدعاءات بمفاتيح Skynet على ميزانية التشغيل. بمفتاحك الخاص (BYOK)، يذهب الاستدعاء إلى مفتاح مزوّدك، دون رسوم نموذج من Skynet. اقرأ [الفوترة](/docs/concepts/billing).
-- لا يتلقى المُقيِّم أسرار التشغيل كمتغيرات بيئة. يصل السر إلى المُقيِّم فقط عبر جدول `[services.<name>]` يذكره `[metric] services`، أو عبر خادم في ملف `[metric] mcp`. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يرسل المُقيِّم طلباته إلى عنوان URL الموجود في `SKYNET_SERVICE_<NAME>_URL`. يضيف Skynet السر خارج البيئة المعزولة.
+- لا يتلقى المُقيِّم أسرار التشغيل كمتغيرات بيئة. يصل السر إلى المُقيِّم فقط عبر جدول `[services.<name>]` يذكره `[metric] services`، أو عبر خادم في ملف `[metric] mcp`. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يرسل المُقيِّم طلباته إلى عنوان URL الموجود في `ASCENT_SERVICE_<NAME>_URL`. يضيف Skynet السر خارج البيئة المعزولة.
 - يُخفي Skynet قيم الأسرار في مخرجات المُقيِّم وفي السجلات.
 
 ## الحدود

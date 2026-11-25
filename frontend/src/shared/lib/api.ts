@@ -3,6 +3,7 @@ import type {
   BlackboxRunRequest,
   ModelCatalogResponse,
   ModelPrivacySettings,
+  SetupBillingSettings,
   OptimizationPayloadResponse,
   OptimizationSubmissionResponse,
   OptimizationStatusResponse,
@@ -1030,12 +1031,84 @@ export interface AccountDeletionResult {
   anonymized_rows: number;
 }
 
-/** Check an optimize.toml text with the repository parser; it stops at the first error. */
-export function checkOptimizeToml(text: string, signal?: AbortSignal) {
+/** One error or warning of an ascent.toml check, with its line when the parser found one (SKY-763). */
+export interface AscentTomlDiagnostic {
+  level: "error" | "warning";
+  line: number | null;
+  section: string | null;
+  key: string | null;
+  message: string;
+}
+
+/**
+ * Write one ascent.toml diagnostic as one line: its level, its line if known, and the message.
+ *
+ * Args:
+ *   d: The diagnostic.
+ *
+ * Returns:
+ *   The text in the UI language; the parser's message stays as it is.
+ */
+export function ascentTomlDiagnosticText(
+  d: Pick<AscentTomlDiagnostic, "level" | "line" | "message">,
+) {
+  const warning = d.level === "warning";
+  if (d.line === null) {
+    return formatMsg(warning ? "submit.setup_check.warning" : "submit.setup_check.error", {
+      p1: d.message,
+    });
+  }
+  return formatMsg(warning ? "submit.setup_check.warning_at" : "submit.setup_check.error_at", {
+    p1: d.line,
+    p2: d.message,
+  });
+}
+
+// A long wrong file can give hundreds of diagnostics; one toast lists this many (SKY-763).
+const TOAST_DIAGNOSTICS_MAX = 10;
+
+/**
+ * Write ascent.toml diagnostics for a toast: errors first, each on its own line.
+ *
+ * Args:
+ *   items: The diagnostics.
+ *   hidden: The errors past the parser's cap, which `items` does not hold.
+ *
+ * Returns:
+ *   One line for each of the first ten, each line starting with a line break,
+ *   then one line that counts the rest; empty for no diagnostic.
+ */
+export function ascentTomlDiagnosticLines(
+  items: Array<Pick<AscentTomlDiagnostic, "level" | "line" | "message">>,
+  hidden = 0,
+): string {
+  const ordered = [
+    ...items.filter((d) => d.level !== "warning"),
+    ...items.filter((d) => d.level === "warning"),
+  ];
+  const shown = ordered
+    .slice(0, TOAST_DIAGNOSTICS_MAX)
+    .map((d) => `\n${ascentTomlDiagnosticText(d)}`);
+  const rest = Math.max(ordered.length - TOAST_DIAGNOSTICS_MAX, 0) + hidden;
+  if (rest > 0) shown.push(`\n${formatMsg("submit.setup_check.more", { p1: rest })}`);
+  return shown.join("");
+}
+
+/**
+ * Check an ascent.toml text with the repository parser. `errors` holds every
+ * error and warning of the file; `ok` is false only for an error (SKY-763).
+ * `hidden` counts the errors past the parser's cap, which `errors` does not hold.
+ * `metric_command` is the command that `[metric] entry` names, else null (SKY-770).
+ * `proposer_command` is the command that `[proposer] entry` names, else null (SKY-771).
+ */
+export function checkAscentToml(text: string, signal?: AbortSignal) {
   return request<{
     ok: boolean;
-    errors: Array<{ section: string | null; key: string | null; message: string }>;
-  }>("/wizard/optimize-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
+    errors: AscentTomlDiagnostic[];
+    hidden: number;
+    metric_command: string[] | null;
+    proposer_command: string[] | null;
+  }>("/wizard/ascent-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
 }
 
 export interface PackageRegistryPreference {
@@ -1432,6 +1505,19 @@ export function updateModelPrivacy(settings: ModelPrivacySettings) {
   });
 }
 
+/** Fetch whether the caller's new runs bill setup checks to the balance only. */
+export function getSetupBilling() {
+  return request<SetupBillingSettings>("/account/setup-billing");
+}
+
+/** Persist whether the caller's new runs bill setup checks to the balance only. */
+export function updateSetupBilling(settings: SetupBillingSettings) {
+  return request<SetupBillingSettings>("/account/setup-billing", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
 export type AccountExportFormat = "json" | "csv" | "xlsx" | "parquet" | "feather" | "pkl";
 
 /**
@@ -1476,11 +1562,6 @@ export function deleteAccount(password: string) {
   });
 }
 
-interface BillingFreeGrant {
-  cents_remaining: number;
-  cents_total: number;
-}
-
 export interface BillingUsageEntry {
   id: string;
   at: string;
@@ -1500,8 +1581,7 @@ interface BillingPricingTerms {
 
 /** The caller's wallet as the backend reports it (snake_case mirrors the API). */
 export interface BillingWalletResponse {
-  paid_balance_cents: number;
-  free_grant: BillingFreeGrant;
+  balance_cents: number;
   usage: BillingUsageEntry[];
   /** Absent from a backend older than the frontend (e.g. mid-deploy). */
   pricing?: BillingPricingTerms;
@@ -2465,6 +2545,44 @@ export function getAgentRun(
   const q = new URLSearchParams({ since_transcript: String(sinceTranscript) });
   return request<BlackboxAgentRunResponse>(
     `/optimizations/${optimizationId}/agent-runs/${runId}?${q.toString()}`,
+    undefined,
+    source,
+  );
+}
+
+/** One flushed agent step of a run. Long text is cut on the server; `truncated` says so. */
+export interface ReplayStep {
+  step_id: string;
+  seq: number;
+  kind: string;
+  tree_id: string | null;
+  created_at: string;
+  command: string | null;
+  output: string | null;
+  response: string | null;
+  truncated: boolean;
+}
+
+/** One page of one agent's steps, oldest first, with the run's agents. */
+export interface ReplayStepPage {
+  agents: Array<{ agent_id: string; step_count: number }>;
+  agent_id: string | null;
+  steps: ReplayStep[];
+  has_more: boolean;
+  next_after_seq: number;
+}
+
+/** One page of a run's step log for one agent; no agent picks the first one. */
+export function getReplaySteps(
+  optimizationId: string,
+  options: { agentId?: string | null; afterSeq?: number; limit?: number } = {},
+  source?: ApiSource,
+) {
+  const q = new URLSearchParams({ after_seq: String(options.afterSeq ?? -1) });
+  if (options.agentId) q.set("agent_id", options.agentId);
+  if (options.limit) q.set("limit", String(options.limit));
+  return request<ReplayStepPage>(
+    `/optimizations/${encodeURIComponent(optimizationId)}/steps?${q.toString()}`,
     undefined,
     source,
   );

@@ -23,7 +23,15 @@ from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResu
 from .constants import EVENT_ERROR, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
-from .sandbox_protocol import FILE_PROPOSER_PROTOCOL, OUTCOME_VERDICT_PROTOCOL, READABLE_PROTOCOLS, SANDBOX_PROTOCOL
+from .sandbox_protocol import (
+    COMMAND_METRIC_PROTOCOL,
+    DIRECTION_PROTOCOL,
+    FILE_PROPOSER_PROTOCOL,
+    OUTCOME_VERDICT_PROTOCOL,
+    READABLE_PROTOCOLS,
+    SANDBOX_PROTOCOL,
+    SCORE_DIRECTION_PROTOCOL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +42,21 @@ OUTDATED_IMAGE_MESSAGE = (
     f"The sandbox image is older than this version of {APP_NAME}; rebuild and re-pin the sandbox image."
 )
 OUTCOME_IMAGE_MESSAGE = (
-    "The sandbox image is older than [outcome] support in optimize.toml; rebuild and re-pin the sandbox image."
+    "The sandbox image is older than [outcome] support in ascent.toml; rebuild and re-pin the sandbox image."
 )
 FILE_PROPOSER_IMAGE_MESSAGE = (
-    "The sandbox image is older than [proposer] entry support in optimize.toml; rebuild and re-pin the sandbox image."
+    "The sandbox image is older than [proposer] entry support in ascent.toml; rebuild and re-pin the sandbox image."
+)
+COMMAND_METRIC_IMAGE_MESSAGE = (
+    "The sandbox image is older than command [metric] entry support in ascent.toml; rebuild and re-pin the"
+    " sandbox image."
+)
+DIRECTION_IMAGE_MESSAGE = (
+    "The sandbox image is older than [metric] direction support in ascent.toml; rebuild and re-pin the sandbox image."
+)
+SCORE_DIRECTION_IMAGE_MESSAGE = (
+    "The sandbox image is older than [outcome.require] limits and [metric.scores] support in ascent.toml; rebuild"
+    " and re-pin the sandbox image."
 )
 PROTOCOL_PROBE = (
     'PYTHONPATH=/app python3 -c "from core.worker.sandbox_protocol import SANDBOX_PROTOCOL; print(SANDBOX_PROTOCOL)"'
@@ -84,7 +103,7 @@ def _starts_codex(payload: dict[str, Any]) -> bool:
         return False
     staged = payload.get(REPO_SNAPSHOT_KEY)
     strategy = payload.get("strategy") or {}
-    # native_runtime gives such a run the default agent as its fallback (SKY-753).
+    # A run stored before SKY-728 can hold this payload: its AutoSaddler sessions fell back to the default agent (SKY-753).
     if (
         isinstance(staged, dict)
         and staged.get("file_proposer")
@@ -162,7 +181,7 @@ def _require_image_protocol(session: Any, lifetime: float) -> int:
 
 
 def _require_outcome_support(image_protocol: int, snapshot: Any) -> None:
-    """Refuse an older image for a run whose staged ``optimize.toml`` sets ``[outcome]`` values.
+    """Refuse an older image for a run whose staged ``ascent.toml`` sets ``[outcome]`` values.
 
     An image before protocol 15 reads the stop score only from
     ``budget.stop_at_score``, so it would run without the file's target or
@@ -202,6 +221,68 @@ def _require_file_proposer_support(image_protocol: int, snapshot: Any) -> None:
     """
     if image_protocol < FILE_PROPOSER_PROTOCOL and isinstance(snapshot, dict) and snapshot.get("file_proposer"):
         raise RuntimeError(FILE_PROPOSER_IMAGE_MESSAGE)
+
+
+def _require_command_metric_support(image_protocol: int, payload: dict[str, Any]) -> None:
+    """Refuse an older image for a run of a command ``[metric] entry``.
+
+    An image before protocol 19 does not know ``scorer.command_metric``, so it
+    refuses the request without metric code at validation, with an error that
+    does not name the cause (SKY-738).
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        payload: The guest request.
+
+    Raises:
+        RuntimeError: When the image is older and the run has a command metric.
+    """
+    scorer = payload.get("scorer")
+    if image_protocol < COMMAND_METRIC_PROTOCOL and isinstance(scorer, dict) and scorer.get("command_metric"):
+        raise RuntimeError(COMMAND_METRIC_IMAGE_MESSAGE)
+
+
+def _require_direction_support(image_protocol: int, snapshot: Any) -> None:
+    """Refuse an older image for a run whose staged ``ascent.toml`` sets ``[metric] direction = "minimize"``.
+
+    An image before protocol 20 ignores the snapshot's ``outcome.direction``.
+    It would maximize the score of a minimize run and report no error (SKY-750).
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        snapshot: The staged repository snapshot of the request, if any.
+
+    Raises:
+        RuntimeError: When the image is older and the snapshot's outcome minimizes.
+    """
+    if image_protocol >= DIRECTION_PROTOCOL or not isinstance(snapshot, dict):
+        return
+    if (snapshot.get("outcome") or {}).get("direction") == "minimize":
+        raise RuntimeError(DIRECTION_IMAGE_MESSAGE)
+
+
+def _require_score_direction_support(image_protocol: int, snapshot: Any) -> None:
+    """Refuse an older image for a run whose staged ``ascent.toml`` sets limits or minimizes a named score.
+
+    An image before protocol 21 ignores the snapshot's ``outcome.scores``. It
+    would judge a minimize score's ``[outcome.require]`` limit as a minimum and
+    report a wrong verdict. It also writes the verdict under the old keys, so a
+    run with any limit would silently lose its ``details.record`` (SKY-775).
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        snapshot: The staged repository snapshot of the request, if any.
+
+    Raises:
+        RuntimeError: When the image is older and ``[outcome.require]`` sets a limit
+            or ``[metric.scores]`` minimizes a score.
+    """
+    if image_protocol >= SCORE_DIRECTION_PROTOCOL or not isinstance(snapshot, dict):
+        return
+    outcome = snapshot.get("outcome") or {}
+    directions = outcome.get("scores") or {}
+    if outcome.get("require") or (isinstance(directions, dict) and "minimize" in directions.values()):
+        raise RuntimeError(SCORE_DIRECTION_IMAGE_MESSAGE)
 
 
 def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any, _start_method: str) -> None:
@@ -263,6 +344,9 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         image_protocol = _require_image_protocol(session, lifetime)
         _require_outcome_support(image_protocol, staged)
         _require_file_proposer_support(image_protocol, staged)
+        _require_command_metric_support(image_protocol, guest_payload)
+        _require_direction_support(image_protocol, staged)
+        _require_score_direction_support(image_protocol, staged)
         # A Codex proposer runs as a contained subprocess of this box and
         # cannot run as root, so the parent writes and checks the root-owned
         # file here, before the optimizer starts (SKY-389). Other runs skip

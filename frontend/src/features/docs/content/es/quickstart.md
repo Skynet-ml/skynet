@@ -55,9 +55,9 @@ Lee [Motores](/docs/concepts/engines) para elegir un motor concreto.
 
 ## 5. Métrica y ejecución
 
-El último paso es **Métrica y ejecución**. El asistente escribe el evaluador y el archivo `optimize.toml` por ti. Puedes editarlos. La entrada `[run]` ejecuta una versión del repositorio sobre un caso. El evaluador recibe la salida de la entrada y el caso:
+El último paso es **Métrica y ejecución**. El asistente escribe el evaluador y el archivo `ascent.toml` por ti. Puedes editarlos. La entrada `[run]` ejecuta una versión del repositorio sobre un caso. El evaluador recibe la salida de la entrada y el caso:
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

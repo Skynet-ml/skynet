@@ -2,9 +2,9 @@ Skynet è Optimize Anything: ogni esecuzione ottimizza un repository. Un motore 
 
 ## Il contratto comune
 
-Ogni esecuzione ha un repository, un file `optimize.toml` con una voce `[run]` o una fase `[target.<name>]`, e uno scorer. La voce `[run]` esegue una versione del repository su un caso. Lo scorer è una funzione Python che riceve l'output della voce e il caso.
+Ogni esecuzione ha un repository, un file `ascent.toml` con una voce `[run]` o una fase `[target.<name>]`, e uno scorer. La voce `[run]` esegue una versione del repository su un caso. Lo scorer è una funzione Python che riceve l'output della voce e il caso.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Il repository ha un file `serve.py` nella radice con `def serve(input)`. La voce `[run]` lo chiama nel proprio box della sandbox. Skynet lo usa per servire la versione migliore dopo l'esecuzione.
 
-Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica e nessun codice della versione, quindi lo scorer non può importare `serve.py`. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from skynet import call`. Senza una voce `[run]` o una fase `[target.<name>]`, Skynet rifiuta il file `optimize.toml`.
+Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica e nessun codice della versione, quindi lo scorer non può importare `serve.py`. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from openascent import call`. Senza una voce `[run]` o una fase `[target.<name>]`, Skynet rifiuta il file `ascent.toml`.
 
 > [!NOTE]
 > L'agente di programmazione che scrive le versioni non può vedere il sorgente dello scorer, i valori attesi né i segreti dell'esecuzione.
@@ -37,9 +37,9 @@ Il codice del tuo repository e il tuo scorer possono chiamare un modello tramite
 
 | Variabile            | Che cosa contiene                                                          |
 | -------------------- | -------------------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | L'URL del gateway. `APP_GATEWAY_URL` contiene lo stesso valore.            |
-| `APP_API_KEY`        | Un token solo per questa esecuzione. Non è una chiave del provider.        |
-| `APP_MODEL`          | Il nome del modello da inviare. È il modello dello scorer dell'esecuzione. |
+| `OPENAI_BASE_URL`    | L'URL del gateway. `ASCENT_MODEL_URL` contiene lo stesso valore.           |
+| `ASCENT_MODEL_KEY`   | Un token solo per questa esecuzione. Non è una chiave del provider.        |
+| `ASCENT_MODEL`       | Il nome del modello da inviare. È il modello dello scorer dell'esecuzione. |
 | `ANTHROPIC_BASE_URL` | L'URL del gateway per gli SDK di Anthropic.                                |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

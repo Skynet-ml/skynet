@@ -15,7 +15,11 @@ from core.api.routers import wizard_preflight
 
 
 def test_stream_preserves_phase_order_and_returns_one_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Forward actual milestones and keep arbitrary guest output out of the public stream."""
+    """Forward actual milestones and keep arbitrary guest output out of the public stream.
+
+    Args:
+        monkeypatch: Stands in the paid setup check and the lease check.
+    """
     calls = []
 
     def run(request: Any, user: Any, store: Any) -> Any:
@@ -37,6 +41,7 @@ def test_stream_preserves_phase_order_and_returns_one_result(monkeypatch: pytest
         return result
 
     monkeypatch.setattr(wizard_preflight, "run_preflight", run)
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
     app = FastAPI()
     app.include_router(wizard_preflight.create_wizard_preflight_router(job_store=object()))
@@ -47,7 +52,10 @@ def test_stream_preserves_phase_order_and_returns_one_result(monkeypatch: pytest
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {"scorer": {"kind": "python", "metric_code": "def score(p):\n    return 1\n"}},
+                "payload": {
+                    "scorer": {"kind": "python", "metric_code": "def score(p):\n    return 1\n"},
+                    "target": {"kind": "repo"},
+                },
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },
@@ -87,7 +95,7 @@ def test_stream_reports_admission_failure_without_success(monkeypatch: pytest.Mo
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {},
+                "payload": {"target": {"kind": "repo"}},
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },
@@ -98,13 +106,19 @@ def test_stream_reports_admission_failure_without_success(monkeypatch: pytest.Mo
 
 
 def test_stream_logs_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """Log the cause of a failure the stream shows only as a generic line."""
+    """Log the cause of a failure the stream shows only as a generic line.
+
+    Args:
+        monkeypatch: Stands in a failing setup check and the lease check.
+        caplog: Captures the logged cause.
+    """
 
     def crash(request: Any, user: Any, store: Any) -> Any:
         """Fail the check with an error the stream does not frame."""
         raise ValueError("The model credential source must be managed or byok.")
 
     monkeypatch.setattr(wizard_preflight, "run_preflight", crash)
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
     app = FastAPI()
     app.include_router(wizard_preflight.create_wizard_preflight_router(job_store=object()))
@@ -115,7 +129,7 @@ def test_stream_logs_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch, capl
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {"scorer": {"metric_code": "def metric(output): return 1.0"}},
+                "payload": {"scorer": {"metric_code": "def metric(output): return 1.0"}, "target": {"kind": "repo"}},
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },

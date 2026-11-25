@@ -357,6 +357,9 @@ interface ScorerDependencyLock {
 export interface BlackboxScorer {
   kind: "python" | "remote";
   metric_code?: string | null;
+  // True when ascent.toml's [metric] entry is a command: the metric box runs
+  // it, so the request carries no metric_code (SKY-738, SKY-770).
+  command_metric?: boolean;
   url?: string | null;
   secret?: string | null;
   timeout_seconds?: number;
@@ -398,7 +401,7 @@ interface BlackboxRepoSource {
   /** The commit the setup agent read the draft files at; the run refuses them on another commit. */
   draft_base?: string;
   /**
-   * What the server recorded from optimize.toml; `outcome.target` is the score that stops the search,
+   * What the server recorded from ascent.toml; `outcome.target` is the score that stops the search,
    * and `proposer_entry` is the `[proposer] entry` command when the run uses it.
    */
   environment?: { outcome?: { target?: number | null }; proposer_entry?: string[] } | null;
@@ -600,7 +603,10 @@ export interface BlackboxRunResult {
   baseline_score?: number | null;
   /** Fresh final-run score of the winner. */
   best_score?: number | null;
+  /** Positive when the run got better, also for a `minimize` run. */
   metric_improvement?: number | null;
+  /** Which way the score improves (`[metric] direction`); absent on older runs means `maximize`. */
+  direction?: "maximize" | "minimize";
   /** The final run's top-level feedback; null when there are cases (see `case_results`). */
   baseline_feedback?: string | null;
   best_feedback?: string | null;
@@ -782,6 +788,12 @@ export interface CatalogModel {
   lab_tier?: number;
   available: boolean;
   max_input_tokens?: number | null;
+  // Most tokens one reply may hold, and the provider's recommended
+  // temperature; null/absent when the provider does not say.
+  max_output_tokens?: number | null;
+  default_temperature?: number | null;
+  // Whether the model accepts a temperature; null/absent when the listing does not say.
+  takes_temperature?: boolean | null;
   // Provider per-token costs (USD) from LiteLLM; null/absent when unpriced, so
   // the estimate falls back to a default rate rather than treating it as free.
   input_cost_per_token?: number | null;
@@ -807,6 +819,11 @@ export type ModelDataPolicy = "allow" | "deny" | "zdr";
 
 export interface ModelPrivacySettings {
   data_policy: ModelDataPolicy;
+}
+
+/** Whether new runs bill their setup checks to the balance, outside the spending limit. */
+export interface SetupBillingSettings {
+  from_wallet: boolean;
 }
 
 export interface CatalogProvider {

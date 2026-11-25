@@ -134,7 +134,9 @@ build() {
 }
 
 build_backend_lane() {
-  build backend "$sha" "$repo_root/backend" backend --build-arg "GIT_SHA=$sha" || return 1
+  # The worker runs ShinkaEvolve as a child process, and the API and the worker share this image (SKY-728).
+  build backend "$sha" "$repo_root/backend" backend --build-arg "GIT_SHA=$sha" --build-arg INCLUDE_SHINKA_EVOLVE=1 ||
+    return 1
   if [[ "$migrate_requested" == --migrate ]]; then
     wait_for_lane_success litellm "$litellm_pid" frontend "$frontend_pid" ||
       return 1

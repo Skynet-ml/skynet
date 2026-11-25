@@ -544,6 +544,50 @@ class Settings(BaseSettings):
         le=VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS,
         description="Ceiling on a sandbox's lifetime in seconds. 2700 (45 minutes) is the Hobby plan limit; Pro and Enterprise teams can raise it to 86400 (24 hours), the most Vercel accepts. A job that outlives its box reopens one on its next call.",
     )
+    image_build_timeout_minutes: int = Field(
+        default=60,
+        alias="IMAGE_BUILD_TIMEOUT_MINUTES",
+        ge=5,
+        le=480,
+        description="Longest time one user image build may take, in minutes. A build over it fails the run. The setting allows 5 to 480 minutes; CodeBuild itself accepts up to 2160 (SKY-888).",
+    )
+    image_build_max_size_gb: float = Field(
+        default=20.0,
+        alias="IMAGE_BUILD_MAX_SIZE_GB",
+        gt=0.0,
+        description="Largest user image a build may produce, in GB (10^9 bytes). An image over it fails the build. Hosted builds measure the compressed size that the registry reports; local builds measure the size that Docker reports (SKY-888).",
+    )
+    image_build_max_context_mb: int = Field(
+        default=500,
+        alias="IMAGE_BUILD_MAX_CONTEXT_MB",
+        ge=1,
+        description="Largest build context a user image build may send, in MB (10^6 bytes), counted over the file sizes. A larger context fails before the upload (SKY-888).",
+    )
+    user_images_repository_prefix_uri: str | None = Field(
+        default=None,
+        alias="USER_IMAGES_REPOSITORY_PREFIX_URI",
+        description="ECR prefix of the user image repositories, <account>.dkr.ecr.<region>.amazonaws.com/<prefix>; each user gets <prefix>/<owner>. Alone, it lets account deletion delete the owner's repository. With IMAGE_PULL_ROLE_ARN, it also turns on the registry that pins and pulls user images. Unset in local mode (SKY-891).",
+    )
+    image_pull_role_arn: str | None = Field(
+        default=None,
+        alias="IMAGE_PULL_ROLE_ARN",
+        description="Role the worker assumes, with a session policy for one owner, to get a token that pulls only that owner's images and reads their manifests and configs for the USER check (SKY-891).",
+    )
+    image_build_project: str | None = Field(
+        default=None,
+        alias="IMAGE_BUILD_PROJECT",
+        description="CodeBuild project that builds user Dockerfiles. With IMAGE_BUILD_SOURCE_BUCKET, IMAGE_BUILD_PUSH_ROLE_ARN and the user image registry, it selects the CodeBuild builder for a Dockerfile; unset, a cloud Dockerfile fails with a clear error. A hosted Vercel run copies each user image into Vercel's registry before its first box (SKY-898).",
+    )
+    image_build_source_bucket: str | None = Field(
+        default=None,
+        alias="IMAGE_BUILD_SOURCE_BUCKET",
+        description="S3 bucket that holds the zipped build context of each CodeBuild user image build (SKY-891).",
+    )
+    image_build_push_role_arn: str | None = Field(
+        default=None,
+        alias="IMAGE_BUILD_PUSH_ROLE_ARN",
+        description="Role a CodeBuild build assumes, with a session policy for one owner, to push to that owner's repository (SKY-891).",
+    )
     blackbox_agent_gateway_url: str | None = Field(
         default=None,
         alias="BLACKBOX_AGENT_GATEWAY_URL",

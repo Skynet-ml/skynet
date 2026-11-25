@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -14,15 +15,16 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from core.billing import guest_model_proxy
 
 from .. import exec_shim, harness, harness_bridge, repo_tree
 from ..harness_bridge import (
@@ -34,7 +36,7 @@ from ..harness_bridge import (
     run_session,
 )
 
-_PLAIN = {"run_command": 'cat "$APP_PROMPT_FILE"', "output_format": "plain", "files": {}, "env": {}}
+_PLAIN = {"run_command": 'cat "$ASCENT_TASK"', "output_format": "plain", "files": {}, "env": {}}
 
 
 def test_cli_parser_accepts_the_meta_harness_and_autoresearch_shapes() -> None:
@@ -70,10 +72,14 @@ def test_cli_parser_accepts_the_meta_harness_and_autoresearch_shapes() -> None:
 
 
 def test_run_session_writes_files_restores_the_key_and_parses_the_answer(tmp_path: Path) -> None:
-    """Materialize the launch in the workspace, swap in the real key and capture the harness answer."""
+    """Materialize the launch in the workspace, swap in the real key and capture the harness answer.
+
+    Args:
+        tmp_path: The workspace and the session folder.
+    """
     proposer = {
         **_PLAIN,
-        "run_command": 'cat "$APP_PROMPT_FILE"; cat config.json; echo "$TOKEN"',
+        "run_command": 'cat "$ASCENT_TASK"; cat config.json; echo "$TOKEN"',
         "files": {"config.json": json.dumps({"key": harness_bridge.KEY_TOKEN})},
         "env": {"TOKEN": harness_bridge.KEY_TOKEN},
         "instructions_file": "AGENTS.md",
@@ -94,26 +100,12 @@ def test_run_session_writes_files_restores_the_key_and_parses_the_answer(tmp_pat
     assert (tmp_path / "session" / "run-1.stdout").exists()
 
 
-def test_run_session_accepts_the_legacy_key_token_and_variables(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Restore a saved launch's pre-rename key token and expose both variable spellings."""
-    proposer = {
-        **_PLAIN,
-        "run_command": 'echo "$APP_MODEL $SKYNET_MODEL"; cat config.json',
-        "files": {"config.json": "__SKYNET_API_KEY__"},
-    }
-    monkeypatch.delenv(harness_bridge.KEY_ENV, raising=False)
-    monkeypatch.setenv("SKYNET_API_KEY", "legacy-key")
-    outcome = run_session(
-        proposer, workspace=tmp_path / "work", prompt="hi", model="m1", session_dir=tmp_path / "session"
-    )
-    assert outcome.returncode == 0
-    assert outcome.text == "m1 m1\nlegacy-key"
-
-
 def test_run_session_reports_timeouts_and_budget_overruns(tmp_path: Path) -> None:
-    """Kill a harness that outlives its timeout and stop one whose priced usage exceeds the budget."""
+    """Kill a harness that outlives its timeout and stop one whose priced usage exceeds the budget.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     slow = {**_PLAIN, "run_command": "sleep 5"}
     outcome = run_session(
         slow, workspace=tmp_path / "w1", prompt="x", model="m", session_dir=tmp_path / "s1", timeout_seconds=0.2
@@ -158,7 +150,11 @@ def _record_signals(
 
 
 def test_stop_group_signals_the_group_once_and_each_detached_descendant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Signal the shell's group once, then only the descendants that left it, never a group member twice."""
+    """Signal the shell's group once, then only the descendants that left it, never a group member twice.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     sent = _record_signals(
         monkeypatch,
         {
@@ -178,7 +174,11 @@ def test_stop_group_signals_the_group_once_and_each_detached_descendant(monkeypa
 
 
 def test_stop_group_leaves_a_process_that_reused_the_shell_pid_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Send nothing when the reaped shell's pid now belongs to a process with another start time."""
+    """Send nothing when the reaped shell's pid now belongs to a process with another start time.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     sent = _record_signals(monkeypatch, {100: (1, 100, 50), 101: (100, 101, 51)})
 
     harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
@@ -187,7 +187,11 @@ def test_stop_group_leaves_a_process_that_reused_the_shell_pid_alone(monkeypatch
 
 
 def test_stop_group_signals_the_group_when_the_reaped_pid_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Signal only the group when the shell is gone and nothing took its pid, as members can still hold the pipe."""
+    """Signal only the group when the shell is gone and nothing took its pid, as members can still hold the pipe.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     sent = _record_signals(monkeypatch, {101: (1, 100, 8)})
 
     harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
@@ -197,7 +201,11 @@ def test_stop_group_signals_the_group_when_the_reaped_pid_is_free(monkeypatch: p
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the descendant sweep reads /proc")
 def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> None:
-    """Kill a grandchild that left the harness group and session, the way eve's sandbox starts a tool command."""
+    """Kill a grandchild that left the harness group and session, the way eve's sandbox starts a tool command.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     detached = f"import os, time; os.setsid(); open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
     process = subprocess.Popen(
@@ -231,7 +239,11 @@ def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> Non
 # orphan in the harness tree; the bridge starts the shell plainly there.
 @pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
 def test_timeout_kills_a_background_job_that_a_finished_tool_command_left(tmp_path: Path) -> None:
-    """Kill an orphaned ``sleep`` whose detached parent already exited, the way ``sleep 300 &`` in an eve tool does."""
+    """Kill an orphaned ``sleep`` whose detached parent already exited, the way ``sleep 300 &`` in an eve tool does.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     tool = (
         "import os, subprocess; os.setsid(); "
@@ -263,7 +275,11 @@ def test_timeout_kills_a_background_job_that_a_finished_tool_command_left(tmp_pa
 
 @pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
 def test_normal_end_kills_a_background_job_that_a_detached_tool_command_left(tmp_path: Path) -> None:
-    """Kill an orphaned ``sleep`` from a detached tool when the harness ends on its own, with no stop."""
+    """Kill an orphaned ``sleep`` from a detached tool when the harness ends on its own, with no stop.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     tool = (
         "import os, subprocess; os.setsid(); "
@@ -295,7 +311,11 @@ def test_normal_end_kills_a_background_job_that_a_detached_tool_command_left(tmp
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the normal-end group kill needs /proc")
 def test_normal_end_kills_a_background_job_left_in_the_harness_group(tmp_path: Path) -> None:
-    """Kill a ``sleep &`` that the harness shell left in its own group when the shell ends on its own."""
+    """Kill a ``sleep &`` that the harness shell left in its own group when the shell ends on its own.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     outcome = run_session(
         {
@@ -322,7 +342,11 @@ def test_normal_end_kills_a_background_job_left_in_the_harness_group(tmp_path: P
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
 def test_harness_pipelines_end_when_the_reader_closes_the_pipe(tmp_path: Path) -> None:
-    """Keep SIGPIPE at its default in the harness shell, so ``producer | head -1`` ends at once."""
+    """Keep SIGPIPE at its default in the harness shell, so ``producer | head -1`` ends at once.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     outcome = run_session(
         {
             "run_command": "while true; do echo x; done | head -1; yes | head -1; echo status=$?",
@@ -344,7 +368,11 @@ def test_harness_pipelines_end_when_the_reader_closes_the_pipe(tmp_path: Path) -
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
 def test_cap_stop_lets_the_harness_exit_trap_remove_its_temp_folder(tmp_path: Path) -> None:
-    """Let the shell's EXIT trap finish after a tool-call cap stop, so a large temp folder is gone."""
+    """Let the shell's EXIT trap finish after a tool-call cap stop, so a large temp folder is gone.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     scratch = tmp_path / "scratch"
     for index in range(20):
         part = scratch / str(index)
@@ -367,7 +395,11 @@ def test_cap_stop_lets_the_harness_exit_trap_remove_its_temp_folder(tmp_path: Pa
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
 def test_cap_stop_kills_a_shell_that_ignores_sigterm_without_a_timeout(tmp_path: Path) -> None:
-    """End a cap stop after the reaper's grace when the shell ignores SIGTERM and the session has no timeout."""
+    """End a cap stop after the reaper's grace when the shell ignores SIGTERM and the session has no timeout.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     events = _tool_events_command(3).replace("sleep 5", "sleep 120")
     outcome = run_session(
         {**_PLAIN, "output_format": "pi", "run_command": f"trap '' TERM; {events}", "max_tool_calls": 1},
@@ -386,7 +418,12 @@ def test_cap_stop_kills_a_shell_that_ignores_sigterm_without_a_timeout(tmp_path:
 def test_normal_end_sends_no_group_kill_when_the_reaped_pid_cannot_be_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Skip the normal-end group kill without a start time, as the reaped shell pid can belong to a new process."""
+    """Skip the normal-end group kill without a start time, as the reaped shell pid can belong to a new process.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     stops: list[int] = []
     monkeypatch.setattr(harness_bridge, "_start_time", lambda pid: None)
     monkeypatch.setattr(harness_bridge, "_stop_group", lambda process, signum, root_start: stops.append(signum))
@@ -426,12 +463,17 @@ def _alive(pid: int) -> bool:
     """
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-    except FileNotFoundError:
+    # Linux raises ProcessLookupError when the process ends between the open and the read.
+    except (FileNotFoundError, ProcessLookupError):
         return False
 
 
 def test_result_document_and_transcript_match_what_upstream_reads(tmp_path: Path) -> None:
-    """Emit a Claude-shaped result and a per-project transcript that ``collect_usage`` can price."""
+    """Emit a Claude-shaped result and a per-project transcript that ``collect_usage`` can price.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     outcome = SessionOutcome(
         text="answer",
         stdout="",
@@ -464,7 +506,11 @@ def test_result_document_and_transcript_match_what_upstream_reads(tmp_path: Path
 
 
 def test_shim_resumes_by_restating_the_opening_prompt(tmp_path: Path) -> None:
-    """Replay the first task before the follow-up nudge because other harnesses cannot resume a session id."""
+    """Replay the first task before the follow-up nudge because other harnesses cannot resume a session id.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     home = tmp_path / "home"
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -552,7 +598,11 @@ def test_failed_result_falls_back_to_plain_stdout_lines() -> None:
 
 
 def test_harness_gets_an_empty_stdin(tmp_path: Path) -> None:
-    """Give the harness a closed stdin so a CLI that reads it never waits on the bridge's own input."""
+    """Give the harness a closed stdin so a CLI that reads it never waits on the bridge's own input.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "run_command": 'if read -r line; then echo "got:$line"; else echo eof; fi'}
     workspace = tmp_path / "w"
     workspace.mkdir()
@@ -563,7 +613,11 @@ def test_harness_gets_an_empty_stdin(tmp_path: Path) -> None:
 
 
 def test_shim_reports_why_the_harness_failed_on_stderr(tmp_path: Path) -> None:
-    """Surface the harness's own error even when its stdout ends with an ordinary chat message."""
+    """Surface the harness's own error even when its stdout ends with an ordinary chat message.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     home = tmp_path / "home"
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -606,7 +660,11 @@ def _tool_events_command(count: int) -> str:
 
 
 def test_tool_call_cap_stops_the_harness_and_keeps_its_edits(tmp_path: Path) -> None:
-    """Stop a harness once it starts more tool calls than the cap, without calling the session failed."""
+    """Stop a harness once it starts more tool calls than the cap, without calling the session failed.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "output_format": "pi", "run_command": _tool_events_command(5), "max_tool_calls": 3}
     workspace = tmp_path / "work"
     outcome = run_session(proposer, workspace=workspace, prompt="x", model="m", session_dir=tmp_path / "session")
@@ -623,7 +681,11 @@ def test_tool_call_cap_stops_the_harness_and_keeps_its_edits(tmp_path: Path) -> 
 
 
 def test_tool_calls_are_counted_but_not_capped_without_a_cap(tmp_path: Path) -> None:
-    """Let a harness run to its end when the launch names no cap."""
+    """Let a harness run to its end when the launch names no cap.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = _tool_events_command(5).replace("sleep 5; ", "")
     proposer = {**_PLAIN, "output_format": "pi", "run_command": command}
     outcome = run_session(proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s")
@@ -646,7 +708,11 @@ def test_tool_call_ids_read_every_streaming_format() -> None:
 
 
 def test_codex_tool_call_counts_once_across_start_and_completion(tmp_path: Path) -> None:
-    """Count a Codex item announced on start and settled on completion as one call."""
+    """Count a Codex item announced on start and settled on completion as one call.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     item = {"id": "i1", "type": "command_execution"}
     events = [{"type": "item.started", "item": item}, {"type": "item.completed", "item": item}]
     command = "; ".join(f"echo '{json.dumps(event)}'" for event in events)
@@ -658,7 +724,7 @@ def test_codex_tool_call_counts_once_across_start_and_completion(tmp_path: Path)
 
 # The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
 _HIDDEN = [
-    "optimize.toml",
+    "ascent.toml",
     "metric",
     ".optimize/exploits",
     "reference/answers.json",
@@ -666,7 +732,7 @@ _HIDDEN = [
     "rules/illegal.md",
     "tools/mcp_server.py",
 ]
-_HIDDEN_FILES = ["optimize.toml", "metric/score.py", ".optimize/exploits/log.md", *_HIDDEN[3:]]
+_HIDDEN_FILES = ["ascent.toml", "metric/score.py", ".optimize/exploits/log.md", *_HIDDEN[3:]]
 # One shape per harness tool family: claude, codex, pi, opencode, prime and their shells.
 _TOOL_CALLS = [
     ("Read", lambda path: {"file_path": path}),
@@ -687,7 +753,14 @@ _TOOL_CALLS = [
 
 
 def _policy(tmp_path: Path) -> dict:
-    """Build a guard policy over the fixed hidden list."""
+    """Build a guard policy over the fixed hidden list.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Returns:
+        The guard policy.
+    """
     workspace = tmp_path / "work"
     workspace.mkdir(exist_ok=True)
     return harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "refusals.jsonl")
@@ -696,9 +769,16 @@ def _policy(tmp_path: Path) -> dict:
 @pytest.mark.parametrize("path", _HIDDEN_FILES)
 @pytest.mark.parametrize(("tool", "shape"), _TOOL_CALLS, ids=[tool for tool, _ in _TOOL_CALLS])
 def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: Path, tool, shape, path) -> None:
-    """Refuse a read, grep, glob, list or shell call on each hidden path, with the right kind."""
+    """Refuse a read, grep, glob, list or shell call on each hidden path, with the right kind.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        shape: Builds the tool input for a path.
+        path: The hidden path.
+    """
     policy = _policy(tmp_path)
-    expected = "config" if path == "optimize.toml" else "scoring"
+    expected = "config" if path == "ascent.toml" else "scoring"
     assert harness_bridge.guard_check(policy, tool, shape(path)) == expected
     absolute = f"{policy['workspace']}/{path}"
     assert harness_bridge.guard_check(policy, tool, shape(absolute)) == expected
@@ -709,19 +789,29 @@ def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: P
     [
         ("Glob", {"pattern": "**/*"}),
         ("Bash", {"command": "ls -R ."}),
-        ("Grep", {"pattern": "optimize.toml", "path": "src"}),
-        ("Read", {"file_path": "src/optimize.toml.md"}),
+        ("Grep", {"pattern": "ascent.toml", "path": "src"}),
+        ("Read", {"file_path": "src/ascent.toml.md"}),
         ("Read", {"file_path": "metrics/score.py"}),
-        ("Read", {"file_path": "../work-other/optimize.toml"}),
+        ("Read", {"file_path": "../work-other/ascent.toml"}),
     ],
 )
 def test_guard_lets_other_paths_and_broad_patterns_run(tmp_path: Path, tool: str, tool_input: dict) -> None:
-    """Match exact hidden names only, so broad globs and look-alike names still work."""
+    """Match exact hidden names only, so broad globs and look-alike names still work.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        tool_input: A tool input that names no hidden path.
+    """
     assert harness_bridge.guard_check(_policy(tmp_path), tool, tool_input) is None
 
 
 def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
-    """Keep the hidden names out of the policy file the agent's workspace can read."""
+    """Keep the hidden names out of the policy file the agent's workspace can read.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     text = json.dumps(_policy(tmp_path))
     for path in _HIDDEN:
         assert path not in text
@@ -730,14 +820,14 @@ def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("tool", "tool_input"),
     [
-        ("Read", {"file_path": "alias/optimize.toml"}),
-        ("Bash", {"command": "cd src && cat ../optimize.toml"}),
+        ("Read", {"file_path": "alias/ascent.toml"}),
+        ("Bash", {"command": "cd src && cat ../ascent.toml"}),
         ("Bash", {"command": "cd src; cd deep && cat ../../metric/score.py"}),
-        ("exec_command", {"cmd": "cat ../optimize.toml", "workdir": "src"}),
-        ("Bash", {"command": 'cat "$(pwd)/optimize.toml"'}),
-        ("Bash", {"command": "cat $(pwd)/optimize.toml"}),
+        ("exec_command", {"cmd": "cat ../ascent.toml", "workdir": "src"}),
+        ("Bash", {"command": 'cat "$(pwd)/ascent.toml"'}),
+        ("Bash", {"command": "cat $(pwd)/ascent.toml"}),
         ("Bash", {"command": "cat `pwd`/data/cases.jsonl"}),
-        ("Read", {"file_path": "${PWD}/optimize.toml"}),
+        ("Read", {"file_path": "${PWD}/ascent.toml"}),
     ],
     ids=[
         "symlink-alias",
@@ -751,16 +841,26 @@ def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
     ],
 )
 def test_guard_resolves_aliases_working_directories_and_pwd(tmp_path: Path, tool: str, tool_input: dict) -> None:
-    """Refuse a hidden path that a symbolic link, a cd, a workdir or a pwd form names."""
+    """Refuse a hidden path that a symbolic link, a cd, a workdir or a pwd form names.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        tool_input: A tool input that names a hidden path through a link, a cd, a workdir or a pwd.
+    """
     policy = _policy(tmp_path)
     (Path(policy["workspace"]) / "alias").symlink_to(".")
     assert harness_bridge.guard_check(policy, tool, tool_input) is not None
 
 
 def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
-    """Refuse OPTIMIZE.TOML on a case-folding policy, and only there."""
+    """Refuse ASCENT.TOML on a case-folding policy, and only there.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     workspace = tmp_path / "work"
-    call = {"file_path": "OPTIMIZE.TOML"}
+    call = {"file_path": "ASCENT.TOML"}
     folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
     exact = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log")
     assert harness_bridge.guard_check(folded, "Read", call) == "config"
@@ -771,18 +871,24 @@ def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("tool", "tool_input"),
     [
-        ("Bash", {"command": "cat ~/shinka-run/repo/optimize.toml"}),
-        ("Bash", {"command": "cat $HOME/shinka-run/repo/optimize.toml"}),
+        ("Bash", {"command": "cat ~/shinka-run/repo/ascent.toml"}),
+        ("Bash", {"command": "cat $HOME/shinka-run/repo/ascent.toml"}),
         ("Bash", {"command": "cat ${HOME}/shinka-run/repo/metric/score.py"}),
-        ("Bash", {"command": "cd ~/shinka-run/repo && cat optimize.toml"}),
+        ("Bash", {"command": "cd ~/shinka-run/repo && cat ascent.toml"}),
         ("Bash", {"command": "cd ~ && cat shinka-run/repo/data/cases.jsonl"}),
-        ("Read", {"file_path": "~/shinka-run/repo/optimize.toml"}),
-        ("exec_command", {"cmd": "cat optimize.toml", "workdir": "~/shinka-run/repo"}),
+        ("Read", {"file_path": "~/shinka-run/repo/ascent.toml"}),
+        ("exec_command", {"cmd": "cat ascent.toml", "workdir": "~/shinka-run/repo"}),
     ],
     ids=["tilde", "home", "brace-home", "cd-tilde", "cd-bare-tilde", "read-tilde", "codex-workdir-tilde"],
 )
 def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_input: dict) -> None:
-    """Refuse a hidden path that ``~``, ``$HOME`` or ``${HOME}`` names, as in a ShinkaEvolve session."""
+    """Refuse a hidden path that ``~``, ``$HOME`` or ``${HOME}`` names, as in a ShinkaEvolve session.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        tool_input: A tool input that names a hidden path through a home folder form.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -793,10 +899,15 @@ def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_inp
 
 @pytest.mark.parametrize(
     "command",
-    ["cat x~/shinka-run/repo/optimize.toml", "cat ~/optimize.toml"],
+    ["cat x~/shinka-run/repo/ascent.toml", "cat ~/ascent.toml"],
 )
 def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, command: str) -> None:
-    """Leave a tilde inside a word, and a home path outside the workspace, alone."""
+    """Leave a tilde inside a word, and a home path outside the workspace, alone.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command whose tilde must stay as it is.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -807,22 +918,27 @@ def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, comma
 @pytest.mark.parametrize(
     "command",
     [
-        "cat ~+/optimize.toml",
-        "cd metric && cat ~-/optimize.toml",
-        "cat $(pwd -P)/optimize.toml",
-        "cat $(pwd -L)/optimize.toml",
-        "cat ${PWD:-x}/optimize.toml",
-        "cat ${HOME:-x}/shinka-run/repo/optimize.toml",
-        "cat ${HOME%/}/shinka-run/repo/optimize.toml",
-        "cd metric; cat $OLDPWD/optimize.toml",
-        "cat ~agent/shinka-run/repo/optimize.toml",
-        "cat $HOMEDIR/shinka-run/repo/optimize.toml",
+        "cat ~+/ascent.toml",
+        "cd metric && cat ~-/ascent.toml",
+        "cat $(pwd -P)/ascent.toml",
+        "cat $(pwd -L)/ascent.toml",
+        "cat ${PWD:-x}/ascent.toml",
+        "cat ${HOME:-x}/shinka-run/repo/ascent.toml",
+        "cat ${HOME%/}/shinka-run/repo/ascent.toml",
+        "cd metric; cat $OLDPWD/ascent.toml",
+        "cat ~agent/shinka-run/repo/ascent.toml",
+        "cat $HOMEDIR/shinka-run/repo/ascent.toml",
         "cat `pwd -P`/metric/score.py",
         'cat "$(dirname x)"/data/cases.jsonl',
     ],
 )
 def test_guard_refuses_a_hidden_name_after_an_unresolved_expansion(tmp_path: Path, command: str) -> None:
-    """Refuse a hidden name after any shell expansion the guard cannot resolve to a known folder."""
+    """Refuse a hidden name after any shell expansion the guard cannot resolve to a known folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with a hidden name after an expansion the guard cannot resolve.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -834,12 +950,17 @@ def test_guard_refuses_a_hidden_name_after_an_unresolved_expansion(tmp_path: Pat
     "command",
     [
         "cd src && python $(pwd -P)/solve.py --out ${OUT:-out}/result.json",
-        "echo $PATH ~+ ~- `date` && cat src/optimize.toml.md",
+        "echo $PATH ~+ ~- `date` && cat src/ascent.toml.md",
         "cat ${HOME:-x}/notes/metrics.md",
     ],
 )
 def test_guard_lets_an_expansion_without_a_hidden_name_run(tmp_path: Path, command: str) -> None:
-    """Let a normal command run when no hidden name follows its shell expansions."""
+    """Let a normal command run when no hidden name follows its shell expansions.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with expansions and no hidden name.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -848,29 +969,54 @@ def test_guard_lets_an_expansion_without_a_hidden_name_run(tmp_path: Path, comma
 
 
 def test_guard_policy_home_defaults_to_this_process_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Record this process's home folder when the caller names none, so the digest covers it."""
+    """Record this process's home folder when the caller names none, so the digest covers it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setenv("HOME", str(tmp_path / "agent-home"))
     assert _policy(tmp_path)["home"] == str(tmp_path / "agent-home")
 
 
 def test_guard_folds_the_case_of_the_workspace_root(tmp_path: Path) -> None:
-    """Refuse an absolute hidden path whose root folder has another case, on a case-folding policy."""
+    """Refuse an absolute hidden path whose root folder has another case, on a case-folding policy.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     workspace = tmp_path / "work"
     workspace.mkdir()
     folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
     first, rest = str(workspace).lstrip("/").split("/", 1)
-    call = {"file_path": f"/{first.upper()}/{rest}/optimize.toml"}
+    call = {"file_path": f"/{first.upper()}/{rest}/ascent.toml"}
     assert harness_bridge.guard_check(folded, "Read", call) == "config"
     assert harness_bridge.guard_check(_policy(tmp_path), "Read", call) is None
 
 
 def _digest(policy_file: Path) -> str:
-    """Hash the policy file as the guard checks it."""
+    """Hash the policy file as the guard checks it.
+
+    Args:
+        policy_file: The guard policy file.
+
+    Returns:
+        The SHA-256 hex digest of the file.
+    """
     return hashlib.sha256(policy_file.read_bytes()).hexdigest()
 
 
 def _guard(mode: str, policy_file: Path, request: dict) -> dict:
-    """Run the guard CLI once and parse its answer."""
+    """Run the guard CLI once and parse its answer.
+
+    Args:
+        mode: The guard CLI mode, ``hook`` or ``check``.
+        policy_file: The guard policy file.
+        request: The tool call to send to the guard.
+
+    Returns:
+        The guard's parsed answer.
+    """
     completed = subprocess.run(
         harness_bridge.guard_command(mode, policy_file, _digest(policy_file)),
         input=json.dumps(request),
@@ -882,11 +1028,15 @@ def _guard(mode: str, policy_file: Path, request: dict) -> dict:
 
 
 def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind(tmp_path: Path) -> None:
-    """Deny in the Codex hook shape, answer the JS check shape, and log no path or content."""
+    """Deny in the Codex hook shape, answer the JS check shape, and log no path or content.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
-    denied = _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "cat optimize.toml"}})
+    denied = _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "cat ascent.toml"}})
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert denied["hookSpecificOutput"]["permissionDecisionReason"] == harness_bridge.GUARD_REFUSAL
     assert _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "ls src"}}) == {}
@@ -905,7 +1055,11 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
 
 
 def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
-    """Skip a line that is not JSON, too deep to parse, a non-object, or without a string tool and kind."""
+    """Skip a line that is not JSON, too deep to parse, a non-object, or without a string tool and kind.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     log = tmp_path / harness_bridge.GUARD_DIR / "refusals.jsonl"
     log.parent.mkdir()
     lines = [
@@ -936,7 +1090,12 @@ def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
     ids=["five-cd", "absolute-cd", "pushd"],
 )
 def test_guard_refuses_more_directory_changes_than_it_can_follow(tmp_path: Path, command: str) -> None:
-    """Refuse a call with more cd or pushd steps than the guard follows, in the check and the CLI."""
+    """Refuse a call with more cd or pushd steps than the guard follows, in the check and the CLI.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with more folder changes than the guard follows.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -961,7 +1120,12 @@ def test_guard_refuses_more_directory_changes_than_it_can_follow(tmp_path: Path,
     ],
 )
 def test_guard_follows_folder_options(tmp_path: Path, command: str) -> None:
-    """Refuse a hidden name behind a ``cd`` option or a folder option such as ``env -C``."""
+    """Refuse a hidden name behind a ``cd`` option or a folder option such as ``env -C``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command that reaches a hidden name through a folder option.
+    """
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
 
 
@@ -977,15 +1141,23 @@ def test_guard_follows_folder_options(tmp_path: Path, command: str) -> None:
     ],
 )
 def test_guard_allows_ordinary_option_forms(tmp_path: Path, command: str) -> None:
-    """Allow a context count after ``grep -C`` and a ``cd`` option before an ordinary folder."""
+    """Allow a context count after ``grep -C`` and a ``cd`` option before an ordinary folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with ordinary option forms.
+    """
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) is None
 
 
-@pytest.mark.parametrize(
-    "command", ["cd; cat shinka-run/repo/optimize.toml", "cd && cat shinka-run/repo/optimize.toml"]
-)
+@pytest.mark.parametrize("command", ["cd; cat shinka-run/repo/ascent.toml", "cd && cat shinka-run/repo/ascent.toml"])
 def test_guard_follows_a_bare_cd_to_the_home_folder(tmp_path: Path, command: str) -> None:
-    """Refuse a hidden path after a ``cd`` with no folder, which goes to the home folder."""
+    """Refuse a hidden path after a ``cd`` with no folder, which goes to the home folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with a bare ``cd`` before a hidden path.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -995,7 +1167,11 @@ def test_guard_follows_a_bare_cd_to_the_home_folder(tmp_path: Path, command: str
 
 
 def test_guard_checks_a_call_in_the_folder_the_hook_event_names(tmp_path: Path) -> None:
-    """Refuse a hidden name relative to the event's ``cwd``, as after an earlier ``cd data`` call."""
+    """Refuse a hidden name relative to the event's ``cwd``, as after an earlier ``cd data`` call.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -1025,7 +1201,15 @@ def _link_tree(workspace: Path, max_target: int) -> list[str]:
     """
 
     def filler(tag: str, budget: int) -> str:
-        """Return a target of ``budget`` characters that ends where it starts."""
+        """Return a target of ``budget`` characters that ends where it starts.
+
+        Args:
+            tag: The first part of the target.
+            budget: The length of the target.
+
+        Returns:
+            The link target.
+        """
         count = max(0, (budget - len(tag) - 4) // 5)
         return tag + "/" + "a/" * count + "../" * (count + 1)
 
@@ -1045,7 +1229,11 @@ def _link_tree(workspace: Path, max_target: int) -> list[str]:
 
 
 def test_guard_denies_a_link_tree_of_long_targets_inside_the_hook_timeout(tmp_path: Path) -> None:
-    """Deny a call whose links point at long paths, well before the 10 s hook timeout."""
+    """Deny a call whose links point at long paths, well before the 10 s hook timeout.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -1065,6 +1253,9 @@ def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
 
     ``os.path.realpath`` follows the whole chain for each candidate, so this
     call kept the guard busy for more than 15 s before the link cap.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
     """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
@@ -1075,7 +1266,7 @@ def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
         (workspace / f"c{index}").symlink_to(f"c{index + 1}")
     for index in range(3000):
         (workspace / f"e{index}").symlink_to("c0")
-    command = "cat " + " ".join(f"e{index}" for index in range(3000)) + " optimize.toml"
+    command = "cat " + " ".join(f"e{index}" for index in range(3000)) + " ascent.toml"
     with pytest.raises(ValueError, match="symbolic links"):
         harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
     started = time.monotonic()
@@ -1085,7 +1276,11 @@ def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
 
 
 def test_guard_refuses_a_symbolic_link_loop(tmp_path: Path) -> None:
-    """Refuse a path behind a link loop, which the system cannot open either."""
+    """Refuse a path behind a link loop, which the system cannot open either.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     policy = _policy(tmp_path)
     workspace = tmp_path / "work"
     (workspace / "loop1").symlink_to("loop2")
@@ -1095,10 +1290,14 @@ def test_guard_refuses_a_symbolic_link_loop(tmp_path: Path) -> None:
 
 
 def test_guard_follows_a_short_link_chain_to_a_hidden_file(tmp_path: Path) -> None:
-    """Resolve a hidden file behind a chain of links, as ``os.path.realpath`` does."""
+    """Resolve a hidden file behind a chain of links, as ``os.path.realpath`` does.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     policy = _policy(tmp_path)
     workspace = tmp_path / "work"
-    (workspace / "link2").symlink_to("optimize.toml")
+    (workspace / "link2").symlink_to("ascent.toml")
     (workspace / "sub").mkdir()
     (workspace / "sub" / "link1").symlink_to("../link2")
     (workspace / "link0").symlink_to("sub/link1")
@@ -1106,7 +1305,11 @@ def test_guard_follows_a_short_link_chain_to_a_hidden_file(tmp_path: Path) -> No
 
 
 def test_guard_still_follows_four_directory_changes(tmp_path: Path) -> None:
-    """Resolve a hidden path behind the largest number of cd steps the guard follows."""
+    """Resolve a hidden path behind the largest number of cd steps the guard follows.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = "cd . && cd . && cd . && cd data && cat cases.jsonl"
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
 
@@ -1121,7 +1324,12 @@ def test_guard_still_follows_four_directory_changes(tmp_path: Path) -> None:
     ids=["too-long", "too-many-checks", "too-deep-after-expansion"],
 )
 def test_guard_refuses_a_call_above_its_cost_caps_fast(tmp_path: Path, command: str) -> None:
-    """Refuse a call the guard cannot check well inside the hook timeout, and answer fast."""
+    """Refuse a call the guard cannot check well inside the hook timeout, and answer fast.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command above one of the guard's cost caps.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -1139,7 +1347,11 @@ _NODE = shutil.which("node")
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) -> None:
-    """Block a hidden read in the Pi extension, the OpenCode plugin and the eve module; let others run."""
+    """Block a hidden read in the Pi extension, the OpenCode plugin and the eve module; let others run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     pi_module = tmp_path / "pi-guard.mjs"
@@ -1159,7 +1371,7 @@ const allowed = await handler({{ toolName: "read", input: {{ path: "src/app.py" 
 const {{ AppGuard }} = await import({json.dumps(plugin_module.as_uri())});
 const hooks = await AppGuard({{}});
 let thrown = null;
-try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "optimize.toml" }} }}); }}
+try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "ascent.toml" }} }}); }}
 catch (error) {{ thrown = error.message; }}
 await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "src/app.py" }} }});
 console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown, eveRefused, eveAllowed }}));
@@ -1176,7 +1388,13 @@ console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown, eveRefu
 @pytest.mark.parametrize("mode", ["hook", "check"])
 @pytest.mark.parametrize("broken", ["missing", "corrupt", "no-hashes", "emptied", "signed-empty", "surrogate"])
 def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, broken: str) -> None:
-    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed."""
+    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        mode: The guard CLI mode.
+        broken: How the test breaks the policy or the input.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -1198,8 +1416,8 @@ def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, brok
         digest = harness_bridge.write_guard_policy(policy_file, {**policy, "hashes": {}})
     else:
         # The lone surrogate comes first, so a strict UTF-8 hash would crash before the hidden name.
-        hook_input = {"cmd": "cat src/\ud800.py optimize.toml"}
-        check_input = {"file_path": "optimize.toml", "path": "src/\ud800.py"}
+        hook_input = {"cmd": "cat src/\ud800.py ascent.toml"}
+        check_input = {"file_path": "ascent.toml", "path": "src/\ud800.py"}
     if mode == "hook":
         raw = json.dumps({"tool_name": "exec_command", "tool_input": hook_input})
     else:
@@ -1216,7 +1434,11 @@ def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, brok
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_pi_extension_refuses_when_the_guard_cannot_run(tmp_path: Path) -> None:
-    """Block every call when the guard process fails, instead of letting it run."""
+    """Block every call when the guard process fails, instead of letting it run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     (session / harness_bridge.GUARD_DIR / "policy.json").unlink()
@@ -1236,7 +1458,11 @@ console.log(JSON.stringify(await handler({{ toolName: "read", input: {{ path: "s
 
 
 def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
-    """Install the guard for a session with hidden paths, report each refusal, and finish the session."""
+    """Install the guard for a session with hidden paths, report each refusal, and finish the session.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = (
         'printf \'{"tool":"read","input":{"path":".optimize/exploits"}}\' | '
         '"$APP_GUARD_PYTHON" "$APP_GUARD_BRIDGE" guard check "$APP_GUARD_POLICY" "$APP_GUARD_DIGEST"; echo done'
@@ -1269,7 +1495,11 @@ def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
 
 
 def test_run_session_guards_the_agent_home_folder(tmp_path: Path) -> None:
-    """Bind the guard to the HOME the agent runs with, so ``~`` resolves as in the agent's shell."""
+    """Bind the guard to the HOME the agent runs with, so ``~`` resolves as in the agent's shell.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     agent_home = tmp_path / "agent-home"
     session = tmp_path / "session"
     proposer = {
@@ -1284,7 +1514,11 @@ def test_run_session_guards_the_agent_home_folder(tmp_path: Path) -> None:
 
 
 def test_run_session_reports_host_agent_refusals(tmp_path: Path) -> None:
-    """Take a host CLI turn's refusals from the shim's summary line, with no guard in the session."""
+    """Take a host CLI turn's refusals from the shim's summary line, with no guard in the session.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     line = json.dumps(
         {"type": "host_agent.result", "text": "ok", "usage": {}, "refusals": [{"tool": "Read", "kind": "config"}]}
     )
@@ -1296,37 +1530,23 @@ def test_run_session_reports_host_agent_refusals(tmp_path: Path) -> None:
 
 
 def test_run_session_without_hidden_paths_installs_no_guard(tmp_path: Path) -> None:
-    """Leave sessions with no hidden list unchanged."""
+    """Leave sessions with no hidden list unchanged.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     outcome = run_session(_PLAIN, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
     assert outcome.refusals == []
     assert not (session / harness_bridge.GUARD_DIR).exists()
 
 
-@pytest.mark.parametrize(
-    "launch",
-    [
-        lambda gateway: harness._pi_launch("m1", gateway),
-        lambda gateway: harness._prime_agent_launch("m1", gateway),
-        lambda gateway: harness.pi_editor_launch("m1", gateway),
-    ],
-    ids=["pi", "prime", "pi-editor"],
-)
-def test_pi_family_launches_load_the_guard_extension_only_when_installed(launch, tmp_path: Path) -> None:
-    """Add ``-e <guard>`` to Pi-family commands when the guard is set, and nothing when it is not."""
-    command = launch(harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
-    assert harness._GUARD_PI_ARG in command
-    expand = f"printf '%s|' {harness._GUARD_PI_ARG}"
-    with_guard = subprocess.run(
-        ["bash", "-c", expand], env={"APP_GUARD_PI": "/g/pi.ts"}, capture_output=True, text=True, check=True
-    )
-    without = subprocess.run(["bash", "-c", expand], env={}, capture_output=True, text=True, check=True)
-    assert with_guard.stdout == "-e|/g/pi.ts|"
-    assert without.stdout == "|"
-
-
 def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) -> None:
-    """Copy the guard hooks into the session's Codex home only when the guard is set."""
+    """Copy the guard hooks into the session's Codex home only when the guard is set.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = harness._codex_launch("m1", harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
     assert command.startswith(harness._GUARD_CODEX_COPY)
     (tmp_path / ".app" / "codex").mkdir(parents=True)
@@ -1338,17 +1558,17 @@ def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) 
     assert (tmp_path / ".app" / "codex" / "hooks.json").read_text() == "{}"
 
 
-# APP_TEST_CODEX can point at the pinned install (npm i @openai/codex@<CODEX_VERSION>).
-_CODEX = os.environ.get("APP_TEST_CODEX") or shutil.which("codex")
-
-
 class _FakeResponses(http.server.BaseHTTPRequestHandler):
-    """Answer the Responses API: one ``cat optimize.toml`` call, then a final message."""
+    """Answer the Responses API: one ``cat ascent.toml`` call, then a final message."""
 
     tool_outputs: list[str] = []
 
     def log_message(self, *args: object) -> None:
-        """Keep the test output quiet."""
+        """Keep the test output quiet.
+
+        Args:
+            *args: The log values, which the server ignores.
+        """
 
     def do_POST(self) -> None:
         """Stream one model turn as server-sent events."""
@@ -1363,7 +1583,7 @@ class _FakeResponses(http.server.BaseHTTPRequestHandler):
                 "content": [{"type": "output_text", "text": "done"}],
             }
         else:
-            arguments = json.dumps({"cmd": "cat optimize.toml"})
+            arguments = json.dumps({"cmd": "cat ascent.toml"})
             item = {
                 "type": "function_call",
                 "id": "f1",
@@ -1384,42 +1604,6 @@ class _FakeResponses(http.server.BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
 
 
-@pytest.mark.skipif(_CODEX is None, reason="codex is not installed")
-def test_installed_codex_runs_the_guard_hook_and_refuses_a_hidden_read(tmp_path: Path) -> None:
-    """Drive the real Codex against a fake model: its shell read of optimize.toml is refused and logged."""
-    assert _CODEX is not None
-    _FakeResponses.tool_outputs = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeResponses)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    (workspace / "optimize.toml").write_text("secret = 1\n")
-    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
-    proposer = {
-        **harness.launch_payload(harness._codex_launch("fake-model", gateway)),
-        "hidden_hashes": harness_bridge.hidden_hashes(["optimize.toml"]),
-    }
-    path = f"{Path(_CODEX).parent}{os.pathsep}{os.environ.get('PATH', '')}"
-    try:
-        outcome = run_session(
-            proposer,
-            workspace=workspace,
-            prompt="Read the config.",
-            model="fake-model",
-            session_dir=tmp_path / "session",
-            timeout_seconds=120,
-            extra_env={"PATH": path},
-            api_key="k",
-        )
-    finally:
-        server.shutdown()
-    assert outcome.returncode == 0, outcome.stderr
-    assert outcome.refusals == [{"tool": "Bash", "kind": "config"}]
-    assert len(_FakeResponses.tool_outputs) == 1
-    assert harness_bridge.GUARD_REFUSAL in _FakeResponses.tool_outputs[0]
-    assert "secret" not in _FakeResponses.tool_outputs[0]
-
-
 class _FakeChat(http.server.BaseHTTPRequestHandler):
     """Answer Chat Completions: one call of ``tool``, then a final message."""
 
@@ -1427,7 +1611,11 @@ class _FakeChat(http.server.BaseHTTPRequestHandler):
     tool_outputs: list[str] = []
 
     def log_message(self, *args: object) -> None:
-        """Keep the test output quiet."""
+        """Keep the test output quiet.
+
+        Args:
+            *args: The log values, which the server ignores.
+        """
 
     def do_POST(self) -> None:
         """Stream one model turn as server-sent events."""
@@ -1471,94 +1659,6 @@ class _FakeChat(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
 
-# Each harness's own read tool and arguments. Prime Agent has only ``ipython``.
-_CHAT_HARNESSES = [
-    ("opencode", harness._opencode_launch, "read", "filePath"),
-    ("pi", harness._pi_launch, "read", "path"),
-    ("prime-agent", harness._prime_agent_launch, "ipython", "code"),
-]
-
-
-@pytest.fixture
-def harness_tmp() -> Iterator[Path]:
-    """Give one harness run its own temp folder, and stop the daemon that the run leaves there.
-
-    Yields:
-        The folder to pass to the harness as ``TMPDIR``.
-    """
-    # Prime Agent keeps its daemon sockets under the temp folder, and the daemon lives on after the
-    # run. A daemon left in the machine's shared temp folder makes every later Prime Agent start
-    # fail. The folder is directly under /tmp because a Unix socket path has a length limit, and
-    # the macOS default temp folder and pytest's tmp_path are too long for the daemon's sockets.
-    folder = Path(tempfile.mkdtemp(dir="/tmp"))
-    try:
-        yield folder
-    finally:
-        daemons = []
-        for owner in folder.glob("prime-agent-*/supervisor-owners/*/owner.json"):
-            with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
-                daemon = int(json.loads(owner.read_text())["pid"])
-                os.kill(daemon, signal.SIGTERM)
-                daemons.append(daemon)
-        # A daemon and its worker write into the folder while they stop, so the folder goes only
-        # after both. The daemon leads their process group, and signal 0 only probes the group.
-        deadline = time.monotonic() + 10
-        for daemon in daemons:
-            with contextlib.suppress(OSError):
-                while time.monotonic() < deadline:
-                    os.killpg(daemon, 0)
-                    time.sleep(0.05)
-        shutil.rmtree(folder, ignore_errors=True)
-
-
-@pytest.mark.parametrize(("binary", "launch", "tool", "key"), _CHAT_HARNESSES, ids=[row[0] for row in _CHAT_HARNESSES])
-@pytest.mark.parametrize("target", ["optimize.toml", "notes.txt"])
-def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
-    tmp_path: Path, harness_tmp: Path, binary: str, launch: Any, tool: str, key: str, target: str
-) -> None:
-    """Drive the real OpenCode, Pi and Prime Agent against a fake model: only the hidden read is refused."""
-    executable = shutil.which(binary)
-    if executable is None:
-        pytest.skip(f"{binary} is not installed")
-    value = f'print(open("{target}").read())' if key == "code" else target
-    _FakeChat.tool = (tool, {key: value})
-    _FakeChat.tool_outputs = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeChat)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    (workspace / "optimize.toml").write_text("secret = 1\n")
-    (workspace / "notes.txt").write_text("hello\n")
-    (tmp_path / "home").mkdir()
-    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
-    proposer = {
-        **harness.launch_payload(launch("fake-model", gateway)),
-        "hidden_hashes": harness_bridge.hidden_hashes(["optimize.toml"]),
-    }
-    path = f"{Path(executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"
-    try:
-        outcome = run_session(
-            proposer,
-            workspace=workspace,
-            prompt="Read the file.",
-            model="fake-model",
-            session_dir=tmp_path / "session",
-            timeout_seconds=120,
-            extra_env={"PATH": path, "HOME": str(tmp_path / "home"), "TMPDIR": str(harness_tmp)},
-            api_key="k",
-        )
-    finally:
-        server.shutdown()
-    assert outcome.returncode == 0, outcome.stderr
-    assert len(_FakeChat.tool_outputs) == 1
-    if target == "optimize.toml":
-        assert outcome.refusals == [{"tool": tool, "kind": "config"}]
-        assert _FakeChat.tool_outputs[0] == harness_bridge.GUARD_REFUSAL
-    else:
-        assert outcome.refusals == []
-        assert "hello" in _FakeChat.tool_outputs[0]
-
-
 def _fake_tool(bin_dir: Path, name: str, script: str) -> None:
     """Write an executable shell command into ``bin_dir``.
 
@@ -1574,7 +1674,11 @@ def _fake_tool(bin_dir: Path, name: str, script: str) -> None:
 
 
 def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_through(tmp_path: Path) -> None:
-    """The shim logs command line, exit code and output of a listed command, also nested, and keeps its behavior."""
+    """The shim logs command line, exit code and output of a listed command, also nested, and keeps its behavior.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     bin_dir = tmp_path / "bin"
     _fake_tool(bin_dir, "probe", 'echo "out $*"; echo err >&2; exit 3')
     _fake_tool(bin_dir, "outer", "probe inner; exit 0")
@@ -1586,8 +1690,9 @@ def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_throu
     }
     session = tmp_path / "session"
 
+    # The limit only stops a hung shim; on a loaded machine the shim's Python starts can take seconds (SKY-839).
     outcome = run_session(
-        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=10
+        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=60
     )
 
     assert outcome.returncode == 0
@@ -1600,7 +1705,11 @@ def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_throu
 
 
 def test_exec_shim_reports_a_missing_command_like_the_shell(tmp_path: Path) -> None:
-    """A listed command that is not installed fails with 127 and is still logged."""
+    """A listed command that is not installed fails with 127 and is still logged.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "run_command": 'no-such-tool-xyz; echo "rc=$?"', "exec_commands": ["no-such-tool-xyz"]}
     session = tmp_path / "session"
 
@@ -1614,7 +1723,11 @@ def test_exec_shim_reports_a_missing_command_like_the_shell(tmp_path: Path) -> N
 
 
 def test_run_session_without_exec_commands_installs_no_exec_shim(tmp_path: Path) -> None:
-    """A launch that lists no command gets no shim folder and no log, and sees its session folder."""
+    """A launch that lists no command gets no shim folder and no log, and sees its session folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "run_command": 'echo "$APP_SESSION_DIR"; echo "$PATH"'}
     session = tmp_path / "session"
 
@@ -1646,7 +1759,11 @@ def _shim_env(tmp_path: Path, names: list[str], log: Path | None) -> dict[str, s
 
 
 def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_path: Path) -> None:
-    """A child env with no ``APP_*`` vars still skips the shim folder on PATH, so the shim does not run itself."""
+    """A child env with no ``APP_*`` vars still skips the shim folder on PATH, so the shim does not run itself.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo real; exit 5")
     env = {key: value for key, value in _shim_env(tmp_path, ["probe"], None).items() if not key.startswith("APP_")}
 
@@ -1659,7 +1776,12 @@ def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_pa
 def test_exec_shim_finds_a_command_in_the_current_folder_through_an_empty_path_entry(
     tmp_path: Path, logged: bool
 ) -> None:
-    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too, and run it once."""
+    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too, and run it once.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        logged: Whether the shim writes an exec log.
+    """
     _fake_tool(tmp_path / "here", "probe", "echo real; exit 5")
     shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", ["probe"], sys.executable)
     # The wrapper counts its runs: a bare-name match would make Popen find the wrapper on PATH again.
@@ -1684,7 +1806,12 @@ def test_exec_shim_finds_a_command_in_the_current_folder_through_an_empty_path_e
 def test_install_exec_shim_rejects_a_name_that_is_not_plain_and_writes_nothing_outside(
     tmp_path: Path, name: str
 ) -> None:
-    """A command name with a path part, or a NUL, raises ValueError before any file is written."""
+    """A command name with a path part, or a NUL, raises ValueError before any file is written.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        name: A command name that is not plain.
+    """
     shim_dir = tmp_path / "shim"
 
     with pytest.raises(ValueError, match="plain name"):
@@ -1694,7 +1821,12 @@ def test_install_exec_shim_rejects_a_name_that_is_not_plain_and_writes_nothing_o
 
 
 def test_install_exec_shim_fails_when_exec_shim_py_is_missing(tmp_path: Path, monkeypatch) -> None:
-    """With no ``exec_shim.py`` next to the bridge, the install raises FileNotFoundError and writes no wrapper."""
+    """With no ``exec_shim.py`` next to the bridge, the install raises FileNotFoundError and writes no wrapper.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setattr(harness_bridge, "__file__", str(tmp_path / "bridge" / "harness_bridge.py"))
 
     with pytest.raises(FileNotFoundError, match="exec shim not found"):
@@ -1704,7 +1836,11 @@ def test_install_exec_shim_fails_when_exec_shim_py_is_missing(tmp_path: Path, mo
 
 
 def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> None:
-    """The caller gets the full output; the log keeps its tail."""
+    """The caller gets the full output; the log keeps its tail.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "big", "head -c 70000 /dev/zero | tr '\\0' a; printf END")
     log = tmp_path / "exec.jsonl"
 
@@ -1716,7 +1852,11 @@ def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> N
 
 
 def test_exec_shim_without_a_log_only_passes_the_command_through(tmp_path: Path) -> None:
-    """With no exec log set, the shim runs the real command with its streams and exit code, and writes nothing."""
+    """With no exec log set, the shim runs the real command with its streams and exit code, and writes nothing.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
 
     env = _shim_env(tmp_path, ["probe"], None)
@@ -1727,16 +1867,21 @@ def test_exec_shim_without_a_log_only_passes_the_command_through(tmp_path: Path)
 
 
 def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> None:
-    """A line the command prints reaches the caller while the command still runs."""
+    """A line the command prints reaches the caller while the command still runs.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     flag = tmp_path / "flag"
     _fake_tool(tmp_path / "bin", "slow", f'echo first; while [ ! -f "{flag}" ]; do sleep 0.05; done; echo second')
     process = subprocess.Popen(
         ["slow"], env=_shim_env(tmp_path, ["slow"], tmp_path / "exec.jsonl"), stdout=subprocess.PIPE
     )
-    # Ends the command if the shim holds the output, so the assertion below fails instead of hanging.
-    timer = threading.Timer(5.0, flag.touch)
+    # Ends the command if the shim holds the output, so the assertion below fails instead of hanging. The
+    # wide times leave room for the shim's start on a loaded machine (SKY-839).
+    timer = threading.Timer(30.0, flag.touch)
     # Ends a shim that never runs the command, so readline returns and the test fails.
-    killer = threading.Timer(10.0, process.kill)
+    killer = threading.Timer(60.0, process.kill)
     timer.start()
     killer.start()
     try:
@@ -1752,7 +1897,11 @@ def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> Non
 
 
 def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path) -> None:
-    """A SIGTERM to the shim ends the real command; the shim logs 128 plus the signal and dies from it."""
+    """A SIGTERM to the shim ends the real command; the shim logs 128 plus the signal and dies from it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "hang", "echo ready; exec sleep 30")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(["hang"], env=_shim_env(tmp_path, ["hang"], log), stdout=subprocess.PIPE)
@@ -1773,7 +1922,12 @@ def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path)
 
 @pytest.mark.parametrize("logged", [True, False])
 def test_exec_shim_runs_a_script_with_no_shebang_line_with_sh(tmp_path: Path, logged: bool) -> None:
-    """The shell runs a script with no shebang line with sh; the shim does too, with and without a log."""
+    """The shell runs a script with no shebang line with sh; the shim does too, with and without a log.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        logged: Whether the shim writes an exec log.
+    """
     bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
     bin_dir.mkdir()
     (bin_dir / "plain").write_text('echo "plain $1"\nexit 3\n')
@@ -1789,7 +1943,11 @@ def test_exec_shim_runs_a_script_with_no_shebang_line_with_sh(tmp_path: Path, lo
 
 
 def test_exec_shim_logs_126_for_a_command_that_cannot_run(tmp_path: Path) -> None:
-    """A command whose interpreter is missing exits 126, and its record is still written."""
+    """A command whose interpreter is missing exits 126, and its record is still written.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
     bin_dir.mkdir()
     (bin_dir / "broken").write_text("#!/no/such/interpreter\n")
@@ -1805,7 +1963,11 @@ def test_exec_shim_logs_126_for_a_command_that_cannot_run(tmp_path: Path) -> Non
 
 
 def test_exec_shim_passes_output_and_exit_code_through_when_the_log_cannot_be_written(tmp_path: Path) -> None:
-    """An exec log path that is a folder loses the record, but the caller gets the real output and code, and no traceback."""
+    """An exec log path that is a folder loses the record, but the caller gets the real output and code, and no traceback.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
     log = tmp_path / "log-folder"
     log.mkdir()
@@ -1818,7 +1980,11 @@ def test_exec_shim_passes_output_and_exit_code_through_when_the_log_cannot_be_wr
 
 
 def test_exec_shim_keeps_an_ignored_sigint_ignored_for_the_command(tmp_path: Path) -> None:
-    """A shim started with SIGINT ignored (``cmd &`` under ``sh``) does not catch it, so the command inherits the ignore."""
+    """A shim started with SIGINT ignored (``cmd &`` under ``sh``) does not catch it, so the command inherits the ignore.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     probe = "import signal; print(signal.getsignal(signal.SIGINT) is signal.SIG_IGN)"
     _fake_tool(tmp_path / "bin", "probe", f"exec {shlex.quote(sys.executable)} -c {shlex.quote(probe)}")
     log = tmp_path / "exec.jsonl"
@@ -1834,7 +2000,11 @@ def test_exec_shim_keeps_an_ignored_sigint_ignored_for_the_command(tmp_path: Pat
 
 
 def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp_path: Path) -> None:
-    """``cmd | head`` ends: the shim closes the child's pipe, so the child gets SIGPIPE and the log has 141."""
+    """``cmd | head`` ends: the shim closes the child's pipe, so the child gets SIGPIPE and the log has 141.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "inf", "exec yes")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(
@@ -1859,7 +2029,11 @@ def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp
 def test_exec_shim_exits_141_with_no_stderr_for_a_command_that_writes_line_by_line_into_a_closed_reader(
     tmp_path: Path,
 ) -> None:
-    """A command that writes line by line into a closed reader ends with 141; the shim exits 141 and prints nothing to stderr."""
+    """A command that writes line by line into a closed reader ends with 141; the shim exits 141 and prints nothing to stderr.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "lines", "while true; do echo hi; sleep 0.01; done")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(
@@ -1882,7 +2056,11 @@ def test_exec_shim_exits_141_with_no_stderr_for_a_command_that_writes_line_by_li
 
 
 def test_exec_shim_logs_only_the_head_of_a_long_command_line_with_a_cut_marker(tmp_path: Path) -> None:
-    """Each non-UTF-8 argv byte is six bytes in the JSON line, so the log keeps a bounded head and marks the cut."""
+    """Each non-UTF-8 argv byte is six bytes in the JSON line, so the log keeps a bounded head and marks the cut.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", 'echo "$#"')
     log = tmp_path / "exec.jsonl"
     args = [b"\xff" * 60000] * 3
@@ -1901,7 +2079,11 @@ def test_exec_shim_logs_only_the_head_of_a_long_command_line_with_a_cut_marker(t
 
 
 def test_exec_shim_passes_an_inherited_fd_3_to_the_command_and_none_of_its_own(tmp_path: Path) -> None:
-    """``cmd 3>&1`` works through the shim as without it, and the command gets no fd of the shim's."""
+    """``cmd 3>&1`` works through the shim as without it, and the command gets no fd of the shim's.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     probe = (
         "import os\n"
         "os.write(3, b'sub\\n')\n"
@@ -1926,7 +2108,11 @@ def test_exec_shim_passes_an_inherited_fd_3_to_the_command_and_none_of_its_own(t
 
 
 def test_exec_shim_with_its_stdout_closed_returns_the_command_code_and_writes_the_record(tmp_path: Path) -> None:
-    """``cmd >&-`` leaves ``sys.stdout`` None; the shim still returns the command's code, with no traceback."""
+    """``cmd >&-`` leaves ``sys.stdout`` None; the shim still returns the command's code, with no traceback.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo err >&2; exit 4")
     log = tmp_path / "exec.jsonl"
 
@@ -1945,7 +2131,15 @@ def test_exec_shim_with_its_stdout_closed_returns_the_command_code_and_writes_th
 def test_exec_shim_with_its_stderr_closed_keeps_stdout_clean_and_returns_the_command_code(
     tmp_path: Path, mode: str, command: str, code: int, stdout: bytes
 ) -> None:
-    """``cmd 2>&-`` leaves ``sys.stderr`` None; no shim message goes to stdout, and the code is the command's."""
+    """``cmd 2>&-`` leaves ``sys.stderr`` None; no shim message goes to stdout, and the code is the command's.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        mode: How the shim runs: logged, nested or with no log.
+        command: The command the shim runs.
+        code: The exit code the shim must return.
+        stdout: The output the shim must write.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
     (tmp_path / "bin" / "broken").write_text("#!/no/such/interpreter\n")
     (tmp_path / "bin" / "broken").chmod(0o755)
@@ -1969,7 +2163,14 @@ def test_exec_shim_with_its_stderr_closed_keeps_stdout_clean_and_returns_the_com
 def test_exec_shim_with_a_stream_closed_lets_the_command_write_to_it_again_and_go_on(
     tmp_path: Path, logged: bool, closed: str, kept: str
 ) -> None:
-    """With no shim, writes to a closed stream fail and the command goes on; the shim must not end it with SIGPIPE."""
+    """With no shim, writes to a closed stream fail and the command goes on; the shim must not end it with SIGPIPE.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        logged: Whether the shim writes an exec log.
+        closed: The shell form that closes a stream.
+        kept: The stream that stays open.
+    """
     lost = "1" if kept == "stderr" else "2"
     shown = "2" if kept == "stderr" else "1"
     _fake_tool(tmp_path / "bin", "tw", f"echo a >&{lost}; sleep 0.2; echo b >&{lost}; echo kept >&{shown}; exit 0")
@@ -1988,7 +2189,12 @@ def test_exec_shim_with_a_stream_closed_lets_the_command_write_to_it_again_and_g
 
 @pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGKILL])
 def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path, number: signal.Signals) -> None:
-    """A command that a signal ends makes the shim die from that signal, so a caller such as bash sees the signal."""
+    """A command that a signal ends makes the shim die from that signal, so a caller such as bash sees the signal.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        number: The signal that ends the command.
+    """
     _fake_tool(tmp_path / "bin", "zz", f"echo out; kill -{number.name[3:]} $$")
     log = tmp_path / "exec.jsonl"
 
@@ -2000,7 +2206,11 @@ def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path, n
 
 
 def test_exec_shim_exits_128_plus_a_core_dump_signal_and_does_not_die_from_it(tmp_path: Path) -> None:
-    """A core-dump signal that ends the command gives exit 128 plus it, so the shim writes no core of its own."""
+    """A core-dump signal that ends the command gives exit 128 plus it, so the shim writes no core of its own.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     # SIGXFSZ writes a core on Linux, but makes no crash report on macOS, so the test leaves nothing behind.
     _fake_tool(tmp_path / "bin", "zz", "echo out; kill -XFSZ $$")
     log = tmp_path / "exec.jsonl"
@@ -2013,7 +2223,11 @@ def test_exec_shim_exits_128_plus_a_core_dump_signal_and_does_not_die_from_it(tm
 
 
 def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
-    """Python ignores SIGPIPE, and an exec keeps that; the shim resets it, so ``yes | head -1`` ends ``yes`` with 141."""
+    """Python ignores SIGPIPE, and an exec keeps that; the shim resets it, so ``yes | head -1`` ends ``yes`` with 141.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin" / "pp").write_text('#!/bin/bash\nyes | head -1 >/dev/null; echo "status ${PIPESTATUS[*]}"\n')
     (tmp_path / "bin" / "pp").chmod(0o755)
@@ -2025,7 +2239,11 @@ def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_
 
 
 def test_a_name_that_starts_with_two_dots_can_be_hidden(tmp_path: Path) -> None:
-    """Hide ``..data``: only a ``..`` part leaves the repository, not a name that starts with two dots."""
+    """Hide ``..data``: only a ``..`` part leaves the repository, not a name that starts with two dots.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     hashes = harness_bridge.hidden_hashes(["..data"])
 
     assert harness_bridge.hashed_kind(hashes, "..data/answers.csv") is not None
@@ -2055,7 +2273,7 @@ def test_a_setup_that_runs_too_long_stops_with_every_process_it_started(tmp_path
 
     started = time.monotonic()
     with pytest.raises(
-        RuntimeError, match=r"(?s)\[proposer\] setup command in optimize.toml .* did not finish within 2 seconds"
+        RuntimeError, match=r"(?s)\[proposer\] setup command in ascent.toml .* did not finish within 2 seconds"
     ):
         harness_bridge.run_setup([sys.executable, "-c", script], tmp_path, timeout_seconds=2)
 
@@ -2177,6 +2395,49 @@ def test_the_contract_files_command_keeps_a_key_token_as_text(tmp_path: Path) ->
 
     assert filled.stdout.strip() == "k"
     assert exact.stdout.strip() == harness_bridge.KEY_TOKEN
+
+
+@pytest.mark.parametrize("where", ["run_command", "env", "files"])
+@pytest.mark.parametrize("vendor", ["APP", "SKYNET"])
+def test_a_saved_launch_with_a_key_token_from_before_sky_776_is_refused(
+    tmp_path: Path, where: str, vendor: str
+) -> None:
+    """A resumed launch that still holds an old key token fails with an error that names the new token.
+
+    Args:
+        tmp_path: The workspace and the session folder.
+        where: The part of the launch that holds the old token.
+        vendor: The old token's prefix.
+    """
+    old = f"__{vendor}_API_KEY__"
+    proposer: dict[str, Any] = {**_PLAIN, "run_command": "echo ok"}
+    if where == "run_command":
+        proposer["run_command"] = f"agent --key {old}"
+    elif where == "env":
+        proposer["env"] = {"TOKEN": old}
+    else:
+        proposer["files"] = {"config.json": json.dumps({"key": old})}
+
+    with pytest.raises(RuntimeError, match=f"old key token {old}.*{harness_bridge.KEY_TOKEN}"):
+        run_session(proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s", api_key="k")
+
+    assert not (tmp_path / "s" / "prompt-1.md").exists()
+
+
+def test_a_launch_with_another_api_key_token_in_its_text_is_not_refused(tmp_path: Path) -> None:
+    """Only the old Skynet key tokens are refused; other ``__*_API_KEY__`` text in a command stays as text.
+
+    Args:
+        tmp_path: The workspace and the session folder.
+    """
+    proposer = {**_PLAIN, "run_command": "echo __OPENAI_API_KEY__"}
+
+    outcome = run_session(
+        proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s", api_key="k"
+    )
+
+    assert outcome.returncode == 0
+    assert outcome.stdout.strip() == "__OPENAI_API_KEY__"
 
 
 def test_a_finished_setup_stops_the_processes_it_left_in_the_background(tmp_path: Path) -> None:
@@ -2322,7 +2583,7 @@ def test_a_setup_that_edits_a_tracked_file_stops_with_its_command_and_the_file(t
     command = [sys.executable, "-c", "open('a.txt', 'a').write('!'); open('new.txt', 'w')"]
 
     with pytest.raises(
-        RuntimeError, match=r"(?s)setup command in optimize.toml \(.*a\.txt.*\) changed tracked files: a\.txt\."
+        RuntimeError, match=r"(?s)setup command in ascent.toml \(.*a\.txt.*\) changed tracked files: a\.txt\."
     ):
         harness_bridge.ensure_setup(command, checkout)
 
@@ -2374,7 +2635,7 @@ def test_a_files_command_outside_a_checkout_without_a_default_agent_stops(tmp_pa
     """
     proposer = {**_PLAIN, "run_command": "echo file-entry", "file_command": True}
 
-    with pytest.raises(RuntimeError, match=r"entry command in optimize.toml runs only in a repository checkout"):
+    with pytest.raises(RuntimeError, match=r"entry command in ascent.toml runs only in a repository checkout"):
         run_session(proposer, workspace=tmp_path / "plain", prompt="x", model="m", session_dir=tmp_path / "s")
 
 
@@ -2597,7 +2858,7 @@ def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(
     with pytest.raises(
         RuntimeError,
         match=(
-            r"(?s)setup command in optimize.toml \(.*\) changed or removed files of the version:"
+            r"(?s)setup command in ascent.toml \(.*\) changed or removed files of the version:"
             r" gone\.txt, kept\.txt\."
         ),
     ):
@@ -2641,50 +2902,54 @@ def test_a_setup_that_points_a_link_of_the_version_at_a_new_target_stops(
         "import os; os.remove('link'); os.symlink('two.txt', 'link'); open('new.txt', 'w')",
     ]
 
-    with pytest.raises(RuntimeError, match=rf"(?s)setup command in optimize.toml \(.*\) {error}\."):
+    with pytest.raises(RuntimeError, match=rf"(?s)setup command in ascent.toml \(.*\) {error}\."):
         harness_bridge.ensure_setup(command, checkout)
 
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
 
 
-def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path) -> None:
+def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A setup cannot run past the session's limit, and the harness gets only the time the setup left (SKY-753).
 
     Args:
         tmp_path: The checkouts and the session folders.
+        monkeypatch: Gives the second session a setup that takes a fixed time.
     """
     slow = {**_PLAIN, "setup": [sys.executable, "-c", "import time; time.sleep(30)"]}
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match=r"did not finish within (1|0\.\d+) seconds"):
+    # The git reads and the copy before the setup count inside the limit too, so a loaded machine needs
+    # more than 1 s for them (SKY-839). The 30 s setup still shows that the limit stops it.
+    with pytest.raises(RuntimeError, match=r"did not finish within (5|[0-4](\.\d+)?) seconds"):
         run_session(
             slow,
             workspace=_git_checkout(tmp_path / "slow"),
             prompt="x",
             model="m",
             session_dir=tmp_path / "s1",
-            timeout_seconds=1.0,
+            timeout_seconds=5.0,
             api_key="k",
         )
     assert time.monotonic() - started < 20
 
-    proposer = {
-        **_PLAIN,
-        "run_command": "sleep 10",
-        "setup": [sys.executable, "-c", "import time; time.sleep(2)"],
-    }
-    started = time.monotonic()
+    # A real setup process can take far longer than its sleep to start under load (SKY-839), and then
+    # it uses up the whole limit. A setup of a fixed length keeps the test on the harness's share.
+    limit, setup = 8.0, 6.0
+    monkeypatch.setattr(harness_bridge, "ensure_setup", lambda command, checkout, seconds, env: time.sleep(setup))
+    proposer = {**_PLAIN, "run_command": "sleep 30", "setup": ["true"]}
     outcome = run_session(
         proposer,
         workspace=_git_checkout(tmp_path / "checkout"),
         prompt="x",
         model="m",
         session_dir=tmp_path / "s2",
-        timeout_seconds=3.0,
+        timeout_seconds=limit,
         api_key="k",
     )
 
     assert outcome.timed_out
-    assert time.monotonic() - started < 4.5
+    # The duration counts only the harness. With the full limit it would run near 8 s; the 2 s the
+    # setup left stops it near 2 s, and the bound leaves 3 s each way for a loaded machine.
+    assert outcome.duration_seconds < limit - setup + 3
 
 
 def test_a_setup_that_uses_up_the_session_time_stops_before_the_harness_starts(
@@ -2729,7 +2994,7 @@ def test_a_stop_that_lands_while_a_group_starts_still_kills_the_group(
     Args:
         starter: Whether the group is the setup's or the harness session's.
         tmp_path: The checkout and the session folder.
-        monkeypatch: The signal at the start, a fake ``os._exit`` and a fresh deferred-stop record.
+        monkeypatch: The signal at the start, a fake ``os._exit``, a fresh deferred-stop record and live binding set.
     """
     real_popen = subprocess.Popen
     started: list[subprocess.Popen[Any]] = []
@@ -2763,6 +3028,7 @@ def test_a_stop_that_lands_while_a_group_starts_still_kills_the_group(
 
     checkout = _git_checkout(tmp_path / "checkout")
     monkeypatch.setattr(harness_bridge, "_DEFERRED_STOP", [])
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", set())
     monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr(os, "_exit", exit_)
     try:
@@ -2905,7 +3171,7 @@ def test_an_unreadable_setup_record_stops_with_a_clear_error(tmp_path: Path) -> 
     (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").write_text("")
 
     with pytest.raises(
-        RuntimeError, match=r"(?s)record of the \[proposer\] setup command in optimize.toml \(.*\) at .*done\.json"
+        RuntimeError, match=r"(?s)record of the \[proposer\] setup command in ascent.toml \(.*\) at .*done\.json"
     ):
         harness_bridge.ensure_setup(command, checkout)
 
@@ -2931,43 +3197,104 @@ def test_a_session_waits_for_another_sessions_setup_only_up_to_its_time_limit(tm
     assert time.monotonic() - started < 10
 
 
-def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(tmp_path: Path) -> None:
+def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The wait for a setup that then fails counts inside the waiter's limit, so it never runs a full limit more.
 
     Args:
-        tmp_path: The checkout and the holder's start marker.
+        tmp_path: The checkout and the holder's start and release markers.
+        monkeypatch: Spies on the limit and the run time of each ``run_setup``.
     """
     checkout = _git_checkout(tmp_path / "checkout")
     marker = tmp_path / "holder-started"
+    release = tmp_path / "holder-release"
+    limit = 6.0
+    # The test, not a sleep in the holder, ends the holder's setup, so load can only make the wait longer.
+    # The holder's exit and its undo can take seconds under load; the limit leaves them that room.
+    held = 2.0
     holder_command = [
         sys.executable,
         "-c",
-        f"import time; open({str(marker)!r}, 'w'); time.sleep(2); raise SystemExit(1)",
+        f"import os, time; open({str(marker)!r}, 'w')\n"
+        f"while not os.path.exists({str(release)!r}): time.sleep(0.02)\n"
+        "raise SystemExit(1)",
     ]
+    real_run_setup = harness_bridge.run_setup
+    runs: list[tuple[list[str], float, float]] = []
+
+    def timed_run_setup(command: list[str], path: Path, timeout: float, env: Mapping[str, str] | None) -> None:
+        """Run the real setup, and keep its limit and how long it ran.
+
+        Args:
+            command: The setup command.
+            path: The checkout.
+            timeout: The limit that ``ensure_setup`` gave the setup.
+            env: The setup's environment.
+        """
+        begun = time.monotonic()
+        try:
+            real_run_setup(command, path, timeout, env)
+        finally:
+            runs.append((command, timeout, time.monotonic() - begun))
+
+    real_common_dir = harness_bridge._common_dir
+    waiter_found_git_dir = threading.Event()
+
+    def spied_common_dir(path: Path) -> Path:
+        """Find the git dir, and tell the test when the waiter has it.
+
+        Args:
+            path: The checkout.
+
+        Returns:
+            The real git common dir.
+        """
+        common = real_common_dir(path)
+        if threading.current_thread().name == "setup-waiter":
+            waiter_found_git_dir.set()
+        return common
+
+    monkeypatch.setattr(harness_bridge, "run_setup", timed_run_setup)
+    monkeypatch.setattr(harness_bridge, "_common_dir", spied_common_dir)
     holder = threading.Thread(
         target=lambda: _run_and_keep_error(lambda: harness_bridge.ensure_setup(holder_command, checkout), []),
         daemon=True,
     )
     holder.start()
-    for _ in range(200):
-        if marker.exists():
-            break
-        time.sleep(0.05)
-    assert marker.exists()
-
-    started = time.monotonic()
-    error = _finish_in_thread(
-        lambda: harness_bridge.ensure_setup(
-            [sys.executable, "-c", "import time; time.sleep(30)"], checkout, timeout_seconds=3.0
+    waiter_command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists():
+            assert time.monotonic() < deadline, "the holder's setup did not start"
+            time.sleep(0.05)
+        errors: list[BaseException] = []
+        waiter = threading.Thread(
+            target=_run_and_keep_error,
+            args=(lambda: harness_bridge.ensure_setup(waiter_command, checkout, timeout_seconds=limit), errors),
+            name="setup-waiter",
+            daemon=True,
         )
-    )
-    elapsed = time.monotonic() - started
+        waiter.start()
+        # ``ensure_setup`` starts the waiter's limit only after its git dir lookup, which is slow under load.
+        # Counting from that lookup, the waiter waits for the lock at least this long.
+        assert waiter_found_git_dir.wait(timeout=20), "the waiter did not find the git dir"
+        time.sleep(held)
+    finally:
+        release.touch()
+    waiter.join(timeout=30)
     holder.join(timeout=10)
 
+    assert not waiter.is_alive()
     assert not holder.is_alive()
+    assert len(errors) == 1
+    error = errors[0]
     assert isinstance(error, RuntimeError)
-    assert re.search(r"did not finish within 0\.\d+ seconds", str(error))
-    assert elapsed < 3.0 + 1.5
+    [(_, given, ran)] = [run for run in runs if run[0] == waiter_command]
+    assert 0 < given <= limit - held
+    assert f"did not finish within {given:g} seconds" in str(error)
+    # A full limit would run the 30 s setup for 6 s; the time left stops it by about 4 s.
+    assert ran < limit
 
 
 def test_a_setup_with_no_time_left_after_the_lock_never_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3094,7 +3421,7 @@ def test_a_setup_that_makes_a_commit_stops_with_its_command(tmp_path: Path) -> N
         "echo evil >> a.txt && git -c user.name=t -c user.email=t@example.com commit --quiet --no-verify -am s",
     ]
 
-    with pytest.raises(RuntimeError, match=r"(?s)setup command in optimize.toml \(.*\) moved HEAD from [0-9a-f]+ to"):
+    with pytest.raises(RuntimeError, match=r"(?s)setup command in ascent.toml \(.*\) moved HEAD from [0-9a-f]+ to"):
         harness_bridge.ensure_setup(command, checkout)
 
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
@@ -3781,3 +4108,575 @@ def test_checkout_git_refuses_a_bare_repository_layout(
         harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo)
     monkeypatch.setattr(harness_bridge, "_SAFE_GIT", ())
     assert harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo).strip() == "."
+
+
+# A built-in agent's model calls: one chat request for each name, from the route key the bridge fills in.
+_AGENT_PROBE = """
+import json, os, sys, urllib.error, urllib.request
+
+key, record, *models = sys.argv[1:]
+statuses = {}
+for model in models:
+    request = urllib.request.Request(
+        os.environ["OPENAI_BASE_URL"] + "/chat/completions",
+        data=json.dumps({"model": model, "messages": [{"role": "user", "content": "go"}]}).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            statuses[model] = [response.status, ""]
+    except urllib.error.HTTPError as error:
+        statuses[model] = [error.code, json.loads(error.read())["error"]["message"]]
+open(record, "w").write(json.dumps(statuses))
+print("done")
+"""
+# What a built-in agent sends: the exact ASCENT_MODEL, LiteLLM's openai/ form (Aider, OpenHands, SWE-agent,
+# mini-SWE-agent, Terminus, OpenHands SDK), the harness provider's app/ form (OpenCode) and a transport prefix.
+_AGENT_NAMES = ("run-model", "openai/run-model", "app/run-model", "litellm_proxy/run-model")
+
+
+@pytest.fixture
+def bindings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Give a non-root box proxy a model bindings folder and no ``ASCENT_MODEL`` of its own.
+
+    Args:
+        tmp_path: Holds the bindings folder.
+        monkeypatch: Sets the folder, removes ``ASCENT_MODEL``, makes the proxy a non-root user and gives
+            the bridge a fresh live binding set.
+
+    Returns:
+        The bindings folder.
+    """
+    folder = tmp_path / "models"
+    folder.mkdir()
+    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
+    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(folder))
+    monkeypatch.setattr(guest_model_proxy.os, "geteuid", lambda: 1000, raising=False)
+    # Without a fresh set, each binding path stays in the worker's global set after the test.
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", set())
+    return folder
+
+
+# The test cannot change the proxy subprocess's user, and a root proxy reads no bindings.
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason="a root box proxy reads no model bindings")
+def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_model(tmp_path: Path) -> None:
+    """A session's request for another model gets the box error that names ``ASCENT_MODEL`` (SKY-884).
+
+    The box proxy has no ``ASCENT_MODEL`` of its own, as in the harness proposer box. The exact
+    model and each prefixed form that a built-in agent sends reach the supervisor.
+
+    Args:
+        tmp_path: Folder for the proxy's mailbox, the session and the probe's record.
+    """
+    home = tmp_path / "home"
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    probe = tmp_path / "probe.py"
+    probe.write_text(_AGENT_PROBE)
+    record = tmp_path / "record.json"
+    models = ["other/model", *_AGENT_NAMES]
+    run_command = shlex.join([sys.executable, str(probe), harness_bridge.KEY_TOKEN, str(record), *models])
+    config = tmp_path / "proposer.json"
+    config.write_text(json.dumps({**_PLAIN, "run_command": run_command}))
+    responses = tmp_path / "box" / "responses"
+    proxy_config = tmp_path / "proxy.json"
+    proxy_config.write_text(json.dumps({"prefix": "P:", "response_dir": str(responses), "timeout_seconds": 20}))
+    env = {
+        **{name: value for name, value in os.environ.items() if name != guest_model_proxy.MODEL_ENV},
+        "HOME": str(home),
+        harness_bridge.CONFIG_ENV: str(config),
+        harness_bridge.KEY_ENV: "route-key",
+    }
+    bridge = [sys.executable, harness_bridge.__file__, "--print", "task", "--output-format", "json"]
+    proxy = subprocess.Popen(
+        [sys.executable, guest_model_proxy.__file__, str(proxy_config), *bridge, "--model", "run-model"],
+        cwd=workspace,
+        stdout=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+
+    def stop() -> None:
+        """Kill the proxy and the bridge under it, which also holds the output pipe."""
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proxy.pid, signal.SIGKILL)
+
+    relayed = []
+    # Killing the whole group closes the output pipe, so the loop ends and a hang fails the test.
+    watchdog = threading.Timer(60, stop)
+    watchdog.start()
+    try:
+        assert proxy.stdout is not None
+        for line in proxy.stdout:
+            if line.startswith("P:"):
+                request = json.loads(line[2:])
+                relayed.append(json.loads(base64.b64decode(request["body"]))["model"])
+                answer = {"status": 200, "content_type": "application/json", "body": base64.b64encode(b"{}").decode()}
+                staged = responses / f"{request['id']}.tmp"
+                staged.write_text(json.dumps(answer))
+                staged.rename(responses / f"{request['id']}.json")
+        assert proxy.wait(timeout=60) == 0
+    finally:
+        watchdog.cancel()
+        stop()
+
+    statuses = json.loads(record.read_text())
+    status, message = statuses.pop("other/model")
+    assert status == 400
+    assert "ASCENT_MODEL" in message
+    assert "run-model" in message
+    assert statuses == {name: [200, ""] for name in _AGENT_NAMES}
+    assert relayed == list(_AGENT_NAMES)
+
+
+@pytest.mark.parametrize("model", _AGENT_NAMES)
+def test_box_proxy_accepts_each_name_a_built_in_agent_sends(bindings: Path, model: str) -> None:
+    """The exact session model and each prefixed form of it pass the box check (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        model: A name of the session's model.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    body = json.dumps({"model": model}).encode()
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+
+
+@pytest.mark.parametrize("model", ["other/model", "openai/other", None])
+def test_box_proxy_refuses_another_model_for_a_bound_key(bindings: Path, model: str | None) -> None:
+    """A request for another model with a session's key gets the error that names ``ASCENT_MODEL`` (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        model: Another model's name, or no model.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    body = json.dumps({"model": model}).encode()
+
+    refusal = guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key")
+
+    assert refusal is not None
+    error = json.loads(refusal)["error"]
+    assert error["code"] == "model_not_allowed"
+    assert "ASCENT_MODEL" in error["message"]
+
+
+def test_box_proxy_lets_a_key_with_no_session_model_go_on(bindings: Path) -> None:
+    """A key that no session named a model for is left to the gateway, and the folder holds no key (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    body = json.dumps({"model": "other/model"}).encode()
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "another-key") is None
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body) is None
+    assert [path.name for path in bindings.iterdir()] == [guest_model_proxy.key_digest("route-key")]
+    assert "route-key" not in "".join(path.read_text() for path in bindings.rglob("*") if path.is_file())
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/v1/messages"])
+def test_box_proxy_checks_the_responses_and_messages_routes(bindings: Path, path: str) -> None:
+    """Codex's Responses requests and Anthropic messages get the same model check as chat (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        path: A model route that names its model at the top level of the body.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+
+    refusal = guest_model_proxy._other_model_refusal(path, json.dumps({"model": "other/model"}).encode(), "route-key")
+
+    assert refusal is not None
+    assert "ASCENT_MODEL" in json.loads(refusal)["error"]["message"]
+    accepted = json.dumps({"model": "openai/run-model"}).encode()
+    assert guest_model_proxy._other_model_refusal(path, accepted, "route-key") is None
+
+
+def _refusal_message(key: str = "route-key") -> str:
+    """Return the box error for a request for another model with a key.
+
+    Args:
+        key: The request's route key.
+
+    Returns:
+        The error message.
+    """
+    refusal = guest_model_proxy._other_model_refusal(
+        "/v1/chat/completions", json.dumps({"model": "other/model"}).encode(), key
+    )
+    assert refusal is not None
+    return json.loads(refusal)["error"]["message"]
+
+
+def test_box_proxy_ignores_a_linked_binding_file(bindings: Path, tmp_path: Path) -> None:
+    """A link in a key folder never puts the linked file's text in the error.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the secret that the link points at.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    secret = tmp_path / "environ"
+    secret.write_text("APP_MCP_RELAY_TOKEN=secret-value")
+    (bindings / guest_model_proxy.key_digest("route-key") / "linked").symlink_to(secret)
+
+    message = _refusal_message()
+
+    assert "secret-value" not in message
+    assert "run-model" in message
+
+
+def test_box_proxy_ignores_a_linked_key_folder(bindings: Path, tmp_path: Path) -> None:
+    """A key folder that is a link is not read, so the request goes on to the gateway.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the folder that the link points at.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "name").write_text("secret-value")
+    (bindings / guest_model_proxy.key_digest("route-key")).symlink_to(elsewhere, target_is_directory=True)
+    body = json.dumps({"model": "other/model"}).encode()
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+
+
+@pytest.mark.parametrize("text", ["x" * 300, "run-model\nAPP_MCP_RELAY_TOKEN=secret-value", ""])
+def test_box_proxy_ignores_a_long_or_multi_line_binding(bindings: Path, text: str) -> None:
+    """A binding that is not one short printable line is skipped, and its text is not in the error.
+
+    Args:
+        bindings: The model bindings folder.
+        text: An oversized, multi-line or empty binding.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    (bindings / guest_model_proxy.key_digest("route-key") / "bad").write_text(text)
+
+    message = _refusal_message()
+
+    assert "secret-value" not in message
+    assert "x" * 300 not in message
+    assert "(run-model)" in message
+
+
+def test_box_proxy_ignores_a_fifo_binding(bindings: Path) -> None:
+    """A FIFO in a key folder neither blocks the handler nor counts as a model.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    os.mkfifo(bindings / guest_model_proxy.key_digest("route-key") / "fifo")
+
+    assert "(run-model)" in _refusal_message()
+
+
+def test_root_box_proxy_reads_no_bindings(bindings: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A root proxy, as the scorer's supervisor runs it, reads no model bindings.
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Makes the proxy root.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    monkeypatch.setattr(guest_model_proxy.os, "geteuid", lambda: 0, raising=False)
+    body = json.dumps({"model": "other/model"}).encode()
+
+    assert guest_model_proxy._bound_models("route-key") == []
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/v1/messages", "/responses", "/messages"])
+def test_box_proxy_with_its_own_ascent_model_checks_the_responses_and_messages_routes(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A box with its own ``ASCENT_MODEL`` and no bindings checks Responses and messages requests (SKY-776).
+
+    Args:
+        monkeypatch: Sets the box's ``ASCENT_MODEL`` and removes the bindings folder.
+        path: A model route, with or without the ``/v1`` prefix.
+    """
+    monkeypatch.setenv(guest_model_proxy.MODEL_ENV, "openai/run-model")
+    monkeypatch.delenv(guest_model_proxy.MODEL_BINDINGS_ENV, raising=False)
+
+    refusal = guest_model_proxy._other_model_refusal(path, json.dumps({"model": "other/model"}).encode())
+
+    assert refusal is not None
+    assert "ASCENT_MODEL" in json.loads(refusal)["error"]["message"]
+    accepted = json.dumps({"model": "litellm_proxy/openai/run-model"}).encode()
+    assert guest_model_proxy._other_model_refusal(path, accepted) is None
+
+
+@pytest.mark.parametrize("own_model", [True, False])
+def test_box_proxy_lets_other_routes_and_methods_go_on(
+    bindings: Path, monkeypatch: pytest.MonkeyPatch, own_model: bool
+) -> None:
+    """A thread's messages route and a GET are not model calls, so the box does not check them.
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Sets the box's own ``ASCENT_MODEL`` for one case.
+        own_model: Whether the box has its own ``ASCENT_MODEL``.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    if own_model:
+        monkeypatch.setenv(guest_model_proxy.MODEL_ENV, "run-model")
+    body = json.dumps({"model": "other/model"}).encode()
+
+    for path in ("/v1/threads/x/messages", "/v1/chat/completions/extra", "/v1/openai/responses"):
+        assert guest_model_proxy._other_model_refusal(path, body, "route-key") is None
+    assert guest_model_proxy._other_model_refusal("/v1/messages", body, "route-key", "GET") is None
+    assert guest_model_proxy._other_model_refusal("/v1/messages?beta=true", body, "route-key") is not None
+
+
+def test_two_live_sessions_on_one_key_both_pass(bindings: Path) -> None:
+    """Concurrent sessions that share a key with different models both reach the gateway.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    with (
+        harness_bridge.model_binding(env, "route-key", "model-a"),
+        harness_bridge.model_binding(env, "route-key", "model-b"),
+    ):
+        for model in ("model-a", "openai/model-b"):
+            body = json.dumps({"model": model}).encode()
+            assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+        assert sorted(guest_model_proxy._bound_models("route-key")) == ["model-a", "model-b"]
+
+
+def test_an_ended_session_model_no_longer_passes_or_shows_in_the_error(bindings: Path) -> None:
+    """After a session ends, its model is refused and the error names only the live session's model.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    with harness_bridge.model_binding(env, "route-key", "run-model"):
+        with harness_bridge.model_binding(env, "route-key", "old-model"):
+            pass
+        body = json.dumps({"model": "old-model"}).encode()
+        refusal = guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key")
+        assert refusal is not None
+        message = json.loads(refusal)["error"]["message"]
+        assert "(run-model)" in message
+        assert "old-model" not in message.split(", not ")[0]
+    assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []
+
+
+def test_run_session_binds_its_model_only_while_it_runs(bindings: Path, tmp_path: Path) -> None:
+    """A session names its model while its command runs and removes the name when it ends.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the session and the command's record.
+    """
+    record = tmp_path / "record.txt"
+    command = {**_PLAIN, "run_command": f'cat "{bindings}"/*/* > {shlex.quote(str(record))}'}
+    run_session(
+        command,
+        workspace=tmp_path / "w",
+        prompt="x",
+        model="run-model",
+        session_dir=tmp_path / "s",
+        extra_env={harness_bridge.MODEL_BINDINGS_ENV: str(bindings)},
+        api_key="route-key",
+    )
+
+    assert record.read_text() == "run-model"
+    assert guest_model_proxy._bound_models("route-key") == []
+
+
+def test_a_session_that_raises_still_removes_its_binding(
+    bindings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session whose start fails removes its binding, so its model does not stay allowed.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the session.
+        monkeypatch: Makes the harness start fail.
+    """
+    seen: list[list[str]] = []
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Record the live bindings, then fail as a harness that cannot start.
+
+        Args:
+            args: The command.
+            kwargs: The start options.
+
+        Raises:
+            OSError: Always.
+        """
+        seen.append(guest_model_proxy._bound_models("route-key"))
+        raise OSError("no harness")
+
+    monkeypatch.setattr(harness_bridge.subprocess, "Popen", fail)
+    with pytest.raises(OSError, match="no harness"):
+        run_session(
+            _PLAIN,
+            workspace=tmp_path / "w",
+            prompt="x",
+            model="run-model",
+            session_dir=tmp_path / "s",
+            extra_env={harness_bridge.MODEL_BINDINGS_ENV: str(bindings)},
+            api_key="route-key",
+        )
+
+    assert seen == [["run-model"]]
+    assert guest_model_proxy._bound_models("route-key") == []
+
+
+def test_the_error_names_each_bound_model_once(bindings: Path) -> None:
+    """Two live sessions with the same model put that model in the error once, in order.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    with (
+        harness_bridge.model_binding(env, "route-key", "run-model"),
+        harness_bridge.model_binding(env, "route-key", "run-model"),
+    ):
+        assert "(run-model), not" in _refusal_message()
+
+
+def test_a_stopped_bridge_removes_its_session_binding(bindings: Path, tmp_path: Path) -> None:
+    """A SIGTERM to the bridge, which exits without ``finally`` blocks, still removes the binding (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the session's config and workspace.
+    """
+    config = tmp_path / "proposer.json"
+    config.write_text(json.dumps({**_PLAIN, "run_command": "sleep 30"}))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        harness_bridge.CONFIG_ENV: str(config),
+        harness_bridge.KEY_ENV: "route-key",
+        harness_bridge.MODEL_BINDINGS_ENV: str(bindings),
+    }
+    bridge = subprocess.Popen(
+        [sys.executable, harness_bridge.__file__, "--print", "task", "--model", "run-model"],
+        cwd=workspace,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while guest_model_proxy._bound_models("route-key") != ["run-model"]:
+            assert bridge.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        bridge.send_signal(signal.SIGTERM)
+        assert bridge.wait(timeout=30) == 128 + signal.SIGTERM
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(bridge.pid, signal.SIGKILL)
+
+    assert guest_model_proxy._bound_models("route-key") == []
+    assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []
+
+
+def test_bind_model_tracks_its_files_before_they_exist(
+    bindings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop at any point of a bind leaves no binding and no partial file (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds a file in place of a bindings folder.
+        monkeypatch: Gives the test its own live set and stops the exit.
+    """
+    live: set[Path] = set()
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", live)
+    monkeypatch.setattr(harness_bridge, "_OWNED_GROUPS", {})
+    seen: list[set[Path]] = []
+    write_text = Path.write_text
+
+    def record(path: Path, *args: Any, **kwargs: Any) -> int:
+        """Record the live set when the partial file is written.
+
+        Args:
+            path: The file to write.
+            args: The text and its options.
+            kwargs: The text options.
+
+        Returns:
+            The number of characters written.
+        """
+        seen.append(set(live))
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", record)
+    binding = harness_bridge.bind_model(bindings, "route-key", "run-model")
+    monkeypatch.setattr(Path, "write_text", write_text)
+
+    assert binding is not None
+    assert seen == [{binding, binding.with_name("." + binding.name)}]
+    assert live == {binding}
+    # A partial file that a stop left behind is in the set too, and the stop removes it.
+    partial = binding.with_name(".left")
+    partial.write_text("run-model")
+    live.update((partial, binding.with_name("missing")))
+    monkeypatch.setattr(harness_bridge.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    with pytest.raises(SystemExit):
+        harness_bridge._stop_owned_groups(signal.SIGTERM, None)
+    assert list(binding.parent.iterdir()) == []
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("")
+    assert harness_bridge.bind_model(blocked, "route-key", "run-model") is None
+    assert live == {binding, partial, binding.with_name("missing")}
+
+
+def test_a_model_name_utf8_cannot_hold_leaves_no_binding(bindings: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model with a lone surrogate binds nothing, and its session still runs (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Gives the test its own live set.
+    """
+    live: set[Path] = set()
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", live)
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    ran = False
+
+    with harness_bridge.model_binding(env, "route-key", "bad\udcff"):
+        ran = True
+
+    assert ran
+    assert live == set()
+    assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []
+
+
+def test_a_route_key_utf8_cannot_hold_leaves_no_binding(bindings: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A route key with a lone surrogate binds nothing, and its session still runs (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Gives the test its own live set.
+    """
+    live: set[Path] = set()
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", live)
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    ran = False
+
+    with harness_bridge.model_binding(env, "bad\udcff", "run-model"):
+        ran = True
+
+    assert ran
+    assert live == set()
+    assert list(bindings.iterdir()) == []

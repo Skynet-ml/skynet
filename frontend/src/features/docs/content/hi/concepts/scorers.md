@@ -14,12 +14,12 @@ def score(repo_path, case, output=None):
 | `case`      | एक dict। `case["input"]` में इनपुट फ़ील्ड होते हैं। `case["expected"]` में अपेक्षित मान होता है, या `None` |
 | `output`    | केस के लिए `[run]` की `entry` ने जो लौटाया, या `None` जब फ़ाइल में `[run]` नहीं होता |
 
-रिपॉज़िटरी की `optimize.toml` फ़ाइल में एक `[run]` सेक्शन या एक `[target.<name>]` स्टेज होना चाहिए। `[run]` की `entry` एक संस्करण को एक केस पर, अपने अलग सैंडबॉक्स बॉक्स में चलाती है। जिस फ़ाइल में इनमें से कोई नहीं है, उसे Skynet अस्वीकार करता है, क्योंकि हर संस्करण को एक ही स्कोर मिलता।
+रिपॉज़िटरी की `ascent.toml` फ़ाइल में एक `[run]` सेक्शन या एक `[target.<name>]` स्टेज होना चाहिए। `[run]` की `entry` एक संस्करण को एक केस पर, अपने अलग सैंडबॉक्स बॉक्स में चलाती है। जिस फ़ाइल में इनमें से कोई नहीं है, उसे Skynet अस्वीकार करता है, क्योंकि हर संस्करण को एक ही स्कोर मिलता।
 
 - फ़ंक्शन entry, जैसे `entry = "serve.py:serve"`, को `case["input"]` आर्गुमेंट के रूप में मिलता है। `output` उसका रिटर्न मान है।
-- कमांड entry, जैसे `entry = ["python", "-m", "pytest", "-q"]`, को इनपुट stdin पर JSON के रूप में मिलता है। `output` का रूप `{"exit_code": ..., "stdout": "..."}` है।
+- कमांड entry, जैसे `entry = ["python", "run_tests.py"]`, `ASCENT_INPUT` के पाथ वाली JSON फ़ाइल से `{"input": ...}` पढ़ती है। वह `ASCENT_OUTPUT` के पाथ पर `{"output": ...}` लिखती है। `output` वह मान है जो `"output"` के नीचे है। कमांड जो प्रिंट करती है, वह सिर्फ़ लॉग में जाता है।
 
-स्कोरर एक अलग सैंडबॉक्स बॉक्स में चलता है। उस बॉक्स में केवल आपकी मेट्रिक फ़ाइलें होती हैं। स्कोरर संस्करण के कोड को न इम्पोर्ट कर सकता है, न चला सकता है। वह संस्करण को केवल `output` से, या किसी `[target.<name>]` स्टेज को `call()` से देखता है। `call` को `from skynet import call` से इम्पोर्ट करें। [ऑप्टिमाइज़ेशन कैसे काम करता है](/docs/concepts/optimization) पढ़ें।
+स्कोरर एक अलग सैंडबॉक्स बॉक्स में चलता है। उस बॉक्स में केवल आपकी मेट्रिक फ़ाइलें होती हैं। स्कोरर संस्करण के कोड को न इम्पोर्ट कर सकता है, न चला सकता है। वह संस्करण को केवल `output` से, या किसी `[target.<name>]` स्टेज को `call()` से देखता है। `call` को `from openascent import call` से इम्पोर्ट करें। [ऑप्टिमाइज़ेशन कैसे काम करता है](/docs/concepts/optimization) पढ़ें।
 
 ## रिटर्न मान
 
@@ -69,7 +69,7 @@ GEPA और Auto अगला संस्करण लिखने के ल�
 
 ### सटीक मिलान
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -88,30 +88,40 @@ def score(repo_path, case, output=None):
 
 ### रिपॉज़िटरी के टेस्ट चलाएँ
 
-`[run]` की `entry` टेस्ट चलाती है। स्कोरर exit code और टेस्ट का आउटपुट पढ़ता है।
+`[run]` की `entry` टेस्ट चलाती है। कोई टेस्ट विफल होने पर `pytest` शून्य से अलग exit code के साथ बंद होता है, और शून्य से अलग exit code केस को विफल करता है। इसलिए wrapper `run_tests.py` परिणाम को `ASCENT_OUTPUT` में लिखता है और 0 के साथ बंद होता है। स्कोरर वह परिणाम पढ़ता है।
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-जब `[run]` entry किसी केस पर विफल होती है, तो उस केस का कोई स्कोर नहीं होता। अगर entry शुरू नहीं होती, उसका समय खत्म होता है या कोई सिग्नल उसे रोकता है, या कोई function entry लौटने से पहले exception उठाती है या बाहर निकल जाती है, तो फ़ीडबैक `Run failed: …` होता है, और Skynet स्कोरर को कॉल नहीं करता। किसी command entry का शून्य से अलग exit code विफलता नहीं है: स्कोरर को वह `output` में मिलता है। ऐसे केस वाले संस्करण का कोई स्कोर नहीं होता। वह सबसे अच्छा संस्करण नहीं बन सकता, किसी `[outcome] target` तक नहीं पहुँचता और कोई pull request नहीं खोलता। अगर किसी विफलता को एक संख्या के रूप में गिनना ज़रूरी है, तो अपने प्रोग्राम में विफलता को पकड़ें, एक आउटपुट लिखें और स्कोरर को उसे स्कोर करने दें। [रिपॉज़िटरी के नियम](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) पढ़ें।
+जब `[run]` entry किसी केस पर विफल होती है, तो उस केस का कोई स्कोर नहीं होता। अगर entry शुरू नहीं होती, उसका समय खत्म होता है या कोई सिग्नल उसे रोकता है, या कोई function entry लौटने से पहले exception उठाती है या बाहर निकल जाती है, तो फ़ीडबैक `Run failed: …` होता है, और Skynet स्कोरर को कॉल नहीं करता। कोई command entry तब भी विफल होती है जब वह शून्य से अलग exit code के साथ बंद होती है या कोई मान्य आउटपुट फ़ाइल नहीं लिखती। ऐसे केस वाले संस्करण का कोई स्कोर नहीं होता। वह सबसे अच्छा संस्करण नहीं बन सकता, किसी `[outcome] target` तक नहीं पहुँचता और कोई pull request नहीं खोलता। अगर किसी विफलता को एक संख्या के रूप में गिनना ज़रूरी है, तो अपने प्रोग्राम में विफलता को पकड़ें, एक आउटपुट लिखें और स्कोरर को उसे स्कोर करने दें। [रिपॉज़िटरी के नियम](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) पढ़ें।
 
 ### जज के रूप में मॉडल
 
-स्कोरर किसी मॉडल को कॉल कर सकता है। `skynet` हेल्पर मॉड्यूल से `llm` इम्पोर्ट करें। कॉल Skynet के मॉडल गेटवे से होकर रन के स्कोरर मॉडल तक जाती है।
+स्कोरर किसी मॉडल को कॉल कर सकता है। `openascent` हेल्पर मॉड्यूल से `llm` इम्पोर्ट करें। कॉल Skynet के मॉडल गेटवे से होकर रन के स्कोरर मॉडल तक जाती है।
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -119,7 +129,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -133,12 +143,12 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-स्कोरर `OPENAI_BASE_URL`, `APP_API_KEY` और `APP_MODEL` एनवायरनमेंट वेरिएबल के साथ कोई भी OpenAI-संगत क्लाइंट भी इस्तेमाल कर सकता है। गेटवे सिर्फ़ रन का स्कोरर मॉडल स्वीकार करता है।
+स्कोरर `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` और `ASCENT_MODEL` एनवायरनमेंट वेरिएबल के साथ कोई भी OpenAI-संगत क्लाइंट भी इस्तेमाल कर सकता है। गेटवे सिर्फ़ रन का स्कोरर मॉडल स्वीकार करता है।
 
 ## मॉडल कॉल और सीक्रेट
 
 - Skynet की कुंजियों पर हुई कॉल रन के बजट से मापी जाती हैं। आपकी अपनी कुंजी (BYOK) के साथ, कॉल आपके प्रदाता की कुंजी पर जाती है, और Skynet कोई मॉडल शुल्क नहीं लेता। [बिलिंग](/docs/concepts/billing) पढ़ें।
-- स्कोरर को रन के सीक्रेट एनवायरनमेंट वेरिएबल के रूप में नहीं मिलते। कोई सीक्रेट स्कोरर तक सिर्फ़ उस `[services.<name>]` टेबल से पहुँचता है जिसे `[metric] services` में लिखा गया है, या `[metric] mcp` फ़ाइल के किसी सर्वर से। सीक्रेट को टेबल के `headers` में `${NAME}` के रूप में लिखें। स्कोरर अपने अनुरोध `SKYNET_SERVICE_<NAME>_URL` वाले URL पर भेजता है। Skynet सीक्रेट को सैंडबॉक्स के बाहर जोड़ता है।
+- स्कोरर को रन के सीक्रेट एनवायरनमेंट वेरिएबल के रूप में नहीं मिलते। कोई सीक्रेट स्कोरर तक सिर्फ़ उस `[services.<name>]` टेबल से पहुँचता है जिसे `[metric] services` में लिखा गया है, या `[metric] mcp` फ़ाइल के किसी सर्वर से। सीक्रेट को टेबल के `headers` में `${NAME}` के रूप में लिखें। स्कोरर अपने अनुरोध `ASCENT_SERVICE_<NAME>_URL` वाले URL पर भेजता है। Skynet सीक्रेट को सैंडबॉक्स के बाहर जोड़ता है।
 - Skynet स्कोरर के आउटपुट और लॉग में सीक्रेट मान छिपाता है।
 
 ## सीमाएँ

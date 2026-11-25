@@ -5,6 +5,7 @@ import {
   canReview,
   cycleTone,
   enableProblem,
+  gainIsBetter,
   modelChanges,
   modelLabels,
   refreshDelayMs,
@@ -172,4 +173,11 @@ test("scoreGain rounds to the shown precision so a tiny change reads as none", (
     scoreGain({ incumbent_score: 0.1235, candidate_score: 0.125 } as ContinuousCycle),
     0.002,
   );
+});
+
+test("gainIsBetter follows the metric direction and keeps maximize as before", () => {
+  assert.equal(gainIsBetter(0.05, false), true);
+  assert.equal(gainIsBetter(-0.05, false), false);
+  assert.equal(gainIsBetter(-0.05, true), true);
+  assert.equal(gainIsBetter(0.05, true), false);
 });

@@ -119,7 +119,7 @@ def test_a_blocked_version_gets_the_fixed_message_and_an_event_with_the_reason()
     assert events == [
         {
             "kind": EVENT_BLOCK,
-            "rule": "optimize.toml [paths]",
+            "rule": "ascent.toml [paths]",
             "reason": "'data/labels.csv' is protected by the repository rules ([paths] protected).",
         }
     ]

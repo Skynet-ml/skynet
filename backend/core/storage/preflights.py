@@ -260,7 +260,7 @@ class PreflightStore:
 
     @staticmethod
     def _after_settlement(row: WizardPreflightModel) -> bool:
-        """Promote only fully performed successful checks after their usage settles.
+        """Promote checks that all succeeded or were skipped, after their usage settles.
 
         Args:
             row: Finished pending attempt with no outstanding paid operations.
@@ -274,7 +274,8 @@ class PreflightStore:
         performed = [check for check in checks if check.get("key") != "usage"]
         if not performed or any(check.get("status") == "failed" for check in performed):
             return False
-        if any(check.get("status") != "succeeded" for check in performed):
+        # A user-image role's setup is skipped, not failed, and does not block success (SKY-893).
+        if any(check.get("status") not in {"succeeded", "skipped"} for check in performed):
             return True
         row.status = "succeeded"
         result = {
@@ -537,10 +538,14 @@ class PreflightStore:
             ):
                 raise BudgetConflictError("The setup attempt is no longer owned.")
             checks = result.get("checks")
+            # A role with a user image is checked by the run itself, so its skipped checks still pass (SKY-893).
             if status == "succeeded" and (
                 not isinstance(checks, list)
                 or not checks
-                or any(not isinstance(check, dict) or check.get("status") != "succeeded" for check in checks)
+                or any(
+                    not isinstance(check, dict) or check.get("status") not in {"succeeded", "skipped"}
+                    for check in checks
+                )
             ):
                 raise BudgetConflictError("Setup success requires completed verification evidence.")
             if budget.pending_operations:

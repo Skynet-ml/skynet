@@ -40,10 +40,14 @@ from typing import IO, Any
 Usage = dict[str, int]
 
 CONFIG_ENV = "APP_PROPOSER_CONFIG"
-KEY_ENV = "APP_API_KEY"
+KEY_ENV = "ASCENT_MODEL_KEY"
 # The serialized launch travels through the sandbox input file, so the gateway
 # key is replaced by this token and only restored from the process environment.
-KEY_TOKEN = "__APP_API_KEY__"
+# The openascent parser refuses it in the contract file's own commands (SKY-776).
+KEY_TOKEN = "__ASCENT_MODEL_KEY__"
+# The key tokens before SKY-776. The bridge no longer fills them, so a saved launch that still holds one is refused:
+# otherwise its harness would send the token's text as the key and fail auth with no clear reason.
+_OLD_KEY_TOKEN = re.compile(r"__(?:APP|SKYNET)_API_KEY__")
 # The open standard's name for the task file; a custom command reads it (SKY-753).
 TASK_ENV = "ASCENT_TASK"
 # The same allowance as repo_workspace's setup command; this file runs alone
@@ -66,6 +70,9 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\udc80-\udcff]")
 # The setup and harness processes this bridge runs now, by pid, with their
 # start times. A stop signal to the bridge kills their groups (SKY-753).
 _OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
+# The model binding files of this bridge's live sessions. A stop signal exits
+# without ``finally`` blocks, so the handler removes them (SKY-884).
+_LIVE_BINDINGS: set[Path] = set()
 # A stop signal that lands while a group starts waits until the group is in
 # ``_OWNED_GROUPS``, so the stop also kills it. Masking the signal instead
 # would leave it masked in the child (SKY-753).
@@ -74,8 +81,9 @@ _DEFERRED_STOP: list[int] = []
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
-_LEGACY_KEY_TOKEN = "__SKYNET_API_KEY__"
 SHIM_DIR = ".local/app-bin"
+# Mirrors guest_model_proxy.MODEL_BINDINGS_ENV: the box proxy's folder where a session names its model (SKY-884).
+MODEL_BINDINGS_ENV = "APP_MODEL_BINDINGS"
 SESSIONS_DIR = ".app-bridge"
 # Inside a session folder: the exec shim wrappers and the log they append to (``exec_shim``).
 EXEC_SHIM_DIR = "exec-bin"
@@ -97,20 +105,23 @@ _RESUME_NOTE = (
 
 
 def _env(name: str, default: str = "") -> str:
-    """Read an ``APP_*`` variable, falling back to its pre-rename ``SKYNET_*`` name.
+    """Read a variable; an ``APP_*`` name falls back to its pre-rename ``SKYNET_*`` name.
+
+    The ``ASCENT_*`` names of the open standard have no legacy name (SKY-776).
 
     Args:
-        name: Variable name starting with ``APP_``.
-        default: Value returned when neither name is set.
+        name: Variable name.
+        default: Value returned when no name is set.
 
     Returns:
         The first non-empty value found, else ``default``.
     """
-    return os.environ.get(name) or os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) or default
+    legacy = os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) if name.startswith("APP_") else None
+    return os.environ.get(name) or legacy or default
 
 
 def _with_key(text: str, api_key: str) -> str:
-    """Restore the gateway key in place of either key token.
+    """Restore the gateway key in place of the key token.
 
     Args:
         text: A launch command, file or environment value.
@@ -119,7 +130,32 @@ def _with_key(text: str, api_key: str) -> str:
     Returns:
         ``text`` with every key token replaced.
     """
-    return text.replace(KEY_TOKEN, api_key).replace(_LEGACY_KEY_TOKEN, api_key)
+    return text.replace(KEY_TOKEN, api_key)
+
+
+def _refuse_old_key_token(proposer: dict[str, Any]) -> None:
+    """Refuse a launch whose command, environment or files still hold a key token from before SKY-776.
+
+    The contract file's own command (``file_command``) is the user's text, so it is not checked here.
+
+    Args:
+        proposer: The serialized launch.
+
+    Raises:
+        RuntimeError: When a part of the launch holds an old key token.
+    """
+    parts = {
+        **({} if proposer.get("file_command") else {"run_command": proposer["run_command"]}),
+        **{f"env {name}": value for name, value in (proposer.get("env") or {}).items()},
+        **{f"file {path}": content for path, content in (proposer.get("files") or {}).items()},
+    }
+    for where, text in parts.items():
+        old = _OLD_KEY_TOKEN.search(text)
+        if old:
+            raise RuntimeError(
+                f"The proposer launch's {where} holds the old key token {old.group()}. Use {KEY_TOKEN} in its place,"
+                " or start the run again."
+            )
 
 
 def _json_lines(stdout: str) -> Iterator[dict[str, Any]]:
@@ -400,7 +436,7 @@ def run_setup(
     """Run the contract file's ``[proposer] setup`` in the folder its command runs in.
 
     Args:
-        command: The exact argument list from ``optimize.toml``.
+        command: The exact argument list from ``ascent.toml``.
         checkout: The repository checkout or worktree of the next session.
         timeout_seconds: Stop the setup, and every process it started, after this long.
         env: The setup's environment; the default is this process's environment.
@@ -409,7 +445,7 @@ def run_setup(
         RuntimeError: When the command cannot start, runs out of time or
             exits with an error, so no session starts without its setup.
     """
-    label = f"The [proposer] setup command in optimize.toml ({shlex.join(command)})"
+    label = f"The [proposer] setup command in ascent.toml ({shlex.join(command)})"
     reaped = sys.platform == "linux" and bool(sys.executable)
     if reaped:
         # The same subreaper as a session, so a setsid or double-forked child cannot escape the group kill.
@@ -501,6 +537,10 @@ def _stop_owned_groups(signum: int, _frame: Any) -> None:
         # Without /proc (macOS) nothing proves a reaped pid is still ours.
         if process.returncode is None or root_start is not None:
             _stop_group(process, signal.SIGKILL, root_start)
+    for binding in list(_LIVE_BINDINGS):
+        # A file in the set may not exist yet, or may already be renamed.
+        with contextlib.suppress(OSError):
+            binding.unlink()
     os._exit(128 + signum)
 
 
@@ -959,7 +999,7 @@ def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
     unsafe = sorted(path for path in paths if _unsafe(path))
     if unsafe:
         raise RuntimeError(
-            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) wrote files whose names are"
+            f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) wrote files whose names are"
             " not UTF-8, hold a control character or end in whitespace:"
             f" {', '.join(repr(path) for path in unsafe)}. The run cannot keep such a file out of the versions."
             " Rename it in the setup."
@@ -995,7 +1035,7 @@ def ensure_setup(
     only the branch refs, ``HEAD`` and ``info/exclude``.
 
     Args:
-        command: The exact argument list from ``optimize.toml``.
+        command: The exact argument list from ``ascent.toml``.
         checkout: The repository checkout or worktree the proposer command runs in.
         timeout_seconds: Stop the setup, and every process it started, after this long.
             The wait for another session's setup counts inside it.
@@ -1023,7 +1063,7 @@ def ensure_setup(
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish"
+                        f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) did not finish"
                         f" in another session within {timeout_seconds:g} seconds."
                     ) from None
                 time.sleep(0.1)
@@ -1035,7 +1075,7 @@ def ensure_setup(
                 kept = json.loads(record.read_text(encoding="utf-8"))["output"]
             except (ValueError, KeyError, TypeError) as error:
                 raise RuntimeError(
-                    f"The record of the [proposer] setup command in optimize.toml ({shlex.join(command)}) at"
+                    f"The record of the [proposer] setup command in ascent.toml ({shlex.join(command)}) at"
                     f" {record} is unreadable: {error!r}. The run cannot tell which files the setup wrote."
                 ) from error
             # A session killed after done.json but before its clean-up left these behind.
@@ -1055,7 +1095,7 @@ def ensure_setup(
                 _undo_setup(checkout, common, saved, json.loads(started.read_text(encoding="utf-8")), later=True)
             except Exception as error:
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) stopped in an earlier"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) stopped in an earlier"
                     f" session before it finished, and its changes could not be undone: {error!r}."
                 ) from error
         # A copy with no started record is from a session killed before its setup ran, so nothing needs it.
@@ -1079,7 +1119,7 @@ def ensure_setup(
         if remaining <= 0:
             _forget_setup(started, saved)
             raise RuntimeError(
-                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish in another"
+                f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) did not finish in another"
                 f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
             )
         start = {
@@ -1103,14 +1143,14 @@ def ensure_setup(
             if moved != head:
                 # A commit would hide its changes from the diff below, and enter every version.
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) moved HEAD from"
                     f" {head} to {moved}. Those changes would enter every version. Make the setup leave the git"
                     " history alone."
                 )
             changed = _setup_changes(checkout, tracked)
             if changed:
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) changed tracked files:"
                     f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
                     " files that git does not track."
                 )
@@ -1121,7 +1161,7 @@ def ensure_setup(
             )
             if rewritten:
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) changed or removed"
                     f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
                     " Make the setup write only new files that git does not track."
                 )
@@ -1300,9 +1340,9 @@ def hidden_kind(path: str) -> str:
         path: Repository-relative hidden path.
 
     Returns:
-        ``"config"`` for an ``optimize.toml`` file, else ``"scoring"``.
+        ``"config"`` for an ``ascent.toml`` file, else ``"scoring"``.
     """
-    return "config" if PurePosixPath(path).name.casefold() == "optimize.toml" else "scoring"
+    return "config" if PurePosixPath(path).name.casefold() == "ascent.toml" else "scoring"
 
 
 def _path_hash(path: str) -> str:
@@ -1324,7 +1364,7 @@ def hidden_hashes(hidden_paths: Iterable[str], fold_case: bool = False) -> dict[
     Args:
         hidden_paths: Repository-relative hidden files and directories.
         fold_case: Whether the workspace's file system ignores case, so that
-            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+            ``ASCENT.TOML`` names the same file as ``ascent.toml``.
 
     Returns:
         Path hashes mapped to their kind.
@@ -1374,7 +1414,7 @@ def guard_policy(
         hidden_paths: Repository-relative hidden files and directories.
         log: File each refusal is appended to.
         fold_case: Whether the workspace's file system ignores case, so that
-            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+            ``ASCENT.TOML`` names the same file as ``ascent.toml``.
         home: The agent's home folder, for ``~`` and ``$HOME``. The default
             is this process's home folder.
 
@@ -2181,13 +2221,21 @@ def reaper_main(command: list[str]) -> int:
 
 
 def _arm_stop_grace(*_: Any) -> None:
-    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends."""
+    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends.
+
+    Args:
+        *_: The signal number and frame, which the handler ignores.
+    """
     if signal.getitimer(signal.ITIMER_REAL)[0] == 0:
         signal.setitimer(signal.ITIMER_REAL, _REAPER_STOP_GRACE_SECONDS)
 
 
 def _kill_descendants(*_: Any) -> None:
-    """Kill every descendant of this process, so the reaper's wait for the shell ends."""
+    """Kill every descendant of this process, so the reaper's wait for the shell ends.
+
+    Args:
+        *_: The timer or signal values, which the handler ignores.
+    """
     for pid in _descendants(_proc_stats() or {}, os.getpid()):
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGKILL)
@@ -2202,6 +2250,79 @@ def _reap_children() -> None:
             return
         if pid == 0:
             return
+
+
+def bind_model(folder: Path, api_key: str, model: str) -> Path | None:
+    """Name a session's model for its route key in the box proxy's model bindings folder.
+
+    The layout mirrors ``guest_model_proxy._bound_models``: this file runs in
+    the box without the backend's code. The proxy then refuses a request for
+    a model that no live session of the key names, with an error that names
+    ``ASCENT_MODEL`` (SKY-884).
+
+    Args:
+        folder: The proxy's model bindings folder.
+        api_key: The session's route key.
+        model: The session's model.
+
+    Returns:
+        The session's own binding file, or ``None`` when the folder cannot be written or UTF-8
+        cannot hold the model name or the route key.
+    """
+    # One file for each session: concurrent sessions of one key with different models must all pass.
+    name = uuid.uuid4().hex
+    files: tuple[Path, ...] = ()
+    try:
+        target = folder / hashlib.sha256(api_key.encode()).hexdigest()
+        # The proxy must never read a partial name, so the name is renamed into place.
+        binding, partial = target / name, target / f".{name}"
+        # A stop signal can land at any point below, so both files are live before either exists.
+        files = (binding, partial)
+        _LIVE_BINDINGS.update(files)
+        target.mkdir(parents=True, exist_ok=True)
+        partial.write_text(model, encoding="utf-8")
+        partial.replace(binding)
+    except (OSError, ValueError):
+        # The gateway refuses another model anyway, so a folder the session cannot write, or a model name
+        # or route key that UTF-8 cannot hold, skips only the clearer error.
+        _unbind(*files)
+        return None
+    _LIVE_BINDINGS.discard(partial)
+    return binding
+
+
+def _unbind(*paths: Path) -> None:
+    """Remove binding files that may or may not exist, and stop tracking them.
+
+    Args:
+        paths: The binding files.
+    """
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        _LIVE_BINDINGS.discard(path)
+
+
+@contextlib.contextmanager
+def model_binding(env: Mapping[str, str], api_key: str | None, model: str) -> Iterator[None]:
+    """Name a session's model for the box proxy while the session runs, then remove the name.
+
+    Args:
+        env: The session's environment, which names the bindings folder.
+        api_key: The session's route key.
+        model: The session's model.
+
+    Yields:
+        Nothing; the name stays while the block runs.
+    """
+    folder = env.get(MODEL_BINDINGS_ENV)
+    binding = bind_model(Path(folder), api_key, model) if folder and api_key and model else None
+    try:
+        yield
+    finally:
+        # A finished session's model must not pass the box check or stay in its error.
+        if binding is not None:
+            _unbind(binding)
 
 
 def run_session(
@@ -2244,14 +2365,15 @@ def run_session(
         timeout_seconds: Kill the harness after this many seconds.
         extra_env: Environment overrides layered on top of the launch env.
         api_key: Route key substituted for the launch's key token; defaults
-            to the proposer key in ``APP_API_KEY``.
+            to the proposer key in ``ASCENT_MODEL_KEY``.
 
     Returns:
         The parsed answer, raw transcript, usage and exit status.
 
     Raises:
-        RuntimeError: When the setup fails or uses up the session's time, or a ``file_command`` session
-            outside a checkout has no ``outside_checkout`` launch.
+        RuntimeError: When the setup fails or uses up the session's time, a ``file_command`` session
+            outside a checkout has no ``outside_checkout`` launch, or the launch holds a key token from
+            before SKY-776.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -2262,9 +2384,10 @@ def run_session(
         fallback = proposer.get("outside_checkout")
         if not fallback:
             raise RuntimeError(
-                f"The [proposer] entry command in optimize.toml runs only in a repository checkout, not in {workspace}."
+                f"The [proposer] entry command in ascent.toml runs only in a repository checkout, not in {workspace}."
             )
         proposer = {**proposer, **fallback, "file_command": False, "setup": None}
+    _refuse_old_key_token(proposer)
     if api_key is None:
         api_key = _env(KEY_ENV)
     env = {
@@ -2293,7 +2416,7 @@ def run_session(
             if timeout_seconds <= 0:
                 # A harness with no time left would be killed at once, so the setup's overrun stops the session.
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(proposer['setup'])}) used up"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(proposer['setup'])}) used up"
                     f" the session's time limit of {limit:g} seconds."
                 )
     for relative_path, content in (proposer.get("files") or {}).items():
@@ -2313,9 +2436,8 @@ def run_session(
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
+    env["ASCENT_MODEL"] = model
     for name, value in (
-        ("MODEL", model),
-        ("PROMPT_FILE", str(prompt_file)),
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
         # A harness with native resume keeps its own session state here, so the committed tree carries it.
         ("SESSION_DIR", str(session_dir)),
@@ -2330,7 +2452,8 @@ def run_session(
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
-    with stderr_file.open("w", encoding="utf-8") as stderr:
+    # The box proxy above this process cannot see this ASCENT_MODEL, so the session names it there (SKY-884).
+    with stderr_file.open("w", encoding="utf-8") as stderr, model_binding(env, api_key, model):
         with _defer_stop():
             process = subprocess.Popen(
                 command,
@@ -2655,7 +2778,7 @@ def main(argv: list[str]) -> int:
     proposer = json.loads(Path(config_path).read_text(encoding="utf-8"))
     resumed = args.resume or args.r
     session_id = args.session_id or resumed or uuid.uuid4().hex
-    model = args.model or str(proposer.get("model") or _env("APP_MODEL"))
+    model = args.model or str(proposer.get("model") or _env("ASCENT_MODEL"))
     workspace = Path.cwd()
     session_dir = Path.home() / SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ registerHooks({
 
 const {
   DEFAULT_LIMIT_CENTS,
+  RUN_LEASE_CENTS,
   RUN_SPARE_CENTS,
   aggregateTokenSource,
   callHoldKey,
@@ -116,7 +117,7 @@ test("unsafe and unknown metric scans make the floor unpriced", () => {
 });
 
 test("helper bindings are unsafe in every scope", () => {
-  for (const prefix of ["", "from skynet import llm\n"]) {
+  for (const prefix of ["", "from openascent import llm\n"]) {
     const code =
       prefix + "def helper(llm): return llm\ndef score(): return llm('x', model='openai/a')";
     assert.deepEqual(scanMetricModel(code), { uses: true, name: null });
@@ -140,13 +141,14 @@ test("positional model variable does not hide the keyword", () => {
 });
 
 test("module keyword names are not value uses", () => {
-  for (const code of ["import skynet\nf(skynet=1)\nllm(model='a')"]) {
+  for (const code of ["import openascent\nf(openascent=1)\nllm(model='a')"]) {
     assert.deepEqual(scanMetricModel(code), { uses: true, name: "a" });
   }
 });
 
 test("global helper rebinding is unsafe", () => {
-  const code = "from skynet import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')";
+  const code =
+    "from openascent import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')";
   assert.deepEqual(scanMetricModel(code), { uses: true, name: null });
 });
 
@@ -170,13 +172,13 @@ test("omitted model conflicts with a distinct declared model", () => {
 
 test("dynamic helper access is unsafe", () => {
   for (const expr of [
-    "getattr(skynet, 'llm')",
+    "getattr(openascent, 'llm')",
     "globals()['llm']",
-    "vars(skynet)['llm']",
-    "skynet.__dict__['llm']",
-    "skynet",
+    "vars(openascent)['llm']",
+    "openascent.__dict__['llm']",
+    "openascent",
   ]) {
-    assert.deepEqual(scanMetricModel("import skynet\nx = " + expr + "\nllm(model='a')"), {
+    assert.deepEqual(scanMetricModel("import openascent\nx = " + expr + "\nllm(model='a')"), {
       uses: true,
       name: null,
     });
@@ -185,17 +187,17 @@ test("dynamic helper access is unsafe", () => {
 
 test("keyword names do not hide metric declarations", () => {
   const code =
-    "from skynet import llm\ndef score(c):\n f(llm=1)\n return llm('x', model='openai/gpt-4.1-mini')";
+    "from openascent import llm\ndef score(c):\n f(llm=1)\n return llm('x', model='openai/gpt-4.1-mini')";
   assert.deepEqual(scanMetricModel(code), { uses: true, name: "openai/gpt-4.1-mini" });
 });
 
 test("rebound helpers are unsafe", () => {
   for (const code of [
-    "from skynet import llm\nllm = partial(llm, model='a')\nllm('x', model='a')",
-    "from skynet import llm as judge\njudge = partial(judge, model='a')\njudge('x', model='a')",
-    "from skynet import *\nllm = partial(llm, model='a')\nllm('x', model='a')",
+    "from openascent import llm\nllm = partial(llm, model='a')\nllm('x', model='a')",
+    "from openascent import llm as judge\njudge = partial(judge, model='a')\njudge('x', model='a')",
+    "from openascent import *\nllm = partial(llm, model='a')\nllm('x', model='a')",
     "llm = partial(llm, model='a')\nllm('x', model='a')",
-    "from skynet import llm as judge\njudge = other\njudge('x', model='a')",
+    "from openascent import llm as judge\njudge = other\njudge('x', model='a')",
   ])
     assert.deepEqual(scanMetricModel(code), { uses: true, name: null });
 });
@@ -226,19 +228,44 @@ test("finds declarations on an unimported injected helper", () => {
   }
 });
 
-test("the floor is the boxes' opening holds plus a dollar of spare", () => {
+test("the floor is the boxes' opening holds plus a dollar of spare, with no lease on top", () => {
   const floor = runFloor({ boxHoldCents: 18.08, callHoldCents: [4.6, 0.3, null] });
 
   assert.equal(RUN_SPARE_CENTS, 100);
-  assert.deepEqual(floor, { boxHoldCents: 19, spareCents: 100, floorCents: 119, unpriced: true });
+  assert.equal(RUN_LEASE_CENTS, 100);
+  assert.deepEqual(floor, {
+    boxHoldCents: 19,
+    spareCents: 100,
+    floorCents: 119,
+    unpriced: true,
+  });
 });
 
 test("a model whose one call holds more than the spare raises the spare to that hold", () => {
-  assert.equal(runFloor({ boxHoldCents: 19, callHoldCents: [134.15] }).floorCents, 19 + 135);
+  assert.equal(
+    runFloor({ boxHoldCents: 19, callHoldCents: [134.15] }).floorCents,
+    19 + 135,
+  );
 });
 
 test("unknown holds still leave the spare as the floor", () => {
   assert.equal(runFloor({ boxHoldCents: null, callHoldCents: [] }).floorCents, RUN_SPARE_CENTS);
+});
+
+test("a local run has no lease minimum, so its floor is the boxes and the spare", () => {
+  const globals = globalThis as { window?: unknown };
+  const previous = globals.window;
+  globals.window = { __APP_ENV__: { localMode: true } };
+  try {
+    const floor = runFloor({ boxHoldCents: 18.08, callHoldCents: [4.6] });
+    assert.equal(floor.floorCents, 19 + RUN_SPARE_CENTS);
+    assert.equal(
+      runFloor({ boxHoldCents: 18.08, callHoldCents: [], tokenSource: "subscription" }).floorCents,
+      19,
+    );
+  } finally {
+    globals.window = previous;
+  }
 });
 
 test("a fresh budget starts at the default limit unless the floor or server minimum is higher", () => {
@@ -260,13 +287,22 @@ test("the job is BYOK only when every named model is", () => {
   assert.equal(aggregateTokenSource([]), "managed");
 });
 
-test("a subscription run holds nothing for its model calls, so its floor is $0", () => {
+test("a subscription run holds nothing for its model calls, so its floor is one lease", () => {
   const floor = runFloor({ boxHoldCents: 0, callHoldCents: [134.15], tokenSource: "subscription" });
-  assert.deepEqual(floor, { boxHoldCents: 0, spareCents: 0, floorCents: 0, unpriced: false });
-  // Only the server's own box hold, if any, remains.
+  assert.deepEqual(floor, {
+    boxHoldCents: 0,
+    spareCents: 0,
+    floorCents: RUN_LEASE_CENTS,
+    unpriced: false,
+  });
+  // A box hold below one lease keeps the lease as the floor; a larger hold is the floor.
   assert.equal(
     runFloor({ boxHoldCents: 18.08, callHoldCents: [], tokenSource: "subscription" }).floorCents,
-    19,
+    RUN_LEASE_CENTS,
+  );
+  assert.equal(
+    runFloor({ boxHoldCents: 150.2, callHoldCents: [], tokenSource: "subscription" }).floorCents,
+    151,
   );
 });
 
@@ -327,9 +363,11 @@ test("the floor prices the literal model declared by the metric", () => {
     extraReflectionModels: [],
   };
   assert.equal(
-    runModels(optimizer, true, "from skynet import llm\nllm('x', model='anthropic/expensive')").at(
-      -1,
-    )?.name,
+    runModels(
+      optimizer,
+      true,
+      "from openascent import llm\nllm('x', model='anthropic/expensive')",
+    ).at(-1)?.name,
     "anthropic/expensive",
   );
 });
@@ -359,7 +397,9 @@ test("a declared extra reflection model keeps its source for the floor", () => {
     extraReflectionModels: [extra],
   };
   assert.deepEqual(
-    runModels(optimizer, true, "from skynet import llm\nllm(model='anthropic/claude-x')").at(-1),
+    runModels(optimizer, true, "from openascent import llm\nllm(model='anthropic/claude-x')").at(
+      -1,
+    ),
     extra,
   );
 });
@@ -374,7 +414,7 @@ test("a stale extra reflection model does not set the source for other optimizer
     ],
   };
   assert.equal(
-    runModels(optimizer, true, "from skynet import llm\nllm(model='anthropic/claude-x')").at(-1)
+    runModels(optimizer, true, "from openascent import llm\nllm(model='anthropic/claude-x')").at(-1)
       ?.token_source,
     "managed",
   );
@@ -396,21 +436,24 @@ test("metric model parsing ignores comments and reads aliases", () => {
     runModels(
       optimizer,
       true,
-      "# llm(model='wrong')\nfrom skynet import llm as judge\njudge('x', model='anthropic/a')",
+      "# llm(model='wrong')\nfrom openascent import llm as judge\njudge('x', model='anthropic/a')",
     ).at(-1)?.name,
     "anthropic/a",
   );
   assert.equal(
-    runModels(optimizer, true, "from skynet import llm\nllm(model=choice)").at(-1)?.name,
+    runModels(optimizer, true, "from openascent import llm\nllm(model=choice)").at(-1)?.name,
     "openai/cheap",
   );
   assert.equal(
-    runModels(optimizer, true, "import skynet\nskynet . llm(model=(r'openai/' 'judge'))").at(-1)
-      ?.name,
+    runModels(
+      optimizer,
+      true,
+      "import openascent\nopenascent . llm(model=(r'openai/' 'judge'))",
+    ).at(-1)?.name,
     "openai/judge",
   );
   assert.equal(
-    runModels(optimizer, true, "from skynet import llm\nllm(model='openai/\\x6audge')").at(-1)
+    runModels(optimizer, true, "from openascent import llm\nllm(model='openai/\\x6audge')").at(-1)
       ?.name,
     "openai/judge",
   );
@@ -424,17 +467,17 @@ test("unsafe helper values and mixed None declarations fall back", () => {
     extraReflectionModels: [],
   };
   for (const code of [
-    "from skynet import llm\nx = llm",
-    "from skynet import llm\npartial(llm, model='other')",
-    "from skynet import llm\nf(llm)",
-    "import skynet\nx = skynet.llm",
-    "from skynet import llm as judge\nx=judge",
+    "from openascent import llm\nx = llm",
+    "from openascent import llm\npartial(llm, model='other')",
+    "from openascent import llm\nf(llm)",
+    "import openascent\nx = openascent.llm",
+    "from openascent import llm as judge\nx=judge",
   ]) {
     assert.equal(
       runModels(
         optimizer,
         true,
-        `${code}\nfrom skynet import llm\nllm(model='openai/declared')`,
+        `${code}\nfrom openascent import llm\nllm(model='openai/declared')`,
       ).at(-1)?.name,
       "openai/reflection",
     );
@@ -443,7 +486,7 @@ test("unsafe helper values and mixed None declarations fall back", () => {
     runModels(
       optimizer,
       true,
-      "from skynet import llm\nllm(model=None); llm(model='openai/declared')",
+      "from openascent import llm\nllm(model=None); llm(model='openai/declared')",
     ).at(-1)?.name,
     "openai/reflection",
   );
@@ -451,7 +494,7 @@ test("unsafe helper values and mixed None declarations fall back", () => {
     runModels(
       optimizer,
       true,
-      "from skynet import llm\nllm(model=(None)); llm(model='openai/declared')",
+      "from openascent import llm\nllm(model=(None)); llm(model='openai/declared')",
     ).at(-1)?.name,
     "openai/reflection",
   );
@@ -469,14 +512,14 @@ test("unrelated llm names do not hide a declared helper model", () => {
       runModels(
         optimizer,
         true,
-        `${code}\nfrom skynet import llm as judge\njudge(model='openai/declared')`,
+        `${code}\nfrom openascent import llm as judge\njudge(model='openai/declared')`,
       ).at(-1)?.name,
       "openai/declared",
     );
   }
   for (const code of [
-    "from skynet import *\nllm(model='openai/declared')",
-    "import skynet as s\ns.llm(model='openai/declared')",
+    "from openascent import *\nllm(model='openai/declared')",
+    "import openascent as s\ns.llm(model='openai/declared')",
   ]) {
     assert.equal(runModels(optimizer, true, code).at(-1)?.name, "openai/declared");
   }
@@ -494,7 +537,7 @@ test("an unmatched metric model does not inherit a subscription", () => {
     extraReflectionModels: [],
   };
   assert.deepEqual(
-    runModels(optimizer, true, "from skynet import llm\nllm(model='openai/judge')").at(-1),
+    runModels(optimizer, true, "from openascent import llm\nllm(model='openai/judge')").at(-1),
     {
       name: "openai/judge",
       token_source: "managed",
@@ -509,7 +552,7 @@ test("an unmatched metric model does not inherit a subscription", () => {
       runModels(
         optimizer,
         true,
-        "from skynet import llm\nllm(model='subscription/claude/anthropic/a')",
+        "from openascent import llm\nllm(model='subscription/claude/anthropic/a')",
       ).at(-1),
       {
         name: "subscription/claude/anthropic/a",
@@ -536,7 +579,7 @@ test("a local subscription metric does not inherit a BYOK reflection source", ()
     const metric = runModels(
       optimizer,
       true,
-      "from skynet import llm\nllm(model='subscription/codex/gpt-5')",
+      "from openascent import llm\nllm(model='subscription/codex/gpt-5')",
     ).at(-1);
     assert.equal(metric?.token_source, "subscription");
     assert.equal(metric?.cli_provider, "codex");
@@ -545,15 +588,17 @@ test("a local subscription metric does not inherit a BYOK reflection source", ()
       reflectionModel: { name: "openai/reflection", token_source: "managed" as const },
     };
     assert.equal(
-      runModels(managed, true, "from skynet import llm\nllm(model='subscription/claude/model')").at(
-        -1,
-      )?.token_source,
+      runModels(
+        managed,
+        true,
+        "from openascent import llm\nllm(model='subscription/claude/model')",
+      ).at(-1)?.token_source,
       "subscription",
     );
     const invalid = runModels(
       optimizer,
       true,
-      "from skynet import llm\nllm(model='subscription/codex///')",
+      "from openascent import llm\nllm(model='subscription/codex///')",
     ).at(-1);
     assert.equal(invalid?.token_source, "byok");
     const matched = {
@@ -565,7 +610,7 @@ test("a local subscription metric does not inherit a BYOK reflection source", ()
       runModels(
         { ...optimizer, taskModel: matched },
         true,
-        "from skynet import llm\nllm(model='subscription/codex/gpt-5')",
+        "from openascent import llm\nllm(model='subscription/codex/gpt-5')",
       ).at(-1),
       matched,
     );
@@ -584,7 +629,7 @@ test("a hosted subscription declaration keeps the reflection source", () => {
   const metric = runModels(
     optimizer,
     true,
-    "from skynet import llm\nllm(model='subscription/codex/gpt-5')",
+    "from openascent import llm\nllm(model='subscription/codex/gpt-5')",
   ).at(-1);
   assert.equal(metric?.token_source, "byok");
   assert.equal(metric?.cli_provider, undefined);

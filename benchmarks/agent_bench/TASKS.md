@@ -126,7 +126,7 @@
 
 **Prompt**
 
-> I'm about to launch a long black-box prompt optimization and I'm worried it might get interrupted before it finishes. If that happens I want to resume from the last checkpoint rather than restart from scratch. Which single black-box engine should I choose for that?
+> I'm about to launch a long black-box optimization run and I'm worried it might get interrupted before it finishes. If that happens I want to resume from the last checkpoint rather than restart from scratch. Which single black-box engine should I choose for that?
 
 **Skills probed:** blackbox, engine-selection, capability-reasoning
 
@@ -208,7 +208,7 @@
 
 **Prompt**
 
-> Here's the scorer I want for a black-box prompt optimization:
+> Here's the scorer I want for a black-box optimization run:
 > 
 > score = lambda candidate, case: len(candidate) / 200.0
 > 

@@ -131,8 +131,8 @@ test("the form's value when the write landed wins over the turn-start one", () =
 });
 
 test("a running turn on the code screens locks every code file; otherwise only the ones being written", () => {
-  assert.deepEqual(lockedCodeFiles(true, []), ["run.py", "metric.py", "optimize.toml"]);
-  assert.deepEqual(lockedCodeFiles(false, ["optimize_toml"]), ["optimize.toml"]);
+  assert.deepEqual(lockedCodeFiles(true, []), ["run.py", "metric.py", "ascent.toml"]);
+  assert.deepEqual(lockedCodeFiles(false, ["ascent_toml"]), ["ascent.toml"]);
   assert.deepEqual(lockedCodeFiles(false, ["metric_code"]), ["metric.py"]);
   assert.deepEqual(lockedCodeFiles(false, ["task_objective"]), []);
 });

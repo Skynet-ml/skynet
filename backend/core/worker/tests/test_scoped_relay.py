@@ -378,7 +378,9 @@ def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) 
     Args:
         client: The fake HTTP client.
     """
-    dispatch = scoped_relay.model_forwarder({"_skynet_target_route": _ROUTE, MCP_RELAY_ROUTE_KEY: _MCP_ROUTE})
+    dispatch = scoped_relay.model_forwarder(
+        {"model_config": {"extra": {"_skynet_budget_route": _ROUTE}}, MCP_RELAY_ROUTE_KEY: _MCP_ROUTE}
+    )
 
     with pytest.raises(ValueError, match="unknown metered model capability"):
         dispatch(_MCP_ROUTE["token"], "/v1/chat/completions", {"model": "fixture/text"}, {})

@@ -23,7 +23,6 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -43,6 +42,7 @@ from ..billing import (
 from ..billing.budgets import BudgetService
 from ..billing.byok_bridge import provider_slug_for_model
 from ..billing.byok_vault import byok_provider_for_litellm
+from ..billing.data_policy import data_policy_for
 from ..billing.host_agent import (
     attach_host_agent_token,
     bind_host_agent,
@@ -78,14 +78,16 @@ from ..constants import (
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
 from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus
-from ..models.blackbox import HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT
+from ..models.blackbox import BLACKBOX_TARGET_REPO, HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT, TARGET_RETIRED
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
+from ..sandbox.image_build import ImageBuildCancelledError
+from ..sandbox.image_registry import image_registry
 from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
 from ..service_gateway.embedding_pipeline import embed_finished_job
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from ..service_gateway.optimization.blackbox.service import validate_blackbox_payload
+from ..service_gateway.optimization.blackbox.service import has_loop_route, validate_blackbox_payload
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
 from ..storage import JobStore
 from ..storage.models import JobModel
@@ -106,7 +108,6 @@ from .checkpoint_compat import (
     validate_checkpoint,
 )
 from .constants import (
-    EVENT_AGENT_RUN,
     EVENT_ERROR,
     EVENT_HEARTBEAT,
     EVENT_LOG,
@@ -116,6 +117,7 @@ from .constants import (
 )
 from .hardening_runner import process_next_hardening_job
 from .log_handler import route_sandbox_logs
+from .loop_host import LOOP_HOST_KEY, run_loop_job
 from .memory_guard import memory_usage_fraction
 from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import (
@@ -123,15 +125,17 @@ from .repo_staging import (
     StagedRepository,
     add_run_record,
     bind_repo_scorer,
+    image_builder,
     infer_repo_setup,
     is_repo_payload,
+    prepare_box_images,
     publish_improvement,
+    runs_proposer_entry,
     stage_repository,
 )
 from .step_recovery import park_run, still_owns_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
-from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
 
@@ -799,6 +803,9 @@ class BackgroundWorker:
             if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
                 raise ValueError(f"Optimization type {optimization_type!r} is no longer supported.")
             execution_payload = BlackboxRunRequest.model_validate(payload_dict, context=STORED_PAYLOAD_CONTEXT)
+            # A stored text or agent run loads for its history, but it never runs again (SKY-834).
+            if execution_payload.target.kind != BLACKBOX_TARGET_REPO:
+                raise ValueError(TARGET_RETIRED)
 
             self._update_owned_job(
                 optimization_id,
@@ -1031,11 +1038,48 @@ class BackgroundWorker:
                         )
                         if gate_failures:
                             raise RepoGateError(gate_failures)
-                        # The broker was bound before staging read optimize.toml, so the
+                        # The broker was bound before staging read ascent.toml, so the
                         # proposer's hosts are granted only now; with none it stays offline.
                         budget_gateway.allow_guest_hosts(
                             tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
                         )
+                        # Before the setup model and the scorer box, so a bad image stops the run
+                        # before it pays for either; a resume keeps the images it pinned (SKY-737).
+                        if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
+                            user_image_registry = image_registry(settings)
+                            try:
+                                staged_repository = prepare_box_images(
+                                    staged_repository,
+                                    owner_id=optimization_id,
+                                    username=execution_payload.username,
+                                    runtime=budget_gateway.parent_sandbox_runtime(),
+                                    builder=image_builder(settings),
+                                    store=self._job_store,
+                                    budget=budget_gateway.runtime,
+                                    registry=user_image_registry,
+                                    pinned=job_data.get("box_images"),
+                                    cancelled=lambda: self._build_cancelled(cancel_event, optimization_id),
+                                )
+                            except ImageBuildCancelledError:
+                                # A stop for a worker shutdown releases the run for a restart; a user
+                                # cancel or pause keeps the status that the endpoint wrote.
+                                self._raise_if_interrupted(cancel_event, optimization_id)
+                                raise CancellationError() from None
+                            pinned_images = self._job_store.pin_box_images(
+                                optimization_id, dict(staged_repository.box_images)
+                            )
+                            # A parallel start of the same run pinned first, so every box uses its images.
+                            if pinned_images != staged_repository.box_images:
+                                staged_repository = prepare_box_images(
+                                    staged_repository,
+                                    owner_id=optimization_id,
+                                    username=execution_payload.username,
+                                    runtime=budget_gateway.parent_sandbox_runtime(),
+                                    builder=None,
+                                    store=self._job_store,
+                                    registry=user_image_registry,
+                                    pinned=pinned_images,
+                                )
                         inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
                         if inferred_setup is not None:
                             self._record_setup_command(optimization_id, inferred_setup)
@@ -1077,12 +1121,39 @@ class BackgroundWorker:
                     raise ValueError(
                         "The stored job contains credentials outside the trusted relay; clone and test setup again."
                     )
+                if not has_loop_route(execution_payload):
+                    # Every engine has a loop route since the cutover (SKY-728); a stored job of an engine
+                    # without one has no other place to run.
+                    raise ValueError("The stored job names an engine that the worker engine loop does not run.")
+                # Staging at each claim refuses this too. A job stored before the cutover must never reach the
+                # loop with the file's command, because the loop would run the built-in proposer in silence (SKY-728).
+                staged_snapshot = payload_dict.get(REPO_SNAPSHOT_KEY) or {}
+                if staged_snapshot.get("file_proposer") and not runs_proposer_entry(payload_dict.get("strategy") or {}):
+                    raise ValueError(
+                        "The stored job runs the [proposer] entry command of ascent.toml, but only a single"
+                        " AutoResearch or Meta-Harness run can use it now. Remove [proposer] entry, or choose"
+                        " one of those engines, and start the run again."
+                    )
+                # After the exposure check: the worker's own child runs this run, not a guest box, so it may
+                # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
+                payload_dict[LOOP_HOST_KEY] = {
+                    "run_id": optimization_id,
+                    "username": execution_payload.username,
+                    "budget_id": job_data["execution_budget_id"],
+                    "budget_generation": job_data["execution_budget_generation"],
+                    "execution_generation": execution_generation,
+                    "worker_id": self._pod_name,
+                    "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
+                    "token_source": parent_payload.get("token_source"),
+                    # The child has no database for the owner's setting, so the parent reads it.
+                    "data_policy": data_policy_for(execution_payload.username),
+                }
 
                 execution_context = mp.get_context("spawn")
                 event_queue = execution_context.Queue()
                 budget_gateway.heartbeat = lambda: event_queue.put_nowait({"type": EVENT_HEARTBEAT})
                 run_process = execution_context.Process(  # type: ignore[attr-defined]
-                    target=run_vercel_dspy,
+                    target=run_loop_job,
                     args=(
                         payload_dict,
                         f"{optimization_id}-g{execution_generation}"
@@ -1293,6 +1364,7 @@ class BackgroundWorker:
                             message=final_message,
                             baseline_score=_baseline,
                             optimized_score=_optimized,
+                            direction=result_dict.get("direction") if isinstance(result_dict, dict) else None,
                         )
                         self._record_run_outcome(
                             optimization_id,
@@ -1604,7 +1676,7 @@ class BackgroundWorker:
         """
         snapshot: dict[str, Any] | None = None
         try:
-            raw = asdict(gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username))
+            raw = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username).limit_view()
             raw.pop("username", None)
             raw.pop("account_available_cents", None)
             snapshot = json.loads(json.dumps(raw, default=str))
@@ -1948,7 +2020,30 @@ class BackgroundWorker:
             return
         if snapshot.uncapped:
             return
-        run_watcher.observe_spend(float(snapshot.setup_spent_cents + snapshot.run_spent_cents), snapshot.total_cents)
+        # Setup bills only the wallet, so only run spend counts against the limit, except for a
+        # continuous-plan budget (SKY-925).
+        run_watcher.observe_spend(float(snapshot.limit_spent_cents), snapshot.total_cents)
+
+    def _build_cancelled(self, cancel_event: threading.Event | None, optimization_id: str) -> bool:
+        """Tell an image build whether its run must stop (SKY-891).
+
+        A cancel on another pod only changes the stored status, and the build
+        blocks the job thread, so the build itself asks the store too.
+
+        Args:
+            cancel_event: The run's cooperative cancel flag, or ``None``.
+            optimization_id: ID of the run that owns the build.
+
+        Returns:
+            True when the flag is set or the stored status is cancelled or paused.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            return True
+        try:
+            self._raise_if_store_cancelled(optimization_id)
+        except CancellationError:
+            return True
+        return False
 
     def _raise_if_store_cancelled(self, optimization_id: str) -> None:
         """Raise ``CancellationError`` when a peer pod has cancelled/paused the job.
@@ -2183,13 +2278,12 @@ class BackgroundWorker:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
         """Drain all pending events from the subprocess queue, routing each by type.
 
-        Handles the event types emitted by ``run_vercel_dspy``:
+        Handles the event types emitted by ``run_loop_job``:
         ``EVENT_PROGRESS`` → ``job_store.record_progress``; ``EVENT_LOG`` →
-        ``job_store.append_log``; ``EVENT_AGENT_RUN`` → ``job_store.save_agent_run``
-        or ``append_agent_run_transcript`` (on stores that keep agent runs);
-        ``EVENT_RESULT`` → captured as the return value; ``EVENT_ERROR`` →
-        captured as the error return value.  Store errors are swallowed so a DB
-        hiccup cannot abort an otherwise-healthy optimization.
+        ``job_store.append_log``; ``EVENT_RESULT`` → captured as the return
+        value; ``EVENT_ERROR`` → captured as the error return value.  Store
+        errors are swallowed so a DB hiccup cannot abort an otherwise-healthy
+        optimization.
 
         Args:
             optimization_id: ID the events are persisted under.
@@ -2252,7 +2346,12 @@ class BackgroundWorker:
                         if incumbent is not None:
                             incumbents = checkpoint_tracker.setdefault("_incumbents", {})
                             previous = incumbents.get(-1)
-                            if previous is None or incumbent["selection_score"] > previous["selection_score"]:
+                            # A minimize run's candidate events say so, and its lowest score is the incumbent (SKY-750).
+                            sign = -1.0 if metrics.get("direction") == "minimize" else 1.0
+                            if (
+                                previous is None
+                                or sign * incumbent["selection_score"] > sign * previous["selection_score"]
+                            ):
                                 incumbents[-1] = incumbent
                     fenced_progress = getattr(self._job_store, "record_progress_for_generation", None)
                     if generation is not None and callable(fenced_progress):
@@ -2286,8 +2385,6 @@ class BackgroundWorker:
                         **run_log.normalize(event),
                     }
                 )
-            elif event_type == EVENT_AGENT_RUN:
-                self._persist_agent_run_event(optimization_id, event.get("run"))
             elif event_type == EVENT_RESULT:
                 payload = event.get("result")
                 if isinstance(payload, dict):
@@ -2313,28 +2410,6 @@ class BackgroundWorker:
                     "Optimization %s: failed to persist %d subprocess log entries", optimization_id, len(log_batch)
                 )
         return result_payload, error_payload, drained_count
-
-    def _persist_agent_run_event(self, optimization_id: str, run: Any) -> None:
-        """Store one agent run record or transcript delta, on stores that keep agent runs.
-
-        Args:
-            optimization_id: The job the run belongs to.
-            run: The event's ``run`` payload.
-        """
-        if not isinstance(run, dict) or not isinstance(run.get("run_id"), int):
-            return
-        save_run = getattr(self._job_store, "save_agent_run", None)
-        append_transcript = getattr(self._job_store, "append_agent_run_transcript", None)
-        if save_run is None or append_transcript is None:
-            return
-        try:
-            delta = run.get("transcript_delta")
-            if isinstance(delta, str):
-                append_transcript(optimization_id, run["run_id"], delta)
-            else:
-                save_run(optimization_id, run)
-        except Exception:
-            logger.exception("Optimization %s: failed to persist agent run %s", optimization_id, run.get("run_id"))
 
     def _checkpoints_enabled(self, optimization_type: str) -> bool:
         """Return whether this job is a GEPA run on a checkpoint-capable store.

@@ -1,4 +1,4 @@
-"""Refuse a repository run whose ``optimize.toml`` asks for what its sandbox cannot give.
+"""Refuse a repository run whose ``ascent.toml`` asks for what its sandbox cannot give.
 
 A setting the run ignores would look like protection the user does not get,
 for example an offline proposer that still has open egress. The gate runs in
@@ -65,9 +65,20 @@ _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "t
 _TARGET_MCP = frozenset({"target.mcp"})
 _RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
 _ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.vcpus"})
+# Staging builds or pins each box image and checks it before the first candidate (SKY-737).
+_BOX_IMAGES = frozenset({"run.image", "run.dockerfile", "metric.image", "metric.dockerfile"})
 _OUTCOME_TARGET = frozenset({"outcome.target"})
-# The run end judges each minimum on the final score (SKY-692).
-_OUTCOME_MINIMUMS = frozenset({"outcome.require"})
+# The run end judges each limit on the final score (SKY-692), in its score's direction (SKY-775).
+_OUTCOME_LIMITS = frozenset({"outcome.require"})
+# The metric box calls a Python entry's function, or runs a command entry
+# through OpenAscent under the same [metric] rules (SKY-738).
+_METRIC_ENTRY = frozenset({"metric.entry"})
+# The eval server, the run end and the pull request read the score's direction (SKY-750).
+_METRIC_DIRECTION = frozenset({"metric.direction"})
+# The eval server, the engines and the run end read each named score's direction (SKY-775).
+_METRIC_SCORES = frozenset({"metric.scores"})
+# The metric setup box runs the build once before the first metric call (SKY-740).
+_METRIC_SETUP = frozenset({"metric.setup"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
@@ -79,8 +90,13 @@ _ENFORCED_EVERYWHERE = (
     | _TARGET_MCP
     | _RUN_ENTRY
     | _ROLE_BOXES
+    | _BOX_IMAGES
     | _OUTCOME_TARGET
-    | _OUTCOME_MINIMUMS
+    | _OUTCOME_LIMITS
+    | _METRIC_ENTRY
+    | _METRIC_DIRECTION
+    | _METRIC_SCORES
+    | _METRIC_SETUP
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
@@ -92,7 +108,7 @@ _UNENFORCED_CODE: dict[Place, I18nKey] = {
 
 @dataclass(frozen=True)
 class GateFailure:
-    """One reason the run cannot start: the ``optimize.toml`` key, the place, and why."""
+    """One reason the run cannot start: the ``ascent.toml`` key, the place, and why."""
 
     key: str
     place: Place
@@ -136,7 +152,7 @@ def check_repository(
     allowed_hosts: Mapping[str, Collection[str]] | None = None,
     require_version: bool = True,
 ) -> list[GateFailure]:
-    """List every reason the repository's ``optimize.toml`` stops this run.
+    """List every reason the repository's ``ascent.toml`` stops this run.
 
     The role MCP files are read from the same snapshot as the toml (E49).
 
@@ -149,7 +165,8 @@ def check_repository(
         allowed_hosts: Each user secret's ``allowed_hosts`` (E52); a name it
             does not hold may go to no host.
         require_version: Passed to :func:`read_constraints`; the staging of
-            the same tree gives it.
+            the same tree gives it. ``False`` marks a started run, which also
+            reads the older forms, as its staging did (SKY-760).
 
     Returns:
         The failures, in file order. An empty list means the run may start.
@@ -158,7 +175,11 @@ def check_repository(
         ConstraintsError: When the file or a role's MCP file is invalid.
     """
     raw = read_constraints_file(archive)
-    constraints = read_constraints(archive, require_version=require_version) if raw is not None else None
+    constraints = (
+        read_constraints(archive, require_version=require_version, legacy_forms=not require_version)
+        if raw is not None
+        else None
+    )
     if raw is None or constraints is None:
         return []
     failures = [
@@ -255,7 +276,7 @@ def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, 
         name: The secret's name.
         host: The one host that receives the secret.
         allowed: The secret's allowed hosts.
-        setting: The ``optimize.toml`` setting that uses the secret.
+        setting: The ``ascent.toml`` setting that uses the secret.
         place: Where the run's sandbox runs.
 
     Returns:
@@ -322,7 +343,7 @@ def check_hidden(
         place: Where the run's sandbox runs.
         optional_paths: Hidden paths that may match no file, such as the
             exploit folder.
-        labels: The ``optimize.toml`` setting that names each hidden path;
+        labels: The ``ascent.toml`` setting that names each hidden path;
             a path it does not hold is labelled ``[metric] files``.
 
     Returns:
@@ -489,10 +510,26 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         if key in stages[name] and not (key == "network" and stages[name][key] == [])
     ]
     keys += [("services", f"[services.{name}]") for name in services]
-    run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus")
+    run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus", "image", "dockerfile")
     keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
-    metric_keys = ("files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
+    metric_keys = (
+        "entry",
+        "files",
+        "exploits",
+        "reference",
+        "direction",
+        "setup",
+        "mcp",
+        "network",
+        "services",
+        "illegal",
+        "vcpus",
+        "image",
+        "dockerfile",
+    )
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
+    if "scores" in metric:
+        keys.append(("metric.scores", "[metric.scores]"))
     outcome = document.get("outcome", {})
     if "target" in outcome:
         keys.append(("outcome.target", "[outcome] target"))
@@ -505,7 +542,7 @@ def _failure(setting: str, place: Place, code: I18nKey, **params: str) -> GateFa
     """Build one failure with its English reason and catalog code.
 
     Args:
-        setting: The ``optimize.toml`` setting that fails.
+        setting: The ``ascent.toml`` setting that fails.
         place: Where the run's sandbox runs.
         code: Catalog key of the message.
         **params: The message's placeholder values.

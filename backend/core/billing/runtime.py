@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import Counter
@@ -12,6 +13,7 @@ from typing import Any, Generic, TypeVar
 
 from .budget_amounts import CENT_SCALE, ceil_cents
 from .budgets import (
+    AccountFundsError,
     BudgetConflictError,
     BudgetFencedError,
     BudgetInFlightError,
@@ -25,6 +27,8 @@ from .operation_pricing import ChargePolicy, OperationQuote, json_fingerprint
 from .signals import BudgetStopLatch
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 _OPERATION_KEY_LIMIT = 128
 
@@ -97,6 +101,8 @@ class BudgetRuntime:
         phase: str,
         stop: BudgetStopLatch | None = None,
         wait_timeout: float = 600,
+        keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> None:
         """Bind the spending context without passing database credentials to guest code.
 
@@ -108,6 +114,11 @@ class BudgetRuntime:
             phase: Setup or run attribution.
             stop: Optional shared stop latch for all concurrent optimizer lanes.
             wait_timeout: Maximum wait for covered work before reporting uncertainty.
+            keep_cents: Cents of a capped limit, and of the account's funds,
+                that the coverage must leave free. Only the check of a ``setup_in_total`` budget
+                (continuous-plan cycles, or accounts that turn off wallet setup billing) keeps them,
+                for the run's first lease (SKY-923).
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
         """
         self.service = service
         self.username = username
@@ -116,6 +127,8 @@ class BudgetRuntime:
         self.phase = phase
         self.stop = stop or BudgetStopLatch()
         self.wait_timeout = wait_timeout
+        self.keep_cents = keep_cents
+        self.keep_funds = keep_funds
         self._changed = threading.Condition()
         self._pinned: dict[str, int] = {}
         # The box tag of each pinned box that runs work; a snapshot hold runs none.
@@ -224,10 +237,14 @@ class BudgetRuntime:
             error: The admission refusal, with its limit arithmetic when it has one.
 
         Returns:
-            True when the refusal has no limit arithmetic, or when the scope
-            fits in the room that the pinned coverage leaves.
+            True when the refusal has no arithmetic, when a run's refusal is
+            about the account's funds, or when the scope fits in the room that
+            the pinned coverage leaves.
         """
         if error.scope_units is None or error.room_units is None:
+            return True
+        # A run waits on funds as before; only a setup check tests its own boxes against the funds (SKY-925).
+        if error.funds and self.phase != "setup":
             return True
         with self._changed:
             pinned = sum(self._pinned.values())
@@ -236,8 +253,11 @@ class BudgetRuntime:
     def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
         """Refuse an operation that only this runtime's own blocked sandboxes keep out.
 
-        A setup check runs its samples one at a time inside boxes it opened
-        itself, so its pinned coverage never makes room. A run's lanes share
+        Setup work is bounded by the account's funds alone (SKY-925), except
+        for a ``setup_in_total`` budget (continuous-plan cycles, or accounts
+        that turn off wallet setup billing), whose limit also bounds setup. A
+        setup check runs its samples one at a time inside boxes it opened itself, so
+        its pinned coverage never frees funds or limit while it waits. A run's lanes share
         this runtime, and a box frees its coverage when its work ends. A
         snapshot hold stays for the whole run. A run therefore refuses early
         only when no pinned work box can end: each one has a model call that
@@ -253,11 +273,15 @@ class BudgetRuntime:
 
         Returns:
             The refusal to raise instead of waiting, or None when waiting may help.
-            In the run phase it is the stop latch's ``BudgetReached``, after
-            the budget stopped admitting work, like any other run refusal.
+            In the setup phase it is an ``AccountFundsError`` for the funds, or
+            a ``BudgetInsufficientError`` for a ``setup_in_total`` limit. In the run phase
+            it is the stop latch's ``BudgetReached``, after the budget stopped
+            admitting work, like any other run refusal.
         """
         if self._fits_after_unpinned_work(error):
             return None
+        if self.phase == "setup" and error.funds:
+            return AccountFundsError("The account cannot fund the next operation.")
         with self._changed:
             pinned = sum(self._pinned.values())
             # With no pinned work box, only run-long holds such as snapshots
@@ -267,6 +291,7 @@ class BudgetRuntime:
             )
         if self.phase != "setup" and not every_box_waits:
             return None
+        # Only the limit of a setup_in_total budget refuses setup work (SKY-925).
         owner = "check's" if self.phase == "setup" else "run's"
         message = (
             f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this {owner} "
@@ -344,6 +369,8 @@ class BudgetRuntime:
                     max_wallet_cents=quote.maximum.wallet,
                     attempt=attempt,
                     role=role,
+                    keep_cents=self.keep_cents,
+                    keep_funds=self.keep_funds,
                 )
             except BudgetUnreconciledError as error:
                 raise UsagePendingError(
@@ -409,6 +436,8 @@ class BudgetRuntime:
                     max_cents=quote.maximum.total,
                     max_wallet_cents=quote.maximum.wallet,
                     evidence=evidence,
+                    keep_cents=self.keep_cents,
+                    keep_funds=self.keep_funds,
                 )
             except BudgetInFlightError as error:
                 refusal = self._wait_cannot_help(error)
@@ -533,7 +562,44 @@ class BudgetRuntime:
                     )
                 else:
                     self.service.mark_pending(operation.id, self.username)
+                    if cost_kind == "model" and (result is None or not result.provider_request_id):
+                        # Without a request id no lookup can confirm the bill. For an OpenRouter hold, the sweep
+                        # releases it at no charge after one minute (SKY-914). The reason shows which path loses
+                        # the bill.
+                        # Only OpenRouter names each generation; another route never does, so its missing id
+                        # is normal and stays at debug (SKY-923).
+                        logger.log(
+                            logging.WARNING if quote.price_snapshot.get("provider") == "openrouter" else logging.DEBUG,
+                            "Model operation %s is held with no provider request id: %s "
+                            "(role=%s, state=%s, interrupted=%s, status=%s).",
+                            operation.id,
+                            _missing_request_id_reason(result, exc),
+                            role,
+                            current.state,
+                            result.evidence.get("interrupted") if result is not None else None,
+                            result.evidence.get("status") if result is not None else None,
+                        )
             raise
         finally:
             with self._changed:
                 self._changed.notify_all()
+
+
+def _missing_request_id_reason(result: PaidResult[Any] | None, error: BaseException) -> str:
+    """Say why a held model call has no provider request id, with no secret and no prompt text.
+
+    Args:
+        result: The dispatch's result, or ``None`` when the dispatch raised.
+        error: The error that ends the execution.
+
+    Returns:
+        A short reason built only from the error type and the answer's status fields.
+    """
+    if result is None:
+        return f"dispatch raised {type(error).__name__} before any answer"
+    if result.evidence.get("interrupted") is True:
+        return "the answer ended before it was complete"
+    status = result.evidence.get("status")
+    if isinstance(status, int) and status >= 400:
+        return f"the provider sent an error answer (HTTP {status})"
+    return "the provider answer carried no request id"

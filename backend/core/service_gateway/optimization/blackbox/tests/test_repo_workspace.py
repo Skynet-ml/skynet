@@ -55,7 +55,8 @@ from ..repo_workspace import (
     redact,
 )
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
-from ..sandbox_broker import ParentSandboxSession
+from ..sandbox_broker import ParentSandboxSession, SandboxBroker
+from ..sandbox_contract import UserImage
 from ..sandbox_runtime import AsyncBridgeSession
 from ..tree_sandbox import BoxSession
 
@@ -316,14 +317,14 @@ def test_protected_paths_win_over_editable_ones_before_the_box_opens(tmp_path: P
     """Lay out an allowed edit, but refuse one to a protected judge file inside an editable folder."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/judge.py": "ok = True\n"})
     runtime = _Runtime()
-    space = _space(archive, runtime, setup=None, protected_paths=["optimize.toml", "src/judge.py"])
+    space = _space(archive, runtime, setup=None, protected_paths=["ascent.toml", "src/judge.py"])
     try:
         rigged = space.open_candidate(_patch(tmp_path / "rigged", archive, {"src/judge.py": "ok = 'always'\n"}))
         assert not isinstance(rigged, CandidateBox)
         assert rigged.problems == ("'src/judge.py' is protected by the repository rules ([paths] protected).",)
         assert runtime.boxes == []
         rules = space.open_candidate(
-            _patch(tmp_path / "rules", archive, {"optimize.toml": "[paths]\neditable = ['.']\n"})
+            _patch(tmp_path / "rules", archive, {"ascent.toml": "[paths]\neditable = ['.']\n"})
         )
         assert not isinstance(rules, CandidateBox)
         allowed = _open(space, _patch(tmp_path / "allowed", archive, {"src/app.py": "x = 2\n"}))
@@ -343,7 +344,7 @@ def _guarded(tmp_path: Path) -> tuple[RepoWorkspace, Path]:
         The workspace and its archive.
     """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n", "eval/judge.py": "ok = True\n"})
-    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval", "optimize.toml"])
+    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval", "ascent.toml"])
     return space, archive
 
 
@@ -1201,10 +1202,171 @@ def test_the_check_runs_as_root_unless_the_provider_root_has_no_capability(
     space, _ = _guarded(tmp_path)
     try:
         session = _SudoRecordingSession(**attributes)
-        assert space.fingerprint(session, WORK_DIR) == ({}, {})  # type: ignore[arg-type]
+        assert space.fingerprint(session, WORK_DIR, "/box") == ({}, {})  # type: ignore[arg-type]
         assert session.sudo == [sudo]
     finally:
         space.close()
+
+
+class _CommandRecordingSession(_SudoRecordingSession):
+    """A box that records each command line, and prints an empty fingerprint."""
+
+    def __init__(self) -> None:
+        """Start with no command."""
+        super().__init__()
+        self.commands: list[str] = []
+
+    def run(self, command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+        """Record the command line and print an empty fingerprint.
+
+        Args:
+            command: Shell command line.
+            sudo: The command asks for root.
+            **options: Other run options.
+
+        Returns:
+            A clean result with an empty fingerprint.
+        """
+        self.commands.append(command)
+        return super().run(command, sudo=sudo, **options)
+
+
+@pytest.mark.parametrize("run_image", [None, "registry.example/u@sha256:" + "b" * 64], ids=["skynet", "user"])
+def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: str | None) -> None:
+    """Hash and answer with the base interpreter alone in a user image box, with no PATH fallback (SKY-737)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval"], run_image=run_image)
+    session = _CommandRecordingSession()
+    space.fingerprint(session, WORK_DIR, "/box")  # type: ignore[arg-type]
+    space._digest_prepared(session, "/box")  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "/box", "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    with pytest.raises(RepoSetupError, match="working directory"):
+        repo_workspace.physical_root(session, space.user_run_image)  # type: ignore[arg-type]
+    assert len(session.commands) == 4
+    assert all(f"p={shlex.quote(repo_workspace.BASE_PYTHON)} && " in command for command in session.commands)
+    assert all(("p=python3" in command) is (run_image is None) for command in session.commands)
+    assert all(('"$p" -I -S -c' in command) for command in session.commands)
+    assert all(("/usr/bin/env -i " in command) is (run_image is not None) for command in session.commands)
+    # An image OpenSSL config could load an engine from a box-user folder into root's hashlib.
+    assert all(("env -i OPENSSL_CONF=/dev/null " in command) is (run_image is not None) for command in session.commands)
+
+
+def test_the_root_hash_and_answer_commands_change_folder_only_to_absolute_paths(tmp_path: Path) -> None:
+    """Every ``cd`` and answer path names the box root that the parent holds, never ``$PWD`` (SKY-737)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    space = _space(
+        archive, _Runtime(), setup=None, protected_paths=["eval"], run_image="registry.example/u@sha256:" + "b" * 64
+    )
+    session = _CommandRecordingSession()
+    space.fingerprint(session, WORK_DIR, "/box")  # type: ignore[arg-type]
+    space.fingerprint(session, "/abs/tree", "/box")  # type: ignore[arg-type]
+    space._digest_prepared(session, "/box")  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "/box", "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    targets = [target for command in session.commands for target in re.findall(r"\bcd (\S+)", command)]
+    assert targets == [f"/box/{WORK_DIR}", "/abs/tree", f"/box/{repo_workspace.PREPARED_DIR}"]
+    assert session.commands[-1].endswith(" /box/answer")
+    assert not any("PWD" in command for command in session.commands)
+
+
+def test_an_absolute_cd_ignores_a_cdpath_decoy(tmp_path: Path) -> None:
+    """A ``cd`` from :func:`absolute_cd` stays in the working folder when ``CDPATH`` names a decoy with the same folder (SKY-737)."""
+    for parent in (tmp_path / "box", tmp_path / "decoy"):
+        (parent / repo_workspace.PREPARED_DIR).mkdir(parents=True)
+    script = f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR, str((tmp_path / 'box').resolve()))} && pwd -P"
+    for shell in ("/bin/sh", "/bin/bash"):
+        done = subprocess.run(
+            [shell, "-c", script],
+            cwd=tmp_path / "box",
+            env={"PATH": "/usr/bin:/bin", "CDPATH": str(tmp_path / "decoy")},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert done.stdout.strip() == str((tmp_path / "box" / repo_workspace.PREPARED_DIR).resolve())
+
+
+def test_an_image_pwd_through_a_link_cannot_move_the_box_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An exported ``PWD`` through a box-owned link gives no root that the link can later move to a decoy (SKY-737).
+
+    Bash takes ``PWD`` from the environment when it names the working
+    folder, so ``pwd`` and ``"$PWD"`` follow the link; ``getcwd`` does not.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Pytest temporary folder.
+    """
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
+    box, decoy, link = tmp_path / "box", tmp_path / "decoy", tmp_path / "l"
+    for parent in (box, decoy):
+        (parent / repo_workspace.PREPARED_DIR).mkdir(parents=True)
+    link.symlink_to(box)
+
+    class Session:
+        """Run each command in the box folder with the image's ``PWD``."""
+
+        def run(self, command: str, **options: Any) -> CommandResult:
+            """Run one command with bash.
+
+            Args:
+                command: The shell command.
+                **options: Other run options.
+
+            Returns:
+                The command's result.
+            """
+            env = {"PATH": "/usr/bin:/bin", "PWD": str(link)}
+            done = subprocess.run(
+                ["/bin/bash", "-c", command], cwd=box, env=env, capture_output=True, text=True, check=False
+            )
+            return CommandResult(exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+
+    session = Session()
+    assert session.run("pwd").stdout.strip() == str(link)
+    root = repo_workspace.physical_root(session, True)  # type: ignore[arg-type]
+    assert root == str(box.resolve())
+    link.unlink()
+    link.symlink_to(decoy)
+    done = session.run(f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR, root)} && pwd -P")
+    assert done.stdout.strip() == str((box / repo_workspace.PREPARED_DIR).resolve())
+
+
+@pytest.mark.parametrize("user_image", [False, True], ids=["skynet", "user"])
+def test_a_user_image_box_starts_the_base_interpreter_with_only_the_kept_variables(
+    monkeypatch: pytest.MonkeyPatch, user_image: bool
+) -> None:
+    """A user image box drops the image's environment, such as loader paths, and keeps only the named variables (SKY-737)."""
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
+    script = "import os; print([name for name in ('APP_ANSWER', 'LD_LIBRARY_PATH', 'PATH') if name in os.environ])"
+    done = subprocess.run(
+        ["/bin/sh", "-c", repo_workspace._pick_base_python(user_image, ("APP_ANSWER",)) + f'"$p" -I -S -c "{script}"'],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "APP_ANSWER": "text", "LD_LIBRARY_PATH": "/tmp/planted"},
+        check=True,
+    )
+    names = ["APP_ANSWER"] if user_image else ["APP_ANSWER", "LD_LIBRARY_PATH", "PATH"]
+    assert done.stdout.strip() == str(names)
+
+
+@pytest.mark.parametrize(("user_image", "planted_runs"), [(False, True), (True, False)], ids=["skynet", "user"])
+def test_a_planted_path_python_runs_only_outside_a_user_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user_image: bool, planted_runs: bool
+) -> None:
+    """With no base interpreter, a user image box fails closed instead of running a planted ``python3`` (SKY-737)."""
+    planted = tmp_path / "bin" / "python3"
+    planted.parent.mkdir()
+    planted.write_text("#!/bin/sh\necho planted\n")
+    planted.chmod(0o755)
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", str(tmp_path / "missing" / "python3"))
+    done = subprocess.run(
+        ["/bin/sh", "-c", repo_workspace._pick_base_python(user_image) + '"$p" -I -S -c "print(1)"'],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.pathsep.join([str(planted.parent), "/usr/bin", "/bin"])},
+        check=False,
+    )
+    assert (done.stdout.strip() == "planted") is planted_runs
+    assert (done.returncode == 0) is planted_runs
 
 
 @pytest.mark.parametrize(("provider", "capable"), [(DockerEnvironment, False), (VercelEnvironment, True)])
@@ -1343,7 +1505,7 @@ def test_a_python3_that_the_version_plants_on_path_never_hashes_the_tree(
     )
     try:
         box = _open(space, "")
-        clean = space.fingerprint(box.session, WORK_DIR)
+        clean = space.fingerprint(box.session, WORK_DIR, box.root)
         box.close()
         assert clean is not None
         marker = tmp_path / "planted-python3-ran"
@@ -1389,7 +1551,7 @@ _SCORING_TOML = (
     '[data]\ncases = "data/cases.jsonl"\n'
 )
 _SCORING_SIDE = {
-    "optimize.toml": _SCORING_TOML,
+    "ascent.toml": _SCORING_TOML,
     "eval/scorer.py": "def score(): return 0.1\n",
     "eval/reference.json": "{}\n",
     "docs/metric_rules.md": "- No cheating.\n",
@@ -1418,7 +1580,7 @@ def _scoring_space(tmp_path: Path, runtime: _Runtime, **options: Any) -> tuple[R
 def test_the_candidate_box_never_holds_the_scoring_side_files(tmp_path: Path) -> None:
     """The setup box and the candidate box get the tree without the metric files (E61, SKY-398)."""
     assert scorer_only_paths(parse_constraints(_SCORING_TOML.encode())) == (
-        "optimize.toml",
+        "ascent.toml",
         "eval/scorer.py",
         ".optimize/exploits",
         "eval/reference.json",
@@ -1454,6 +1616,110 @@ def test_the_metric_box_holds_only_the_metric_files_at_their_repository_paths(tm
         assert metric.session.run("test ! -e .app-repo").ok
         assert metric.session.spec.private
         metric.close()
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "diff --git a/src/link b/src/link\n--- a/src/link\n+++ b/src/link\n@@ -1 +1 @@\n-../x\n"
+        "\\ No newline at end of file\n+../secret.txt\n\\ No newline at end of file\n",
+        "diff --git a/src/link b/src/l3\nsimilarity index 100%\nrename from src/link\nrename to src/l3\n",
+    ],
+    ids=["retarget", "rename"],
+)
+def test_a_version_that_keeps_a_shipped_link_as_a_link_is_refused(tmp_path: Path, patch: str) -> None:
+    """Refuse a hunk or rename of a shipped link before the candidate box runs ``git apply`` (SKY-906).
+
+    Args:
+        tmp_path: Scratch folder.
+        patch: A hunk or rename of ``src/link`` with no mode line.
+    """
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "src/app.py").write_text("x = 1\n")
+    (source / "src/link").symlink_to("../x")
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        packed.add(source, arcname=".")
+    space = _space(archive, _Runtime(), setup=None)
+    try:
+        deleted = "diff --git a/src/link b/src/link\ndeleted file mode 120000\n"
+        assert space.violations(patch) == [
+            "Symlinks are not allowed; the change retargets, moves, or copies the symlink 'src/link'."
+        ]
+        assert space.violations(deleted) == []
+    finally:
+        space.close()
+
+
+_SETUP_LINK = "src/m a'd$(touch PWNED)"
+_RETARGET = (
+    f"diff --git a/{_SETUP_LINK} b/{_SETUP_LINK}\n--- a/{_SETUP_LINK}\n+++ b/{_SETUP_LINK}\n@@ -1 +1 @@\n-../x\n"
+    "\\ No newline at end of file\n+../secret.txt\n\\ No newline at end of file\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("patch", "left"),
+    [
+        (_RETARGET, _SETUP_LINK),
+        (
+            f"diff --git a/{_SETUP_LINK} b/src/moved\nsimilarity index 100%\nrename from {_SETUP_LINK}\n"
+            "rename to src/moved\n",
+            "src/moved",
+        ),
+        (
+            f"diff --git a/{_SETUP_LINK} b/src/copied\nsimilarity index 100%\ncopy from {_SETUP_LINK}\n"
+            "copy to src/copied\n",
+            _SETUP_LINK,
+        ),
+    ],
+    ids=["retarget", "rename", "copy"],
+)
+def test_a_version_that_keeps_a_link_made_by_setup_as_a_link_is_blocked(tmp_path: Path, patch: str, left: str) -> None:
+    """Block in the candidate box a version that retargets, moves, or copies a link that setup made (SKY-906).
+
+    The link's name holds a space, a quote and a command, so the box shell
+    must test it as one name and run nothing.
+
+    Args:
+        tmp_path: Scratch folder.
+        patch: The version.
+        left: The first touched path that is a link after the apply.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=f"ln -s ../x {shlex.quote(_SETUP_LINK)}")
+    try:
+        assert space.violations(patch) == []
+        opened = space.open_candidate(patch)
+        assert isinstance(opened, Checkout)
+        assert opened.blocked
+        assert opened.problems == (f"Symlinks are not allowed; the change leaves one at {left}.",)
+        assert not list(tmp_path.rglob("PWNED"))
+    finally:
+        space.close()
+
+
+def test_a_version_with_many_paths_passes_the_link_check(tmp_path: Path) -> None:
+    """A version whose path list is larger than one command line still opens (SKY-906).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=None)
+    names = [f"src/{index:06d}-{'n' * 34}" for index in range(30_000)]
+    patch = "".join(
+        f"diff --git a/{name} b/{name}\nnew file mode 100644\n--- /dev/null\n+++ b/{name}\n@@ -0,0 +1 @@\n+x\n"
+        for name in names
+    )
+    assert len(shlex.join(names)) > 1024 * 1024
+    try:
+        box = _open(space, patch)
+        assert box.session.read_file(f"{WORK_DIR}/{names[-1]}") == "x\n"
+        box.close()
     finally:
         space.close()
 
@@ -1514,6 +1780,117 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
     assert not candidate.spec.private
     assert metric.spec.private
     assert candidate.spec.operation_key != metric.spec.operation_key
+
+
+def test_each_role_opens_its_own_user_image_and_the_metric_uses_its_checked_python(tmp_path: Path) -> None:
+    """The setup and candidate boxes use the [run] image, the metric box the [metric] image (SKY-737)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(
+        tmp_path,
+        runtime,
+        run_image="run@sha256:" + "a" * 64,
+        metric_image="metric@sha256:" + "b" * 64,
+        metric_python=sys.executable,
+    )
+    try:
+        _open(space, "").close()
+        metric = space.open_metric()
+        metric.install_metric_files()
+        metric.close()
+    finally:
+        space.close()
+    setup, candidate, metric_box = runtime.boxes
+    assert setup.spec.image == candidate.spec.image == "run@sha256:" + "a" * 64
+    assert metric_box.spec.image == "metric@sha256:" + "b" * 64
+    assert space.metric_python == sys.executable
+    assert any(command.startswith(f"cd {METRIC_REPO_DIR} && {sys.executable} -I") for command, _ in metric_box.commands)
+
+
+def test_a_workspace_without_user_images_keeps_the_default_image_and_python3(tmp_path: Path) -> None:
+    """With no image key, every box uses the run's image and the metric runs ``python3`` (SKY-737)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime)
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert {box.spec.image for box in runtime.boxes} == {_ONLINE.image}
+    assert {box.spec.user_image for box in runtime.boxes} == {None}
+    assert not space.user_run_image
+    assert space.metric_python == "python3"
+
+
+def test_each_box_start_passes_its_role_user_image_with_its_registry_access(tmp_path: Path) -> None:
+    """Each box start gives the runtime its own role's user image and pull access (SKY-891)."""
+    runtime = _Runtime()
+    run = UserImage(
+        "registry.example/u/a@sha256:" + "a" * 64, repository="registry.example/u/a", credentials=lambda: ("AWS", "t")
+    )
+    space, _ = _scoring_space(tmp_path, runtime, run_image=run, metric_image="metric@sha256:" + "b" * 64)
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    setup, candidate, metric_box = runtime.boxes
+    assert setup.spec.user_image is candidate.spec.user_image is run
+    assert setup.spec.image == candidate.spec.image == run.reference
+    # A plain reference is an image with no registry access, such as a public image.
+    assert metric_box.spec.user_image == UserImage("metric@sha256:" + "b" * 64)
+    assert metric_box.spec.user_image.credentials is None
+    assert metric_box.spec.image == "metric@sha256:" + "b" * 64
+
+
+class _ImageRuntime:
+    """Record each spec that reaches the provider runtime, without a box."""
+
+    injects_headers = False
+
+    def __init__(self, *, accepts: bool) -> None:
+        """Start with no spec.
+
+        Args:
+            accepts: Whether this runtime can start a user image.
+        """
+        self.accepts_user_images = accepts
+        self.copies_user_images = accepts
+        self.specs: list[SandboxSpec] = []
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Record the spec.
+
+        Args:
+            spec: The provider spec.
+
+        Returns:
+            A stand-in session.
+        """
+        self.specs.append(spec)
+        return SimpleNamespace(close=lambda: None)
+
+
+@pytest.mark.parametrize("accepts", [True, False])
+def test_the_workspace_box_start_reaches_the_provider_with_its_user_image(accepts: bool) -> None:
+    """The parent runtime passes the box's user image to the provider, and says if the provider takes one (SKY-891).
+
+    Args:
+        accepts: Whether the provider runtime can start a user image.
+    """
+    runtime = _ImageRuntime(accepts=accepts)
+    broker = SandboxBroker(runtime, image="skynet@sha256:" + "c" * 64, max_lifetime_seconds=120)
+    parent = broker.parent_runtime(())
+    image = UserImage("registry.example/u/a@sha256:" + "a" * 64, repository="registry.example/u/a")
+
+    assert parent.accepts_user_images is accepts
+    assert parent.copies_user_images is accepts
+    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="op:candidate-1", user_image=image))
+    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="op:candidate-2"))
+    broker.close()
+
+    with_image, without_image = runtime.specs
+    assert (with_image.image, with_image.user_image) == (image.reference, image)
+    assert (without_image.image, without_image.user_image) == ("skynet@sha256:" + "c" * 64, None)
 
 
 def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
@@ -1811,6 +2188,139 @@ def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_r
     assert not metric_box.online
 
 
+def _build_space(tmp_path: Path, runtime: _Runtime, build: str) -> RepoWorkspace:
+    """Build a workspace whose ``[metric] setup`` command is ``build`` and whose metric files are ``eval``.
+
+    Args:
+        tmp_path: Scratch folder.
+        runtime: Where its boxes open.
+        build: The ``[metric] setup`` command.
+
+    Returns:
+        The workspace.
+    """
+    archive = _archive(
+        tmp_path, {"src/app.py": "SOURCE = 1\n", "eval/metric.sh": "cat bin/metric.txt\n", "eval/source.txt": "v1\n"}
+    )
+    return _space(archive, runtime, setup=None, hidden_paths=["eval"], metric_setup=build)
+
+
+def test_the_metric_setup_command_builds_once_and_each_metric_box_has_the_build(tmp_path: Path) -> None:
+    """``[metric] setup`` runs once with the metric files, offline but for the registries and with no secret (SKY-740)."""
+    runtime = _Runtime()
+    build = 'mkdir -p eval/bin && cp eval/source.txt eval/bin/metric.txt && echo "${API_KEY:-unset}" > eval/bin/key.txt'
+    space = _build_space(tmp_path, runtime, build)
+    try:
+        space.prepare()
+        boxes = [space.open_metric() for _ in range(2)]
+        for metric in boxes:
+            # The saved state holds the build output but no metric source (SKY-398).
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/metric.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/metric.sh") is None
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/source.txt") is None
+            metric.install_metric_files()
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/source.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/metric.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/key.txt") == "unset\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/metric.sh") == "cat bin/metric.txt\n"
+            metric.close()
+    finally:
+        space.close()
+    _, metric_setup, *metric_boxes = runtime.boxes
+    assert len(metric_boxes) == 2
+    builds = [command for each in runtime.boxes for command, _ in each.commands if build in command]
+    assert builds == [f"cd {METRIC_REPO_DIR} && {build}"]
+    [(_, env)] = [(command, env) for command, env in metric_setup.commands if build in command]
+    assert env is None
+    assert metric_setup.spec.operation_key == "op:metric-setup-1"
+    assert metric_setup.spec.allowed_hosts == PACKAGE_REGISTRY_HOSTS
+    assert metric_setup.spec.services == ()
+    assert metric_setup.spec.private
+    assert metric_setup.online
+    # The box has no requirements file, so no pip install runs.
+    assert not [command for command, _ in metric_setup.commands if "pip install" in command]
+    texts = [*metric_setup.writes.values(), *(command for command, _ in metric_setup.commands)]
+    assert not [text for text in texts if "SOURCE" in text or "very-secret-value" in text]
+
+
+@pytest.mark.parametrize(
+    ("skip", "kinds"),
+    [((), ["setup", "metric-setup"]), (("run",), ["metric-setup"]), (("metric",), ["setup"]), (("run", "metric"), [])],
+)
+def test_prepare_opens_no_setup_box_for_a_skipped_role(tmp_path: Path, skip: tuple[str, ...], kinds: list[str]) -> None:
+    """A role with a user image opens no setup box in preflight; the other role still does (SKY-893).
+
+    Args:
+        tmp_path: Pytest fixture for a temporary folder.
+        skip: The roles that ``prepare`` must not set up.
+        kinds: The setup boxes that must open.
+    """
+    runtime = _Runtime()
+    space = _build_space(tmp_path, runtime, "true")
+    try:
+        space.prepare(skip=skip)
+    finally:
+        space.close()
+    assert [box.spec.operation_key.split(":")[1].rsplit("-", 1)[0] for box in runtime.boxes] == kinds
+
+
+@pytest.mark.parametrize("skip", [("run",), ("metric",), ("run", "metric")])
+def test_a_workspace_with_a_skipped_role_scores_no_version(tmp_path: Path, skip: tuple[str, ...]) -> None:
+    """Refuse to score or to prepare again after a setup check skipped a role (SKY-893).
+
+    Args:
+        tmp_path: Pytest fixture for a temporary folder.
+        skip: The roles that ``prepare`` did not set up.
+    """
+    runtime = _Runtime()
+    space = _build_space(tmp_path, runtime, "true")
+    archive = _archive(tmp_path / "other", {"src/app.py": "SOURCE = 1\n"})
+    try:
+        space.prepare(skip=skip)
+        opened = [box.spec.operation_key for box in runtime.boxes]
+        with pytest.raises(RuntimeError, match="scores no version"):
+            space.open_candidate(_patch(tmp_path / "one", archive, {"src/app.py": "SOURCE = 2\n"}))
+        with pytest.raises(RuntimeError, match="scores no version"):
+            space.open_metric()
+        with pytest.raises(RuntimeError, match="prepares no more"):
+            space.prepare()
+        with pytest.raises(RuntimeError, match="prepares no more"):
+            space.prepare(skip=("metric",))
+    finally:
+        space.close()
+    # The refused calls open no box, so no setup runs again for the skipped role.
+    assert [box.spec.operation_key for box in runtime.boxes] == opened
+
+
+def test_a_failed_metric_setup_command_stops_the_run_before_any_candidate_box(tmp_path: Path) -> None:
+    """A broken build fails ``prepare`` with its last lines, and no candidate box opens (SKY-740)."""
+    runtime = _Runtime()
+    space = _build_space(tmp_path, runtime, "echo the-build-broke; exit 3")
+    archive = _archive(tmp_path / "other", {"src/app.py": "SOURCE = 1\n"})
+    try:
+        with pytest.raises(RepoSetupError, match=r"\[metric\] setup\) failed \(exit 3\)") as raised:
+            space.prepare()
+        assert "the-build-broke" in str(raised.value)
+        with pytest.raises(RepoSetupError, match="exit 3"):
+            space.open_candidate(_patch(tmp_path / "one", archive, {"src/app.py": "SOURCE = 2\n"}))
+    finally:
+        space.close()
+    assert [box.spec.operation_key for box in runtime.boxes] == ["op:setup-0", "op:metric-setup-1"]
+
+
+def test_a_metric_setup_command_that_runs_out_of_time_fails_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build has the setup time limit (SKY-740)."""
+    monkeypatch.setattr(repo_workspace, "_SETUP_TIMEOUT_SECONDS", 1.0)
+    space = _build_space(tmp_path, _Runtime(), "sleep 5")
+    try:
+        with pytest.raises(RepoSetupError, match="ran out of time"):
+            space.prepare()
+    finally:
+        space.close()
+
+
 @pytest.mark.parametrize("line", ["-r other.txt", "--index-url https://x.example.com", "./local", "git+https://x/y"])
 def test_a_metric_requirement_that_is_not_a_package_fails_setup(tmp_path: Path, line: str) -> None:
     """Options, paths and URLs could install repository code or reach other hosts, so they fail."""
@@ -1931,8 +2441,8 @@ def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker()
     )
     try:
         space = SimpleNamespace(_protected=("eval/metric.py",), watched=True, changes=lambda current, before: ())
-        space.fingerprint = lambda box, directory, **options: RepoWorkspace.fingerprint(
-            space, box, directory, **options
+        space.fingerprint = lambda box, directory, root, **options: RepoWorkspace.fingerprint(
+            space, box, directory, root, **options
         )
         call = ".app-repo/calls/000001/candidate"
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{call}/input.json": "{}"})
@@ -1958,7 +2468,7 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{WORK_DIR}/eval/hidden/data.py": "y = 2\n"})
         made = session.run(f"chmod 0600 {WORK_DIR}/eval/metric.py && chmod 0700 {WORK_DIR}/eval/hidden")
         assert made.exit_code == 0
-        files, _ = RepoWorkspace.fingerprint(space, session, WORK_DIR)  # type: ignore[arg-type]
+        files, _ = RepoWorkspace.fingerprint(space, session, WORK_DIR, "/workspace")  # type: ignore[arg-type]
         assert sorted(files) == ["eval/hidden/data.py", "eval/metric.py"]
     finally:
         session.close()

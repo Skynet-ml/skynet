@@ -10,6 +10,21 @@ Knobs (env or flag):
     --no-down          keep the stack up after the run (debug failures)
     --scenarios=A,B    run a subset, in the listed order
 
+The SKY-727 scenarios (reference_shapes, chaos_gate, swarm_10k) run in
+process with a mock model and local or fake boxes. When only they are
+selected, the orchestrator starts no stack. The swarm runs only when
+named: its rate gate needs about 10,000 agents, and its default 1,000
+agents always fail it:
+
+    .venv/bin/python -m load_tests.run_all --scenarios=chaos_gate,swarm_10k --swarm-agents=10000
+
+The swarm gate passes only on a throwaway Postgres and a local S3 server
+such as MinIO, the backend that its target names. Set them in the
+environment, never with a flag, so a database password stays off the
+command line: ``LOAD_TEST_SWARM_DB_URL`` (the database name starts with
+``loadtest``), ``LOAD_TEST_SWARM_S3_BUCKET`` and
+``LOAD_TEST_SWARM_S3_ENDPOINT``.
+
 Reports land in ``load_tests/results/<timestamp>.{json,md}`` and the
 console renders one block per scenario as it finishes so a long run does
 not feel silent.
@@ -28,10 +43,19 @@ import urllib.request
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from .lib.metrics import ScenarioResult
+from .lib.metrics import ScenarioMetrics, ScenarioResult
 from .lib.reporter import print_result, write_json_report, write_markdown_report
 from .lib.warmup import warm_validation_cache
-from .scenarios import dashboard_read, failure_injection, full_lifecycle, mixed_realistic, submission_burst
+from .scenarios import (
+    chaos_gate,
+    dashboard_read,
+    failure_injection,
+    full_lifecycle,
+    mixed_realistic,
+    reference_shapes,
+    submission_burst,
+    swarm_10k,
+)
 
 _DEFAULT_COMPOSE_FILE = str(Path(__file__).resolve().parent / "docker-compose.loadtest.yml")
 _DEFAULT_API_URL = "http://127.0.0.1:58000"
@@ -51,7 +75,42 @@ _SCENARIOS: dict[str, ScenarioFn] = {
     "full_lifecycle": full_lifecycle.main,
     "dashboard_read": dashboard_read.main,
     "failure_injection": failure_injection.main,
+    "reference_shapes": reference_shapes.main,
+    "chaos_gate": chaos_gate.main,
+    "swarm_10k": swarm_10k.main,
 }
+
+# These scenarios need no compose stack: they run the new path in process and spend no money (SKY-727).
+_IN_PROCESS_SCENARIOS = frozenset({"reference_shapes", "chaos_gate", "swarm_10k"})
+# The swarm runs only when named: below about 3,000 agents it cannot offer its target rate, so its default
+# 1,000 agents would fail every default run.
+_OPT_IN_SCENARIOS = frozenset({"swarm_10k"})
+_DEFAULT_SCENARIOS = [name for name in _SCENARIOS if name not in _OPT_IN_SCENARIOS]
+
+# Each flag sets the environment variable that its scenario reads, so the scenario also runs alone.
+_SCENARIO_KNOBS = (
+    (
+        "--shape-rounds",
+        "LOAD_TEST_SHAPE_ROUNDS",
+        "model rounds of each shape run, for reference_shapes and for chaos_gate"
+        " (default: 2 for reference_shapes, 4 for chaos_gate)",
+    ),
+    ("--box-image", "LOAD_TEST_BOX_IMAGE", "local Docker image id for the shape boxes (default: local subprocesses)"),
+    ("--chaos-runs-per-shape", "LOAD_TEST_CHAOS_RUNS_PER_SHAPE", "chaos gate runs of each shape (default: 3)"),
+    ("--chaos-seed", "LOAD_TEST_CHAOS_SEED", "chaos job random seed (default: 727)"),
+    ("--swarm-agents", "LOAD_TEST_SWARM_AGENTS", "swarm agents (default: 1000; the capacity target is 10000)"),
+    (
+        "--swarm-steps-per-agent",
+        "LOAD_TEST_SWARM_STEPS_PER_AGENT",
+        f"swarm steps of each agent, at least {swarm_10k.MIN_STEPS_PER_AGENT} (default: 10)",
+    ),
+    (
+        "--swarm-shards",
+        "LOAD_TEST_SWARM_SHARDS",
+        "step-log shards of the swarm's gated pass, one OS process each"
+        f" (default: one for each {swarm_10k.AGENTS_PER_SHARD} agents, 2 to {swarm_10k.MAX_SHARDS})",
+    ),
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -60,7 +119,14 @@ def _parse_args() -> argparse.Namespace:
     Returns:
         The parsed :class:`argparse.Namespace` carrying every knob.
     """
-    parser = argparse.ArgumentParser(description="Skynet load-test orchestrator")
+    parser = argparse.ArgumentParser(
+        description="Skynet load-test orchestrator",
+        epilog=(
+            "swarm_10k reads its throwaway Postgres URL only from LOAD_TEST_SWARM_DB_URL, so a password stays off"
+            " the command line, and its local S3 bucket from LOAD_TEST_SWARM_S3_BUCKET and"
+            " LOAD_TEST_SWARM_S3_ENDPOINT. Its gate passes only on that backend."
+        ),
+    )
     parser.add_argument(
         "--api-url",
         default=os.environ.get("LOAD_TEST_API_URL", _DEFAULT_API_URL),
@@ -78,8 +144,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenarios",
-        default=",".join(_SCENARIOS),
-        help="Comma-separated scenario list (default: all, in submit→read→failure order)",
+        default=",".join(_DEFAULT_SCENARIOS),
+        help=(
+            f"Comma-separated scenario list from: {', '.join(_SCENARIOS)}"
+            f" (default: all but {', '.join(sorted(_OPT_IN_SCENARIOS))}, in this order)"
+        ),
     )
     parser.add_argument(
         "--compose-file",
@@ -111,6 +180,8 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Leave the stack running after the report (useful for triage)",
     )
+    for flag, env_name, text in _SCENARIO_KNOBS:
+        parser.add_argument(flag, dest=env_name, metavar="VALUE", default=None, help=f"{text}; sets {env_name}")
     return parser.parse_args()
 
 
@@ -204,27 +275,37 @@ def _ensure_env(args: argparse.Namespace) -> None:
     os.environ.setdefault("LOAD_TEST_MOCK_LM_URL", args.mock_lm_url)
     os.environ.setdefault("LOAD_TEST_COMPOSE_FILE", args.compose_file)
     os.environ.setdefault("LOAD_TEST_COMPOSE_PROJECT", args.compose_project)
+    for _, env_name, _ in _SCENARIO_KNOBS:
+        value = getattr(args, env_name)
+        if value is not None:
+            os.environ[env_name] = value
 
 
 async def _run_scenarios(names: list[str], api_url: str, mock_lm_url: str) -> list[ScenarioResult]:
     """Run each scenario serially and print its result as it finishes.
 
     Args:
-        names: Scenario names to run (must exist in :data:`_SCENARIOS`).
+        names: Scenario names to run; :func:`_async_main` refuses a name that is not in :data:`_SCENARIOS` first.
         api_url: Backend base URL forwarded to each scenario.
         mock_lm_url: Mock LM URL forwarded to each scenario.
 
     Returns:
-        The collected :class:`ScenarioResult` objects in run order.
+        The collected :class:`ScenarioResult` objects in run order. A scenario that raises an ``Exception``, such as
+        a ``ValueError`` for a bad knob value, gives a failed result with the error text.
     """
     results: list[ScenarioResult] = []
     for name in names:
-        scenario = _SCENARIOS.get(name)
-        if scenario is None:
-            print(f"[loadtest] WARNING: unknown scenario '{name}', skipping")
-            continue
         print(f"\n[loadtest] running scenario: {name}")
-        result = await scenario(api_url, mock_lm_url)
+        try:
+            result = await _SCENARIOS[name](api_url, mock_lm_url)
+        except Exception as exc:
+            # Like a failed run row: one scenario's error fails only that scenario, so the report keeps the others.
+            error = f"{type(exc).__name__}: {exc}"
+            print(f"[loadtest] scenario {name} raised {error}", file=sys.stderr)
+            result = ScenarioMetrics(name).finish()
+            result.extras = {"error": error}
+            result.slo_passed = False
+            result.slo_violations = [f"scenario raised {error}"]
         results.append(result)
     return results
 
@@ -249,27 +330,37 @@ async def _async_main() -> int:
     """Orchestrator entrypoint coroutine.
 
     Returns:
-        Process exit code: ``0`` when every SLO gate passes, otherwise ``1``.
+        Process exit code: ``0`` when every SLO gate passes, ``2`` for an unknown scenario name, otherwise ``1``.
     """
     args = _parse_args()
     _ensure_env(args)
+    names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+    # A typo would count as a stack scenario, bring the whole stack up, and then be skipped.
+    unknown = [name for name in names if name not in _SCENARIOS]
+    if unknown:
+        print(
+            f"[loadtest] unknown scenario(s): {', '.join(unknown)}; choose from: {', '.join(_SCENARIOS)}",
+            file=sys.stderr,
+        )
+        return 2
+    needs_stack = any(name not in _IN_PROCESS_SCENARIOS for name in names)
 
-    if not args.skip_stack:
+    if needs_stack and not args.skip_stack:
         _bring_up(args)
 
     try:
-        _wait_for_http(f"{args.api_url}/health")
-        _wait_for_http(f"{args.frontend_url}/login")
-        warm = await warm_validation_cache(args.api_url)
-        print(
-            f"[loadtest] warmed validation cache: {warm['calls']} calls, "
-            f"{warm['failures']} failures, {warm['elapsed_seconds']:.1f}s "
-            f"(latencies_ms={[f'{ms:.0f}' for ms in warm['latencies_ms']]})"
-        )
-        names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+        if needs_stack:
+            _wait_for_http(f"{args.api_url}/health")
+            _wait_for_http(f"{args.frontend_url}/login")
+            warm = await warm_validation_cache(args.api_url)
+            print(
+                f"[loadtest] warmed validation cache: {warm['calls']} calls, "
+                f"{warm['failures']} failures, {warm['elapsed_seconds']:.1f}s "
+                f"(latencies_ms={[f'{ms:.0f}' for ms in warm['latencies_ms']]})"
+            )
         results = await _run_scenarios(names, args.api_url, args.mock_lm_url)
     finally:
-        if not args.skip_stack and not args.no_down:
+        if needs_stack and not args.skip_stack and not args.no_down:
             _bring_down(args)
 
     if not results:

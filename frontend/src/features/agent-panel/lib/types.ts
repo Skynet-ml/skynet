@@ -68,8 +68,8 @@ export interface WizardState {
   spending_floor_cents?: number;
   run_code?: string;
   metric_code?: string;
-  /** A repository run's optimize.toml in the setup draft; only the Metric screen's workspace tools write it. */
-  optimize_toml?: string;
+  /** A repository run's ascent.toml in the setup draft; only the Metric screen's workspace tools write it. */
+  ascent_toml?: string;
   /** The other repository files in the setup draft, by path; the run writes them over its checkout. */
   workspace_files?: Record<string, string>;
   /** The commit the agent read the draft files at; the run refuses them on any other commit. */

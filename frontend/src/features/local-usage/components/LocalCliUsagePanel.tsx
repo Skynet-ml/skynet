@@ -165,7 +165,7 @@ function IconWell({ children }: { children: ReactNode }) {
   );
 }
 
-/** Codex's credit balance and its free limit resets, with a button that uses one reset. */
+/** Codex's credit balance and its limit resets, with a button that uses one reset. */
 function CodexCredits({
   credits,
   locale,

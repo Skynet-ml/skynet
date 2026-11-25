@@ -25,6 +25,7 @@ from ..protocol import (
     engine_score,
     fill_unscored,
     openai_tools,
+    safe_tool_call,
     score_batch,
     tool_calls_from_openai,
     warn_once_without_feedback,
@@ -787,6 +788,34 @@ def test_text_nests_deeper_counts_only_brackets_outside_strings(text: str, deepe
     assert protocol.text_nests_deeper(text, 2) is deeper
 
 
+# Compact JSON: json.dumps adds spaces, so the test fails if the code dumps the parsed object again.
+@pytest.mark.parametrize("arguments", ['{"text":"\\ud800"}', '{"k\\udfff":1}', '{"a":[{"b":"\\udc00"}]}', "\ud800"])
+def test_tool_calls_from_openai_keeps_raw_text_when_the_parsed_arguments_hold_a_lone_surrogate(arguments: str) -> None:
+    """A lone surrogate in a key or a value, at any depth, keeps the raw text, escaped, so the step log stores it."""
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    [call] = tool_calls_from_openai(message)
+
+    assert call["arguments"] == arguments.encode("utf-8", "backslashreplace").decode("utf-8")
+    json.dumps(call, ensure_ascii=False).encode("utf-8")  # The step log encodes so; a surrogate raises.
+
+
+def test_safe_tool_call_escapes_surrogates_and_keeps_a_safe_call() -> None:
+    """Parsed arguments with a surrogate become JSON text; the id and the name get escapes; a safe call stays."""
+    safe = {"id": "call_x", "name": "bash", "arguments": {"command": "ls \u00e9"}}
+
+    assert safe_tool_call(safe) == safe
+    assert safe_tool_call({"id": "c\ud800", "name": "b\udfff", "arguments": {"k": ["\ud83d"]}}) == {
+        "id": "c\\ud800",
+        "name": "b\\udfff",
+        "arguments": '{"k": ["\\ud83d"]}',
+    }
+    hebrew = safe_tool_call({"id": "c", "name": "b", "arguments": {"a": "\ud800 שלום"}})
+    assert hebrew["arguments"] == '{"a": "\\ud800 שלום"}'
+
+
 def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
     """A flat definition sent in OpenAI form, and the OpenAI call it gets, convert back to the flat shapes."""
     definition = {"name": "bash", "description": "Run a command.", "input_schema": {"type": "object"}}
@@ -804,3 +833,80 @@ def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
 
     assert {"name": sent["name"], "description": sent["description"], "input_schema": sent["parameters"]} == definition
     assert tool_calls_from_openai(message) == [call]
+
+
+_DIRECTION_SCORES = {"low": 0.2, "mid": 0.5, "high": 0.8}
+
+
+def _direction_scorer(candidate: Any, _case: Any) -> tuple[float, dict[str, Any]]:
+    """Score each named version with a fixed raw score."""
+    return _DIRECTION_SCORES[candidate], {}
+
+
+def test_a_minimize_server_gives_the_engines_negated_scores_and_the_lowest_version_as_best() -> None:
+    """Every engine maximizes, so a minimize run negates each score; raw_score turns it back (SKY-750)."""
+    seen: list[float | None] = []
+    server = EvalServer(
+        _direction_scorer, max_evals=10, on_eval=lambda _server, score: seen.append(score), direction="minimize"
+    )
+
+    scores = [server.evaluate(name)[0] for name in ("mid", "low", "high")]
+
+    assert server.minimizes
+    assert scores == [-0.5, -0.2, -0.8]
+    assert seen == [0.5, 0.2, 0.8]
+    assert server.best_candidate == "low"
+    assert server.raw_score(server.best_score) == 0.2
+    assert server.raw_score(server.raw_score(0.3)) == 0.3
+    assert server.raw_score(None) is None
+
+
+def test_a_minimize_lane_follows_its_root_and_record_external_takes_a_raw_score() -> None:
+    """A lane shares the root's direction, and an outside score is the metric's own score (SKY-750)."""
+    seen: list[float | None] = []
+    root = EvalServer(
+        _direction_scorer, max_evals=10, on_eval=lambda _server, score: seen.append(score), direction="minimize"
+    )
+    lane = root.lane(5)
+
+    lane.charge("ext", 0.1, {})
+
+    assert lane.minimizes
+    assert root.mean_score("ext") == -0.1
+    assert lane.raw_score(lane.mean_score("ext")) == 0.1
+    assert seen == [0.1]
+
+
+def _named_direction_scorer(candidate: Any, _case: Any) -> tuple[float, dict[str, Any]]:
+    """Score every version 0.5, with a raw ``cost_usd`` and ``recall`` named score."""
+    return 0.5, {"scores": {"cost_usd": _DIRECTION_SCORES[candidate], "recall": {"score": 0.9, "feedback": "ok"}}}
+
+
+def test_a_minimize_named_score_stays_raw_and_carries_its_direction() -> None:
+    """Only a [metric.scores] minimize name gets the marker; every named score keeps the metric's value (SKY-775)."""
+    root = EvalServer(_named_direction_scorer, max_evals=10, score_directions={"cost_usd": "minimize", "x": "maximize"})
+
+    score, side_info = root.lane(5).evaluate("low")
+
+    assert score == 0.5
+    assert side_info["scores"] == {
+        "cost_usd": {"score": 0.2, "feedback": "", "direction": "minimize"},
+        "recall": {"score": 0.9, "feedback": "ok"},
+    }
+
+
+def test_a_server_with_no_minimize_named_score_keeps_side_info_as_returned() -> None:
+    """Without a minimize name the scorer's side info passes through unchanged."""
+    server = EvalServer(_named_direction_scorer, max_evals=10, score_directions={"cost_usd": "maximize"})
+
+    assert server.evaluate("low")[1]["scores"] == {"cost_usd": 0.2, "recall": {"score": 0.9, "feedback": "ok"}}
+
+
+def test_a_maximize_server_keeps_raw_scores() -> None:
+    """The default direction leaves every score as the metric gave it."""
+    server = EvalServer(_direction_scorer, max_evals=10)
+
+    assert [server.evaluate(name)[0] for name in ("low", "high")] == [0.2, 0.8]
+    assert not server.minimizes
+    assert server.best_candidate == "high"
+    assert server.raw_score(0.8) == 0.8

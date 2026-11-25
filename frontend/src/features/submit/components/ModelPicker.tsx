@@ -4,12 +4,18 @@ import { MicroPill } from "@/shared/ui/model-chip";
 import * as React from "react";
 import { motion, useReducedMotion } from "motion/react";
 import {
+  ArrowDown,
+  ArrowUp,
+  Brain,
   Check,
   CaretDown,
   Eye,
   Gauge,
+  Info,
   MagnifyingGlass,
   ShieldCheck,
+  Stack,
+  Timer,
   Warning,
 } from "@/shared/ui/icons";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
@@ -22,9 +28,9 @@ import {
   cachedCatalog,
   getByokModelCatalog,
   cachedByokCatalog,
+  rankMeasure,
   rankModels,
   type ModelRanking,
-  type RankedGroup,
 } from "@/shared/lib/model-catalog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
@@ -69,12 +75,27 @@ const RANKING_LABEL_KEYS: Record<ModelRanking, MessageKey> = {
   fastest: "submit.modelpicker.tab.fastest",
 };
 
-// The leading ranked group needs no header; the tab already names its order.
-const GROUP_LABEL_KEYS: Partial<Record<RankedGroup["kind"], MessageKey>> = {
-  dominated: "submit.modelpicker.group.dominated",
-  unrated: "submit.modelpicker.group.unrated",
-  no_speed: "submit.modelpicker.group.no_speed",
+const COLUMN_LABEL_KEYS: Record<ModelRanking, MessageKey> = {
+  best_value: "submit.modelpicker.col.best_value",
+  smartest: "submit.modelpicker.col.smartest",
+  fastest: "submit.modelpicker.col.fastest",
 };
+
+// Each score's help is a title of at most five words and a muted description
+// of at most two sentences; model-picker-help.test.ts holds every catalog to it.
+const COLUMN_HELP_KEYS: Record<ModelRanking, [MessageKey, MessageKey]> = {
+  best_value: [
+    "submit.modelpicker.col.best_value_help",
+    "submit.modelpicker.col.best_value_help_note",
+  ],
+  smartest: ["submit.modelpicker.col.smartest_help", "submit.modelpicker.col.smartest_help_note"],
+  fastest: ["submit.modelpicker.col.fastest_help", "submit.modelpicker.col.fastest_help_note"],
+};
+
+// The score and link columns have fixed widths, so the header lines up with
+// every row and a row without an Artificial Analysis link keeps its score in place.
+const SCORE_COL = "w-20 shrink-0 text-end";
+const LINKS_COL = "flex w-14 shrink-0 justify-end lg:w-12";
 
 const number = (value: number, digits: number) =>
   value.toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -88,10 +109,14 @@ function RowIconTip({
   label,
   icon,
   children,
+  className,
+  contentClassName = "max-w-72 leading-relaxed",
 }: {
   label: string;
   icon: React.ReactNode;
   children: React.ReactNode;
+  className?: string;
+  contentClassName?: string;
 }) {
   const [open, setOpen] = React.useState(false);
   // Touch has no hover, so a tap toggles; a mouse click must not close the
@@ -111,96 +136,261 @@ function RowIconTip({
             if (pointerType.current === "touch") setOpen((v) => !v);
             else setOpen(true);
           }}
-          className="flex min-h-[44px] w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:min-h-0 lg:size-6"
+          className={cn(
+            "flex min-h-[44px] w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:min-h-0 lg:size-6",
+            className,
+          )}
         >
           {icon}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-64 leading-relaxed" dir={getActiveDir()}>
+      <TooltipContent side="top" className={contentClassName} dir={getActiveDir()}>
         {children}
       </TooltipContent>
     </Tooltip>
   );
 }
 
-const seconds = (ms: number | null | undefined) =>
-  ms
-    ? msg("submit.modelpicker.speed.seconds", { s: number(ms / 1000, 2) })
-    : msg("submit.modelpicker.speed.unknown");
+const perMillion = (perToken: number | null | undefined) =>
+  perToken == null
+    ? msg("submit.modelpicker.speed.unknown")
+    : msg("submit.modelpicker.detail.price", { price: number(perToken * 1e6, 2) });
 
-/** Time to first token and output speed for one row. */
-function SpeedTip({ model }: { model: CatalogModel }) {
-  const tps = model.throughput_tps
-    ? msg("submit.modelpicker.stat.speed", { tps: number(model.throughput_tps, 0) })
-    : msg("submit.modelpicker.speed.unknown");
+function retention(model: CatalogModel): string {
+  if (model.zero_retention) return msg("settings.model_privacy.zdr.label");
+  if (model.zero_retention === false) return msg("submit.modelpicker.detail.retention_kept");
+  return msg("submit.modelpicker.speed.unknown");
+}
+
+/** One info icon per row; its tooltip holds price, context, vision, retention, score and speed. */
+function ModelDetailsTip({ model }: { model: CatalogModel }) {
+  const unknown = msg("submit.modelpicker.speed.unknown");
+  const rows: Array<[React.ElementType, string, string]> = [
+    [ArrowDown, msg("submit.modelpicker.detail.input"), perMillion(model.input_cost_per_token)],
+    [ArrowUp, msg("submit.modelpicker.detail.output"), perMillion(model.output_cost_per_token)],
+    [
+      Stack,
+      msg("submit.modelpicker.detail.context"),
+      model.max_input_tokens
+        ? msg("submit.modelpicker.detail.tokens", {
+            tokens: model.max_input_tokens.toLocaleString(undefined, { notation: "compact" }),
+          })
+        : unknown,
+    ],
+    [
+      Eye,
+      msg("submit.modelpicker.detail.vision"),
+      msg(
+        model.supports_vision
+          ? "submit.modelpicker.detail.vision_yes"
+          : "submit.modelpicker.detail.vision_no",
+      ),
+    ],
+    [ShieldCheck, msg("submit.modelpicker.detail.retention"), retention(model)],
+    [
+      Brain,
+      msg("submit.modelpicker.detail.intelligence"),
+      model.intelligence_index != null ? number(model.intelligence_index, 1) : unknown,
+    ],
+    [
+      Gauge,
+      msg("submit.modelpicker.speed_label"),
+      model.throughput_tps
+        ? msg("submit.modelpicker.stat.speed", { tps: number(model.throughput_tps, 0) })
+        : unknown,
+    ],
+    [
+      Timer,
+      msg("submit.modelpicker.detail.first_token"),
+      model.ttft_ms
+        ? msg("submit.modelpicker.speed.seconds", { s: number(model.ttft_ms / 1000, 2) })
+        : unknown,
+    ],
+  ];
   return (
     <RowIconTip
-      label={msg("submit.modelpicker.speed_label")}
-      icon={<Gauge className="size-3.5" aria-hidden="true" />}
+      label={msg("submit.modelpicker.details_label")}
+      icon={<Info className="size-3.5" aria-hidden="true" />}
     >
-      <span className="block font-medium">{msg("submit.modelpicker.speed_label")}</span>
-      <span className="block">
-        {msg("submit.modelpicker.speed.ttft", { value: seconds(model.ttft_ms) })}
+      <span className="mb-1 block text-center font-medium" dir="ltr">
+        {model.display_name || model.label}
       </span>
-      <span className="block">{msg("submit.modelpicker.speed.throughput", { value: tps })}</span>
-      <span className="mt-1 block opacity-70">{msg("submit.modelpicker.speed.source")}</span>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        {rows.map(([Icon, term, value]) => (
+          <React.Fragment key={term}>
+            <dt className="flex items-center gap-1.5 opacity-70">
+              <Icon className="size-3 shrink-0" aria-hidden="true" />
+              {term}
+            </dt>
+            <dd className="tabular-nums">{value}</dd>
+          </React.Fragment>
+        ))}
+      </dl>
     </RowIconTip>
   );
 }
 
-/** The model's intelligence score; hover explains it, click opens its Artificial Analysis page. */
-function ScoreTip({ model }: { model: CatalogModel }) {
-  const score = number(model.intelligence_index ?? 0, 1);
-  const chip =
-    "me-2 flex min-h-[44px] shrink-0 items-center rounded-md border border-border/50 px-2 text-[0.6875rem] font-medium tabular-nums text-muted-foreground transition-colors hover:border-foreground/25 hover:text-foreground lg:min-h-0 lg:py-0.5";
-  const url = model.artificial_analysis_url;
+/**
+ * The number the active tab ranks by: points per blended dollar, intelligence
+ * index, or output tokens per second. The column header names the unit.
+ */
+function RankScore({ model, ranking }: { model: CatalogModel; ranking: ModelRanking }) {
+  const value = rankMeasure(model, ranking);
+  const text =
+    value == null
+      ? ""
+      : value === Number.POSITIVE_INFINITY
+        ? "∞"
+        : // Points per token is tiny; per $1M of tokens reads as a plain number.
+          number(ranking === "best_value" ? value / 1e6 : value, ranking === "fastest" ? 0 : 1);
+  return (
+    <span className={cn(SCORE_COL, "text-[0.6875rem] tabular-nums text-muted-foreground")}>
+      {text}
+    </span>
+  );
+}
+
+/** The sticky column header: rank, model, the active tab's score with its meaning in a tooltip, and links. */
+function ColumnHeader({ ranking }: { ranking: ModelRanking }) {
+  return (
+    <div className="sticky top-0 z-10 flex items-center bg-background text-[0.625rem] font-semibold text-muted-foreground/70">
+      <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1">
+        <span className="w-5 shrink-0 text-center">{msg("submit.modelpicker.col.rank")}</span>
+        <span className="min-w-0 flex-1 truncate text-start">
+          {msg("submit.modelpicker.col.model")}
+        </span>
+        <span className={cn(SCORE_COL, "flex justify-end")}>
+          <RowIconTip
+            label={msg("submit.modelpicker.col.help_label")}
+            icon={
+              <>
+                <span className="truncate">{msg(COLUMN_LABEL_KEYS[ranking])}</span>
+                <Info className="size-3 shrink-0" aria-hidden="true" />
+              </>
+            }
+            className="w-auto max-w-full gap-1 px-0 text-muted-foreground/70 lg:size-auto"
+            contentClassName="max-w-60 px-2.5 py-2 text-start leading-snug text-pretty"
+          >
+            <span className="block text-center">{msg(COLUMN_HELP_KEYS[ranking][0])}</span>
+            <span className="mt-0.5 block text-[0.6875rem] font-normal text-muted-foreground">
+              {msg(COLUMN_HELP_KEYS[ranking][1])}
+            </span>
+          </RowIconTip>
+        </span>
+        <span className="size-3.5 shrink-0" aria-hidden="true" />
+      </div>
+      <span className={cn(LINKS_COL, "justify-center truncate")}>
+        {msg("submit.modelpicker.col.links")}
+      </span>
+    </div>
+  );
+}
+
+/** Artificial Analysis's own mark, so the link reads as their index at a glance. */
+function AaLogo() {
+  return (
+    <svg viewBox="0 0 16 16" className="size-3.5" fill="#8842fd" aria-hidden="true">
+      <path d="M13.982 16h1.996v-3.997h-3.992V16zM7.984 0 3.992 3.997H0v3.998h5.988L9.98 3.997h2.006V0zM7.984 7.995l-3.992 4.008H0V16h5.988l3.992-3.997h2.006V7.995zM15.978 7.995V3.997h-3.992v3.998h3.992" />
+    </svg>
+  );
+}
+
+/** A link icon beside the details icon that opens the model's Artificial Analysis page; nothing when there is none. */
+function AaLinkTip({ url }: { url: string | null | undefined }) {
+  if (!url) return null;
+  const label = msg("submit.modelpicker.detail.aa_link");
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        {url ? (
-          <a
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={msg("submit.modelpicker.score_aria", { score })}
-            className={chip}
-          >
-            {score}
-          </a>
-        ) : (
-          <span
-            tabIndex={0}
-            aria-label={msg("submit.modelpicker.score_aria", { score })}
-            className={chip}
-          >
-            {score}
-          </span>
-        )}
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={label}
+          className="flex min-h-[44px] w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:min-h-0 lg:size-6"
+        >
+          <AaLogo />
+        </a>
       </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-64 leading-relaxed" dir={getActiveDir()}>
-        <span className="block font-medium">
-          {msg("submit.modelpicker.score_tip_title", { score })}
-        </span>
-        <span className="block">{msg("submit.modelpicker.score_tip")}</span>
-        {url && (
-          <span className="mt-1 block opacity-70">{msg("submit.modelpicker.score_tip_link")}</span>
-        )}
+      <TooltipContent side="top" className="px-1.5 py-0.5">
+        {label}
       </TooltipContent>
     </Tooltip>
   );
 }
 
-/** Input price for one row; the score, speed and retention live in hover tooltips. */
-function ModelStats({ model }: { model: CatalogModel }) {
-  if (!model.input_cost_per_token) return null;
-  return (
-    <span className="flex flex-wrap gap-x-2 text-[0.6875rem] text-muted-foreground">
-      <span title={msg("submit.modelpicker.stat.price_title")}>
-        {msg("submit.modelpicker.stat.price", {
-          price: number(model.input_cost_per_token * 1e6, 2),
-        })}
+// Gold, silver and bronze. Banded face stops fake the streaks of polished
+// metal; a rim lit from the top-left and a bevel lit from the bottom-right
+// give the coin its struck edge. The metal already says 1st, 2nd and 3rd, so
+// it carries no number.
+const MEDALS = [
+  { light: "#fff8d6", mid: "#f0c03a", dark: "#b07a14", deep: "#6e4605", ribbon: "#a3261f" },
+  { light: "#ffffff", mid: "#cfd6df", dark: "#8792a2", deep: "#4b5563", ribbon: "#24508f" },
+  { light: "#ffe4cc", mid: "#d48848", dark: "#8f4c1d", deep: "#55280b", ribbon: "#2f6b3a" },
+];
+
+function RankBadge({ rank }: { rank: number }) {
+  const id = React.useId();
+  const medal = MEDALS[rank - 1];
+  if (!medal) {
+    return (
+      <span className="flex w-5 shrink-0 justify-center text-[0.625rem] font-semibold tabular-nums text-muted-foreground/70">
+        {rank}
       </span>
-    </span>
+    );
+  }
+  const face = `${id}face`;
+  const rim = `${id}rim`;
+  const bevel = `${id}bevel`;
+  const shine = `${id}shine`;
+  return (
+    <svg
+      viewBox="0 0 20 24"
+      className="-my-0.5 h-6 w-5 shrink-0 drop-shadow-sm"
+      role="img"
+      aria-label={String(rank)}
+    >
+      <defs>
+        <linearGradient id={face} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor={medal.light} />
+          <stop offset="0.22" stopColor={medal.mid} />
+          <stop offset="0.42" stopColor={medal.light} />
+          <stop offset="0.58" stopColor={medal.mid} />
+          <stop offset="0.8" stopColor={medal.dark} />
+          <stop offset="1" stopColor={medal.mid} />
+        </linearGradient>
+        <linearGradient id={rim} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor={medal.light} />
+          <stop offset="0.45" stopColor={medal.dark} />
+          <stop offset="1" stopColor={medal.deep} />
+        </linearGradient>
+        <linearGradient id={bevel} x1="1" y1="1" x2="0" y2="0">
+          <stop offset="0" stopColor={medal.light} />
+          <stop offset="0.5" stopColor={medal.mid} />
+          <stop offset="1" stopColor={medal.deep} />
+        </linearGradient>
+        <radialGradient id={shine} cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0" stopColor="#fff" stopOpacity="0.85" />
+          <stop offset="1" stopColor="#fff" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <path d="M3 0h5l3.5 9.5h-5z" fill={medal.ribbon} />
+      <path d="M5 0h1.2l3.5 9.5H8.5z" fill="#fff" opacity="0.35" />
+      <path d="M17 0h-5L8.5 9.5h5z" fill={medal.ribbon} />
+      <path d="M17 0h-5L8.5 9.5h5z" fill="#000" opacity="0.18" />
+      <path d="M15 0h-1.2l-3.5 9.5h1.2z" fill="#fff" opacity="0.25" />
+      <circle cx="10" cy="15.5" r="7.6" fill={`url(#${rim})`} />
+      <circle cx="10" cy="15.5" r="6.5" fill={`url(#${bevel})`} />
+      <circle cx="10" cy="15.5" r="5.7" fill={`url(#${face})`} />
+      <ellipse
+        cx="8"
+        cy="13.2"
+        rx="3"
+        ry="1.6"
+        transform="rotate(-35 8 13.2)"
+        fill={`url(#${shine})`}
+      />
+    </svg>
   );
 }
 
@@ -315,7 +505,7 @@ export function ModelPicker({
 
   const [ranking, setRanking] = React.useState<ModelRanking>("best_value");
   const prefersReduced = useReducedMotion();
-  const groups = React.useMemo(() => rankModels(filtered, ranking), [filtered, ranking]);
+  const ranked = React.useMemo(() => rankModels(filtered, ranking), [filtered, ranking]);
 
   // A provider can fan out across data centers, so each row names the
   // endpoint it resolves through.
@@ -368,7 +558,7 @@ export function ModelPicker({
           {value ? (
             <span className="flex min-w-0 flex-1 items-center gap-2" dir="ltr">
               <ProviderLogo slug={modelProviderSlug(value)} size={16} />
-              <span className="truncate font-mono text-[0.8125rem]">
+              <span className="truncate text-[0.8125rem]">
                 {selectedModel?.display_name || selectedModel?.label || value}
               </span>
             </span>
@@ -449,90 +639,69 @@ export function ModelPicker({
           initial={prefersReduced ? false : { opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.18, ease: "easeOut" }}
-          className="max-h-60 min-h-0 flex-1 overflow-y-auto py-1"
+          className="max-h-60 min-h-0 flex-1 overflow-y-auto pb-1"
         >
-          {filtered.length === 0 && (
+          {ranked.length === 0 ? (
             <div className="px-3 py-8 text-center text-xs text-muted-foreground">
               {msg("auto.features.submit.components.modelpicker.3")}
             </div>
+          ) : (
+            <ColumnHeader ranking={ranking} />
           )}
-          {groups.map((group) => (
-            <div key={group.kind} className="py-1">
-              {GROUP_LABEL_KEYS[group.kind] && (
-                <div className="px-3 py-1 text-[0.625rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/60 text-start">
-                  {msg(GROUP_LABEL_KEYS[group.kind]!)}
-                </div>
+          {ranked.map((m, i) => (
+            <div
+              key={`${m.provider}:${m.data_center ?? ""}:${m.value}`}
+              className={cn(
+                "flex items-center transition-colors hover:bg-accent/70",
+                isSelected(m) && "bg-accent/50",
               )}
-              {group.models.map((m) => (
-                <div
-                  key={`${m.provider}:${m.data_center ?? ""}:${m.value}`}
-                  className={cn(
-                    "flex items-center transition-colors hover:bg-accent/70",
-                    isSelected(m) && "bg-accent/50",
-                  )}
-                >
-                  <button
-                    type="button"
-                    onClick={() => commit(m)}
-                    title={providerLabel(m)}
-                    className={cn(
-                      "flex min-h-[44px] min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-start text-sm lg:min-h-0",
-                      !m.available && "opacity-60",
+            >
+              <button
+                type="button"
+                onClick={() => commit(m)}
+                title={providerLabel(m)}
+                className={cn(
+                  "flex min-h-[44px] min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-start text-sm lg:min-h-0",
+                  !m.available && "opacity-60",
+                )}
+                role="option"
+                aria-selected={isSelected(m)}
+              >
+                {rankMeasure(m, ranking) === null ? (
+                  <span className="w-5 shrink-0" aria-hidden="true" />
+                ) : (
+                  <RankBadge rank={i + 1} />
+                )}
+                <ProviderLogo slug={modelProviderSlug(m.value)} size={14} />
+                <span className="flex min-w-0 flex-1 flex-col" dir="ltr">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-[0.8125rem]">{m.display_name || m.label}</span>
+                    {showRetention && dataPolicy === "zdr" && m.zero_retention === false && (
+                      <MicroPill
+                        className="bg-[var(--warning-dim)] text-[var(--warning)]"
+                        title={msg("submit.modelpicker.zdr_unavailable")}
+                        aria-label={msg("submit.modelpicker.zdr_unavailable")}
+                        role="img"
+                      >
+                        <Warning className="size-2.5" aria-hidden="true" />
+                      </MicroPill>
                     )}
-                    role="option"
-                    aria-selected={isSelected(m)}
-                  >
-                    <ProviderLogo slug={modelProviderSlug(m.value)} size={14} />
-                    <span className="flex min-w-0 flex-1 flex-col" dir="ltr">
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        <span className="truncate text-[0.8125rem]">
-                          {m.display_name || m.label}
-                        </span>
-                        {m.supports_vision && (
-                          <MicroPill tone="primary" title={msg("shared.model_chip.vision_badge")}>
-                            <Eye className="size-2.5" />
-                          </MicroPill>
-                        )}
-                        {showRetention && dataPolicy === "zdr" && m.zero_retention === false && (
-                          <MicroPill
-                            className="bg-[var(--warning-dim)] text-[var(--warning)]"
-                            title={msg("submit.modelpicker.zdr_unavailable")}
-                            aria-label={msg("submit.modelpicker.zdr_unavailable")}
-                            role="img"
-                          >
-                            <Warning className="size-2.5" aria-hidden="true" />
-                          </MicroPill>
-                        )}
-                      </span>
-                      {m.data_center && (
-                        <span className="truncate text-[0.6875rem] text-muted-foreground">
-                          {providerLabel(m)}
-                        </span>
-                      )}
-                      <ModelStats model={m} />
+                  </span>
+                  {m.data_center && (
+                    <span className="truncate text-[0.6875rem] text-muted-foreground">
+                      {providerLabel(m)}
                     </span>
-                    <Check
-                      className={cn(
-                        "size-3.5 shrink-0",
-                        isSelected(m) ? "opacity-100" : "opacity-0",
-                      )}
-                    />
-                  </button>
-                  {m.zero_retention && (
-                    <RowIconTip
-                      label={msg("settings.model_privacy.zdr.label")}
-                      icon={<ShieldCheck className="size-3.5" aria-hidden="true" />}
-                    >
-                      <span className="block font-medium">
-                        {msg("submit.modelpicker.zdr_tip_title")}
-                      </span>
-                      <span className="block">{msg("submit.modelpicker.zdr_tip")}</span>
-                    </RowIconTip>
                   )}
-                  {!!(m.throughput_tps || m.ttft_ms || m.latency_ms) && <SpeedTip model={m} />}
-                  {m.intelligence_index != null && <ScoreTip model={m} />}
-                </div>
-              ))}
+                </span>
+                <RankScore model={m} ranking={ranking} />
+                <Check
+                  className={cn("size-3.5 shrink-0", isSelected(m) ? "opacity-100" : "opacity-0")}
+                />
+              </button>
+              <span className={LINKS_COL}>
+                <ModelDetailsTip model={m} />
+                <AaLinkTip url={m.artificial_analysis_url} />
+              </span>
             </div>
           ))}
         </motion.div>

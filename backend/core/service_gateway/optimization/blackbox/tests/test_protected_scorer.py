@@ -1,4 +1,4 @@
-"""Verify protected scorer routing, seedless readiness, and irreversible usage signals."""
+"""Verify protected scorer routing, runner stop signals, runtime binding and pending usage at job end."""
 
 from __future__ import annotations
 
@@ -15,23 +15,18 @@ from core.billing.model_gateway import ROUTE_KEY
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.config import Settings
-from core.exceptions import ServiceError
 from core.models.common import ModelConfig
 
 from .. import runner
 from .. import service as service_module
 from ..sandbox import (
-    CommandResult,
     current_sandbox_runtime,
     sandbox_runtime_context,
     sandbox_runtime_from_settings,
     sandbox_unavailable_reason,
-    scorer_runtime_from_settings,
 )
-from ..sandbox_scorer import SandboxPythonScorer, ScorerGateway, scorer_gateway
-from .mocks import FakeSandboxRuntime, FakeSandboxSession
-from .test_agent_eval import _scorer_of, _target
-from .test_sandbox_scorer import _InstallSession, _RunnerSession
+from ..sandbox_scorer import scorer_gateway
+from .mocks import FakeSandboxRuntime
 from .test_service import _payload
 
 
@@ -51,149 +46,6 @@ def test_protected_scorer_route_precedes_provider_credentials() -> None:
     assert gateway.protected is True
     assert gateway.runner_payload()["protected"] is True
     assert "must-not-leave-parent" not in json.dumps(gateway.runner_payload())
-
-
-def test_readiness_loads_real_scorer_without_a_candidate() -> None:
-    """Verify scorer loading and dependencies without invoking the scorer's body."""
-    runtime = FakeSandboxRuntime(lambda: _RunnerSession(runner.run_call))
-    runtime.protected = True
-    scorer = SandboxPythonScorer(
-        "import math\ndef metric(candidate, case):\n    raise AssertionError('must not score readiness')\n",
-        runtime=runtime,
-        gateway=None,
-        timeout_seconds=10,
-    )
-    try:
-        assert scorer.check_ready() == {
-            "ready": True,
-            "entrypoint": "metric",
-            "accepts_case": True,
-            "model_configured": False,
-        }
-    finally:
-        scorer.close()
-    [session] = runtime.sessions
-    assert "candidate" not in session.payloads[0]
-    assert "case" not in session.payloads[0]
-    assert session.closed is True
-    assert runtime.specs[0].network_disabled is True
-    assert runtime.specs[0].operation_key.startswith("scorer:")
-
-
-def test_protected_runtime_refuses_unregistered_model_credentials() -> None:
-    """Reject stale provider configuration before any key can reach a protected guest."""
-    runtime = FakeSandboxRuntime()
-    runtime.protected = True
-    gateway = ScorerGateway("https://provider.invalid/v1", "model", "private-provider-key", "model")
-    with pytest.raises(ServiceError, match="opaque model route"):
-        SandboxPythonScorer("def score(candidate): return 1", runtime=runtime, gateway=gateway, timeout_seconds=10)
-    with sandbox_runtime_context(runtime), pytest.raises(ServiceError, match="opaque model route"):
-        service_module._agent_scorer(
-            lambda candidate, case: (1, {}), _target(), job_id="job", progress_callback=None, agent_run_sink=None
-        )
-    assert runtime.specs == []
-
-
-def test_readiness_reports_real_import_failures() -> None:
-    """Fail setup when the runtime cannot import a scorer dependency."""
-    runtime = FakeSandboxRuntime(lambda: _RunnerSession(runner.run_call))
-    scorer = SandboxPythonScorer(
-        "import missing_scorer_dependency_789\ndef score(candidate): return 1\n",
-        runtime=runtime,
-        gateway=None,
-        timeout_seconds=10,
-    )
-    try:
-        with pytest.raises(ServiceError, match="missing_scorer_dependency_789"):
-            scorer.check_ready()
-    finally:
-        scorer.close()
-
-
-@pytest.mark.parametrize("method", ["run", "check_ready"])
-@pytest.mark.parametrize(
-    ("code", "exception"), [("budget_reached", BudgetReached), ("usage_pending", UsagePendingError)]
-)
-def test_protected_controls_escape_without_scorer_zero_or_reopen(
-    method: str, code: str, exception: type[BaseException]
-) -> None:
-    """Propagate admission and usage controls without inventing a score or a second sandbox.
-
-    Args:
-        method: Candidate scoring or seedless readiness path.
-        code: Parent control signal.
-        exception: Expected boundary exception.
-    """
-    runtime = FakeSandboxRuntime(lambda: _RunnerSession(lambda payload: {"control": {"code": code, "message": "halt"}}))
-    runtime.protected = True
-    scorer = SandboxPythonScorer("def score(candidate): return 1", runtime=runtime, gateway=None, timeout_seconds=10)
-    try:
-        with pytest.raises(exception, match="halt"):
-            getattr(scorer, method)(*(["seed"] if method == "run" else []))
-    finally:
-        scorer.close()
-    assert len(runtime.sessions) == 1
-
-
-def test_protected_scorer_keeps_close_pending_and_never_retries_uncertain_execution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep both command transport failures and close reconciliation failures observable.
-
-    Args:
-        monkeypatch: Pytest patch fixture.
-    """
-
-    def uncertain(payload: dict[str, Any]) -> dict[str, Any]:
-        """Simulate a command transport losing its reply after execution.
-
-        Args:
-            payload: Unused runner request.
-
-        Raises:
-            RuntimeError: Always, after the sandbox has already opened.
-        """
-        raise RuntimeError("lost command reply")
-
-    def pending() -> None:
-        """Simulate unresolved stopped-sandbox metrics.
-
-        Raises:
-            UsagePendingError: Always, after attempting cleanup.
-        """
-        raise UsagePendingError("missing final receipt")
-
-    runtime = FakeSandboxRuntime(lambda: _RunnerSession(uncertain))
-    runtime.protected = True
-    scorer = SandboxPythonScorer("def score(candidate): return 1", runtime=runtime, gateway=None, timeout_seconds=10)
-    with pytest.raises(RuntimeError, match="lost command reply"):
-        scorer.run("seed")
-    assert len(runtime.sessions) == 1
-    monkeypatch.setattr(runtime.sessions[0], "close", pending)
-    with pytest.raises(UsagePendingError, match="missing final receipt"):
-        scorer.close()
-    scorer.close()
-
-
-def test_protected_install_command_runs_inside_the_managed_boundary() -> None:
-    """Run offline dependency preparation inside the same charged sandbox as scoring."""
-    install = "pip install --no-index ./wheels/scorer_dependency.whl"
-    runtime = FakeSandboxRuntime(lambda: _InstallSession(runner.run_call, CommandResult(exit_code=0)))
-    runtime.protected = True
-    scorer = SandboxPythonScorer(
-        "def score(candidate): return 1",
-        runtime=runtime,
-        gateway=None,
-        timeout_seconds=10,
-        install_command=install,
-    )
-    try:
-        assert scorer.check_ready()["ready"] is True
-    finally:
-        scorer.close()
-    [session] = runtime.sessions
-    assert session.commands[0] == install
-    assert runtime.specs[0].network_disabled is True
 
 
 @pytest.mark.parametrize("code", ["budget_reached", "usage_pending"])
@@ -243,7 +95,6 @@ def test_runtime_context_overrides_settings_and_restores_nested_bindings() -> No
     assert current_sandbox_runtime() is None
     with sandbox_runtime_context(first):
         assert sandbox_runtime_from_settings(settings) is first
-        assert scorer_runtime_from_settings(settings) is first
         assert sandbox_unavailable_reason(settings) is None
         with sandbox_runtime_context(second):
             assert current_sandbox_runtime() is second
@@ -288,58 +139,15 @@ def test_job_finalization_preserves_outcome_while_usage_is_pending(
             raise primary_error
         return outcome
 
-    monkeypatch.setattr(service_module, "build_scorer", lambda *args, **kwargs: SimpleNamespace(close=close))
+    monkeypatch.setattr(service_module, "RemoteScorer", lambda *args, **kwargs: SimpleNamespace(close=close))
+    monkeypatch.setattr(service_module, "validate_blackbox_payload", lambda *args, **kwargs: None)
     monkeypatch.setattr(service_module, "_run_job", run)
+    payload = _payload(target={"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}})
+    route = {"evaluator_route": {"token": "route"}, "repo_snapshot": {"chunks": ["chunk"]}}
     if primary_error is None:
-        assert service_module.run_blackbox_optimization(_payload(), artifact_id="completed") is outcome
+        assert service_module.run_blackbox_optimization(payload, artifact_id="completed", **route) is outcome
         assert service_module.CASE_SPLIT_KEY in outcome.details
     else:
         with pytest.raises(type(primary_error)) as caught:
-            service_module.run_blackbox_optimization(_payload(), artifact_id="stopped")
+            service_module.run_blackbox_optimization(payload, artifact_id="stopped", **route)
         assert caught.value is primary_error
-
-
-def test_completed_agent_record_survives_pending_close(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Preserve the actual agent answer separately from its pending runtime receipt.
-
-    Args:
-        monkeypatch: Pytest patch fixture.
-    """
-    session = FakeSandboxSession(produces={"run-agent": {"output/answer.txt": "actual answer"}})
-    runtime = FakeSandboxRuntime(lambda: session)
-    runtime.protected = True
-
-    def close() -> None:
-        """Report pending runtime usage after cleanup.
-
-        Raises:
-            UsagePendingError: Always, without invalidating the completed answer.
-        """
-        raise UsagePendingError("runtime pending")
-
-    monkeypatch.setattr(session, "close", close)
-    result = _scorer_of(runtime, _target()).run("instructions", {"input": "question"})
-    assert result["output"] == "actual answer"
-    assert result["runtime_usage_pending"] is True
-    assert len(runtime.sessions) == 1
-
-
-def test_protected_agent_transport_failure_does_not_reopen() -> None:
-    """Retain uncertain execution without a hidden new sandbox attempt."""
-
-    def fail(command: str) -> Any:
-        """Simulate losing the reply after agent execution may have started.
-
-        Args:
-            command: Unused agent command.
-
-        Raises:
-            UsagePendingError: Always, to prevent hidden replay.
-        """
-        raise UsagePendingError("lost reply")
-
-    runtime = FakeSandboxRuntime(lambda: FakeSandboxSession(script=fail))
-    runtime.protected = True
-    with pytest.raises(UsagePendingError, match="lost reply"):
-        _scorer_of(runtime, _target()).run("instructions", {"input": "question"})
-    assert len(runtime.sessions) == 1

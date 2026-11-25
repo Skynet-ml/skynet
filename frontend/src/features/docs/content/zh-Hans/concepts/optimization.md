@@ -2,9 +2,9 @@ Skynet 就是 Optimize Anything：每次运行都优化一个仓库。引擎提�
 
 ## 共享契约
 
-每次运行都有一个仓库、一个带有 `[run]` 入口或 `[target.<name>]` 阶段的 `optimize.toml` 文件，以及一个评分器。`[run]` 入口对一个用例运行仓库的一个版本。评分器是一个 Python 函数，它接收入口的输出和该用例。
+每次运行都有一个仓库、一个带有 `[run]` 入口或 `[target.<name>]` 阶段的 `ascent.toml` 文件，以及一个评分器。`[run]` 入口对一个用例运行仓库的一个版本。评分器是一个 Python 函数，它接收入口的输出和该用例。
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口在自己的沙箱中调用它。运行结束后，Skynet 也用它来部署最好的版本。
 
-评分器在另一个独立的沙箱中运行。该沙箱只包含你的指标文件，不包含版本代码，所以评分器不能导入 `serve.py`。它只能通过 `output`，或通过对 `[target.<name>]` 阶段的 `call()` 看到版本。用 `from skynet import call` 导入 `call`。如果既没有 `[run]` 入口，也没有 `[target.<name>]` 阶段，Skynet 会拒绝该 `optimize.toml` 文件。
+评分器在另一个独立的沙箱中运行。该沙箱只包含你的指标文件，不包含版本代码，所以评分器不能导入 `serve.py`。它只能通过 `output`，或通过对 `[target.<name>]` 阶段的 `call()` 看到版本。用 `from openascent import call` 导入 `call`。如果既没有 `[run]` 入口，也没有 `[target.<name>]` 阶段，Skynet 会拒绝该 `ascent.toml` 文件。
 
 > [!NOTE]
 > 编写版本的编码智能体看不到评分器的源代码、期望值或运行密钥。
@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | 变量                 | 内容                                                  |
 | -------------------- | ----------------------------------------------------- |
-| `OPENAI_BASE_URL`    | 网关 URL。`APP_GATEWAY_URL` 包含相同的值。            |
-| `APP_API_KEY`        | 仅用于本次运行的令牌。它不是提供商密钥。              |
-| `APP_MODEL`          | 要发送的模型名称。它是本次运行的评分器模型。          |
+| `OPENAI_BASE_URL`    | 网关 URL。`ASCENT_MODEL_URL` 包含相同的值。           |
+| `ASCENT_MODEL_KEY`   | 仅用于本次运行的令牌。它不是提供商密钥。              |
+| `ASCENT_MODEL`       | 要发送的模型名称。它是本次运行的评分器模型。          |
 | `ANTHROPIC_BASE_URL` | 供 Anthropic SDK 使用的网关 URL。                     |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
