@@ -422,6 +422,7 @@
     "agent_settings.not_writable": "चैट {key} नहीं बदल सकता। इसे {tab} टैब में बदलें।",
     "agent_settings.missing_target": "{action} कार्रवाई के लिए एक लक्ष्य चाहिए।",
     "agent_settings.invalid_page": "यह पेज ऐप में मौजूद नहीं है।",
+    "agent_settings.missing_page": "ऐप का कोई पाथ, जैसे /submit, या सेटिंग्स टैब दें।",
     "hosted_link.failed": "होस्टेड {term.appName} साइट ने लिंक स्वीकार नहीं किया। लिंक फिर से शुरू करें।",
     "hosted_link.unreachable": "Mac ऐप होस्टेड {term.appName} साइट तक नहीं पहुँच पा रहा है। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
     "hosted_link.revoked": "यह Mac अब आपके {term.appName} खाते से लिंक नहीं है। जारी रखने के लिए इसे फिर से लिंक करें।",

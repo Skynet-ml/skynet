@@ -1,3 +1,5 @@
+[See all platforms](/download)
+
 The Skynet Mac app runs Skynet on your own computer. It sends model calls through a coding CLI that is signed in on your Mac, so your CLI plan pays for those calls. You can also link the app to your hosted Skynet account.
 
 ## Requirements

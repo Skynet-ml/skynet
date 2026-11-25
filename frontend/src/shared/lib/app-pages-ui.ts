@@ -4,6 +4,7 @@ import {
   ChartBar,
   Compass,
   Database,
+  DownloadSimple,
   FileText,
   HardDrive,
   PaperPlaneTilt,
@@ -29,6 +30,7 @@ export const APP_PAGE_ICONS: Record<AppPageId, Icon> = {
   submit: PaperPlaneTilt,
   explore: Compass,
   storage: HardDrive,
+  download: DownloadSimple,
   terms: FileText,
   privacy: ShieldCheck,
 };

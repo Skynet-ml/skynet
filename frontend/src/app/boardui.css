@@ -45,6 +45,55 @@
   }
 }
 
+/* Opt-in variant for a menu that drops from a full-width button: the panel
+   unrolls from its top edge, so it reads as part of the button, and its
+   rows settle in order. */
+.bui-menu.bui-menu-unfold[data-state="open"] {
+  animation: bui-menu-unfold-in 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.bui-menu.bui-menu-unfold[data-state="closed"] {
+  animation: bui-menu-unfold-out 140ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+.bui-menu-unfold[data-state="open"] > * {
+  animation: bui-menu-unfold-row 260ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.bui-menu-unfold[data-state="open"] > :nth-child(2) {
+  animation-delay: 40ms;
+}
+.bui-menu-unfold[data-state="open"] > :nth-child(n + 3) {
+  animation-delay: 80ms;
+}
+@keyframes bui-menu-unfold-in {
+  from {
+    opacity: 0;
+    translate: 0 -6px;
+    clip-path: inset(0 0 100% 0 round 1rem);
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+    clip-path: inset(0 0 0 0 round 1rem);
+  }
+}
+@keyframes bui-menu-unfold-out {
+  to {
+    opacity: 0;
+    translate: 0 -4px;
+    clip-path: inset(0 0 35% 0 round 1rem);
+  }
+}
+@keyframes bui-menu-unfold-row {
+  from {
+    opacity: 0;
+    translate: 0 -4px;
+  }
+}
+@keyframes bui-menu-fade {
+  from {
+    opacity: 0;
+  }
+}
+
 @keyframes bui-composer-loader-dash {
   from {
     stroke-dashoffset: 0;
@@ -99,6 +148,13 @@ html[dir="rtl"] .react-loading-skeleton::after {
   .bui-tooltip,
   .bui-menu,
   .bui-composer-loader-rect {
+    animation: none !important;
+  }
+  /* Keep the open state readable without the unroll or the row movement. */
+  .bui-menu.bui-menu-unfold[data-state="open"] {
+    animation: bui-menu-fade 120ms ease-out !important;
+  }
+  .bui-menu-unfold[data-state="open"] > * {
     animation: none !important;
   }
   html .react-loading-skeleton::after {

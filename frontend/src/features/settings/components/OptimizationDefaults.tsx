@@ -2,11 +2,10 @@
 
 import * as React from "react";
 
-import { ModelConfigModal, optimizerLabel, useRecentModelConfigs } from "@/features/submit";
+import { ModelConfigModal, optimizerLabel } from "@/features/submit";
 import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
-import { modelDisplayName } from "@/shared/lib/model-provider";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import {
   BLACKBOX_OPTIMIZERS,
@@ -42,7 +41,6 @@ type ModelRole = "optimizerTaskModel" | "optimizerReflectionModel";
 export function OptimizationDefaults() {
   const { prefs, setPref } = useUserPrefs();
   const [editing, setEditing] = React.useState<ModelRole | null>(null);
-  const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
   const [catalogModels, setCatalogModels] = React.useState<CatalogModel[] | null>(null);
   React.useEffect(() => {
     if (catalogModels) return;
@@ -67,27 +65,14 @@ export function OptimizationDefaults() {
   // An unpinned model is stored empty and resolved to the catalog default
   // each time a wizard opens, so a new default reaches everyone who never
   // pinned one.
-  const bestNow = catalogModels?.find((model) => model.is_default);
-  const automaticLabel = bestNow
-    ? msg("settings.optimization.model.automatic_now", {
-        model: modelDisplayName(bestNow.value, catalogModels ?? undefined),
-      })
-    : msg("settings.optimization.model.automatic");
-  const strongestNow = catalogModels?.find((model) => model.is_strongest);
-  const reflectionAutomaticLabel = strongestNow
-    ? msg("settings.optimization.model.automatic_strongest", {
-        model: modelDisplayName(strongestNow.value, catalogModels ?? undefined),
-      })
-    : automaticLabel;
+  const automaticLabel = msg("settings.optimization.model.automatic");
 
   const modelRow = (role: ModelRole, label: string, description: string) => (
     <SettingsRow icon={Cpu} label={label} description={description}>
       <div className="flex min-w-0 items-center gap-1">
         <ModelChip
           config={prefs[role]}
-          emptyLabel={
-            role === "optimizerReflectionModel" ? reflectionAutomaticLabel : automaticLabel
-          }
+          emptyLabel={automaticLabel}
           catalogModels={catalogModels ?? undefined}
           onClick={() => setEditing(role)}
         />
@@ -175,13 +160,10 @@ export function OptimizationDefaults() {
         config={editing ? prefs[editing] : ({ name: "" } satisfies ModelConfig)}
         onSave={(cfg) => {
           if (!editing) return;
-          saveToRecent(cfg);
           setPref(editing, cfg);
         }}
         roleLabel={editingLabel}
         catalogModels={catalogModels ?? undefined}
-        recentConfigs={recentConfigs}
-        onRemoveRecent={removeRecentConfig}
       />
     </section>
   );

@@ -19,33 +19,111 @@ import {
   Morph,
   Nebius,
   Novita,
+  Nvidia,
   OpenAI,
   OpenRouter,
   Qwen,
   SambaNova,
+  Stepfun,
+  Tencent,
   Together,
+  Upstage,
   XAI,
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { GmiCloud } from "@/shared/ui/brand-marks";
+import { getRuntimeEnv } from "@/shared/lib/runtime-env";
+import { GmiCloud, Reflection, ThinkingMachines } from "@/shared/ui/brand-marks";
 import { Plug } from "@/shared/ui/icons";
 
+type LoadedLogo = { url: string; mono: boolean } | null;
+
+// One fetch per slug for the whole page: every row that shows a lab shares it.
+const logoRequests = new Map<string, Promise<LoadedLogo>>();
+
 /**
- * Full-color brand avatar for a BYOK provider slug.
+ * Fetch a lab's SVG once, and hand it out as a same-origin object URL.
  *
- * Maps a provider slug onto its @lobehub/icons brand mark (the `.Avatar`
- * variant — a colored, rounded tile), or onto a local brand mark for providers
- * the icon set lacks. An unknown slug (a custom endpoint, or a
- * provider without a bundled mark) falls back to a neutral plug tile so the row
- * still reads as a connection. `dir="ltr"` keeps the mark upright under RTL.
+ * The object URL keeps the third-party SVG inert (an image or a mask never
+ * runs its scripts) and lets a CSS mask use it without a CORS check.
+ */
+function loadLogo(slug: string): Promise<LoadedLogo> {
+  let request = logoRequests.get(slug);
+  if (!request) {
+    request = fetch(`${getRuntimeEnv().apiUrl}/models/logos/${encodeURIComponent(slug)}`)
+      .then(async (response) => {
+        if (!response.ok) return null;
+        const svg = await response.text();
+        const blob = new Blob([svg], { type: "image/svg+xml" });
+        return { url: URL.createObjectURL(blob), mono: /<svg data-tone="mono"/.test(svg) };
+      })
+      .catch(() => null);
+    logoRequests.set(slug, request);
+  }
+  return request;
+}
+
+/**
+ * Brand mark for a model lab or BYOK provider slug.
+ *
+ * The backend serves the provider's current icon from the LobeHub icon set
+ * (`/models/logos/{slug}`), so a redrawn logo appears without a deploy. Each
+ * lab has one file for both themes: a full-color mark shows as is, and a
+ * one-color mark is a mask painted in the text color. When the fetch fails,
+ * the slug maps onto its bundled @lobehub/icons avatar or a local brand mark.
+ * An unknown slug (a custom endpoint) falls back to a neutral plug tile, so
+ * the row still reads as a connection. `dir="ltr"` keeps the mark upright
+ * under RTL.
  */
 export function ProviderLogo({ slug, size = 28 }: { slug: string; size?: number }) {
-  const logo = renderBrand(slug, size);
+  const [loaded, setLoaded] = React.useState<{ slug: string; logo: LoadedLogo } | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void loadLogo(slug).then((logo) => {
+      if (!cancelled) setLoaded({ slug, logo });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
+  const logo = loaded?.slug === slug ? loaded.logo : undefined;
+  // Until the fetch settles, hold the space so the row does not shift.
+  if (logo === undefined) {
+    return <span className="inline-flex shrink-0" style={{ width: size, height: size }} />;
+  }
   if (logo) {
     return (
+      <span dir="ltr" className="inline-flex shrink-0" style={{ width: size, height: size }}>
+        {logo.mono ? (
+          <span
+            className="size-full bg-current"
+            style={{
+              maskImage: `url(${logo.url})`,
+              maskSize: "contain",
+              maskRepeat: "no-repeat",
+              maskPosition: "center",
+            }}
+          />
+        ) : (
+          <img
+            src={logo.url}
+            alt=""
+            width={size}
+            height={size}
+            decoding="async"
+            className="size-full object-contain"
+          />
+        )}
+      </span>
+    );
+  }
+  const brand = renderBrand(slug, size);
+  if (brand) {
+    return (
       <span dir="ltr" className="inline-flex shrink-0">
-        {logo}
+        {brand}
       </span>
     );
   }
@@ -116,6 +194,18 @@ function renderBrand(slug: string, size: number): React.ReactNode {
       return <OpenRouter.Avatar size={size} />;
     case "gmi":
       return <GmiCloud.Avatar size={size} />;
+    case "nvidia":
+      return <Nvidia.Avatar size={size} />;
+    case "stepfun":
+      return <Stepfun.Avatar size={size} />;
+    case "tencent":
+      return <Tencent.Avatar size={size} />;
+    case "upstage":
+      return <Upstage.Avatar size={size} />;
+    case "reflection":
+      return <Reflection.Avatar size={size} />;
+    case "thinkingmachines":
+      return <ThinkingMachines.Avatar size={size} />;
     default:
       return null;
   }
