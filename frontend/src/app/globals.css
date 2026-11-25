@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "./boardui.css";
+@import "../shared/ui/agent/rich-markdown/editor.css";
 
 /* Dark mode is class-driven: ThemeProvider (and the pre-paint script in
    layout.tsx) puts `.dark` on <html> for the Dark choice, or for System when
@@ -725,6 +726,53 @@ body:has([data-toast-clearance]) .Toastify__toast-container[class*="--bottom-"] 
   background: var(--scrollbar-thumb-hover);
 }
 
+/* A composer draft at its height cap (SKY-772): a quiet scrollbar, no scroll
+   chaining to the chat, and a soft fade only on the edge that hides more text. */
+@property --composer-fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --composer-fade-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+.composer-scroll {
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+@keyframes composer-scroll-fade {
+  0% {
+    --composer-fade-top: 0px;
+    --composer-fade-bottom: 14px;
+  }
+  6%,
+  94% {
+    --composer-fade-top: 14px;
+    --composer-fade-bottom: 14px;
+  }
+  100% {
+    --composer-fade-top: 14px;
+    --composer-fade-bottom: 0px;
+  }
+}
+/* A draft that does not scroll has an inactive timeline, so it gets no fade. */
+@supports (animation-timeline: scroll()) {
+  .composer-scroll {
+    mask-image: linear-gradient(
+      to bottom,
+      transparent,
+      #000 var(--composer-fade-top),
+      #000 calc(100% - var(--composer-fade-bottom)),
+      transparent
+    );
+    animation: composer-scroll-fade linear both;
+    animation-timeline: scroll(self);
+  }
+}
+
 /* Close button — global style for all X dismiss buttons. Positioning is
    left to the consumer (e.g. ``absolute top-4 end-4`` for dialog corners,
    nothing for inline table cells) so the same visual treatment applies in
@@ -975,6 +1023,19 @@ html body[data-scroll-locked] {
   --removed-body-scroll-bar-size: 0px;
 }
 
+/* A held answer card lands: it settles back from the press with a small overshoot. */
+@keyframes choice-confirm {
+  0% {
+    transform: scale(0.985);
+  }
+  60% {
+    transform: scale(1.012);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -1017,7 +1078,7 @@ code,
     box-shadow var(--duration-fast) var(--ease-snappy);
 }
 
-/* Active sidebar link indicator — now handled by framer-motion layoutId */
+/* Active sidebar link indicator — now handled by Motion layoutId */
 
 /* ════════════════════════════════════════════
    PREMIUM POLISH
@@ -1761,6 +1822,37 @@ table {
     )
   );
 }
+/* The pill and the list move together: the list arrives from the side of
+   the tab it belongs to, so the two views read as neighbours. */
+.model-view-toggle [role="radiogroup"] > span[aria-hidden] {
+  transition-duration: 300ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+.model-view {
+  --model-view-side: 1;
+}
+.model-view:dir(rtl) {
+  --model-view-side: -1;
+}
+.model-view[data-slide="all"] {
+  animation: model-view-in 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.model-view[data-slide="suggested"] {
+  --model-view-from: -1;
+  animation: model-view-in 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes model-view-in {
+  from {
+    opacity: 0;
+    translate: calc(var(--model-view-side) * var(--model-view-from, 1) * 16px) 0;
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+    filter: blur(0);
+  }
+}
 .model-search-results {
   animation: model-search-update 120ms cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -1804,6 +1896,9 @@ table {
   .model-fold[data-state],
   .model-search-results {
     animation: none;
+  }
+  .model-view[data-slide] {
+    animation: model-search-update 150ms ease-out;
   }
 }
 
@@ -2409,56 +2504,151 @@ table {
 
 /* The agentic IDE review pane and code editor. */
 /* Syntax colours for the code review views, from the app's --code-* tokens. */
-.ide-code .tok-keyword { color: var(--code-keyword); font-weight: 600; }
-.ide-code .tok-operator { color: var(--code-operator); }
-.ide-code .tok-number { color: var(--code-number); }
-.ide-code .tok-string { color: var(--code-string); }
-.ide-code .tok-comment { color: var(--code-comment); font-style: italic; }
+.ide-code .tok-keyword {
+  color: var(--code-keyword);
+  font-weight: 600;
+}
+.ide-code .tok-operator {
+  color: var(--code-operator);
+}
+.ide-code .tok-number {
+  color: var(--code-number);
+}
+.ide-code .tok-string {
+  color: var(--code-string);
+}
+.ide-code .tok-comment {
+  color: var(--code-comment);
+  font-style: italic;
+}
 .ide-code .tok-typeName,
 .ide-code .tok-bool,
-.ide-code .tok-atom { color: var(--code-type); }
+.ide-code .tok-atom {
+  color: var(--code-type);
+}
 .ide-code .tok-propertyName,
-.ide-code .tok-className { color: var(--code-accent); }
-.ide-code .tok-variableName { color: var(--code-text); }
-.ide-code .tok-punctuation { color: var(--code-punct); }
-.ide-code .tok-variableName.tok-definition { color: var(--code-function); }
+.ide-code .tok-className {
+  color: var(--code-accent);
+}
+.ide-code .tok-variableName {
+  color: var(--code-text);
+}
+.ide-code .tok-punctuation {
+  color: var(--code-punct);
+}
+.ide-code .tok-variableName.tok-definition {
+  color: var(--code-function);
+}
 
 /* Light mode code sat on plain white and read as prose. A warm editor tint
    marks it as code. Dark mode already reads as an editor, so it keeps its ground. */
-:root { --ide-code-bg: #f6f2ec; }
-.dark { --ide-code-bg: transparent; }
-.ide-code { font-variant-ligatures: none; tab-size: 4; background: var(--ide-code-bg); }
-.ide-code ::selection { background: color-mix(in oklab, var(--primary) 22%, transparent); }
+:root {
+  --ide-code-bg: #f6f2ec;
+}
+.dark {
+  --ide-code-bg: transparent;
+}
+.ide-code {
+  font-variant-ligatures: none;
+  tab-size: 4;
+  background: var(--ide-code-bg);
+}
+.ide-code ::selection {
+  background: color-mix(in oklab, var(--primary) 22%, transparent);
+}
 
-.ide-scroll { scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent) transparent; }
+.ide-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent) transparent;
+}
 
 /* One authored moment: a file the agent just touched pulses once in the tree. */
 @keyframes ide-touch {
-  from { background-color: color-mix(in oklab, var(--primary) 16%, transparent); }
-  to { background-color: transparent; }
+  from {
+    background-color: color-mix(in oklab, var(--primary) 16%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
 }
-.ide-touched { animation: ide-touch 1.4s cubic-bezier(0.16, 1, 0.3, 1); }
+.ide-touched {
+  animation: ide-touch 1.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
 @media (prefers-reduced-motion: reduce) {
-  .ide-touched { animation: none; }
+  .ide-touched {
+    animation: none;
+  }
 }
 
-@keyframes ide-line-in { from { opacity: 0; transform: translateY(2px); } }
-.ide-line { animation: ide-line-in 240ms cubic-bezier(0.16, 1, 0.3, 1) backwards; }
-@media (prefers-reduced-motion: reduce) { .ide-line { animation: none; } }
+@keyframes ide-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+.ide-line {
+  animation: ide-line-in 240ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ide-line {
+    animation: none;
+  }
+}
 
 /* A review pane menu grows from its button on open and fades out fast on close. */
-@keyframes ide-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } }
-@keyframes ide-menu-out { to { opacity: 0; transform: scale(0.98); } }
-.ide-menu-pop[data-state="open"] { animation: ide-menu-in 180ms cubic-bezier(0.22, 1, 0.36, 1); }
-.ide-menu-pop[data-state="closed"] { animation: ide-menu-out 110ms ease-in forwards; }
-@media (prefers-reduced-motion: reduce) { .ide-menu-pop[data-state] { animation: none; } }
+@keyframes ide-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+}
+@keyframes ide-menu-out {
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+.ide-menu-pop[data-state="open"] {
+  animation: ide-menu-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ide-menu-pop[data-state="closed"] {
+  animation: ide-menu-out 110ms ease-in forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ide-menu-pop[data-state] {
+    animation: none;
+  }
+}
 
 /* A new comment box: its row opens, and the box fades and settles in. */
-@keyframes ide-comment-row { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
-@keyframes ide-comment-in { from { opacity: 0; transform: translateY(-6px) scale(0.985); } }
-.ide-comment-row { display: grid; animation: ide-comment-row 300ms cubic-bezier(0.22, 1, 0.36, 1); }
-.ide-comment-in { animation: ide-comment-in 260ms cubic-bezier(0.22, 1, 0.36, 1) 40ms both; transform-origin: top; }
-@media (prefers-reduced-motion: reduce) { .ide-comment-row, .ide-comment-in { animation: none; } }
+@keyframes ide-comment-row {
+  from {
+    grid-template-rows: 0fr;
+  }
+  to {
+    grid-template-rows: 1fr;
+  }
+}
+@keyframes ide-comment-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+}
+.ide-comment-row {
+  display: grid;
+  animation: ide-comment-row 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ide-comment-in {
+  animation: ide-comment-in 260ms cubic-bezier(0.22, 1, 0.36, 1) 40ms both;
+  transform-origin: top;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ide-comment-row,
+  .ide-comment-in {
+    animation: none;
+  }
+}
 
 /* The completion popup, drawn like Skynet's floating cards: large round rows and round chips.
    It takes the colors, font and size of Settings > Code (code-style.tsx): the Skynet themes keep
@@ -2466,34 +2656,78 @@ table {
    monospace font, so the list inherits the popup's code font here. */
 .ide-editor .cm-tooltip.cm-tooltip-autocomplete {
   font-family: var(--font-mono);
-  background: var(--ide-popup-bg, var(--card)); color: var(--code-text);
+  background: var(--ide-popup-bg, var(--card));
+  color: var(--code-text);
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  border-radius: 16px; box-shadow: var(--shadow-float); overflow: hidden;
+  border-radius: 16px;
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
 }
 .ide-editor .cm-tooltip.cm-tooltip-autocomplete > ul {
-  min-width: 260px; max-width: 560px; padding: 6px; font-family: inherit; font-size: inherit;
+  min-width: 260px;
+  max-width: 560px;
+  padding: 6px;
+  font-family: inherit;
+  font-size: inherit;
 }
 .ide-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li {
-  display: flex; align-items: center; gap: 0.65em; height: 2.4em; padding-block: 0; padding-inline: 8px 12px;
-  border-radius: 10px; color: var(--code-text);
+  display: flex;
+  align-items: center;
+  gap: 0.65em;
+  height: 2.4em;
+  padding-block: 0;
+  padding-inline: 8px 12px;
+  border-radius: 10px;
+  color: var(--code-text);
 }
 .ide-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
-  background: color-mix(in srgb, var(--code-text) 8%, transparent); color: var(--code-text);
+  background: color-mix(in srgb, var(--code-text) 8%, transparent);
+  color: var(--code-text);
 }
-.ide-editor .cm-completionLabel { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-.ide-editor .cm-completionMatchedText { text-decoration: none; color: var(--code-keyword); }
+.ide-editor .cm-completionLabel {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ide-editor .cm-completionMatchedText {
+  text-decoration: none;
+  color: var(--code-keyword);
+}
 .ide-editor .cm-completionDetail {
-  margin-inline-start: auto; padding-inline-start: 16px; font: 0.92em ui-sans-serif, system-ui, sans-serif;
+  margin-inline-start: auto;
+  padding-inline-start: 16px;
+  font:
+    0.92em ui-sans-serif,
+    system-ui,
+    sans-serif;
   color: var(--code-comment);
 }
 .ide-editor .pc-icon {
-  flex: none; display: inline-grid; place-items: center; inline-size: 2em; block-size: 2em;
-  font: 600 0.72em/1 ui-sans-serif, system-ui, sans-serif;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  inline-size: 2em;
+  block-size: 2em;
+  font:
+    600 0.72em/1 ui-sans-serif,
+    system-ui,
+    sans-serif;
 }
 .ide-editor .pc-icon[data-kind] {
-  border-radius: 50%; color: var(--ide-popup-bg, var(--card)); background: var(--kind);
+  border-radius: 50%;
+  color: var(--ide-popup-bg, var(--card));
+  background: var(--kind);
 }
-.ide-editor .pc-icon[data-kind="m"], .ide-editor .pc-icon[data-kind="f"] { --kind: var(--code-function); }
-.ide-editor .pc-icon[data-kind="c"] { --kind: var(--code-type); }
-.ide-editor .pc-icon[data-kind="v"] { --kind: var(--code-number); }
-.ide-editor .pc-icon[data-kind="p"] { --kind: var(--code-string); }
+.ide-editor .pc-icon[data-kind="m"],
+.ide-editor .pc-icon[data-kind="f"] {
+  --kind: var(--code-function);
+}
+.ide-editor .pc-icon[data-kind="c"] {
+  --kind: var(--code-type);
+}
+.ide-editor .pc-icon[data-kind="v"] {
+  --kind: var(--code-number);
+}
+.ide-editor .pc-icon[data-kind="p"] {
+  --kind: var(--code-string);
+}

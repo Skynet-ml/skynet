@@ -5,7 +5,7 @@ import { LoadingState } from "@/shared/ui/loading-state";
 import { FieldKey } from "@/shared/ui/field-key";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useCompletionNotification } from "@/shared/hooks/use-completion-notification";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ArrowCounterClockwise,
   Binary,

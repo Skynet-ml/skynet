@@ -205,21 +205,22 @@ for (const reason of ["stopped", "superseded"]) {
 
 test("Composer Escape ignores a popup owned by another field", () => {
   let stops = 0;
-  const callback = expression("src/shared/ui/agent/composer.tsx", "handleKeyDown", {
+  const callback = expression("src/shared/ui/agent/composer.tsx", "keyDown", {
     streaming: true, suggestion: "", handleComposerEscape, onStop: () => { stops++; },
     suggestKeyAction: () => null, value: "", midTurn: null,
   });
-  callback({ key: "Escape", keyCode: 27, nativeEvent: { isComposing: false }, preventDefault: () => {},
-    currentTarget: { getAttribute: () => null, ownerDocument: { querySelector: () => ({}), getElementById: () => null } } });
+  callback({ key: "Escape", keyCode: 27, isComposing: false, preventDefault: () => {} },
+    { dom: { getAttribute: () => null, ownerDocument: { querySelector: () => ({}), getElementById: () => null } } });
   assert.equal(stops, 1);
 });
 
 test("Composer leaves native IME and keyCode 229 Escape untouched", () => {
-  const callback = expression("src/shared/ui/agent/composer.tsx", "handleKeyDown", {
+  const callback = expression("src/shared/ui/agent/composer.tsx", "keyDown", {
     streaming: true, suggestion: "", handleComposerEscape, onStop: () => assert.fail("stopped during IME"),
   });
+  const view = { dom: { getAttribute: () => null, ownerDocument: { getElementById: () => null } } };
   for (const [isComposing, keyCode] of [[true, 27], [false, 229]]) {
-    callback({ key: "Escape", keyCode, nativeEvent: { isComposing } });
+    callback({ key: "Escape", keyCode, isComposing }, view);
   }
 });
 
@@ -246,12 +247,12 @@ test("withdraw API accepts an older backend response without delivered", async (
 
 test("R2 an idle next-prompt hint cannot block streaming Escape", () => {
   let stops = 0;
-  const callback = expression("src/shared/ui/agent/composer.tsx", "handleKeyDown", {
+  const callback = expression("src/shared/ui/agent/composer.tsx", "keyDown", {
     streaming: true, suggestion: visibleSuggestion({ signature: "same", text: "hint", dismissed: false }, { signature: "same", draft: "", streaming: true, disabled: false }), handleComposerEscape, onStop: () => { stops++; },
     suggestKeyAction: () => null, value: "", midTurn: null,
   });
-  callback({ key: "Escape", keyCode: 27, nativeEvent: { isComposing: false }, preventDefault: () => {},
-    currentTarget: { getAttribute: () => null, ownerDocument: { getElementById: () => null } } });
+  callback({ key: "Escape", keyCode: 27, isComposing: false, preventDefault: () => {} },
+    { dom: { getAttribute: () => null, ownerDocument: { getElementById: () => null } } });
   assert.equal(stops, 1);
 });
 

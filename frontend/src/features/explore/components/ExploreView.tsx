@@ -4,7 +4,7 @@ import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { Button } from "@/shared/ui/primitives/button";
 import * as React from "react";
 import { useSession } from "next-auth/react";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import {
   Clock,
   FunnelX,

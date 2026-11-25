@@ -18,10 +18,10 @@ You can edit both fields. The assistant does not overwrite your edits.
 
 Skynet is Optimize Anything: every run optimizes a repository. Select one of two choices:
 
-- **Use a repository**: optimize code in a GitHub repository that you connected.
-- **Create a new repository**: Skynet creates a new GitHub repository in your account. The assistant writes a first solution from your task and data. That solution is the starting version.
+- **Use a repository**: optimize code in a GitHub, GitLab or Bitbucket repository that you connected.
+- **Create a new repository**: Skynet creates a new repository in your GitHub, GitLab or Bitbucket account. The assistant writes a first solution from your task and data. That solution is the starting version.
 
-Connect GitHub in **Settings → Connectors** before you start.
+Connect GitHub, GitLab or Bitbucket in **Settings → Connectors** before you start.
 
 ### Use a repository
 
@@ -36,10 +36,10 @@ Set these fields:
 
 Set these fields:
 
-- **Name**: the name of the new repository. Your GitHub account must not already have a repository with this name.
-- **Private** or **Public**: who can see the repository on GitHub.
+- **Name**: the name of the new repository. Your account on the host must not already have a repository with this name.
+- **Private** or **Public**: who can see the repository on the host.
 
-Skynet pushes each candidate to its own branch. The `skynet/best` branch points at the best version.
+On GitHub, Skynet pushes each candidate to its own branch. The `skynet/best` branch points at the best version. On GitLab and Bitbucket, Skynet opens a draft merge request (Bitbucket: pull request) with the best version when it beats the starting version.
 
 ## Step 2: Inputs
 

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Brain, CaretRight } from "@/shared/ui/icons";
 
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
@@ -10,6 +10,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { thoughtSeconds } from "@/shared/lib/thinking-segments";
 
 import type { MessageMarkdown as MessageMarkdownComponent } from "./message-markdown";
+import { Reveal } from "./reveal";
 import { ThinkingDots } from "./thinking-dots";
 import type { AgentThinking } from "./types";
 
@@ -79,12 +80,12 @@ export function ThinkingSection({ thinking, compact = false, open: openProp, onO
 
   if (!reasoning && !isThinking) return null;
 
-  // Codex shows no live clock on "Thinking". Without an end time the span is unknown, so it reads "briefly".
+  // Codex shows no live clock on "Thinking", and a plain "Thought" when it has no span to name.
   const thought = endedAt ? thoughtSeconds(startedAt, endedAt) : null;
   const label = isThinking
     ? msg("shared.agent.thinking")
     : thought === null || thought < 1
-      ? msg("shared.agent.thought_briefly")
+      ? msg("shared.agent.thought")
       : formatMsg("shared.agent.thought_for", { duration: formatSpan(thought * 1000) });
 
   return (
@@ -97,7 +98,11 @@ export function ThinkingSection({ thinking, compact = false, open: openProp, onO
         }}
         disabled={!reasoning}
         aria-expanded={open}
-        className="group relative flex w-full items-start gap-2 py-1 text-start text-[0.8125rem] leading-5 text-muted-foreground transition-colors enabled:cursor-pointer enabled:hover:text-foreground"
+        className={cn(
+          "group relative flex w-full items-start gap-2 text-start text-[0.8125rem] leading-5 text-muted-foreground transition-colors enabled:cursor-pointer enabled:hover:text-foreground",
+          // In a turn it is one of the activity rows, which sit 4px apart as in Codex.
+          compact ? "py-0.5" : "py-1",
+        )}
       >
         {isThinking ? (
           <ThinkingDots className="mt-[3px] shrink-0 text-primary" />
@@ -123,37 +128,29 @@ export function ThinkingSection({ thinking, compact = false, open: openProp, onO
         {reasoning && (
           <CaretRight
             className={cn(
-              "mt-1 size-3 shrink-0 transition-[transform,opacity] duration-150",
-              open ? "rotate-90" : "rtl:-scale-x-100 opacity-0 group-hover:opacity-100",
+              "mt-1 size-3 shrink-0 transition-[transform,opacity] duration-300",
+              open
+                ? "rotate-90"
+                : "rtl:-scale-x-100 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
             )}
             aria-hidden
           />
         )}
       </button>
-      <AnimatePresence initial={false}>
-        {open && reasoning && (
-          <motion.div
-            initial={reduce ? false : { height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={reduce ? undefined : { height: 0, opacity: 0 }}
-            transition={reduce ? { duration: 0 } : { duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
-            className="overflow-hidden"
-          >
-            <div
-              ref={scrollRef}
-              onScroll={handleScroll}
-              dir="auto"
-              className="mb-1.5 max-h-48 overflow-y-auto ps-5.5 pe-2 text-[0.8125rem] leading-relaxed text-muted-foreground/80 break-words"
-            >
-              {Markdown ? (
-                <Markdown content={reasoning} />
-              ) : (
-                <span className="whitespace-pre-wrap">{reasoning}</span>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <Reveal open={open && Boolean(reasoning)}>
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          dir="auto"
+          className="mb-1.5 max-h-48 overflow-y-auto ps-5.5 pe-2 text-[0.8125rem] leading-relaxed text-muted-foreground/80 break-words"
+        >
+          {Markdown ? (
+            <Markdown content={reasoning} />
+          ) : (
+            <span className="whitespace-pre-wrap">{reasoning}</span>
+          )}
+        </div>
+      </Reveal>
     </div>
   );
 }

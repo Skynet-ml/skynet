@@ -11,7 +11,7 @@ import {
   RETIRED_AUTO_MODEL,
   type MenuSide,
 } from "@/features/local-runtime";
-import { Check, CaretUp, Lightning, MagnifyingGlass, X } from "@/shared/ui/icons";
+import { Check, CaretUp, Lightning, MagnifyingGlass, SealCheck, SquaresFour, X } from "@/shared/ui/icons";
 import { EffortSlider, effortHint } from "@/shared/ui/agent/effort-slider";
 
 import { cachedCatalog, getModelCatalog, getModelFastMode } from "@/shared/lib/model-catalog";
@@ -20,6 +20,7 @@ import { effortLabel, effortsFor, supportsEffortSlider } from "@/shared/lib/mode
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { Segmented } from "@/shared/ui/segmented";
 import { ProviderLogo } from "@/shared/ui/provider-logo";
 import {
   catalogFallbackModel,
@@ -74,8 +75,20 @@ export interface ModelMenuHandle {
   open: (view: "models" | "effort") => void;
 }
 
+type ModelView = "suggested" | "all";
+
 // Caps the fallback list when the catalog flags no featured models (a
 // listing that carries no release dates or benchmarks).
+/** A view toggle's tooltip: the view's name over one line that says what it lists. */
+function ViewTip({ name, text }: { name: string; text: string }) {
+  return (
+    <>
+      <span className="block font-medium">{name}</span>
+      <span className="block opacity-75">{text}</span>
+    </>
+  );
+}
+
 const FALLBACK_LIST_CAP = 50;
 
 /**
@@ -117,6 +130,9 @@ export function ComposerModelMenu({
   }, [savedEffort, onEffortChange]);
   const [open, setOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
+  const [tab, setTab] = React.useState<ModelView>("suggested");
+  // The view the list last switched to; it slides in from that tab's side.
+  const [slide, setSlide] = React.useState<ModelView | null>(null);
   const searchRef = React.useRef<HTMLInputElement>(null);
   // Starts empty on server and client alike: the cache lives in localStorage,
   // so seeding the first render from it would not match the SSR markup.
@@ -238,6 +254,8 @@ export function ComposerModelMenu({
       open: (view) => {
         if (disabled || available.length === 0) return;
         setSearch("");
+        setTab("suggested");
+        setSlide(null);
         setModelsOpen(view === "models");
         setOpen(true);
       },
@@ -278,18 +296,32 @@ export function ComposerModelMenu({
   );
   const query = search.trim().toLocaleLowerCase();
   const terms = query.split(/\s+/);
+  // Search always covers every model, so the All tab lights up while a query is typed.
+  const hasTabs = available.length > featured.length;
+  const view = query || !hasTabs ? "all" : tab;
   const visibleModels = query
     ? searchableModels.filter(({ text }) => terms.every((term) => text.includes(term))).map(({ model }) => model)
-    : featured;
+    : view === "all" && hasTabs
+      ? available
+      : featured;
   const sections = modelSections(visibleModels);
-  const visibleExtra = query ? null : currentExtra;
+  const visibleExtra = query || view === "all" ? null : currentExtra;
   const resultsRef = React.useRef<HTMLDivElement>(null);
   React.useLayoutEffect(() => {
     if (resultsRef.current) resultsRef.current.scrollTop = 0;
-  }, [query]);
+  }, [query, view]);
+  const slideTo = (next: ModelView) => {
+    if (next !== view) setSlide(next);
+  };
   const clearSearch = () => {
+    slideTo(tab);
     setSearch("");
     searchRef.current?.focus({ preventScroll: true });
+  };
+  const pickTab = (next: ModelView) => {
+    slideTo(next);
+    setTab(next);
+    if (next === "suggested") setSearch("");
   };
   const modelRows = (
     <div
@@ -324,7 +356,10 @@ export function ComposerModelMenu({
             spellCheck={false}
             dir="auto"
             className="h-9 min-w-0 flex-1 bg-transparent text-sm text-foreground caret-primary outline-none placeholder:text-muted-foreground"
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              slideTo(e.target.value.trim() || !hasTabs ? "all" : tab);
+              setSearch(e.target.value);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Escape") return;
               // Keep typing and caret movement out of Radix's menu typeahead.
@@ -358,8 +393,36 @@ export function ComposerModelMenu({
             </button>
           </TooltipButton>
         </div>
+        {hasTabs && (
+          // Radix menus trap Tab; the tabs pass it on like the search field does.
+          <div className="model-view-toggle mt-2" onKeyDown={(e) => { if (e.key === "Tab") e.stopPropagation(); }}>
+            <Segmented
+              size="sm"
+              iconOnly
+              className="grid w-full"
+              value={view}
+              onChange={pickTab}
+              label={msg("agent.model_menu.tabs")}
+              options={[
+                {
+                  value: "suggested",
+                  label: msg("agent.model_menu.tab_suggested"),
+                  icon: <SealCheck aria-hidden className="size-4 shrink-0" />,
+                  tip: <ViewTip name={msg("agent.model_menu.tab_suggested")} text={msg("agent.model_menu.tab_suggested_tip")} />,
+                },
+                {
+                  value: "all",
+                  label: `${msg("agent.model_menu.tab_all")} (${available.length})`,
+                  icon: <SquaresFour aria-hidden className="size-4 shrink-0" />,
+                  tip: <ViewTip name={`${msg("agent.model_menu.tab_all")} · ${available.length}`} text={msg("agent.model_menu.tab_all_tip")} />,
+                },
+              ]}
+            />
+          </div>
+        )}
       </div>
-      <div ref={resultsRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 pb-1">
+      <div ref={resultsRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-1 pb-1">
+        <div key={view} className="model-view" data-slide={slide ?? undefined}>
         <div key={query} className="model-search-results">
           {visibleExtra && (
             <MenuItem
@@ -403,6 +466,7 @@ export function ComposerModelMenu({
             </div>
           )}
         </div>
+        </div>
       </div>
     </div>
   );
@@ -415,7 +479,11 @@ export function ComposerModelMenu({
       onChange={onEffortChange}
       modelName={displayName}
       onPickModel={() => {
-        if (!modelsOpen) setSearch("");
+        if (!modelsOpen) {
+          setSearch("");
+          setTab("suggested");
+          setSlide(null);
+        }
         setModelsOpen((was) => !was);
       }}
       modelsOpen={modelsOpen}
@@ -432,6 +500,8 @@ export function ComposerModelMenu({
         if (next) {
           setModelsOpen(false);
           setSearch("");
+          setTab("suggested");
+          setSlide(null);
         }
       }}
     >

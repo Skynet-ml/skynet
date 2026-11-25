@@ -51,7 +51,7 @@ Puedes comparar una versión con otra. La pestaña también muestra los **Coment
 
 ### Ramas en un repositorio nuevo
 
-Cuando Skynet crea el repositorio para la ejecución, sube cada candidato a su propia rama, `skynet/candidate-<version id>`. La rama `skynet/best` siempre apunta a la mejor versión. Se mueve cuando aparece una versión mejor.
+Cuando Skynet crea el repositorio para la ejecución en GitHub, sube cada candidato a su propia rama, `skynet/candidate-<version id>`. La rama `skynet/best` siempre apunta a la mejor versión. Se mueve cuando aparece una versión mejor.
 
 ## Servir la mejor versión
 

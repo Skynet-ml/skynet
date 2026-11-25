@@ -66,7 +66,7 @@
   "settings.code.dark_theme": "Tema de código oscuro",
   "settings.code.font": "Fuente del código",
   "settings.code.font.description": "Define una fuente monoespaciada para el código y los diffs.",
-  "settings.code.font.placeholder": "p. ej. JetBrains Mono",
+  "settings.code.font.default": "Predeterminado",
   "settings.code.size": "Tamaño de fuente del código",
   "settings.code.size.description": "Se aplica a archivos abiertos, diffs y bloques de código.",
   "settings.code.size.px": "px",

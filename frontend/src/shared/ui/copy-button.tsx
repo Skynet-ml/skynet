@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
 import { Check, Copy } from "@/shared/ui/icons";
 
 import { cn } from "@/shared/lib/utils";

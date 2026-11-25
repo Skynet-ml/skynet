@@ -1,6 +1,6 @@
 "use client";
 
-import { animate, motion, useReducedMotion } from "framer-motion";
+import { animate, motion, useReducedMotion } from "motion/react";
 import {
   ArrowCounterClockwise,
   ArrowsIn,

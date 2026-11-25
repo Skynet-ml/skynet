@@ -51,7 +51,7 @@ Sie können eine Version mit einer anderen Version vergleichen. Der Tab zeigt au
 
 ### Branches in einem neuen Repository
 
-Hat Skynet das Repository für den Durchlauf erstellt, pusht es jeden Kandidaten auf einen eigenen Branch, `skynet/candidate-<version id>`. Der Branch `skynet/best` zeigt immer auf die beste Version. Er bewegt sich, wenn eine bessere Version erscheint.
+Hat Skynet das Repository für den Durchlauf auf GitHub erstellt, pusht es jeden Kandidaten auf einen eigenen Branch, `skynet/candidate-<version id>`. Der Branch `skynet/best` zeigt immer auf die beste Version. Er bewegt sich, wenn eine bessere Version erscheint.
 
 ## Die beste Version bereitstellen
 

@@ -51,7 +51,7 @@ Skynet 用驗證案例揀版本。佢用測試案例報告最終分數。引擎�
 
 ### 新倉庫入面嘅分支
 
-如果 Skynet 為呢次運行建立咗個倉庫，佢會將每個候選版本推去佢自己嘅分支 `skynet/candidate-<version id>`。`skynet/best` 分支一直指住最佳版本。有更好嘅版本出現時，佢會跟住移動。
+如果 Skynet 為呢次運行喺 GitHub 建立咗個倉庫，佢會將每個候選版本推去佢自己嘅分支 `skynet/candidate-<version id>`。`skynet/best` 分支一直指住最佳版本。有更好嘅版本出現時，佢會跟住移動。
 
 ## 提供最佳版本
 

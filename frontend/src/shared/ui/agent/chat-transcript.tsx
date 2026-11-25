@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
 
 import type { ActivityKind } from "@/shared/lib/activity-summary";
 
@@ -101,7 +101,11 @@ export function ChatTranscript({
     const times = separatorTimes(
       pairs.map((pair) => [
         ...(pair.user ? [{ role: "user" as const, at: pair.user.msg.createdAt }] : []),
-        ...(pair.agent ? [{ role: "agent" as const, at: pair.agent.createdAt }] : []),
+        // Codex times a reply by the start of its final answer. Replies stored
+        // before the backend sent that time fall back to when they ended.
+        ...(pair.agent
+          ? [{ role: "agent" as const, at: pair.agent.stats?.finalAnswerAt ?? pair.agent.createdAt }]
+          : []),
       ]),
       now,
     );

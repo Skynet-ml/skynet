@@ -90,7 +90,7 @@ Auto lit le texte de retour de votre évaluateur.
 
 | Votre situation                          | À utiliser                                                                                        |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Vous avez du code dans un dépôt GitHub   | **Utiliser un dépôt**. Le code de la branche ou du commit que vous choisissez est le point de départ. |
+| Vous avez du code dans un dépôt GitHub, GitLab ou Bitbucket   | **Utiliser un dépôt**. Le code de la branche ou du commit que vous choisissez est le point de départ. |
 | Vous n'avez qu'une tâche et des données  | **Créer un nouveau dépôt**. Skynet rédige une première solution. C'est le point de départ.        |
 
 > [!WARNING]

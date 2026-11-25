@@ -34,7 +34,7 @@ Object.assign(dom.window, {
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 // Animations finish at once, so a panel that would collapse reads as height 0 at once.
-const { MotionGlobalConfig } = await import("framer-motion");
+const { MotionGlobalConfig } = await import("motion/react");
 MotionGlobalConfig.skipAnimations = true;
 const { TurnActivity } = await import("./turn-activity");
 
@@ -247,10 +247,10 @@ void it("folds a run of reads and searches apart from the edits after it", async
   await unmount();
 });
 
-// SKY-743: plain rows, group summaries, setup-write rows and rows in an open
-// group all sit the same distance apart: each row has py-1, and nothing
-// between them adds a gap, padding or margin.
-void it("spaces every step-like row the same, in a group or out of it", async () => {
+// Codex's spacing: every step-like row has the same 4px of padding (py-0.5)
+// and a fixed line height; an open group indents its rows and sets them 12px
+// apart, and nothing else between the rows adds a gap, padding or margin.
+void it("spaces step-like rows as Codex does, in a group or out of it", async () => {
   const { StepRow } = await import("./activity-steps");
   const { Wrench } = await import("@/shared/ui/icons");
   const host = document.createElement("div");
@@ -290,7 +290,10 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
   const label = (id: string) =>
     [...host.querySelectorAll("span")].find((s) => s.textContent === id)!.parentElement!;
   const rows = [summary, label("edit-a"), label("write-b"), label("read-c")];
-  for (const row of rows) assert.ok(row.classList.contains("py-1"), `${row.textContent} has py-1`);
+  for (const row of rows) {
+    assert.ok(row.classList.contains("py-0.5"), `${row.textContent} has py-0.5`);
+    assert.ok(row.classList.contains("leading-5"), `${row.textContent} has a fixed line height`);
+  }
 
   const SPACING = /^(gap|gap-y|space-y|p|py|pt|pb|m|my|mt|mb)-/;
   // The history is the block right after the turn row.
@@ -298,7 +301,9 @@ void it("spaces every step-like row the same, in a group or out of it", async ()
   for (const row of rows) {
     for (let node = row.parentElement; node && node !== history; node = node.parentElement) {
       const extra = [...node.classList].filter((c) => SPACING.test(c));
-      assert.deepEqual(extra, [], `nothing between rows adds spacing: ${node.className}`);
+      // The open group's rows: Codex's 24px indent and 12px apart, with the row's own 4px.
+      const expected = node.classList.contains("max-h-56") ? ["gap-2", "pt-2.5"] : [];
+      assert.deepEqual(extra, expected, `nothing else between rows adds spacing: ${node.className}`);
     }
   }
   // jsdom applies no CSS, so this checks that an empty padded box carries the class that hides it.
@@ -380,13 +385,42 @@ function segment(
 
 /** The "Thought for" rows; the test loads no catalog, so each shows its key. */
 function thoughtRows(host: HTMLElement): Element[] {
-  return [...host.querySelectorAll("button")].filter((b) => /thought_(for|briefly)/.test(b.textContent ?? ""));
+  return [...host.querySelectorAll("button")].filter((b) => /thought(_for)?$/.test(b.textContent ?? ""));
 }
 
 /** True when `a` comes before `b` in the document. */
 function before(a: Node, b: Node): boolean {
   return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 }
+
+// A full-width rule under "Worked for" (Gilad keeps it), tabular figures so the
+// live clock does not shift, and a gap above the history that folds away with it.
+void it("puts the history under a ruled Worked for row, inside the fold", async () => {
+  const { host, unmount } = await mount([
+    { call: call("read-a"), isRetry: false, index: 0 },
+    { call: call("read-b"), isRetry: false, index: 1 },
+  ]);
+  const row = turnRow(host);
+  assert.ok(row.classList.contains("tabular-nums"), "the label uses tabular figures");
+  assert.ok(row.parentElement!.className.includes("border-b"), "the row draws a full-width rule");
+  const gap = () => host.querySelector("div[aria-hidden='true'].h-3\\.5");
+  assert.equal(gap(), null, "the folded history takes no space");
+  await openTurn(host);
+  assert.ok(gap(), "the open history starts 16px under the row");
+  await unmount();
+});
+
+void it("names a thought with no span to measure plainly, as Codex does", async () => {
+  const { host, unmount } = await mount([{ call: call("edit-a"), isRetry: false, index: 0 }], {
+    thinking: [segment("Check the config first.", 1, { endedAt: null })],
+    stepKind: () => "edit",
+  });
+  await openTurn(host);
+  const rows = thoughtRows(host);
+  assert.equal(rows.length, 1, host.innerHTML);
+  assert.match(rows[0]!.textContent ?? "", /shared\.agent\.thought$/);
+  await unmount();
+});
 
 // SKY-773: a finished stretch of reasoning is one folded row in time order.
 void it("shows a finished thinking segment as a folded row between the tools it ran between", async () => {

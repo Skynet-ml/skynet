@@ -189,7 +189,7 @@ export function ScheduleEditor({
             <SelectTrigger id={`${idPrefix}-zone`} className="w-full min-w-48 bg-background">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent className="max-h-72">
+            <SelectContent>
               {zones.map((zone) => (
                 <SelectItem key={zone} value={zone}>
                   <bdi>{zone.replaceAll("_", " ")}</bdi>

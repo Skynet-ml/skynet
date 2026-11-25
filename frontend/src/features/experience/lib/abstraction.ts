@@ -15,9 +15,10 @@ export const EXPERIENCE_LEVELS: readonly ExperienceLevel[] = ["guided", "standar
 
 /**
  * The level an unknown, missing or not-yet-loaded value means. New users start
- * with the least to read; anyone who picked a level keeps it.
+ * with everything shown, because the setup no longer asks: an empty account
+ * cannot show what each level changes. Anyone who picked a level keeps it.
  */
-export const DEFAULT_LEVEL: ExperienceLevel = "guided";
+export const DEFAULT_LEVEL: ExperienceLevel = "expert";
 
 export function normalizeLevel(value: unknown): ExperienceLevel {
   return value === "guided" || value === "standard" || value === "expert" ? value : DEFAULT_LEVEL;

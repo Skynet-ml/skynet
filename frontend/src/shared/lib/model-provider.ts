@@ -36,12 +36,13 @@ const LAB_NAMES: Record<string, string> = {
   moonshotai: "Moonshot AI",
   xiaomi: "Xiaomi",
   cohere: "Cohere",
+  "ibm-granite": "IBM Granite",
   nvidia: "NVIDIA",
+  reflection: "Reflection AI",
   stepfun: "StepFun",
   tencent: "Tencent",
-  upstage: "Upstage",
-  reflection: "Reflection AI",
   thinkingmachines: "Thinking Machines",
+  upstage: "Upstage",
 };
 
 /** Lab name for a `modelProviderSlug` value; an unknown slug shows as itself. */

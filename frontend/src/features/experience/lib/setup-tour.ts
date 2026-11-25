@@ -12,14 +12,15 @@ import type { ModelDataPolicy } from "@/shared/types/api";
 import type { IntakeAnswers, IntakeLlmPhase } from "./intake";
 
 /** The settings the tour asks; the language is asked before it, full screen. */
-export type SetupQuestion = "level" | "theme" | IntakeLlmPhase;
+export type SetupQuestion = "theme" | IntakeLlmPhase;
 
 export interface SetupStop {
   id: string;
   /** The `data-setup` anchor the spotlight frames; a missing one centers the card. */
   anchor: string;
   title: MessageKey;
-  body: MessageKey;
+  /** A line under the title; a stop whose answers explain themselves has none. */
+  body?: MessageKey;
   question?: SetupQuestion;
   /**
    * The Settings tab that holds this stop's setting: the stop opens it and
@@ -34,25 +35,16 @@ export interface SetupStop {
 }
 
 /*
- * The dashboard comes first because the level reshapes it (Guided hides its
- * analytics and the technical columns), so the user sees the answer land.
- * The last stop is the new-optimization entry, which finishing then opens.
+ * The setup does not ask for the level: an empty account cannot show what
+ * each level changes, so new users start at the default and change it in
+ * Settings. The last stop is the new-optimization entry, which finishing
+ * then opens.
  */
 export const SETUP_STOPS: readonly SetupStop[] = [
-  {
-    id: "level",
-    anchor: "dashboard",
-    title: "experience.level.title",
-    body: "experience.level.subtitle",
-    question: "level",
-    above: true,
-  },
-  // Next to the level: both change how the app looks, so the user compares them in place.
   {
     id: "theme",
     anchor: "dashboard",
     title: "experience.setup.theme.title",
-    body: "experience.setup.theme.body",
     question: "theme",
     above: true,
   },
@@ -64,7 +56,8 @@ export const SETUP_STOPS: readonly SetupStop[] = [
   },
   {
     id: "billing",
-    anchor: "account",
+    anchor: "wallet",
+    settings: "billing",
     title: "experience.intake.billing.title",
     body: "experience.intake.billing.hint",
     question: "billing",
@@ -83,7 +76,6 @@ export const SETUP_STOPS: readonly SetupStop[] = [
     anchor: "model-privacy",
     settings: "privacy",
     title: "experience.intake.privacy.title",
-    body: "experience.intake.privacy.hint",
     question: "privacy",
   },
   // The stops below ask nothing: the user sets the real controls, or not, and continues.
@@ -174,17 +166,6 @@ export const THEME_OPTIONS: ReadonlyArray<{
     description: "experience.setup.theme.dark_description",
   },
 ];
-
-/*
- * Answers that change how the app looks apply at once but never move the
- * tour on: the user looks at the change behind the card, then continues.
- */
-const APPEARANCE_QUESTIONS: readonly SetupQuestion[] = ["level", "theme"];
-
-/** Whether picking an answer at this stop moves the tour on by itself. */
-export function advancesOnAnswer(question: SetupQuestion): boolean {
-  return !APPEARANCE_QUESTIONS.includes(question);
-}
 
 /**
  * Where a setup that left the page picks up (a sign-in for Slack or a

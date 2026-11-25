@@ -1,7 +1,7 @@
 "use client";
 
 import { PingDot } from "@/shared/ui/ping-dot";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import { GitBranch } from "@/shared/ui/icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OptimizationStatusResponse } from "@/shared/types/api";

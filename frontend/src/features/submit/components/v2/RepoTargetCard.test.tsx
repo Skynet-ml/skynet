@@ -10,6 +10,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { setClientLocale } from "@/shared/lib/runtime-locale";
+import { TooltipProvider } from "@/shared/ui/primitives/tooltip";
 
 import type { RepoDraft } from "../../lib/wizard-v2";
 
@@ -29,44 +30,45 @@ const { RepoTargetCard } = await import("./RepoTargetCard");
 setClientLocale("he");
 globalThis.__APP_REQUEST_MESSAGES__ = buildActiveCatalog("he");
 
-const draft = (branch: string, commit: string): RepoDraft => ({
+const repo: RepoDraft = {
   provider: "github",
   repository: "owner/repo",
-  branch,
-  commit,
+  branch: "main",
+  commit: "abc1234",
   editablePaths: [],
   setupCommand: "",
-});
+  secrets: [{ name: "API_KEY", value: "", allowedHosts: "" }],
+};
 
-/** The class attribute of the field (an input, or a select trigger once a branch is set) with this id. */
-function fieldClass(html: string, id: string): string {
-  const tag = html.match(new RegExp(`<[a-z]+[^>]*id="${id}"[^>]*>`))?.[0];
-  assert.ok(tag, `no field #${id}`);
-  return tag.match(/class="([^"]*)"/)?.[1] ?? "";
-}
-
-const render = (repo: RepoDraft) =>
+const render = (draft: RepoDraft) =>
   renderToStaticMarkup(
-    <RepoTargetCard
-      repo={repo}
-      onChange={() => {}}
-      issue={null}
-      guided={false}
-      seed={{ objective: "", scorerCode: "", cases: [] }}
-    />,
+    // The app mounts this provider once at the root; the secrets header needs it.
+    <TooltipProvider>
+      <RepoTargetCard
+        repo={draft}
+        onChange={() => {}}
+        issue={null}
+        guided={false}
+        seed={{ objective: "", scorerCode: "", cases: [] }}
+      />
+    </TooltipProvider>,
   );
 
-void describe("RepoTargetCard branch and commit fonts (SKY-633)", () => {
-  void it("keeps the UI font for the Hebrew placeholders of empty fields", () => {
-    const html = render(draft("", ""));
-    assert.match(html, /placeholder="[֐-׿]/);
-    assert.doesNotMatch(fieldClass(html, "v2-repo-branch"), /font-mono/);
-    assert.doesNotMatch(fieldClass(html, "v2-repo-commit"), /font-mono/);
+void describe("RepoTargetCard before a host account is linked", () => {
+  void it("shows no repository, branch, commit or secrets fields", () => {
+    // Server rendering never loads the connectors, so no account is linked.
+    const html = render(repo);
+    for (const id of ["v2-repo-name", "v2-repo-branch", "v2-repo-commit", "v2-repo-secrets-panel"])
+      assert.doesNotMatch(html, new RegExp(`id="${id}"`));
+    assert.doesNotMatch(html, /aria-controls="v2-repo-secrets-panel"/);
   });
+});
 
-  void it("shows a typed branch and SHA in monospace", () => {
-    const html = render(draft("main", "abc1234"));
-    assert.match(fieldClass(html, "v2-repo-branch"), /font-mono/);
-    assert.match(fieldClass(html, "v2-repo-commit"), /font-mono/);
+void describe("RepoTargetCard with an empty draft", () => {
+  void it("preselects no source and shows no host until the user picks one", () => {
+    const html = render({ ...repo, provider: undefined, repository: "", branch: "", commit: "" });
+    assert.equal(html.match(/aria-pressed="false"/g)?.length, 2);
+    assert.doesNotMatch(html, /aria-pressed="true"/);
+    assert.doesNotMatch(html, /role="radio"/);
   });
 });

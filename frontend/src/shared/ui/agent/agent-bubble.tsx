@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import dynamic from "next/dynamic";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { cn } from "@/shared/lib/utils";
 import type { ActivityKind } from "@/shared/lib/activity-summary";
@@ -17,10 +17,9 @@ import type { AgentMessage, AgentThinking, AgentToolCall } from "./types";
 // only matter once the agent chat actually renders a message, but the panel is
 // mounted on every authenticated route. Lazy-load it so the parser stays out of
 // the global first-load chunk; the Suspense fallback shows the raw text meanwhile.
-const MessageMarkdown = dynamic(
-  () => import("./message-markdown").then((m) => m.MessageMarkdown),
-  { ssr: false },
-);
+const MessageMarkdown = dynamic(() => import("./message-markdown").then((m) => m.MessageMarkdown), {
+  ssr: false,
+});
 
 interface AgentBubbleProps {
   msg: AgentMessage;
@@ -123,17 +122,23 @@ export function AgentBubble({
   // With a history, a card call (the coding tool) is activity too; without
   // it, a turn whose only call is that card had no header, and the header
   // vanished once its reasoning-less thinking row dropped out.
-  const hasActivity = hasThinking || (withHistory ? visibleToolCalls.length > 0 : stepCalls.length > 0);
+  const hasActivity =
+    hasThinking || (withHistory ? visibleToolCalls.length > 0 : stepCalls.length > 0);
 
   const plan = msg.plan?.trim();
-  const renderAnswer = (content: string) => (
+  const renderAnswer = (content: string, live = false) => (
     <div className="text-sm leading-relaxed text-foreground">
       <React.Suspense fallback={<span className="whitespace-pre-wrap">{content}</span>}>
-        <MessageMarkdown content={content} onRunCode={onRunCode} allowLink={allowLink} />
+        <MessageMarkdown
+          content={content}
+          onRunCode={onRunCode}
+          allowLink={allowLink}
+          streaming={live}
+        />
       </React.Suspense>
     </div>
   );
-  const answer = hasText && renderAnswer(msg.content);
+  const answer = hasText && renderAnswer(msg.content, turnStreaming);
 
   // With a turn history, the plan and every call (cards too) sit in it in
   // the order they ran, and the answer comes last, as in Codex. ReActV2
@@ -153,22 +158,25 @@ export function AgentBubble({
     const hasTurn = turnStreaming || hasActivity || Boolean(plan) || earlierTurns.length > 0;
     if (!hasTurn && !hasText && !afterContent) return null;
     return (
-      <div className={cn("flex w-full min-w-0 flex-col gap-3", className)}>
-        {(hasTurn || hasText) && <TurnActivity
-          thinking={allThinking}
-          steps={visibleToolCalls.map((v) => ({
-            ...v,
-            card: !isStepCall?.(v.call),
-          }))}
-          streaming={turnStreaming}
-          answering={hasText}
-          plan={plan}
-          renderStep={renderToolCall}
-          stepKind={stepKind}
-          durationMs={msg.stats?.durationMs}
-          startedAt={turnStart(allThinking, [])}
-          earlier={earlierTurns}
-        />}
+      // Codex's 16px item gap between the turn's activity and its answer.
+      <div className={cn("flex w-full min-w-0 flex-col gap-4", className)}>
+        {(hasTurn || hasText) && (
+          <TurnActivity
+            thinking={allThinking}
+            steps={visibleToolCalls.map((v) => ({
+              ...v,
+              card: !isStepCall?.(v.call),
+            }))}
+            streaming={turnStreaming}
+            answering={hasText}
+            plan={plan}
+            renderStep={renderToolCall}
+            stepKind={stepKind}
+            durationMs={msg.stats?.durationMs}
+            startedAt={turnStart(allThinking, [])}
+            earlier={earlierTurns}
+          />
+        )}
         {answer}
         {afterContent}
       </div>

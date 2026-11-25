@@ -8,7 +8,6 @@ import { INTAKE_LLM_PHASES } from "./intake.ts";
 import {
   SETUP_STOPS,
   THEME_OPTIONS,
-  advancesOnAnswer,
   arrowStep,
   billingChoices,
   resumeStopIndex,
@@ -42,10 +41,10 @@ test("the setup stays short and every stop is unique", () => {
   assert.equal(new Set(SETUP_STOPS.map((s) => s.id)).size, SETUP_STOPS.length);
 });
 
-test("the level comes first and every settings question is asked once", () => {
-  assert.equal(SETUP_STOPS[0]!.question, "level");
+test("the theme comes first and every settings question is asked once", () => {
+  assert.equal(SETUP_STOPS[0]!.question, "theme");
   const asked = SETUP_STOPS.flatMap((s) => (s.question ? [s.question] : []));
-  assert.deepEqual([...asked].sort(), ["level", "theme", ...INTAKE_LLM_PHASES].sort());
+  assert.deepEqual([...asked].sort(), ["theme", ...INTAKE_LLM_PHASES].sort());
 });
 
 test("the last stop is the new-optimization entry finishing opens", () => {
@@ -136,14 +135,17 @@ test("the Mac app offers the coding CLI subscription as a billing answer; the ho
   }
 });
 
-test("an answer that changes how the app looks does not move the tour on", () => {
-  assert.equal(advancesOnAnswer("level"), false);
-  assert.equal(advancesOnAnswer("theme"), false);
-  for (const question of INTAKE_LLM_PHASES) assert.equal(advancesOnAnswer(question), true);
+test("the billing question opens the Billing tab in Settings", () => {
+  const tabs = readFileSync(join(SRC, "features/settings/lib/tabs.ts"), "utf8");
+  const wallet = readFileSync(join(SRC, "features/billing/components/WalletTab.tsx"), "utf8");
+  const stop = SETUP_STOPS.find((s) => s.question === "billing")!;
+  assert.equal(stop.settings, "billing");
+  assert.ok(tabs.includes(`"${stop.settings}",`), `no Settings tab "${stop.settings}"`);
+  assert.ok(wallet.includes(`data-setup="${stop.anchor}"`));
 });
 
-test("the theme stop follows the level and offers every Settings theme", () => {
-  assert.equal(SETUP_STOPS[1]!.question, "theme");
+test("the theme stop offers every Settings theme", () => {
+  assert.equal(SETUP_STOPS[0]!.question, "theme");
   assert.deepEqual(
     THEME_OPTIONS.map((o) => o.value),
     [...COLOR_THEMES],
@@ -171,7 +173,7 @@ test("every stop's copy exists in the base and English catalogs", () => {
     const catalog = JSON.parse(readFileSync(join(CATALOG_DIR, `${locale}.json`), "utf8"));
     for (const stop of SETUP_STOPS) {
       assert.ok(catalog[stop.title], `${locale}: missing ${stop.title}`);
-      assert.ok(catalog[stop.body], `${locale}: missing ${stop.body}`);
+      if (stop.body) assert.ok(catalog[stop.body], `${locale}: missing ${stop.body}`);
     }
   }
 });

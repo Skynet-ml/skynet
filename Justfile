@@ -55,6 +55,10 @@ backend:
 frontend:
     cd frontend && npm run dev
 
+# Motion Studio's companion server for `next dev` (https://motion.dev/docs/studio)
+studio:
+    cd frontend && npm run studio
+
 # Start both (backend in background, frontend in foreground)
 dev:
     cd backend && {{_run}}python main.py &

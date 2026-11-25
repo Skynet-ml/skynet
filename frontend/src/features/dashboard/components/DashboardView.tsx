@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTableSort } from "@/shared/hooks/use-table-sort";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
 import { toast } from "react-toastify";
 import { ChartBar, Table } from "@/shared/ui/icons";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";

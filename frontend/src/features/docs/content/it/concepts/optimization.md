@@ -90,7 +90,7 @@ Auto legge il testo del feedback del tuo scorer.
 
 | La tua situazione                         | Usa                                                                                           |
 | ----------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Hai del codice in un repository GitHub    | **Usa un repository**. Il codice del branch o del commit che scegli è il punto di partenza.   |
+| Hai del codice in un repository GitHub, GitLab o Bitbucket    | **Usa un repository**. Il codice del branch o del commit che scegli è il punto di partenza.   |
 | Hai solo un'attività e dei dati           | **Crea un nuovo repository**. Skynet scrive una prima soluzione. Quella è il punto di partenza. |
 
 > [!WARNING]

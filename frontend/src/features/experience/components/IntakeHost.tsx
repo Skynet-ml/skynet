@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AnimatePresence, motion, useReducedMotion, type Transition } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion, type Transition } from "motion/react";
 import { usePathname, useRouter } from "next/navigation";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
@@ -32,7 +32,6 @@ import { Switch } from "@/shared/ui/primitives/switch";
 import { SubmitSplashOverlay, SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 import type { ModelDataPolicy } from "@/shared/types/api";
 
-import { EXPERIENCE_LEVELS, type ExperienceLevel } from "../lib/abstraction";
 import {
   buildExperiencePatch,
   clearIntakeDraft,
@@ -51,13 +50,11 @@ import {
 } from "../lib/intake";
 import {
   SETUP_SETTING_EVENT,
-  advancesOnAnswer,
   arrowStep,
   billingChoices,
   resumeStopIndex,
   setupStops,
   THEME_OPTIONS,
-  type SetupQuestion,
   type SetupSettingDetail,
 } from "../lib/setup-tour";
 import {
@@ -68,7 +65,6 @@ import {
   subscribeSplash,
 } from "../lib/entrance";
 import { useExperienceOptional } from "../providers/experience-provider";
-import { LEVEL_KEYS } from "./level-keys";
 import { SetupTour } from "./SetupTour";
 import { TOUCH_TAP_SQUARE } from "./touch";
 
@@ -139,13 +135,6 @@ const TITLE_IN_MS = (TITLE_DELAY_S + WORDMARK_S) * 1000;
 const TITLE_HOLD_MS = 1250;
 const STEP_S = 0.35;
 const REDUCED_S = 0.2;
-/*
- * A picked answer stays marked this long before the tour moves on, so the
- * user sees it land. A still hold, not motion, so it is the same under
- * reduced motion. An answer that changes how the app looks (the level) never
- * moves on by itself: the user continues once they have seen it.
- */
-const ANSWER_HOLD_MS = 700;
 
 type Stage = "title" | "language" | "tour";
 
@@ -265,8 +254,11 @@ function IntakeSurface() {
    * above the panel, so showing them at once would cover the curtain.
    */
   const [curtainUp, setCurtainUp] = React.useState(initial.stage === "tour");
-  /** The stop whose question was just answered; it moves on after the hold. */
-  const [answeredStop, setAnsweredStop] = React.useState<number | null>(null);
+  /*
+   * A tapped language is only marked: recording it as answered would skip
+   * the language screen on a reload. Continue or a hold switches to it.
+   */
+  const [tappedLanguage, setTappedLanguage] = React.useState<Locale | null>(null);
   const { openGuided, setOpen: setSettingsOpen } = useSettingsModal();
 
   const { answers } = draft;
@@ -328,27 +320,9 @@ function IntakeSurface() {
     }));
   };
 
-  /** Move on once a picked answer has shown, unless it changes how the app looks. */
-  const landed = (question: SetupQuestion) => {
-    if (advancesOnAnswer(question)) setAnsweredStop(stopIndex);
-  };
-
-  /** Record a tour stop's answer, then move on once it has shown. */
-  const answerStop = (phase: IntakeLlmPhase, patch: Partial<IntakeAnswers> = {}) => {
-    answer(phase, patch);
-    landed(phase);
-  };
-
   /** Hand an answer to the setting Settings shows behind the card, which saves it. */
   const tellSettings = (detail: SetupSettingDetail) => {
     window.dispatchEvent(new CustomEvent(SETUP_SETTING_EVENT, { detail }));
-  };
-
-  const chooseLevel = (level: ExperienceLevel) => {
-    setDraft((prev) => ({ ...prev, answers: { ...prev.answers, level, level_chosen: true } }));
-    // Saved at once so the page behind re-renders at the new level.
-    void experience.save({ level });
-    landed("level");
   };
 
   /** Write what the user answered; an untouched setting keeps its value. */
@@ -407,39 +381,31 @@ function IntakeSurface() {
   };
 
   const goNext = () => {
-    setAnsweredStop(null);
     if (stopIndex >= stops.length - 1) void finish();
     else setStopIndex(stopIndex + 1);
   };
 
   const goBack = () => {
-    setAnsweredStop(null);
     if (stopIndex === 0) {
       setCurtainUp(false);
       setStage("language");
     } else setStopIndex(stopIndex - 1);
   };
 
-  const advanceAfterAnswer = React.useEffectEvent(() => {
-    if (answeredStop === stopIndex) goNext();
-  });
-  React.useEffect(() => {
-    if (answeredStop === null) return;
-    const timer = setTimeout(() => advanceAfterAnswer(), ANSWER_HOLD_MS);
-    return () => clearTimeout(timer);
-  }, [answeredStop]);
-
   // Back from a language switch: the panel came back down already, now it lifts off the tour.
   React.useEffect(() => {
     if (initial.resumed) setStage("tour");
   }, [initial.resumed]);
 
+  // Nothing is marked until the user picks; Continue then keeps the active language.
+  const picked =
+    tappedLanguage ??
+    (draft.answered.includes("language") && isLocale(answers.language) ? answers.language : null);
+
   // The language screen reads left to right in English, so the right arrow continues.
   const onLanguageArrow = React.useEffectEvent((event: KeyboardEvent) => {
     if (arrowStep(event, false) !== 1) return;
     event.preventDefault();
-    const picked =
-      draft.answered.includes("language") && isLocale(answers.language) ? answers.language : null;
     chooseLanguage(picked ?? locale);
   });
   React.useEffect(() => {
@@ -448,34 +414,8 @@ function IntakeSurface() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, [stage]);
-  const keepCurrent: InterviewOption = {
-    label: msg("experience.intake.chat.keep_current"),
-    description: msg("experience.intake.chat.keep_current_description"),
-  };
-
   const renderQuestion = () => {
     switch (stop.question) {
-      case "level": {
-        // Answer cards, not the Settings segmented control, whose descriptions
-        // hide in tooltips; the stop's card is wide, so they sit in a row.
-        const options = EXPERIENCE_LEVELS.map((value) => ({
-          label: msg(LEVEL_KEYS[value].label),
-          description: msg(LEVEL_KEYS[value].description),
-        }));
-        const chosen = answers.level_chosen ? EXPERIENCE_LEVELS.indexOf(answers.level) : -1;
-        return (
-          <Choices
-            options={options}
-            selected={chosen >= 0 ? options[chosen]!.label : []}
-            ariaLabel={msg("experience.level.title")}
-            className="sm:[&>div]:grid-cols-3"
-            onSelect={(_, index) => {
-              const level = EXPERIENCE_LEVELS[index];
-              if (level) chooseLevel(level);
-            }}
-          />
-        );
-      }
       case "theme": {
         // The live theme is the answer: Settings and this card share one store.
         const options = THEME_OPTIONS.map((o) => ({
@@ -492,7 +432,11 @@ function IntakeSurface() {
             onSelect={(_, index) => {
               const next = THEME_OPTIONS[index];
               if (next) setTheme(next.value);
-              landed("theme");
+            }}
+            onConfirm={(_, index) => {
+              const next = THEME_OPTIONS[index];
+              if (next) setTheme(next.value);
+              goNext();
             }}
           />
         );
@@ -504,6 +448,10 @@ function IntakeSurface() {
           description: msg(c.description),
         }));
         const current = choices.findIndex((c) => c.value === answers.billing);
+        const chooseBilling = (index: number) => {
+          const billing = choices[index]?.value ?? "platform";
+          answer("billing", billing === "byok" ? { billing } : { billing, byok_provider: null });
+        };
         return (
           <>
             <Choices
@@ -512,15 +460,13 @@ function IntakeSurface() {
                 draft.answered.includes("billing") && current >= 0 ? options[current]!.label : []
               }
               ariaLabel={msg("experience.intake.billing.title")}
-              onSelect={(_, index) => {
-                const billing = choices[index]?.value ?? "platform";
-                answerStop(
-                  "billing",
-                  billing === "byok" ? { billing } : { billing, byok_provider: null },
-                );
+              onSelect={(_, index) => chooseBilling(index)}
+              onConfirm={(_, index) => {
+                chooseBilling(index);
+                goNext();
               }}
             />
-            {/* Changes only the draft: the stop still moves on when a billing choice is picked.
+            {/* Changes only the draft, not the billing answer.
                 Local budgets check no balance, so the switch would change nothing there. */}
             {!isLocalMode() && (
               <label className="mt-3 flex items-start gap-3 text-sm">
@@ -549,50 +495,47 @@ function IntakeSurface() {
         );
       }
       case "privacy": {
-        const options: InterviewOption[] = [
-          ...PRIVACY_OPTIONS.map((o) => ({ label: msg(o.label), description: msg(o.description) })),
-          keepCurrent,
-        ];
+        const options: InterviewOption[] = PRIVACY_OPTIONS.map((o) => ({
+          label: msg(o.label),
+          description: msg(o.description),
+        }));
         const current = PRIVACY_OPTIONS.find((o) => o.value === answers.privacy);
+        const choosePrivacy = (index: number) => {
+          const privacy = PRIVACY_OPTIONS[index]?.value ?? null;
+          answer("privacy", { privacy });
+          if (privacy) tellSettings({ privacy });
+        };
         return (
           <Choices
             options={options}
-            selected={
-              draft.answered.includes("privacy")
-                ? current
-                  ? msg(current.label)
-                  : keepCurrent.label
-                : []
-            }
+            selected={draft.answered.includes("privacy") && current ? msg(current.label) : []}
             ariaLabel={msg("experience.intake.privacy.title")}
-            onSelect={(_, index) => {
-              const privacy = PRIVACY_OPTIONS[index]?.value ?? null;
-              answerStop("privacy", { privacy });
-              if (privacy) tellSettings({ privacy });
+            onSelect={(_, index) => choosePrivacy(index)}
+            onConfirm={(_, index) => {
+              choosePrivacy(index);
+              goNext();
             }}
           />
         );
       }
       case "trust": {
-        const options: InterviewOption[] = [
-          ...TRUST_OPTIONS.map((o) => ({ label: msg(o.label), description: msg(o.description) })),
-          keepCurrent,
-        ];
+        const options: InterviewOption[] = TRUST_OPTIONS.map((o) => ({
+          label: msg(o.label),
+          description: msg(o.description),
+        }));
         const current = TRUST_OPTIONS.find((o) => o.value === answers.trust);
+        const chooseTrust = (index: number) =>
+          answer("trust", { trust: TRUST_OPTIONS[index]?.value ?? null });
         return (
           <Choices
             options={options}
-            selected={
-              draft.answered.includes("trust")
-                ? current
-                  ? msg(current.label)
-                  : keepCurrent.label
-                : []
-            }
+            selected={draft.answered.includes("trust") && current ? msg(current.label) : []}
             ariaLabel={msg("experience.intake.trust.title")}
-            onSelect={(_, index) =>
-              answerStop("trust", { trust: TRUST_OPTIONS[index]?.value ?? null })
-            }
+            onSelect={(_, index) => chooseTrust(index)}
+            onConfirm={(_, index) => {
+              chooseTrust(index);
+              goNext();
+            }}
           />
         );
       }
@@ -623,9 +566,6 @@ function IntakeSurface() {
     label: LOCALE_REGISTRY[l].nativeName,
     description: LOCALE_REGISTRY[l].englishName,
   }));
-  // Nothing is marked until the user picks; Continue then keeps the active language.
-  const picked =
-    draft.answered.includes("language") && isLocale(answers.language) ? answers.language : null;
 
   return (
     <>
@@ -698,11 +638,9 @@ function IntakeSurface() {
                         transition={stepTransition}
                       >
                         <div className="relative flex">
-                          <EvolutionMorph
-                            still
-                            width={300}
-                            className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2"
-                          />
+                          <div className="absolute bottom-full left-1/2 mb-3 flex w-max -translate-x-1/2 flex-col items-center">
+                            <EvolutionMorph scene still width={300} />
+                          </div>
                           <div className="w-[min(86vw,372px)]">
                             <AnimatedWordmark fluid morphSpeed={120} />
                           </div>
@@ -783,7 +721,9 @@ function IntakeSurface() {
                               // Seventeen languages fit as a three-column grid (two on a
                               // phone, where each card shows only the language's own name).
                               className="[&>div]:grid-cols-2 sm:[&>div]:grid-cols-3 sm:[&_button]:py-2.5 max-sm:[&_[dir=auto]+[dir=auto]]:hidden [@media(min-height:860px)]:sm:[&_button]:py-3 [@media(max-height:700px)]:[&_button]:py-1.5"
-                              onSelect={(_, index) => chooseLanguage(choices[index] ?? locale)}
+                              // A tap marks the language; a hold (or Continue) switches to it.
+                              onSelect={(_, index) => setTappedLanguage(choices[index] ?? null)}
+                              onConfirm={(_, index) => chooseLanguage(choices[index] ?? locale)}
                             />
                           </section>
                           <div className="flex shrink-0 items-center gap-2">

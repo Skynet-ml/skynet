@@ -6,8 +6,8 @@ Her çalıştırma bir depoyu optimize eder. İki şekilde başlayabilirsiniz:
 
 | Başlangıç              | Ne olur                                                                                              |
 | ---------------------- | ---------------------------------------------------------------------------------------------------- |
-| Bir depo kullan        | Skynet, bağladığınız bir GitHub deposunda, izin verdiğiniz yollardaki dosyaları değiştirir.          |
-| Yeni depo oluştur  | Bir görev ve veri verirsiniz. Skynet hesabınızda yeni bir GitHub deposu oluşturur ve ilk çözümü yazar. |
+| Bir depo kullan        | Skynet, bağladığınız bir GitHub, GitLab veya Bitbucket deposunda, izin verdiğiniz yollardaki dosyaları değiştirir.          |
+| Yeni depo oluştur  | Bir görev ve veri verirsiniz. Skynet GitHub, GitLab veya Bitbucket hesabınızda yeni bir depo oluşturur ve ilk çözümü yazar. |
 
 Depodaki kod herhangi bir şey olabilir: bir uygulama, bir hizmet, bir betik veya bir kütüphane. Herhangi bir kütüphaneyi kullanabilir.
 

@@ -3,7 +3,8 @@
 Callers that read, clone or publish a repository hold a provider slug next
 to the ``owner/name`` path. This module maps the slug to the host's module
 and gives the three calls whose names differ between hosts: the token
-lookup, the commit pin and the opening of the pull or merge request.
+lookup, the commit pin, the opening of the pull or merge request and the
+creation of a new repository.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from typing import Any
 
 from ..api.errors import DomainError
 from . import bitbucket, github, gitlab
+from .github_create_repo import CreatedRepository, checked_paths, push_initial_commit
+from .github_create_repo import create_repository as github_create_repository
 from .github_publish import HardeningSummary, PublishedChange, open_pull_request
 from .github_repo import RepoFetchError
 from .github_repo import resolve_commit as github_resolve_commit
@@ -155,3 +158,39 @@ def open_change(
     return module.open_change(
         token, repository, head=head, base_branch=base_branch, title=title, body=body, hardening=hardening
     )
+
+
+def create_repository_with_files(
+    provider: str,
+    token: str,
+    name: str,
+    files: dict[str, str],
+    *,
+    private: bool,
+    description: str | None = None,
+    message: str = "Initial commit",
+) -> CreatedRepository:
+    """Create a repository on a host and push ``files`` as its first commit.
+
+    Args:
+        provider: ``github``, ``gitlab`` or ``bitbucket``.
+        token: Host token that may create repositories and push.
+        name: Repository name.
+        files: Repository-relative path to text content.
+        private: Whether only the user can see the repository.
+        description: Optional one-line description.
+        message: First commit message.
+
+    Returns:
+        The repository, its default branch and the pinned first commit.
+
+    Raises:
+        RepoCreateError: When creation or the first push fails.
+        RepoFetchError: For a slug that is not a repository host.
+    """
+    module = host(provider)
+    checked_paths(files)
+    create = github_create_repository if module is github else module.create_repository
+    full_name, branch = create(token, name, private=private, description=description)
+    commit = push_initial_commit(full_name, branch, files, message, token, provider=module.PROVIDER)
+    return CreatedRepository(full_name=full_name, default_branch=branch, commit=commit)

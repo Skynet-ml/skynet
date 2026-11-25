@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { Button } from "@/shared/ui/primitives/button";
