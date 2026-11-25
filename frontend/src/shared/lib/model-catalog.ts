@@ -178,15 +178,24 @@ const byScore = bestFirst((m) => m.intelligence_index ?? -1);
 // score breaks that tie.
 const byValue = bestFirst((m) => scorePerDollar(m) ?? -1);
 
+/** The tab's measure for one model: points per blended dollar, intelligence index, or output tokens per second. Null when the model has none. */
+export function rankMeasure(m: CatalogModel, ranking: ModelRanking): number | null {
+  if (ranking === "fastest") return m.throughput_tps || null;
+  if (ranking === "smartest") return m.intelligence_index ?? null;
+  return scorePerDollar(m);
+}
+
 /**
- * Order models for one picker tab, the best by that tab's measure first: points
- * per blended dollar, intelligence index, or output tokens per second. A model
- * without that measure is left out. Ties go to the higher score, then the name.
+ * Order models for one picker tab, the best by that tab's measure first. Ties
+ * go to the higher score, then the name. Models without the measure (BYOK
+ * routes, CLI slugs, unscored models) follow by name, so every model stays
+ * pickable.
  */
 export function rankModels(models: CatalogModel[], ranking: ModelRanking): CatalogModel[] {
-  if (ranking === "fastest") {
-    return models.filter((m) => !!m.throughput_tps).sort(bestFirst((m) => m.throughput_tps ?? 0));
-  }
-  if (ranking === "smartest") return models.filter((m) => m.intelligence_index != null).sort(byScore);
-  return models.filter((m) => scorePerDollar(m) !== null).sort(byValue);
+  const measured = models.filter((m) => rankMeasure(m, ranking) !== null);
+  const rest = models
+    .filter((m) => rankMeasure(m, ranking) === null)
+    .sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  const order = ranking === "fastest" ? bestFirst((m) => m.throughput_tps ?? 0) : ranking === "smartest" ? byScore : byValue;
+  return [...measured.sort(order), ...rest];
 }

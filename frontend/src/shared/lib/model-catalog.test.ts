@@ -41,7 +41,7 @@ function model(value: string, fields: Partial<CatalogModel> = {}): CatalogModel 
 
 const values = (models: CatalogModel[]) => models.map((m) => m.value);
 
-test("best value ranks every scored model by points per blended dollar and leaves out the rest", () => {
+test("best value ranks scored models by points per blended dollar, then lists the rest by name", () => {
   const ranked = rankModels(
     [
       model("unrated", { input_cost_per_token: 1e-6, output_cost_per_token: 1e-6 }),
@@ -52,7 +52,7 @@ test("best value ranks every scored model by points per blended dollar and leave
     ],
     "best_value",
   );
-  assert.deepEqual(values(ranked), ["cheap-mid", "beaten", "pricey-genius"]);
+  assert.deepEqual(values(ranked), ["cheap-mid", "beaten", "pricey-genius", "unpriced", "unrated"]);
 });
 
 test("best value sorts by points per dollar, not by lab", () => {
@@ -92,19 +92,23 @@ test("best value blends input and output prices 3:1, so a dear output is not hid
   assert.deepEqual(values(ranked), ["balanced", "cheap-in-dear-out"]);
 });
 
-test("best value leaves out a model without an output price", () => {
-  assert.deepEqual(rankModels([model("input-only", { intelligence_index: 40, input_cost_per_token: 1e-6 })], "best_value"), []);
+test("best value puts a model without an output price after the ranked ones", () => {
+  const models = [
+    model("input-only", { intelligence_index: 40, input_cost_per_token: 1e-6 }),
+    model("priced", { intelligence_index: 10, input_cost_per_token: 1e-6, output_cost_per_token: 1e-6 }),
+  ];
+  assert.deepEqual(values(rankModels(models, "best_value")), ["priced", "input-only"]);
 });
 
-test("smartest sorts by intelligence index and leaves out the unrated", () => {
+test("smartest sorts by intelligence index and lists the unrated last", () => {
   const ranked = rankModels(
     [model("none"), model("mid", { intelligence_index: 50 }), model("top", { intelligence_index: 70 })],
     "smartest",
   );
-  assert.deepEqual(values(ranked), ["top", "mid"]);
+  assert.deepEqual(values(ranked), ["top", "mid", "none"]);
 });
 
-test("fastest sorts by throughput and leaves out the unmeasured", () => {
+test("fastest sorts by throughput and lists the unmeasured last, by name", () => {
   const ranked = rankModels(
     [
       model("unmeasured"),
@@ -114,7 +118,7 @@ test("fastest sorts by throughput and leaves out the unmeasured", () => {
     ],
     "fastest",
   );
-  assert.deepEqual(values(ranked), ["fast", "slow"]);
+  assert.deepEqual(values(ranked), ["fast", "slow", "unmeasured", "zero"]);
 });
 
 test("ties break by score, then by name, never by catalog order", () => {
@@ -140,7 +144,10 @@ test("every tab ignores alphabetical and provider order", () => {
   assert.deepEqual(values(rankModels(models, "fastest")), ["google/b", "openai/c", "anthropic/a"]);
 });
 
-test("a tab with no scored model is empty", () => {
-  assert.deepEqual(rankModels([model("a")], "smartest"), []);
+test("a BYOK list with no scores keeps every model pickable in every tab", () => {
+  const byok = [model("openai/gpt-x"), model("anthropic/claude-y"), model("google/gemini-z")];
+  for (const tab of ["best_value", "smartest", "fastest"] as const) {
+    assert.deepEqual(values(rankModels(byok, tab)), ["anthropic/claude-y", "google/gemini-z", "openai/gpt-x"], tab);
+  }
   assert.deepEqual(rankModels([], "best_value"), []);
 });

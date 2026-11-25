@@ -28,8 +28,8 @@ import {
   cachedCatalog,
   getByokModelCatalog,
   cachedByokCatalog,
+  rankMeasure,
   rankModels,
-  scorePerDollar,
   type ModelRanking,
 } from "@/shared/lib/model-catalog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
@@ -235,10 +235,7 @@ function ModelDetailsTip({ model }: { model: CatalogModel }) {
  * index, or output tokens per second. The column header names the unit.
  */
 function RankScore({ model, ranking }: { model: CatalogModel; ranking: ModelRanking }) {
-  let value: number | null = null;
-  if (ranking === "fastest") value = model.throughput_tps || null;
-  else if (ranking === "smartest") value = model.intelligence_index ?? null;
-  else value = scorePerDollar(model);
+  const value = rankMeasure(model, ranking);
   const text =
     value == null
       ? ""
@@ -670,7 +667,11 @@ export function ModelPicker({
                 role="option"
                 aria-selected={isSelected(m)}
               >
-                <RankBadge rank={i + 1} />
+                {rankMeasure(m, ranking) === null ? (
+                  <span className="w-5 shrink-0" aria-hidden="true" />
+                ) : (
+                  <RankBadge rank={i + 1} />
+                )}
                 <ProviderLogo slug={modelProviderSlug(m.value)} size={14} />
                 <span className="flex min-w-0 flex-1 flex-col" dir="ltr">
                   <span className="flex min-w-0 items-center gap-1.5">

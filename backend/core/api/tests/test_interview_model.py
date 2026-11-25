@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from threading import Thread
+import time
 
 import pytest
 
@@ -134,7 +134,6 @@ def test_interview_model_id_runs_the_catalog_default(monkeypatch: pytest.MonkeyP
 def test_with_interview_default_flags_one_model(monkeypatch: pytest.MonkeyPatch) -> None:
     """The catalog copy marks exactly the current pick."""
     monkeypatch.setattr(interview_model, "interview_model_id", lambda: "openrouter/b")
-    monkeypatch.setattr(interview_model, "_speeds", {"openrouter/a": (100.0, 500.0)})
     catalog = ModelCatalogResponse(models=[_model("openrouter/a", 1.0), _model("openrouter/b", 1.0)], providers=[])
     flagged = interview_model.with_interview_default(catalog)
     assert [m.is_interview_default for m in flagged.models] == [False, True]
@@ -151,21 +150,17 @@ def test_with_interview_default_attaches_measured_speeds(monkeypatch: pytest.Mon
     assert (b.throughput_tps, b.ttft_ms, b.latency_ms) == (None, None, None)
 
 
-def test_with_interview_default_waits_for_the_first_measurement(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A catalog sent before any measurement waits for the first one instead of shipping no speeds."""
+def test_with_interview_default_does_not_wait_for_a_measurement_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A catalog sent while the first measurement runs ships without speeds instead of holding a request thread."""
     catalog = ModelCatalogResponse(models=[_model("openrouter/a", 1.0)], providers=[])
     monkeypatch.setattr(interview_model, "interview_model_id", lambda: "openrouter/a")
-    monkeypatch.setattr(interview_model, "catalog_snapshot", lambda: catalog)
-    monkeypatch.setattr(interview_model, "_measure", lambda models: {"openrouter/a": (120.0, 450.0)})
-    monkeypatch.setattr(interview_model, "_first_measure_done", interview_model.Event())
-    for name, value in (("_speeds", {}), ("_pick", None), ("_picked_at", 0.0), ("_measured_at", 0.0)):
-        monkeypatch.setattr(interview_model, name, value)
+    monkeypatch.setattr(interview_model, "_speeds", {})
     monkeypatch.setattr(interview_model, "_refresh_in_flight", True)
-    # The conftest keeps refreshes offline; run the real one in the background.
     monkeypatch.setattr(interview_model, "_kick_refresh", lambda: None)
-    Thread(target=interview_model._refresh, daemon=True).start()
+    started = time.monotonic()
     (a,) = interview_model.with_interview_default(catalog).models
-    assert (a.throughput_tps, a.ttft_ms) == (120.0, 450.0)
+    assert time.monotonic() - started < 1
+    assert a.throughput_tps is None
 
 
 def test_refresh_keeps_the_last_speed_of_a_model_whose_fetch_failed(monkeypatch: pytest.MonkeyPatch) -> None:

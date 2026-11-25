@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event, Lock, Thread
+from threading import Lock, Thread
 
 from ..config import settings
 from .model_catalog import (
@@ -58,8 +58,6 @@ _REPLY_TOKENS = 150
 _MIN_UPTIME_PERCENT = 99.0
 _FETCH_TIMEOUT_SECONDS = 6
 _FETCH_WORKERS = 16
-# The first catalog request waits this long for the first measurement.
-_FIRST_MEASURE_WAIT_SECONDS = 10
 
 _lock = Lock()
 _pick: str | None = None
@@ -67,7 +65,6 @@ _picked_at: float = 0.0
 _speeds: dict[str, tuple[float, float]] = {}
 _measured_at: float = 0.0
 _refresh_in_flight = False
-_first_measure_done = Event()
 
 
 def _price(model: CatalogModel) -> float:
@@ -243,7 +240,6 @@ def _refresh() -> None:
     finally:
         with _lock:
             _refresh_in_flight = False
-        _first_measure_done.set()
 
 
 def _kick_refresh() -> None:
@@ -326,13 +322,6 @@ def with_interview_default(catalog: ModelCatalogResponse) -> ModelCatalogRespons
     # picker's speeds still need one.
     if stale:
         _kick_refresh()
-    # The picker keeps its first catalog for the whole page session, so a
-    # catalog sent before the first measurement left the Fastest tab empty.
-    with _lock:
-        measuring = _refresh_in_flight
-    if not speeds and measuring and _first_measure_done.wait(_FIRST_MEASURE_WAIT_SECONDS):
-        with _lock:
-            speeds = dict(_speeds)
     models = []
     for m in catalog.models:
         speed = speeds.get(m.value)
