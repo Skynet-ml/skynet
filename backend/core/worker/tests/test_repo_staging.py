@@ -104,7 +104,7 @@ from core.service_gateway.optimization.blackbox.sandbox import (
 )
 from core.service_gateway.optimization.blackbox.sandbox_contract import UserImage
 from core.service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY, case_split_positions, legacy_case_splits
-from core.storage.models import Base, PackageRegistryPreferenceModel
+from core.storage.models import Base
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
 from core.worker import repo_staging, scoped_relay
 from core.worker.repo_gate import RepoGateError, check_hidden
@@ -223,7 +223,6 @@ def _stage_with(
     """
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {"API_KEY": "secret-value"})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
-    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
     monkeypatch.setattr(
         repo_staging,
         "fetch_snapshot",
@@ -375,44 +374,25 @@ def test_staging_keeps_drafts_on_their_own_commit_or_with_no_base(
     staged.cleanup()
 
 
-def test_the_saved_index_is_the_account_setting_or_pypi() -> None:
-    """An account with no saved index installs from PyPI; a saved one replaces it."""
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine, tables=[PackageRegistryPreferenceModel.__table__])  # type: ignore[list-item]
-    with Session(engine) as session:
-        session.add(PackageRegistryPreferenceModel(username="bob", index_url="https://pkgs.example.com/simple"))
-        session.commit()
-
-    assert repo_staging.saved_index_url(engine, "alice") == "https://pypi.org/simple"
-    assert repo_staging.saved_index_url(engine, "bob") == "https://pkgs.example.com/simple"
-
-
 @pytest.mark.parametrize(
-    ("proposer", "index_url", "hosts"),
+    ("proposer", "hosts"),
     [
-        ("", "https://pypi.org/simple", list(PROPOSER_REGISTRY_HOSTS)),
-        ("\n[proposer]\nnetwork = []\n", "https://pypi.org/simple", []),
-        (
-            '\n[proposer]\nnetwork = ["docs.python.org"]\n',
-            "https://pypi.org/simple",
-            sorted({*PROPOSER_REGISTRY_HOSTS, "docs.python.org"}),
-        ),
-        ("", "https://pkgs.example.com/simple", ["pkgs.example.com", "registry.npmjs.org"]),
+        ("", list(PROPOSER_REGISTRY_HOSTS)),
+        ("\n[proposer]\nnetwork = []\n", []),
+        ('\n[proposer]\nnetwork = ["docs.python.org"]\n', sorted({*PROPOSER_REGISTRY_HOSTS, "docs.python.org"})),
     ],
 )
 def test_staging_records_the_hosts_the_proposer_box_reaches(
-    proposer: str, index_url: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
+    proposer: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57).
+    """The snapshot and the record both carry the proposer's effective hosts (E57).
 
     Args:
         proposer: The ``[proposer]`` table of the file.
-        index_url: The saved package index URL.
         hosts: The hosts the proposer box must reach.
         monkeypatch: Pytest monkeypatch.
     """
     files = {**_FILES, "ascent.toml": _CONSTRAINTS + _RUN + proposer}
-    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: index_url)
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
     monkeypatch.setattr(
@@ -1144,7 +1124,6 @@ def test_staging_pins_the_commit_and_keeps_secrets_in_the_parent(
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
     monkeypatch.setattr(repo_staging, "resolve_commit", lambda token, repository, branch: "a" * 40)
     monkeypatch.setattr(repo_staging, "fetch_snapshot", fetch)
-    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
     original = _payload(commit)
 
     staged_payload, staged = repo_staging.stage_repository(original, username="alice", binding_id="b", engine=None)
@@ -1219,7 +1198,6 @@ def test_staging_reads_a_public_repository_without_a_connection(monkeypatch: pyt
     monkeypatch.setattr(repo_staging, "github_token", _no_connection)
     monkeypatch.setattr(repo_staging, "resolve_commit", resolve)
     monkeypatch.setattr(repo_staging, "fetch_snapshot", fetch)
-    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
 
     staged_payload, staged = repo_staging.stage_repository(
         _payload(None), username="alice", binding_id="b", engine=None
@@ -1387,7 +1365,6 @@ def test_staging_uses_the_gitlab_connection_and_falls_back_without_one(monkeypat
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging.repo_hosts, "resolve_commit", resolve)
     monkeypatch.setattr(repo_staging, "fetch_snapshot", fetch)
-    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
     payload = _payload(None)
     payload["target"]["repo"]["provider"] = "gitlab"
 

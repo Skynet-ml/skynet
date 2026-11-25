@@ -9,7 +9,7 @@
   "app.shell.search.kw.security": "segurança dois fatores autenticador códigos de recuperação chaves de acesso códigos por e-mail login security 2FA TOTP recovery passkey login",
   "app.shell.search.kw.tagging": "marcação rotulagem rótulos assistida por IA marcação automática modelo predefinido tagging labels autotag model",
   "app.shell.search.kw.usage": "uso gastos custo dólares gastos tokens execuções por modelo atividade usage spend cost tokens",
-  "app.shell.search.kw.wizard": "otimização assistente geração de código conjunto de dados divisão registo de pacotes modelos optimization wizard split package registry pip models",
+  "app.shell.search.kw.wizard": "otimização assistente geração de código conjunto de dados divisão modelos optimization wizard split pip models",
   "common.empty": "—",
   "optimizations.duration.lt_0_1s": "<0.1s",
   "optimizations.duration.seconds": "{value}s",

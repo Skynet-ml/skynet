@@ -96,7 +96,6 @@ from ..storage.models import (
     NotificationPreferenceModel,
     OptimizationShareGrantModel,
     OptimizationShareLinkModel,
-    PackageRegistryPreferenceModel,
     PushSubscriptionModel,
     SetupBillingPreferenceModel,
     SetupDraftModel,
@@ -225,7 +224,6 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
             },
         }
 
-    registry_row = session.get(PackageRegistryPreferenceModel, username)
     privacy_row = session.get(ModelPrivacyPreferenceModel, username)
     setup_billing_row = session.get(SetupBillingPreferenceModel, username)
     engine_row = session.get(AgentEnginePreferenceModel, username)
@@ -543,7 +541,6 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         "model_privacy": {"data_policy": privacy_row.data_policy if privacy_row is not None else "deny"},
         "setup_billing": {"from_wallet": setup_billing_row.from_wallet if setup_billing_row is not None else True},
         "agent_engine": {"engine": engine_row.engine if engine_row is not None else None},
-        "package_registry": {"index_url": registry_row.index_url if registry_row else "https://pypi.org/simple"},
     }
 
 
@@ -772,8 +769,6 @@ def delete_account(
     _run_delete(delete(ModelPrivacyPreferenceModel).where(ModelPrivacyPreferenceModel.username == username))
     _run_delete(delete(SetupBillingPreferenceModel).where(SetupBillingPreferenceModel.username == username))
     _run_delete(delete(AgentEnginePreferenceModel).where(AgentEnginePreferenceModel.username == username))
-
-    _run_delete(delete(PackageRegistryPreferenceModel).where(PackageRegistryPreferenceModel.username == username))
 
     tombstone = _deletion_tombstone(username)
     _run_anonymize(update(TelemetryEventModel).where(TelemetryEventModel.username == username).values(username=None))

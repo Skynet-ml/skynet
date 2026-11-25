@@ -1111,37 +1111,6 @@ export function checkAscentToml(text: string, signal?: AbortSignal) {
   }>("/wizard/ascent-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
 }
 
-export interface PackageRegistryPreference {
-  index_url: string;
-}
-
-export function getPackageRegistry() {
-  return request<PackageRegistryPreference>("/account/package-registry");
-}
-
-export function updatePackageRegistry(indexUrl: string) {
-  return request<PackageRegistryPreference>("/account/package-registry", {
-    method: "PUT",
-    body: JSON.stringify({ index_url: indexUrl }),
-  });
-}
-
-export interface PackageRegistryCheckResult {
-  ok: boolean;
-  /** Stable outcome slug the UI maps to a message (e.g. "healthy", "not_an_index"). */
-  reason: string;
-  /** HTTP status of the probe, when a response arrived — names the exact failure. */
-  status_code: number | null;
-}
-
-/** Probe a candidate index for reachability without persisting it. */
-export function checkPackageRegistry(indexUrl: string) {
-  return request<PackageRegistryCheckResult>("/account/package-registry/check", {
-    method: "POST",
-    body: JSON.stringify({ index_url: indexUrl }),
-  });
-}
-
 export type NotificationEventType =
   | "budget_near"
   | "failed"

@@ -1386,7 +1386,7 @@ catch the failure in the program, as above, and let the metric score it.
 | --- | --- |
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `ascent.toml` itself is always protected and hidden. |
-| `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
+| `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: `pypi.org`, `files.pythonhosted.org` and `registry.npmjs.org`. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
 | `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. Only a single AutoResearch or Meta-Harness run can use it today; every other run refuses it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[metric] setup` | Runs once in the metric setup box, in the folder of the metric files, with package-registry network and no secrets. No version file is in that box. A failure stops the run before the first version. |
@@ -1554,14 +1554,14 @@ mcp = "eval/.mcp.json"
   - two servers with `headers` use one host;
   - a server with no `headers` uses the host of a server with `headers`;
   - the proposer's network reaches that host: a `[proposer] network` entry,
-    a package registry or the account's saved package index. A suffix entry
-    such as `*.example.com` counts when it matches the host, and also when
-    the host is `example.com` itself.
+    or a package registry. A suffix entry such as `*.example.com` counts
+    when it matches the host, and also when the host is `example.com`
+    itself.
 
   The check ignores case and a trailing dot, so `MCP.example.com.` is
   `mcp.example.com`. To fix it, give each server with `headers` its own
   host, or remove its `headers`, or remove the host from `[proposer]
-  network` or the saved package index.
+  network`.
 - The run, not the repository, says where each user secret may go. Each
   secret in `target.repo.secrets` has `allowed_hosts`: up to 20 entries, each
   an exact host (`api.example.com`) or a suffix (`*.example.com`, which

@@ -16,7 +16,7 @@
   "app.shell.search.kw.storage": "storage files space quota usage delete cleanup",
   "app.shell.search.kw.tagging": "tagging labelling labeling AI-assisted autotag default tagging model",
   "app.shell.search.kw.usage": "usage spend cost dollars spent tokens runs by model activity",
-  "app.shell.search.kw.wizard": "optimisation optimization wizard code generation dataset split package registry pip models",
+  "app.shell.search.kw.wizard": "optimisation optimization wizard code generation dataset split pip models",
   "app.submit.title": "New Optimization",
   "auth.login.meta_description": "Sign in to {term.appName}, a code-optimisation platform",
   "auto.app.submit.layout.template.1": "Start a new optimisation of your code — choose {p1}, upload {p2}, and improve performance",
