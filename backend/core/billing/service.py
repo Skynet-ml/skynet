@@ -1527,8 +1527,8 @@ class StripeBillingService:
             reason: Why the check needs the money.
             approval: The approval text for this grant, logged as given.
             idempotency_key: Caller key; a repeated key credits nothing.
-            named_account: Skip the test-account shape check, for a named
-                account that Gilad approved in chat.
+            named_account: Skip the test-account shape check, because the
+                caller found the account with :meth:`account_for_email_sha256`.
 
         Returns:
             The credited cents, the new balance, and whether the key was a replay.
@@ -1598,7 +1598,7 @@ class StripeBillingService:
         The deployment guards run first, so no other database is ever read.
 
         Args:
-            digest: 64 lowercase hex characters.
+            digest: 64 hex characters, in any case.
 
         Returns:
             The account email.

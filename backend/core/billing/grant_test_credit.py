@@ -2,8 +2,9 @@
 
 Agents run this command through ECS RunTask on the staging migrate task, which
 has ``APP_ENVIRONMENT`` and ``REMOTE_DB_URL``. The grant goes through
-:meth:`StripeBillingService.grant_test_credit`, so every guard (environment,
-test account, approval text, $50 UTC-day cap, idempotency) applies. Amounts
+:meth:`StripeBillingService.grant_test_credit`, so its guards (environment,
+approval text, $50 UTC-day cap, idempotency) apply. The test-account shape
+check applies only to ``--account-id``. Amounts
 are in dollars on the command line and in the output. The output never prints
 the account email. A named account is given as the SHA-256 of its lowercased
 email, so the email stays out of the ECS command too.

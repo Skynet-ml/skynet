@@ -199,9 +199,10 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
 
 - For a named account, replace `"--account-id", $id` with
   `"--account-sha256", $id` and set `ACCOUNT_ID` to the hash, for example
-  `printf %s "$EMAIL" | tr A-Z a-z | shasum -a 256 | cut -c1-64`. Never print
-  or log the email, and never put it in the key. Use the first 12 hex
-  characters of the hash in the key, for example `<12 hex>-1`.
+  `python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].strip().lower().encode()).hexdigest())' "$EMAIL"`.
+  This matches the command's own hash. Never print or log the email or the
+  hash, and never put either in the key. Use a key such as
+  `named-<YYYYMMDD>-1`.
 - For a check account, set `ACCOUNT_ID` to the id `account.py` printed.
   Set `DOLLARS` to the amount, `REASON` to the check, `APPROVAL` to who asked
   for the grant, and `KEY` to a new key.
@@ -216,9 +217,9 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
 - Exit code `2` with usage text and no `Grant refused:` means a missing or
   bad argument. Fix the command line; nothing was written.
 - Record the grant (account id, dollars, key) on the Linear issue. For a
-  named account, record only the first 12 hex characters of the hash. The
-  repository is public, and anyone who can guess the email can check a full
-  hash.
+  named account, write "named account" instead of the id, and record no part
+  of the hash. Anyone who can guess the email can check a hash or a prefix
+  of it.
 
 ### Authentication changes
 
