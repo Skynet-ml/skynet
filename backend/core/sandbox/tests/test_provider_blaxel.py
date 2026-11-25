@@ -68,6 +68,21 @@ class FakeCreationTimeoutError(FakeSandboxAPIError):
         super().__init__(408)
 
 
+class FakeUnexpectedStatusError(Exception):
+    """Stand in for ``blaxel.core.client.errors.UnexpectedStatus``, which is not a ``SandboxAPIError``."""
+
+    def __init__(self, status_code: int, code: str | None = None) -> None:
+        """Keep the HTTP status and the code that the SDK parses from the body.
+
+        Args:
+            status_code: The HTTP status that the create endpoint does not model.
+            code: The Blaxel error code from the body, or ``None``.
+        """
+        super().__init__(f"Unexpected HTTP status {status_code}")
+        self.status_code = status_code
+        self.code = code
+
+
 class FakeResponseError(Exception):
     """Stand in for ``blaxel.core.ResponseError``."""
 
@@ -360,6 +375,7 @@ def fake_blaxel(monkeypatch: pytest.MonkeyPatch) -> FakeBlaxel:
     monkeypatch.setattr(blaxel_provider, "SandboxAPIError", FakeSandboxAPIError)
     monkeypatch.setattr(blaxel_provider, "SandboxCreationTimeoutError", FakeCreationTimeoutError)
     monkeypatch.setattr(blaxel_provider, "ResponseError", FakeResponseError)
+    monkeypatch.setattr(blaxel_provider, "UnexpectedStatus", FakeUnexpectedStatusError)
     monkeypatch.setattr(blaxel_provider, "get_credentials", lambda: SimpleNamespace(workspace="ws"))
     monkeypatch.setattr(blaxel_provider, "_JOB_BOXES", {})
     return sdk
@@ -678,13 +694,18 @@ async def test_protected_box_reserves_before_the_create_and_settles_after_the_de
     ("error", "get_error", "absent"),
     [
         (FakeSandboxAPIError(400), None, True),
-        (FakeSandboxAPIError(402), None, True),
+        (FakeSandboxAPIError(401), None, True),
+        (FakeSandboxAPIError(403), None, True),
+        (FakeUnexpectedStatusError(402), None, True),
+        (FakeUnexpectedStatusError(404), None, True),
+        (FakeUnexpectedStatusError(413), None, True),
+        (FakeUnexpectedStatusError(422), None, True),
         (FakeSandboxAPIError(400), FakeSandboxAPIError(500), False),
-        (FakeSandboxAPIError(503, "AUTHENTICATION_UNAVAILABLE"), None, True),
-        (FakeSandboxAPIError(503, "AUTHENTICATION_UNAVAILABLE"), FakeSandboxAPIError(500), False),
-        (FakeSandboxAPIError(503), None, False),
+        (FakeUnexpectedStatusError(503, "AUTHENTICATION_UNAVAILABLE"), None, True),
+        (FakeUnexpectedStatusError(503, "AUTHENTICATION_UNAVAILABLE"), FakeSandboxAPIError(500), False),
+        (FakeUnexpectedStatusError(503), None, False),
         (FakeSandboxAPIError(409), None, False),
-        (FakeSandboxAPIError(429), None, False),
+        (FakeUnexpectedStatusError(429), None, False),
         (FakeSandboxAPIError(500), None, False),
         (FakeCreationTimeoutError(), None, False),
         (RuntimeError("connection reset"), None, False),
@@ -713,7 +734,9 @@ async def test_failed_create_releases_only_when_no_box_can_exist(
     assert env.usage is None
 
 
-@pytest.mark.parametrize("error", [FakeSandboxAPIError(400), FakeSandboxAPIError(503, "AUTHENTICATION_UNAVAILABLE")])
+@pytest.mark.parametrize(
+    "error", [FakeSandboxAPIError(400), FakeUnexpectedStatusError(503, "AUTHENTICATION_UNAVAILABLE")]
+)
 async def test_box_that_a_failed_create_made_is_deleted_and_settled(fake_blaxel: FakeBlaxel, error: Exception) -> None:
     """Delete and settle, not release, a box that the lookup finds after a refused create.
 
@@ -724,7 +747,7 @@ async def test_box_that_a_failed_create_made_is_deleted_and_settled(fake_blaxel:
     fake_blaxel.create_error = error
     fake_blaxel.create_error_makes_box = True
     env, budget = _protected()
-    with pytest.raises(FakeSandboxAPIError):
+    with pytest.raises(type(error)):
         await env.start()
     (usage,) = budget.reservations
     assert fake_blaxel.only_box().deleted
@@ -1103,7 +1126,8 @@ async def test_real_hold_over_run_settles_at_the_hold(
     ("error", "get_error", "state"),
     [
         (FakeSandboxAPIError(400), None, "released"),
-        (FakeSandboxAPIError(400), FakeSandboxAPIError(503), "pending"),
+        (FakeSandboxAPIError(400), FakeUnexpectedStatusError(503), "pending"),
+        (FakeUnexpectedStatusError(422), None, "released"),
         (FakeSandboxAPIError(500), None, "pending"),
         (FakeCreationTimeoutError(), None, "pending"),
     ],

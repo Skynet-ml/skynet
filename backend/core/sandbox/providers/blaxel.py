@@ -52,12 +52,14 @@ try:
         SandboxInstance,
         get_credentials,
     )
+    from blaxel.core.client.errors import UnexpectedStatus
 except ImportError:
     ResponseError = None
     SandboxAPIError = None
     SandboxCreationTimeoutError = None
     SandboxInstance = None
     get_credentials = None
+    UnexpectedStatus = None
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,8 @@ _CREATE_TIMEOUT_SEC = 50
 # record from ``get`` for about 5 minutes after the delete, not a 404.
 _GONE_STATUSES = frozenset({"DELETING", "TERMINATED"})
 # The Blaxel create docs (SDK 0.4.28) list these statuses as answers that make
-# no box. 409 and 429 are left out: 409 means the unique name already has a
+# no box. The create models only 400, 401, 403, 409 and 500 as a
+# SandboxAPIError; any other status comes as an UnexpectedStatus. 409 and 429 are left out: 409 means the unique name already has a
 # box, and a 429 says nothing about an earlier attempt. A
 # SandboxCreationTimeoutError (408) is left out too: the docs say the control
 # plane releases its box, but not whether that box was billed. A refused
@@ -458,14 +461,13 @@ class BlaxelEnvironment(SandboxEnvironment):
         Returns:
             The create config with the funded ttl. The SDK adds ``BL_REGION``.
         """
-        config: dict[str, Any] = {
+        return {
             "name": name,
             "image": self.spec.image or DEFAULT_IMAGE,
             "memory": self._memory_mb,
             # Blaxel deletes the box at its ttl, so the funded lifetime bounds the box.
             "ttl": f"{self._ttl_sec}s",
         }
-        return config
 
     async def _create(self, name: str, usage: Any | None) -> Any:
         """Create one sandbox, and confirm it to the usage reservation.
@@ -542,9 +544,11 @@ def _status_code(error: BaseException | None) -> int | None:
         error: The error, or ``None``.
 
     Returns:
-        The status, or ``None`` when the error is not a ``SandboxAPIError``.
+        The status, or ``None`` when the error is not a ``SandboxAPIError``
+        or an ``UnexpectedStatus``.
     """
-    if SandboxAPIError is None or not isinstance(error, SandboxAPIError):
+    api_errors = tuple(cls for cls in (SandboxAPIError, UnexpectedStatus) if cls is not None)
+    if not api_errors or not isinstance(error, api_errors):
         return None
     return getattr(error, "status_code", None)
 
@@ -556,12 +560,14 @@ def _refused(error: BaseException | None) -> bool:
         error: The create error.
 
     Returns:
-        True for a ``SandboxAPIError`` with a refused status that is not a
-        creation timeout, or a 503 with code ``AUTHENTICATION_UNAVAILABLE``.
+        True for a ``SandboxAPIError`` or ``UnexpectedStatus`` with a refused
+        status that is not a creation timeout, or a 503 whose body code is
+        ``AUTHENTICATION_UNAVAILABLE``.
     """
     if SandboxCreationTimeoutError is not None and isinstance(error, SandboxCreationTimeoutError):
         return False
     status = _status_code(error)
+    # The SDK reads ``code`` the same way: BlaxelError parses it from the body.
     if (status, getattr(error, "code", None)) == _AUTH_UNAVAILABLE:
         return True
     return status in _REFUSED_CREATE_STATUSES
