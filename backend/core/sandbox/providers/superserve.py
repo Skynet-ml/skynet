@@ -291,8 +291,8 @@ async def _find_boxes(attempt: str | None) -> tuple[list[Any], bool] | None:
         attempt: The attempt label of the create.
 
     Returns:
-        The live boxes and whether a failed box was found, or ``None`` when
-        the lookup or the kill of a failed box failed.
+        The live boxes and whether a failed box was found, also when its
+        kill failed, or ``None`` when the lookup failed.
     """
     if attempt is None:
         return None
@@ -306,8 +306,7 @@ async def _find_boxes(attempt: str | None) -> tuple[list[Any], bool] | None:
     for box in boxes:
         status = getattr(box.status, "value", box.status)
         if status == "failed":
-            if not await _bounded(AsyncSandbox.kill_by_id(box.id), "kill a failed box of a failed create"):
-                return None
+            await _bounded(AsyncSandbox.kill_by_id(box.id), "kill a failed box of a failed create")
             failed = True
         elif status != "deleted":
             live.append(box)

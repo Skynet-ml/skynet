@@ -814,6 +814,56 @@ async def test_lookup_ignores_boxes_that_are_not_running(
     assert usage.calls[-1] == ("fail", absent and status is FakeStatus.DELETED)
 
 
+@pytest.mark.parametrize("failed_first", [True, False])
+async def test_failed_kill_of_a_failed_box_keeps_the_live_box(sdk: FakeSuperserve, failed_first: bool) -> None:
+    """Bind, kill and settle the live box of a lookup, also when the kill of its failed box fails.
+
+    Args:
+        sdk: The fake SDK.
+        failed_first: Whether the lookup lists the failed box before the live box.
+    """
+    usage = FakeUsage()
+    sdk.create_error = FakeSDKError("conflict", 409)
+    sdk.create_makes_box = True
+    listing = sdk.AsyncSandbox.list
+    killing = sdk.AsyncSandbox.kill_by_id
+
+    async def list_two_boxes(*, metadata: dict[str, str]) -> list[FakeBox]:
+        """Add a second box with the same attempt label, fail one of them, then list.
+
+        Args:
+            metadata: The pairs to match.
+
+        Returns:
+            The matching boxes.
+        """
+        sdk.boxes.append(FakeBox(sdk, {"metadata": dict(sdk.boxes[0].metadata)}))
+        sdk.boxes[0 if failed_first else 1].status = FakeStatus.FAILED
+        return await listing(metadata=metadata)
+
+    async def kill_all_but_the_failed_box(sandbox_id: str) -> None:
+        """Fail the kill of the failed box, and kill other boxes.
+
+        Args:
+            sandbox_id: The box id.
+
+        Raises:
+            FakeSDKError: When the box is the failed box.
+        """
+        if sandbox_id == failed_id:
+            raise FakeSDKError("down", 503)
+        await killing(sandbox_id)
+
+    failed_id, live_id = ("sbx-1", "sbx-2") if failed_first else ("sbx-2", "sbx-1")
+    sdk.AsyncSandbox.list = list_two_boxes
+    sdk.AsyncSandbox.kill_by_id = kill_all_but_the_failed_box
+    with pytest.raises(SandboxInfraError):
+        await _protected(usage).start()
+    assert sdk.killed == [live_id]
+    assert usage.calls[1] == ("bind", live_id)
+    assert usage.names() == ["sent", "bind", "stopped", "settle"]
+
+
 async def test_failed_lookup_keeps_a_refused_hold_pending(sdk: FakeSuperserve) -> None:
     """Keep the hold pending when the lookup after a refused create fails."""
     usage = FakeUsage()
