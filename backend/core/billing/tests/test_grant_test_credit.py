@@ -9,6 +9,7 @@ and a PostgreSQL-only test proves that lock blocks a grant on another account.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Iterator
@@ -681,3 +682,79 @@ def test_cli_hides_a_database_error_and_exits_1(
     captured = capsys.readouterr()
     assert captured.err.strip() == "Grant failed: OperationalError"
     assert "@" not in captured.err + captured.out
+
+
+NAMED_EMAIL = "owner@example.com"
+NAMED_SHA256 = hashlib.sha256(NAMED_EMAIL.encode()).hexdigest()
+
+
+def test_named_account_is_found_by_its_email_sha256_and_granted(engine: Engine, staging: None) -> None:
+    """A named account found by its email hash gets the grant and the other guards still run."""
+    _add_user(engine, NAMED_EMAIL)
+    service = StripeBillingService(engine=engine)
+    username = service.account_for_email_sha256(NAMED_SHA256.upper())
+    assert username == NAMED_EMAIL
+    result = service.grant_test_credit(
+        username, 500, reason="r", approval="Gilad approved $5", idempotency_key="n1", named_account=True
+    )
+    assert result.credited_cents == 500
+    assert _balance(engine, NAMED_EMAIL) == 500
+
+
+def test_named_account_without_the_flag_is_still_refused(engine: Engine, staging: None) -> None:
+    """The test-account shape check stays on unless the caller resolved a named account."""
+    _add_user(engine, NAMED_EMAIL)
+    with pytest.raises(GrantRefusedError, match="test account"):
+        StripeBillingService(engine=engine).grant_test_credit(
+            NAMED_EMAIL, 500, reason="r", approval="a", idempotency_key="n2"
+        )
+    assert _ledger(engine) == []
+
+
+@pytest.mark.parametrize("digest", ["0" * 64, "abc", "g" * 64, ""])
+def test_unknown_or_malformed_email_sha256_is_refused(engine: Engine, staging: None, digest: str) -> None:
+    """A hash that is malformed or matches no account is refused."""
+    _add_user(engine, NAMED_EMAIL)
+    with pytest.raises(GrantRefusedError, match="sha256"):
+        StripeBillingService(engine=engine).account_for_email_sha256(digest)
+
+
+def test_email_sha256_lookup_checks_the_deployment_before_reading_users(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside staging the lookup refuses before any query, so another database is never read."""
+    monkeypatch.setattr(settings, "app_environment", "production")
+    no_tables = create_engine("sqlite:///:memory:")
+    with pytest.raises(GrantRefusedError, match="APP_ENVIRONMENT"):
+        StripeBillingService(engine=no_tables).account_for_email_sha256(NAMED_SHA256)
+
+
+def test_email_sha256_lookup_checks_the_database_before_reading_users(
+    staging: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a non-staging database the lookup refuses before any query."""
+    monkeypatch.setattr(billing_service, "_is_staging_database", lambda _url: False)
+    no_tables = create_engine("sqlite:///:memory:")
+    with pytest.raises(GrantRefusedError, match="staging database"):
+        StripeBillingService(engine=no_tables).account_for_email_sha256(NAMED_SHA256)
+
+
+def test_cli_grants_a_named_account_and_prints_no_email_or_hash(
+    engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command grants by email hash and prints neither the email nor the hash."""
+    _add_user(engine, NAMED_EMAIL)
+    monkeypatch.setattr("core.billing.grant_test_credit._engine", lambda: engine)
+    argv = ["--account-sha256", NAMED_SHA256, "--dollars", "5", "--reason", "r", "--approval", "a"]
+    assert main([*argv, "--idempotency-key", "cli-n"]) == 0
+    out = capsys.readouterr().out
+    assert out.strip() == "Granted $5.00 to a named account. Balance: $5.00. Key: cli-n."
+    assert NAMED_SHA256[:12] not in out
+    assert "@" not in out
+    assert _balance(engine, NAMED_EMAIL) == 500
+
+
+def test_cli_refuses_both_account_flags() -> None:
+    """The account id and the email hash are mutually exclusive."""
+    argv = ["--account-id", STAGING_ID, "--account-sha256", NAMED_SHA256, "--dollars", "1"]
+    with pytest.raises(SystemExit) as exit_info:
+        main([*argv, "--reason", "r", "--approval", "a", "--idempotency-key", "k"])
+    assert exit_info.value.code == 2
