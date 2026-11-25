@@ -66,6 +66,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     ),
     "runta": ProviderEntry("core.sandbox.providers.runta", "RuntaEnvironment", "runta", False),
     "superserve": ProviderEntry("core.sandbox.providers.superserve", "SuperserveEnvironment", "superserve", False),
+    "hf_sandbox": ProviderEntry("core.sandbox.providers.hf_sandbox", "HfSandboxEnvironment", "hf_sandbox", False),
     "singularity": ProviderEntry("core.sandbox.providers.singularity", "SingularityEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
 }

@@ -156,6 +156,7 @@ def test_registry_lists_every_provider() -> None:
         "e2b",
         "ec2",
         "gke",
+        "hf_sandbox",
         "hyperbrowser",
         "kata",
         "kernel",
