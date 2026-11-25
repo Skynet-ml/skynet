@@ -35,9 +35,8 @@ import { cn } from "@/shared/lib/utils";
 import type { ModelConfig, CatalogModel } from "@/shared/types/api";
 import { HelpTip } from "@/shared/ui/help-tip";
 import { tip } from "@/shared/lib/tooltips";
-import { TERMS } from "@/shared/lib/terms";
 import { msg } from "@/shared/lib/messages";
-import { defaultOpen, isVisible, useExperienceLevel } from "@/features/experience";
+import { defaultOpen, useExperienceLevel } from "@/features/experience";
 
 interface ModelConfigModalProps {
   open: boolean;
@@ -175,7 +174,6 @@ export function ModelConfigModal({
   const paramsFirstOpen = defaultOpen("wizard.model_params", level);
   const hasParams = (c: ModelConfig) =>
     c.temperature != null || c.max_tokens != null || !!c.extra?.reasoning_effort;
-  const showParameters = isVisible("wizard.model_params", level) || hasParams(config);
   const localMode = isLocalMode() && !remote;
   const byokOnly = localMode && byokOnlyLocally;
   const [draft, setDraft] = React.useState<ModelConfig>(() =>

@@ -8,7 +8,6 @@ import {
   ArrowRight,
   BookOpen,
   CaretDown,
-  DownloadSimple,
   Globe,
   Plug,
 } from "@/shared/ui/icons";

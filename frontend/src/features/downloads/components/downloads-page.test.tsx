@@ -30,8 +30,6 @@ const { DownloadsPage } = await jiti.import<{ DownloadsPage: React.ComponentType
   "./downloads-page",
 );
 
-const DMG = "https://github.com/Skynet-ml/skynet/releases/latest/download/Skynet-";
-
 function render(locale: Locale = "en") {
   return renderToStaticMarkup(
     <LocaleProvider initialLocale={locale}>
