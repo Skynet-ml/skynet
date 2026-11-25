@@ -39,7 +39,7 @@ Skynet は Optimize Anything です。すべての実行はリポジトリを最
 - **名前**: 新しいリポジトリの名前。ホスト上のあなたのアカウントに、同じ名前のリポジトリがあってはいけません。
 - **非公開** または **公開**: ホスト上でリポジトリを見られる人。
 
-GitHub では、Skynet は各候補を、それぞれのブランチにプッシュします。`skynet/best` ブランチは最も良いバージョンを指します。GitLab と Bitbucket では、実行は既存のリポジトリを使う実行と同じように終わります。
+GitHub では、Skynet は各候補を、それぞれのブランチにプッシュします。`skynet/best` ブランチは最も良いバージョンを指します。GitLab と Bitbucket では、Skynet は最も良いバージョンで merge request（Bitbucket では pull request）を開きます。
 
 ## ステップ 2: 入力
 

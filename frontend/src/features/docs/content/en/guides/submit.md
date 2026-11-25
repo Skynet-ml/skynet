@@ -39,7 +39,7 @@ Set these fields:
 - **Name**: the name of the new repository. Your account on the host must not already have a repository with this name.
 - **Private** or **Public**: who can see the repository on the host.
 
-On GitHub, Skynet pushes each candidate to its own branch. The `skynet/best` branch points at the best version. On GitLab and Bitbucket, the run ends in the same way as a run on a repository that you use.
+On GitHub, Skynet pushes each candidate to its own branch. The `skynet/best` branch points at the best version. On GitLab and Bitbucket, Skynet opens a merge request (Bitbucket: pull request) with the best version.
 
 ## Step 2: Inputs
 

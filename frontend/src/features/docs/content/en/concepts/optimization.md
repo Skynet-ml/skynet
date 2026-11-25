@@ -90,7 +90,7 @@ Auto reads the feedback text from your scorer.
 
 | Your situation                       | Use                                                                                  |
 | ------------------------------------ | ------------------------------------------------------------------------------------ |
-| You have code in a GitHub repository | **Use a repository**. The code at the branch or commit that you pick is the start.   |
+| You have code in a GitHub, GitLab or Bitbucket repository | **Use a repository**. The code at the branch or commit that you pick is the start.   |
 | You have only a task and data        | **Create a new repository**. Skynet writes a first solution. That is the start.      |
 
 > [!WARNING]

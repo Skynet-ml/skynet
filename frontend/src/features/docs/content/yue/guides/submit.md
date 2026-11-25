@@ -39,7 +39,7 @@ Skynet 就係 Optimize Anything：每次運行都會最佳化一個倉庫。喺�
 - **名稱**：新倉庫嘅名稱。你喺託管平台嘅帳戶唔可以已經有同名嘅倉庫。
 - **私人** 或者 **公開**：邊個可以喺託管平台睇到呢個倉庫。
 
-喺 GitHub 上面，Skynet 會將每個候選版本推去佢自己嘅分支。`skynet/best` 分支指住最佳版本。喺 GitLab 同 Bitbucket 上面，運行嘅結束方式同用現有倉庫嘅運行一樣。
+喺 GitHub 上面，Skynet 會將每個候選版本推去佢自己嘅分支。`skynet/best` 分支指住最佳版本。喺 GitLab 同 Bitbucket 上面，Skynet 會用最佳版本開一個 merge request（Bitbucket 係 pull request）。
 
 ## 步驟 2：輸入
 

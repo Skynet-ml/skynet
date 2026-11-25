@@ -39,7 +39,7 @@ Rellena estos campos:
 - **Nombre**: el nombre del repositorio nuevo. Tu cuenta en el host no debe tener ya un repositorio con este nombre.
 - **Privado** o **Público**: quién puede ver el repositorio en el host.
 
-En GitHub, Skynet sube cada candidato a su propia rama. La rama `skynet/best` apunta a la mejor versión. En GitLab y Bitbucket, la ejecución termina igual que una ejecución en un repositorio que usas.
+En GitHub, Skynet sube cada candidato a su propia rama. La rama `skynet/best` apunta a la mejor versión. En GitLab y Bitbucket, Skynet abre un merge request (Bitbucket: pull request) con la mejor versión.
 
 ## Paso 2: Entradas
 

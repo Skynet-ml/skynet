@@ -90,7 +90,7 @@ Auto liest den Feedback-Text Ihres Scorers.
 
 | Ihre Situation                                 | Verwenden Sie                                                                                      |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Sie haben Code in einem GitHub-Repository      | **Repository verwenden**. Der Code im gewählten Branch oder Commit ist der Ausgangspunkt.      |
+| Sie haben Code in einem GitHub-, GitLab- oder Bitbucket-Repository      | **Repository verwenden**. Der Code im gewählten Branch oder Commit ist der Ausgangspunkt.      |
 | Sie haben nur eine Aufgabe und Daten           | **Neues Repository erstellen**. Skynet schreibt eine erste Lösung. Das ist der Ausgangspunkt.  |
 
 > [!WARNING]
