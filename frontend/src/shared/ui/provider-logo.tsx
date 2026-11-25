@@ -55,7 +55,7 @@ function loadLogo(slug: string): Promise<LoadedLogo> {
         if (!response.ok) return null;
         const svg = await response.text();
         const blob = new Blob([svg], { type: "image/svg+xml" });
-        return { url: URL.createObjectURL(blob), mono: /^<svg data-tone="mono"/.test(svg) };
+        return { url: URL.createObjectURL(blob), mono: /<svg data-tone="mono"/.test(svg) };
       })
       .catch(() => null);
     logoRequests.set(slug, request);

@@ -80,6 +80,7 @@ def test_color_icon_is_served_as_is_with_safe_headers_and_cached() -> None:
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Record the URL and serve the color icon."""
         seen.append(str(request.url))
         return _svg(COLOR_SVG)
 
@@ -101,6 +102,7 @@ def test_mono_icon_is_tagged_for_the_text_color() -> None:
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Record the icon name and serve only the one-color icon."""
         seen.append(request.url.path.rsplit("/", 1)[-1])
         return httpx.Response(404) if request.url.path.endswith("-color.svg") else _svg(MONO_SVG)
 
@@ -113,6 +115,7 @@ def test_thinking_machines_uses_the_local_mark_without_a_fetch() -> None:
     """Draw Thinking Machines from its local one-color mark."""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Fail the test on any fetch."""
         raise AssertionError(f"unexpected fetch of {request.url}")
 
     body = _app(LabLogoCache(_client_factory(handler))).get("/models/logos/thinkingmachines").content
@@ -125,6 +128,7 @@ def test_invalid_slug_is_404_without_any_fetch(slug: str) -> None:
     """Fetch nothing for a malformed slug or a lab the catalog does not know."""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Fail the test on any fetch."""
         raise AssertionError(f"unexpected fetch of {request.url}")
 
     assert _app(LabLogoCache(_client_factory(handler))).get(f"/models/logos/{slug}").status_code == 404
@@ -144,6 +148,7 @@ def test_bad_icon_responses_are_404_and_cached(response: httpx.Response) -> None
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Record the call and return the bad response."""
         calls.append(request.url.path)
         return response
 
