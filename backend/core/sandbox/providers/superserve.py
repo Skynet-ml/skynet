@@ -277,19 +277,22 @@ async def _kill_and_settle(sandbox_id: str, usage: Any | None, handle: Any | Non
         await asyncio.to_thread(usage.settle)
 
 
-async def _find_boxes(attempt: str | None) -> list[Any] | None:
+async def _find_boxes(attempt: str | None) -> tuple[list[Any], bool] | None:
     """Look up the boxes that a create attempt made.
 
     A box in status ``failed`` or ``deleted`` is not running or is gone, so
-    it does not count: it is never bound or settled. The SDK does not say
-    that Superserve deletes a failed box or stops billing its disk, so a
-    failed box gets a best-effort kill.
+    it is never bound or settled. The SDK does not say that Superserve
+    deletes a failed box or stops billing its disk, so a failed box gets a
+    best-effort kill, and it still shows that the create made a box. The SDK
+    does not say that a deleted box can still bill, so a deleted box is
+    ignored and gets no kill.
 
     Args:
         attempt: The attempt label of the create.
 
     Returns:
-        The live boxes, or ``None`` when the lookup failed.
+        The live boxes and whether a failed box was found, or ``None`` when
+        the lookup or the kill of a failed box failed.
     """
     if attempt is None:
         return None
@@ -299,13 +302,16 @@ async def _find_boxes(attempt: str | None) -> list[Any] | None:
         logger.exception("Could not look up a Superserve box after a failed create; its hold stays pending.")
         return None
     live = []
+    failed = False
     for box in boxes:
         status = getattr(box.status, "value", box.status)
         if status == "failed":
-            await _bounded(AsyncSandbox.kill_by_id(box.id), "kill a failed box of a failed create")
+            if not await _bounded(AsyncSandbox.kill_by_id(box.id), "kill a failed box of a failed create"):
+                return None
+            failed = True
         elif status != "deleted":
             live.append(box)
-    return live
+    return live, failed
 
 
 async def _fail_usage(usage: Any | None, refused: bool = False) -> None:
@@ -314,7 +320,8 @@ async def _fail_usage(usage: Any | None, refused: bool = False) -> None:
     A sent create may still have made a box. A lookup by the attempt label
     finds it, and the box is killed and settled. The hold is released only
     when the create was never sent, or when Superserve refused it and the
-    lookup found no box. A failed lookup keeps the hold pending.
+    lookup found no box, failed or live. A failed lookup keeps the hold
+    pending.
 
     Args:
         usage: The usage reservation, or ``None``.
@@ -324,7 +331,8 @@ async def _fail_usage(usage: Any | None, refused: bool = False) -> None:
         return
     absent = False
     if usage.sent_at is not None and usage.sandbox_id is None:
-        found = await _find_boxes(usage.attempt)
+        lookup = await _find_boxes(usage.attempt)
+        found = lookup[0] if lookup is not None else []
         if found:
             try:
                 await asyncio.to_thread(usage.bind, found[0].id)
@@ -337,7 +345,7 @@ async def _fail_usage(usage: Any | None, refused: bool = False) -> None:
             except Exception:
                 logger.exception("Could not stop a Superserve box that a failed create made.")
             return
-        absent = refused and found == []
+        absent = refused and lookup == ([], False)
     try:
         await asyncio.to_thread(usage.fail, absent)
     except Exception:

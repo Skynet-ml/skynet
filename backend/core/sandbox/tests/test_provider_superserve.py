@@ -765,16 +765,17 @@ async def test_unknown_create_keeps_the_hold_pending(sdk: FakeSuperserve, error:
 async def test_lookup_ignores_boxes_that_are_not_running(
     sdk: FakeSuperserve, status: FakeStatus, status_code: int, absent: bool, kill_fails: bool
 ) -> None:
-    """Treat a failed or deleted box like no box, and kill only a failed box, best effort.
+    """Never bind a failed or deleted box, and kill only a failed box, best effort.
 
-    The box is never bound or settled, and the hold is released only on a
-    refusal, also when the kill of a failed box fails.
+    A deleted box counts as no box, so a refusal releases the hold. A failed
+    box shows that the create made a box, so the hold stays pending, also
+    when its kill fails and the outcome is unknown.
 
     Args:
         sdk: The fake SDK.
         status: The status of the box that the lookup finds.
         status_code: The status of the create error.
-        absent: Whether the hold is released as absent.
+        absent: Whether a refusal with no box releases the hold as absent.
         kill_fails: Whether the best-effort kill fails.
     """
     usage = FakeUsage()
@@ -810,7 +811,7 @@ async def test_lookup_ignores_boxes_that_are_not_running(
     assert sdk.killed == ([] if kill_fails else ["sbx-1"] if expected_kills else [])
     assert not sdk.handle_kills
     assert usage.names() == ["sent", "fail"]
-    assert usage.calls[-1] == ("fail", absent)
+    assert usage.calls[-1] == ("fail", absent and status is FakeStatus.DELETED)
 
 
 async def test_failed_lookup_keeps_a_refused_hold_pending(sdk: FakeSuperserve) -> None:
