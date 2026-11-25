@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "المحادثة طويلة جدًا بالنسبة لنافذة سياق النموذج — ابدأ محادثة جديدة أو اختصر رسالتك",
   "agent.error.capacity": "النموذج مشغول الآن.",
   "agent.error.insufficient_funds": "رصيدك منخفض جدًا، أضف رصيدًا للمتابعة.",
+  "agent.error.provider_quota": "نفد الرصيد في حساب مزوّد النموذج أو بلغ حد الإنفاق. تحقق من الحساب لدى مزوّد النموذج.",
   "agent.parallel.background_count": "المحادثات قيد التشغيل في الخلفية: {p1}",
   "agent.parallel.busy_indicator": "محادثة قيد التشغيل في الخلفية",
   "agent.web_chat.tag": "الويب",

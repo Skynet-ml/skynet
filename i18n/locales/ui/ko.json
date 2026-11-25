@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "대화가 모델의 컨텍스트 길이를 초과했습니다 — 새 채팅을 시작하거나 메시지를 줄여주세요",
   "agent.error.capacity": "지금은 모델이 혼잡합니다.",
   "agent.error.insufficient_funds": "잔액이 부족합니다. 계속하려면 충전하세요.",
+  "agent.error.provider_quota": "모델 제공업체 계정의 크레딧이 소진되었거나 지출 한도에 도달했습니다. 모델 제공업체에서 계정을 확인하세요.",
   "agent.parallel.background_count": "백그라운드에서 실행 중인 채팅: {p1}",
   "agent.parallel.busy_indicator": "채팅이 백그라운드에서 실행 중입니다",
   "agent.web_chat.tag": "웹",

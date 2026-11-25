@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "会話がモデルのコンテキストウィンドウの上限を超えています — 新しいチャットを開始するか、メッセージを短くしてください",
   "agent.error.capacity": "モデルは現在混み合っています。",
   "agent.error.insufficient_funds": "残高が不足しています。続けるには入金してください。",
+  "agent.error.provider_quota": "モデルプロバイダーのアカウントのクレジットが不足しているか、利用上限に達しました。モデルプロバイダーでアカウントを確認してください。",
   "agent.parallel.background_count": "バックグラウンドで実行中のチャット: {p1}",
   "agent.parallel.busy_indicator": "バックグラウンドでチャットを実行中",
   "agent.web_chat.tag": "ウェブ",

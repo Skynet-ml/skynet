@@ -62,7 +62,6 @@ from ...brand import APP_NAME
 from ...config import settings
 from ...constants import TOKEN_SOURCE_BYOK
 from ...exceptions import ServiceError
-from ...i18n_keys import I18nKey
 from ...local.cli_catalog import CliProvider
 from ...local.managed_models import HOSTED_INFERENCE_KEY
 from ...models import ModelConfig
@@ -3793,9 +3792,7 @@ async def _drive_generalist_agent(
         screen = wizard_state.get("wizard_screen") if "wizard_screen" in wizard_state else None
         dspy_tools = [
             _wrap_tool_with_approval(
-                note_sample_language(
-                    scope_wizard_tool(tool_from_mcp(session, spec), wizard_state), reply_language
-                ),
+                note_sample_language(scope_wizard_tool(tool_from_mcp(session, spec), wizard_state), reply_language),
                 trust_mode=trust_mode,
                 registry=registry,
                 emit=emit,
@@ -4012,11 +4009,12 @@ def _is_spent_quota(exc: BaseException) -> bool:
     return False
 
 
-# A BYOK key out of credits gets the same code as an empty Skynet wallet, so
-# the chat shows one message and its Add funds button. The relay's managed
-# refusal (``managed_funds_exhausted``) is the platform's problem, not the
-# user's, so it is not in this list.
+# A BYOK key or provider account out of credits gets its own code, not the
+# Skynet wallet's: adding Skynet funds does not fix it (Gilad, 2026-11-25).
+# The relay's managed refusal (``managed_funds_exhausted``) is the platform's
+# problem, not the user's, so it is not in this list.
 _SPENT_FUNDS_PATTERNS = (*_QUOTA_PATTERNS, BYOK_FUNDS_EXHAUSTED, "insufficient credits")
+PROVIDER_QUOTA_CODE = "provider_quota"
 
 
 def _turn_error_payload(exc: BaseException) -> dict[str, str]:
@@ -4026,14 +4024,14 @@ def _turn_error_payload(exc: BaseException) -> dict[str, str]:
         exc: The exception that ended the turn.
 
     Returns:
-        The agent error payload. A spent quota or credit gets the wallet's
-        ``billing.insufficient_funds`` code. A capacity failure without
+        The agent error payload. A spent provider quota or credit gets
+        ``code="provider_quota"``. A capacity failure without
         another code gets ``code="capacity"``, so the chat counts down and
         retries.
     """
     payload = _agent_error_payload(exc)
     if "code" not in payload and _is_spent_quota(exc):
-        payload["code"] = I18nKey.BILLING_INSUFFICIENT_FUNDS.value
+        payload["code"] = PROVIDER_QUOTA_CODE
     elif "code" not in payload and _is_capacity_error(exc):
         payload["code"] = "capacity"
     return payload

@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "बातचीत मॉडल के कॉन्टेक्स्ट विंडो के लिए बहुत लंबी है — नई चैट शुरू करें या अपना संदेश छोटा करें",
   "agent.error.capacity": "मॉडल अभी व्यस्त है।",
   "agent.error.insufficient_funds": "आपका बैलेंस बहुत कम है, जारी रखने के लिए पैसे जोड़ें।",
+  "agent.error.provider_quota": "मॉडल प्रदाता खाते में क्रेडिट खत्म हो गया है या खर्च सीमा पूरी हो गई है। अपने मॉडल प्रदाता के पास खाता जांचें।",
   "agent.parallel.background_count": "बैकग्राउंड में चल रही चैट: {p1}",
   "agent.parallel.busy_indicator": "बैकग्राउंड में चैट चल रही है",
   "agent.web_chat.tag": "वेब",

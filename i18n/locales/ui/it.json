@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "La conversazione è troppo lunga per la finestra di contesto del modello — avvia una nuova chat o accorcia il messaggio",
   "agent.error.capacity": "Il modello è occupato al momento.",
   "agent.error.insufficient_funds": "Il tuo saldo è troppo basso, aggiungi fondi per continuare.",
+  "agent.error.provider_quota": "L'account del fornitore del modello ha esaurito i crediti o ha raggiunto il limite di spesa. Controlla l'account presso il fornitore del modello.",
   "agent.parallel.background_count": "Chat in esecuzione in background: {p1}",
   "agent.parallel.busy_indicator": "Chat in esecuzione in background",
   "agent.web_chat.tag": "Web",

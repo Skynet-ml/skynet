@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "Konuşma, modelin bağlam penceresi için çok uzun — yeni bir sohbet başlatın veya mesajınızı kısaltın",
   "agent.error.capacity": "Model şu anda meşgul.",
   "agent.error.insufficient_funds": "Bakiyeniz çok düşük, devam etmek için bakiye ekleyin.",
+  "agent.error.provider_quota": "Model sağlayıcı hesabının kredisi bitti veya harcama sınırına ulaştı. Hesabı model sağlayıcınızda kontrol edin.",
   "agent.parallel.background_count": "Arka planda çalışan sohbetler: {p1}",
   "agent.parallel.busy_indicator": "Sohbet arka planda çalışıyor",
   "agent.web_chat.tag": "Web",

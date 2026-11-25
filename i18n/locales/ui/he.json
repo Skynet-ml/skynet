@@ -144,6 +144,7 @@
   "agent.error.context_too_long": "השיחה ארוכה מדי עבור חלון ההקשר של המודל — התחילו שיחה חדשה או קצרו את ההודעה",
   "agent.error.capacity": "המודל עמוס כרגע.",
   "agent.error.insufficient_funds": "היתרה שלכם נמוכה מדי, הוסיפו כסף כדי להמשיך.",
+  "agent.error.provider_quota": "בחשבון אצל ספק המודל נגמר הקרדיט או שהוא הגיע למגבלת ההוצאה. בדקו את החשבון אצל ספק המודל.",
   "agent.model_menu.auto": "אוטומטי",
   "agent.model_menu.effort_default": "ברירת מחדל",
   "agent.model_menu.effort_default_hint": "רמת ברירת המחדל של המודל",

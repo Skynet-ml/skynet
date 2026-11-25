@@ -144,6 +144,7 @@
   "agent.error.context_too_long": "The conversation is too long for the model's context window — start a new chat or shorten your message",
   "agent.error.capacity": "The model is busy right now.",
   "agent.error.insufficient_funds": "Your balance is too low, add funds to continue.",
+  "agent.error.provider_quota": "The model provider account is out of credits or reached its spend limit. Check the account with your model provider.",
   "agent.model_menu.auto": "Auto",
   "agent.model_menu.effort_default": "Default",
   "agent.model_menu.effort_default_hint": "The model's default level",

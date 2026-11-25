@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "对话长度已超出模型的上下文窗口限制——请开启新对话或缩短消息内容",
   "agent.error.capacity": "模型当前繁忙。",
   "agent.error.insufficient_funds": "你的余额不足，请充值后继续。",
+  "agent.error.provider_quota": "模型提供商账户的额度已用完或已达到消费上限。请在模型提供商处检查账户。",
   "agent.parallel.background_count": "后台运行的对话：{p1}",
   "agent.parallel.busy_indicator": "对话正在后台运行",
   "agent.web_chat.tag": "网页",

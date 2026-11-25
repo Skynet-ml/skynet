@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "Die Unterhaltung ist zu lang für das Kontextfenster des Modells — starten Sie einen neuen Chat oder kürzen Sie Ihre Nachricht",
   "agent.error.capacity": "Das Modell ist gerade ausgelastet.",
   "agent.error.insufficient_funds": "Ihr Guthaben ist zu niedrig, laden Sie Guthaben auf.",
+  "agent.error.provider_quota": "Das Konto beim Modellanbieter hat kein Guthaben mehr oder hat sein Ausgabenlimit erreicht. Prüfen Sie das Konto beim Modellanbieter.",
   "agent.parallel.background_count": "Im Hintergrund laufende Chats: {p1}",
   "agent.parallel.busy_indicator": "Chat läuft im Hintergrund",
   "agent.web_chat.tag": "Web",

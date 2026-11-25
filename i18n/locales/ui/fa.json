@@ -990,6 +990,7 @@
   "agent.error.context_too_long": "گفتگو برای پنجره زمینه مدل بیش از حد طولانی است — گفتگوی جدیدی شروع کنید یا پیام خود را کوتاه‌تر کنید",
   "agent.error.capacity": "مدل در حال حاضر مشغول است.",
   "agent.error.insufficient_funds": "موجودی شما خیلی کم است، برای ادامه موجودی اضافه کنید.",
+  "agent.error.provider_quota": "اعتبار حساب ارائه‌دهنده مدل تمام شده یا به سقف هزینه رسیده است. حساب را نزد ارائه‌دهنده مدل بررسی کنید.",
   "agent.parallel.background_count": "گفتگوهای در حال اجرا در پس‌زمینه: {p1}",
   "agent.parallel.busy_indicator": "گفتگو در پس‌زمینه در حال اجرا است",
   "agent.web_chat.tag": "وب",

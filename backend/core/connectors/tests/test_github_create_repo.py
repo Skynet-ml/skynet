@@ -66,6 +66,7 @@ def _github(monkeypatch: pytest.MonkeyPatch, *, taken: bool | None = None) -> li
     sent: list[dict[str, Any]] = []
 
     def fake_request(method: str, url: str, *, json: dict[str, Any], **_: Any) -> httpx.Response:
+        """Record the create body and accept or refuse the create."""
         assert (method, url) == ("POST", "https://api.github.com/user/repos")
         sent.append(json)
         if taken is not None:
@@ -73,6 +74,7 @@ def _github(monkeypatch: pytest.MonkeyPatch, *, taken: bool | None = None) -> li
         return httpx.Response(201, json={"full_name": f"ada/{json['name']}", "default_branch": "main"})
 
     def fake_get_json(url: str, **_: Any) -> dict[str, Any]:
+        """Answer the user lookup and the repository lookup."""
         if url == "https://api.github.com/user":
             return {"login": "ada"}
         assert url == "https://api.github.com/repos/ada/starter"
@@ -141,6 +143,7 @@ def test_existing_repository_lookup_raises_when_github_fails(monkeypatch: pytest
     """A GitHub outage raises instead of reporting the name as free."""
 
     def fake_get_json(url: str, **_: Any) -> dict[str, Any]:
+        """Answer the user lookup and fail the repository lookup."""
         if url == "https://api.github.com/user":
             return {"login": "ada"}
         raise DomainError("connectors.provider_error", status=502, provider="GitHub", status_code=500)

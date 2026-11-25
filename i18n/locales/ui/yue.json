@@ -1016,6 +1016,7 @@
   "agent.error.context_too_long": "對話長度超出咗模型嘅上下文上限 — 請開啟新對話或縮短你嘅訊息",
   "agent.error.capacity": "模型而家好繁忙。",
   "agent.error.insufficient_funds": "你嘅餘額太少，請充值再繼續。",
+  "agent.error.provider_quota": "模型供應商帳戶嘅額度用晒，或者已經到咗消費上限。請去模型供應商度檢查帳戶。",
   "agent.model_menu.auto": "自動",
   "agent.model_menu.effort_default": "預設",
   "agent.model_menu.effort_default_hint": "模型嘅預設級別",
