@@ -18,6 +18,7 @@ import { JobsStreamProvider } from "@/shared/hooks/use-jobs-stream";
 import { PageContainer } from "@/shared/layout/page-container";
 import { MobileShell } from "@/shared/layout/mobile-shell";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
+import { BalanceChip } from "@/features/billing";
 import { NotificationBell } from "@/features/notifications";
 import { ResourceModeSwitch } from "@/shared/ui/resource-mode-switch";
 import {
@@ -209,6 +210,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-1.5" dir={dir}>
+          <BalanceChip />
           <ResourceModeSwitch />
           <NotificationBell />
           <Button

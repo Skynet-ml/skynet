@@ -276,8 +276,10 @@ def test_an_invalid_ascent_toml_holds_the_metric_screen() -> None:
     bad = WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml="version = 2")
     assert _screen_problems("metric", bad) == [
         "ascent.toml is not valid: ascent.toml: version 2 is not supported; use version = 1. (line 1)",
-        "ascent.toml is not valid: ascent.toml: the metric cannot score a version with no output. Add a [run] "
-        "section or a [target.<name>] stage whose outputs the metric scores.",
+        (
+            "ascent.toml is not valid: ascent.toml: the metric cannot score a version with no output. Add a [run] "
+            "section or a [target.<name>] stage whose outputs the metric scores."
+        ),
     ]
     assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml=_VALID_TOML)) == []
     assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml="  ")) == []
