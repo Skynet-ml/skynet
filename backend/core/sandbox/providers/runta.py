@@ -259,7 +259,9 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
     delete settles, as in the teardown. Each duplicate that the lookup could
     not delete gets one more delete after the runtime deletes. A failed
     lookup, a failed delete or a duplicate that is left keeps the hold
-    pending with the runtime name as evidence.
+    pending with the runtime name as evidence. No box handle is left after
+    this task, so no job sweep retries a failed lookup. This edge is rare and
+    accepted: the hold stays pending and its evidence names the runtime.
 
     Args:
         create: The create task.
@@ -297,6 +299,9 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
             if usage is not None:
                 await asyncio.to_thread(usage.pending)
             raise UsagePendingError("A late Runta runtime did not delete, so its hold stays pending.")
+        # Stop the clock before the duplicate retries, so their wait is not billed.
+        if usage is not None:
+            usage.stopped()
         for stray in list(strays):
             if await _bounded(stray.delete(), "delete a duplicate runtime"):
                 strays.remove(stray)
@@ -306,7 +311,6 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
             if strays:
                 raise SandboxInfraError(f"The duplicate Runta runtime {strays[0].id} of {name} did not delete.")
             return
-        usage.stopped()
         if strays:
             await asyncio.to_thread(usage.pending)
             raise UsagePendingError("A duplicate of a late Runta runtime did not delete, so its hold stays pending.")
@@ -875,6 +879,7 @@ class RuntaEnvironment(SandboxEnvironment):
         if runtime is None and self._sent:
             runtime = await self._find_failed_create()
             if runtime is None:
+                self._forget()
                 self._usage = None
                 if usage is not None:
                     await asyncio.to_thread(usage.fail, _refused_create(self._create_error))
@@ -955,11 +960,15 @@ class RuntaEnvironment(SandboxEnvironment):
             The SDK handle of the runtime, or ``None`` when Runta lists no runtime with the name.
 
         Raises:
-            UsagePendingError: The lookup failed, so the hold stays pending.
+            UsagePendingError: The lookup failed, so the hold stays pending
+                and the box stays listed under its job for a later sweep.
         """
         try:
             found, strays = await _list_named(self._client, self._name, self._usage)
         except Exception as error:
+            # List the box under its job, so a later job sweep runs the lookup again.
+            if self._job_id is not None:
+                _JOB_BOXES.setdefault(self._job_id, set()).add(self)
             try:
                 if self._usage is not None:
                     await asyncio.to_thread(self._usage.pending)

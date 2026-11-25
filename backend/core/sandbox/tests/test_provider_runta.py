@@ -1436,7 +1436,9 @@ async def test_a_late_duplicate_is_deleted_again_and_the_hold_settles(
     fake_sdk.create_gate.set()
     await _late_tasks_done()
     assert all(box.deleted for box in fake_sdk.boxes)
-    assert usage.names() == ["reserve", "sent", "pending", "stray", "confirm", "stray_gone", "stopped", "settle"]
+    assert usage.names() == ["reserve", "sent", "pending", "stray", "confirm", "stopped", "stray_gone", "settle"]
+    # The clock stops while the duplicate still runs, so its retry is not billed.
+    assert ("stopped", [True, False]) in usage.calls
 
 
 async def test_a_late_duplicate_that_does_not_delete_keeps_the_hold(
@@ -1530,3 +1532,42 @@ async def test_a_job_sweep_counts_a_deleted_runtime_once(fake_sdk: FakeCloud) ->
     assert await RuntaEnvironment.stop_job_sandboxes("job-sweep") == 0
     assert not duplicate.deleted
     assert made[0].names()[-1] == "pending"
+
+
+async def test_a_job_sweep_retries_a_failed_lookup_and_settles(fake_sdk: FakeCloud) -> None:
+    """List a box under its job when its lookup fails, so a later sweep finds, deletes and settles it.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.list_error = FakeApiError(503)
+    env, made = _protected(tags={JOB_TAG: "job-lookup"})
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    with pytest.raises(UsagePendingError, match="could not list"):
+        await env.stop()
+    assert not env._deleted
+    fake_sdk.list_error = None
+    assert await RuntaEnvironment.stop_job_sandboxes("job-lookup") == 1
+    assert fake_sdk.boxes[0].deleted
+    assert made[0].names()[-2:] == ["stopped", "settle"]
+    assert "job-lookup" not in runta._JOB_BOXES
+
+
+async def test_a_job_sweep_forgets_a_box_whose_retried_lookup_finds_nothing(fake_sdk: FakeCloud) -> None:
+    """Release the hold and drop the box from its job when the retried lookup finds no runtime.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.list_error = FakeApiError(503)
+    env, made = _protected(tags={JOB_TAG: "job-empty"})
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    fake_sdk.list_error = None
+    assert await RuntaEnvironment.stop_job_sandboxes("job-empty") == 0
+    assert made[0].names()[-1] == "fail"
+    assert "job-empty" not in runta._JOB_BOXES
