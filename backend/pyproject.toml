@@ -235,6 +235,13 @@ superserve = [
     # came in 0.12.0); the funded-size check needs both to see a box that can grow.
     "superserve>=0.13.0,<0.15",
 ]
+hf_sandbox = [
+    # Hugging Face Sandbox provider (SKY-942). Imported lazily by
+    # core.sandbox.providers.hf_sandbox; the default legacy backend never needs it.
+    # Harbor's hf_sandbox uses huggingface_hub.Sandbox, which first ships in 1.22.0.
+    # The <2 cap keeps transformers 5.10.1 and tokenizers 0.22.2 in the lock, which need hub <2.
+    "huggingface-hub>=1.22,<2",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
