@@ -39,7 +39,7 @@ Skynet은 Optimize Anything입니다. 모든 실행은 리포지토리를 최적
 - **이름**: 새 리포지토리의 이름입니다. 호스트의 계정에 같은 이름의 리포지토리가 이미 있으면 안 됩니다.
 - **비공개** 또는 **공개**: 호스트에서 리포지토리를 볼 수 있는 사람.
 
-GitHub에서는 Skynet이 각 후보를 별도 브랜치에 푸시합니다. `skynet/best` 브랜치는 가장 좋은 버전을 가리킵니다. GitLab과 Bitbucket에서는 Skynet이 가장 좋은 버전으로 merge request(Bitbucket: pull request)를 엽니다.
+GitHub에서는 Skynet이 각 후보를 별도 브랜치에 푸시합니다. `skynet/best` 브랜치는 가장 좋은 버전을 가리킵니다. GitLab과 Bitbucket에서는 가장 좋은 버전이 시작 버전보다 나을 때 Skynet이 그 버전으로 초안 merge request(Bitbucket: pull request)를 엽니다.
 
 ## 2단계: 입력
 

@@ -39,7 +39,7 @@ Renseignez ces champs :
 - **Nom** : le nom du nouveau dépôt. Votre compte sur l'hébergeur ne doit pas déjà avoir un dépôt de ce nom.
 - **Privé** ou **Public** : qui peut voir le dépôt sur l'hébergeur.
 
-Sur GitHub, Skynet pousse chaque candidat sur sa propre branche. La branche `skynet/best` pointe vers la meilleure version. Sur GitLab et Bitbucket, Skynet ouvre une merge request (Bitbucket : pull request) avec la meilleure version.
+Sur GitHub, Skynet pousse chaque candidat sur sa propre branche. La branche `skynet/best` pointe vers la meilleure version. Sur GitLab et Bitbucket, Skynet ouvre une merge request en brouillon (Bitbucket : pull request) avec la meilleure version quand elle bat la version de départ.
 
 ## Étape 2 : Entrées
 

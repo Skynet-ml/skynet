@@ -39,7 +39,7 @@ Skynet همان Optimize Anything است: هر اجرا یک مخزن را به�
 - **نام**: نام مخزن جدید. حساب شما در میزبان نباید از قبل مخزنی با این نام داشته باشد.
 - **خصوصی** یا **عمومی**: چه کسانی می‌توانند مخزن را در میزبان ببینند.
 
-در GitHub، Skynet هر نامزد را به شاخهٔ خودش push می‌کند. شاخهٔ `skynet/best` به بهترین نسخه اشاره می‌کند. در GitLab و Bitbucket، Skynet یک merge request (در Bitbucket: pull request) با بهترین نسخه باز می‌کند.
+در GitHub، Skynet هر نامزد را به شاخهٔ خودش push می‌کند. شاخهٔ `skynet/best` به بهترین نسخه اشاره می‌کند. در GitLab و Bitbucket، وقتی بهترین نسخه از نسخهٔ شروع بهتر باشد، Skynet یک merge request پیش‌نویس (در Bitbucket: pull request) با آن باز می‌کند.
 
 ## مرحلهٔ 2: ورودی‌ها
 

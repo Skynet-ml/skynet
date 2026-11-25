@@ -39,7 +39,7 @@ Başlamadan önce GitHub, GitLab veya Bitbucket'ı **Ayarlar → Bağlayıcılar
 - **Ad**: yeni deponun adı. Barındırıcıdaki hesabınızda bu adda bir depo zaten olmamalıdır.
 - **Özel** veya **Herkese açık**: depoyu barındırıcıda kimin görebileceği.
 
-GitHub'da Skynet her adayı kendi dalına gönderir. `skynet/best` dalı en iyi sürümü gösterir. GitLab ve Bitbucket'ta Skynet, en iyi sürümle bir merge request (Bitbucket'ta pull request) açar.
+GitHub'da Skynet her adayı kendi dalına gönderir. `skynet/best` dalı en iyi sürümü gösterir. GitLab ve Bitbucket'ta en iyi sürüm başlangıç sürümünü geçtiğinde Skynet, bu sürümle taslak bir merge request (Bitbucket'ta pull request) açar.
 
 ## 2. adım: Girdiler
 

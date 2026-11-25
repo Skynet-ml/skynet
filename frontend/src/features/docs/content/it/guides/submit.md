@@ -39,7 +39,7 @@ Imposta questi campi:
 - **Nome**: il nome del nuovo repository. Il tuo account sull'host non deve avere già un repository con questo nome.
 - **Privato** o **Pubblico**: chi può vedere il repository sull'host.
 
-Su GitHub, Skynet invia ogni candidato a un proprio branch. Il branch `skynet/best` punta alla versione migliore. Su GitLab e Bitbucket, Skynet apre una merge request (Bitbucket: pull request) con la versione migliore.
+Su GitHub, Skynet invia ogni candidato a un proprio branch. Il branch `skynet/best` punta alla versione migliore. Su GitLab e Bitbucket, Skynet apre una merge request in bozza (Bitbucket: pull request) con la versione migliore quando supera la versione iniziale.
 
 ## Passaggio 2: Input
 

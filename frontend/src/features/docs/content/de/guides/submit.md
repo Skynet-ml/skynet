@@ -39,7 +39,7 @@ Legen Sie diese Felder fest:
 - **Name**: der Name des neuen Repositorys. Ihr Konto beim Host darf noch kein Repository mit diesem Namen haben.
 - **Privat** oder **Öffentlich**: wer das Repository beim Host sehen kann.
 
-Auf GitHub pusht Skynet jeden Kandidaten auf einen eigenen Branch. Der Branch `skynet/best` zeigt auf die beste Version. Auf GitLab und Bitbucket öffnet Skynet einen Merge Request (Bitbucket: Pull Request) mit der besten Version.
+Auf GitHub pusht Skynet jeden Kandidaten auf einen eigenen Branch. Der Branch `skynet/best` zeigt auf die beste Version. Auf GitLab und Bitbucket öffnet Skynet einen Draft-Merge-Request (Bitbucket: Pull Request) mit der besten Version, wenn sie die Startversion übertrifft.
 
 ## Schritt 2: Eingaben
 

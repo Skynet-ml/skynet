@@ -39,7 +39,7 @@ Skynet הוא Optimize Anything: כל ריצה מייעלת מאגר קוד. ב�
 - **שם**: השם של המאגר החדש. בחשבון שלך אצל המארח לא יכול להיות כבר מאגר בשם הזה.
 - **פרטי** או **ציבורי**: מי יכול לראות את המאגר אצל המארח.
 
-ב-GitHub, ‏Skynet דוחף כל מועמד לענף משלו. הענף `skynet/best` מצביע על הגרסה הטובה ביותר. ב-GitLab וב-Bitbucket, ‏Skynet פותח merge request (ב-Bitbucket: pull request) עם הגרסה הטובה ביותר.
+ב-GitHub, ‏Skynet דוחף כל מועמד לענף משלו. הענף `skynet/best` מצביע על הגרסה הטובה ביותר. ב-GitLab וב-Bitbucket, ‏Skynet פותח טיוטת merge request (ב-Bitbucket: pull request) עם הגרסה הטובה ביותר, כשהיא טובה מגרסת ההתחלה.
 
 ## שלב 2: קלטים
 
