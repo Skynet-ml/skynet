@@ -88,6 +88,8 @@ class FakeCloud:
     create_calls: int = 0
     create_error: BaseException | None = None
     create_makes_box: bool = False
+    # Extra runtimes with the same name that a failed create also makes.
+    create_duplicates: int = 0
     create_gate: asyncio.Event | None = None
     create_started: asyncio.Event = field(default_factory=asyncio.Event)
     ready_error: BaseException | None = None
@@ -340,7 +342,8 @@ class FakeRuntimes:
         params = {"name": name, **params}
         if CLOUD.create_error is not None:
             if CLOUD.create_makes_box:
-                CLOUD.make_box(params)
+                for _ in range(1 + CLOUD.create_duplicates):
+                    CLOUD.make_box(params)
             raise CLOUD.create_error
         return FakeRuntime(CLOUD.make_box(params))
 
@@ -498,6 +501,14 @@ class FakeUsage:
         if self.confirm_error is not None:
             raise self.confirm_error
         self.runtime_id = handle.id
+
+    def keep_stray(self, runtime_id: str) -> None:
+        """Record a duplicate runtime that did not delete.
+
+        Args:
+            runtime_id: The id of the duplicate runtime.
+        """
+        self.calls.append(("stray", runtime_id))
 
     def stopped(self) -> None:
         """Record the end of the clock, with the box state at that time."""
@@ -948,6 +959,25 @@ async def test_a_failed_create_that_made_a_box_is_deleted_and_settled(fake_sdk: 
         await env.start()
     assert made[0].names() == ["reserve", "sent", "confirm", "stopped", "settle"]
     assert fake_sdk.boxes[0].deleted
+
+
+async def test_a_duplicate_that_does_not_delete_is_kept_in_the_hold(fake_sdk: FakeCloud) -> None:
+    """Record a duplicate runtime whose delete fails, so the hold keeps its id.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    fake_sdk.create_error = FakeApiError(422)
+    fake_sdk.create_makes_box = True
+    fake_sdk.create_duplicates = 1
+    fake_sdk.delete_fails = 1
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    first, duplicate = fake_sdk.boxes
+    assert first.deleted and not duplicate.deleted
+    assert made[0].names() == ["reserve", "sent", "stray", "confirm", "stopped", "settle"]
+    assert ("stray", duplicate.id) in made[0].calls
 
 
 async def test_a_failed_lookup_keeps_the_hold(fake_sdk: FakeCloud) -> None:

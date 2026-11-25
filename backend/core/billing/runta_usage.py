@@ -223,6 +223,8 @@ class RuntaUsageReservation:
         self._sent_wall: float | None = None
         # True once a create returned a handle, so a runtime surely existed.
         self._returned = False
+        # Duplicate runtimes with this box's name that did not delete.
+        self.strays: list[str] = []
 
     @property
     def returned(self) -> bool:
@@ -255,8 +257,19 @@ class RuntaUsageReservation:
         runtime_id = getattr(handle, "id", None)
         if not isinstance(runtime_id, str) or not runtime_id:
             raise UsagePendingError("The Runta runtime returned no runtime id.")
-        self.runtime_id = runtime_id
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, runtime_id)
+        # Set only after the ledger accepted the id, so the provider sees a
+        # failed bind and tries the confirm again before the delete.
+        self.runtime_id = runtime_id
+        self.pending()
+
+    def keep_stray(self, runtime_id: str) -> None:
+        """Record a duplicate runtime that did not delete, so the hold never settles.
+
+        Args:
+            runtime_id: The Runta id of the duplicate runtime.
+        """
+        self.strays.append(runtime_id)
         self.pending()
 
     def stopped(self) -> None:
@@ -284,7 +297,7 @@ class RuntaUsageReservation:
         measured = None
         if self.sent_at is not None and self.stopped_at is not None:
             measured = max(0, math.ceil((self.stopped_at - self.sent_at) * 1000))
-        return {
+        evidence: dict[str, Any] = {
             "provider": "runta",
             "runtime_id": self.runtime_id,
             "name": self.name,
@@ -292,6 +305,9 @@ class RuntaUsageReservation:
             "measured_ms": measured,
             "funded_ms": self.lifetime_ms,
         }
+        if self.strays:
+            evidence["stray_runtime_ids"] = list(self.strays)
+        return evidence
 
     def pending(self) -> None:
         """Retain the hold when the box's existence or end is uncertain."""
@@ -344,7 +360,8 @@ class RuntaUsageReservation:
         """Settle the deleted box at its measured wall time, clamped to the funded lifetime.
 
         Raises:
-            UsagePendingError: When the delete was not confirmed, so the end is unknown.
+            UsagePendingError: When the delete was not confirmed, or a duplicate
+                runtime did not delete, so the end is unknown.
             BudgetError: When the charge breaks the reserved bounds.
         """
         try:
@@ -354,6 +371,9 @@ class RuntaUsageReservation:
                 return
             if self.sent_at is None or self.stopped_at is None:
                 raise UsagePendingError("The Runta runtime has no confirmed delete to settle.")
+            if self.strays:
+                # A duplicate can still run, and its time is not in this charge.
+                raise UsagePendingError("A duplicate Runta runtime did not delete, so the hold stays pending.")
             evidence = self._evidence()
             measured = evidence["measured_ms"]
             billed_ms = min(measured, self.lifetime_ms)

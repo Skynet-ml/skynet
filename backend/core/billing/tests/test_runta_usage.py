@@ -294,6 +294,56 @@ def test_confirm_records_the_start_for_reconciliation(database: Engine) -> None:
     assert evidence.evidence["funded_ms"] == FUNDED_MS
 
 
+def test_a_failed_confirm_leaves_no_runtime_id(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the runtime id empty when the ledger refuses it, so the provider confirms again.
+
+    Args:
+        database: The SQLite ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    runtime = _runtime(database)
+    reservation = RuntaUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent("skynet-box")
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        """Fail like a ledger that is down.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            ConnectionError: Always.
+        """
+        raise ConnectionError("ledger down")
+
+    working = runtime.service.mark_dispatched
+    monkeypatch.setattr(runtime.service, "mark_dispatched", broken)
+    with pytest.raises(ConnectionError):
+        reservation.confirm_created(SimpleNamespace(id="rt-1"))
+    assert reservation.runtime_id is None
+    monkeypatch.setattr(runtime.service, "mark_dispatched", working)
+    reservation.confirm_created(SimpleNamespace(id="rt-1"))
+    assert reservation.runtime_id == "rt-1"
+
+
+def test_a_stray_duplicate_keeps_the_hold_pending_with_its_id(database: Engine) -> None:
+    """Refuse to settle while a duplicate runtime did not delete, and keep its id in the evidence."""
+    runtime = _runtime(database)
+    reservation = RuntaUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent("skynet-box")
+    reservation.keep_stray("rt-2")
+    reservation.confirm_created(SimpleNamespace(id="rt-1"))
+    reservation.stopped()
+    with pytest.raises(UsagePendingError, match="duplicate"):
+        reservation.settle()
+    assert _operation(database).state == "pending"
+    with Session(database) as session:
+        rows = session.scalars(select(ExecutionUsageEvidenceModel)).all()
+    assert rows
+    assert all(row.evidence["stray_runtime_ids"] == ["rt-2"] for row in rows)
+
+
 def test_failure_before_the_create_releases_the_hold(database: Engine) -> None:
     """Release the hold when no create reached Runta."""
     runtime = _runtime(database)

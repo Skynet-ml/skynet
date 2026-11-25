@@ -18,6 +18,8 @@ output limit and the delete on stop come from
 - A closed or allowlist network policy also sends an empty
   ``tcp_allowlist``, because Runta denies raw TCP only for an empty list.
   Harbor sends no TCP list.
+- A duplicate runtime with the box's name that does not delete keeps the
+  hold pending, with its id in the evidence.
 - The requests and the limits of vCPU and memory are equal, so the priced
   size is the billed size. Harbor sends no limits.
 - A spec image is refused: the direct path runs Runta's default runtime
@@ -206,25 +208,31 @@ async def _release_late(reserving: asyncio.Future[Any]) -> None:
     await asyncio.to_thread(usage.fail)
 
 
-async def _list_named(client: Any, name: str) -> list[Any]:
+async def _list_named(client: Any, name: str, usage: Any) -> list[Any]:
     """List the runtimes with this exact name, and delete every match but the first.
+
+    The list is complete or it raises: runta-sdk 0.2.7 ``AsyncRuntimes.list``
+    follows every cursor page, and a malformed page raises ``ApiError``.
 
     Args:
         client: The Runta client.
         name: The unique name of the runtime.
+        usage: The box's reservation, or ``None`` for an unprotected box.
 
     Returns:
         A list with the first match, or an empty list.
 
     Raises:
-        Exception: The list call failed or timed out.
+        Exception: The list call failed or timed out, or the ledger did not
+            record a duplicate that did not delete.
     """
     listed = await asyncio.wait_for(client.runtimes.list(), STOP_TIMEOUT)
     # Only a runtime with this exact name can belong to this create; never
     # touch another runtime that the list returns.
     found = [runtime for runtime in listed if runtime.name == name]
     for extra in found[1:]:
-        await _bounded(extra.delete(), "delete a duplicate runtime")
+        if not await _bounded(extra.delete(), "delete a duplicate runtime") and usage is not None:
+            await asyncio.to_thread(usage.keep_stray, extra.id)
     return found[:1]
 
 
@@ -250,7 +258,7 @@ async def _delete_late(create: asyncio.Future[Any], usage: Any, client: Any, nam
             runtime = await create
         except Exception as create_error:
             try:
-                found = await _list_named(client, name)
+                found = await _list_named(client, name, usage)
             except Exception as error:
                 raise UsagePendingError(
                     "Runta could not list runtimes after a late failed create, so the hold stays."
@@ -881,7 +889,7 @@ class RuntaEnvironment(SandboxEnvironment):
             UsagePendingError: The lookup failed, so the hold stays pending.
         """
         try:
-            found = await _list_named(self._client, self._name)
+            found = await _list_named(self._client, self._name, self._usage)
         except Exception as error:
             try:
                 if self._usage is not None:
