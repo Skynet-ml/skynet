@@ -1508,9 +1508,9 @@ class StripeBillingService:
         idempotency_key: str,
         named_account: bool = False,
     ) -> GrantResult:
-        """Credit a staging test account, once per idempotency key.
+        """Credit a staging check account or named account, once per key.
 
-        This is the only allowed way to fund a check account. It raises the
+        This is the only allowed way to fund a staging account. It raises the
         purchased balance and writes one ``grant`` ledger row in one
         transaction. The row's description holds the reason, which the account
         sees in its wallet history. The approval text goes only to the operator
@@ -1622,7 +1622,7 @@ class StripeBillingService:
         """Write one checked test grant in one transaction, or replay its key.
 
         Args:
-            username: Checked test-account email.
+            username: Email of a checked test account or a named account.
             cents: Positive amount to credit, in cents.
             description: Ledger description the account sees.
             settlement_key: ``testgrant:<key>`` for the ledger row.

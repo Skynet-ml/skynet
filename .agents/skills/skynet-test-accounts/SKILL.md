@@ -145,7 +145,8 @@ secret changes nothing and exits 0.
 
 - A new staging account gets no credit. For a check that needs a paid run,
   fund the check account with "Grant test credit" below.
-- Never add funds except through "Grant test credit" below.
+- Never add funds except through "Grant test credit" below. Never grant on
+  production or to real customers.
 - Staging keeps the setup intake for new accounts.
 
 ### Grant test credit (staging only)
@@ -199,7 +200,7 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
 
 - For a named account, replace `"--account-id", $id` with
   `"--account-sha256", $id` and set `ACCOUNT_ID` to the hash, for example
-  `python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].strip().lower().encode()).hexdigest())' "$EMAIL"`.
+  `ACCOUNT_ID=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].strip().lower().encode()).hexdigest())' "$EMAIL")`.
   This matches the command's own hash. The command prints neither the email
   nor the hash. The full hash stays in the private ECS task record. Never
   print the email or the hash yourself, and never put either in the key,
