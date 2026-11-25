@@ -157,7 +157,9 @@ def _is_customerless(customer_id: str) -> bool:
 
 
 # Staging test-credit grants (SKY-573). The test-account tool signs up
-# ``staging-<label>-<6 hex>@`` this inbox; nothing else may receive a grant.
+# ``staging-<label>-<6 hex>@`` this inbox. A named staging account may also
+# receive a grant, found by the SHA-256 of its email so the plain email stays
+# out of the ECS command and the task log (SKY-971).
 # The cap is one shared total per UTC day across all accounts in the staging
 # database, so an agent loop cannot drain more than $50. PR previews are
 # refused: each preview has its own database on the same RDS instance, and the
@@ -166,6 +168,7 @@ TEST_ACCOUNT_INBOX = "eegeupelae.resend.app"
 TEST_GRANT_DAILY_CAP_CENTS = 5000
 TEST_GRANT_KEY_PREFIX = "testgrant:"
 _TEST_ACCOUNT_ID = re.compile(r"staging-[a-z0-9-]+-[0-9a-f]{6}")
+_EMAIL_SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _SETTLEMENT_KEY_MAX_LENGTH = 64
 _LEDGER_DESCRIPTION_MAX_LENGTH = 255
 # The account sees the ledger description in its wallet history, so it holds
@@ -1503,6 +1506,7 @@ class StripeBillingService:
         reason: str,
         approval: str,
         idempotency_key: str,
+        named_account: bool = False,
     ) -> GrantResult:
         """Credit a staging test account, once per idempotency key.
 
@@ -1517,11 +1521,14 @@ class StripeBillingService:
         account with debt is refused.
 
         Args:
-            username: Test-account email, as built by :func:`check_account_email`.
+            username: Test-account email, as built by :func:`check_account_email`,
+                or a named account's email from :meth:`account_for_email_sha256`.
             cents: Amount to credit, in cents.
             reason: Why the check needs the money.
             approval: The approval text for this grant, logged as given.
             idempotency_key: Caller key; a repeated key credits nothing.
+            named_account: Skip the test-account shape check, for a named
+                account that Gilad approved in chat.
 
         Returns:
             The credited cents, the new balance, and whether the key was a replay.
@@ -1533,11 +1540,7 @@ class StripeBillingService:
                 conflicted twice.
                 Nothing is written.
         """
-        target = _test_grant_target()
-        if target is None:
-            raise GrantRefusedError("APP_ENVIRONMENT must be staging; PR preview environments are refused")
-        if not _is_staging_database(self._engine.url):
-            raise GrantRefusedError("the database is not the staging database")
+        target = self._check_grant_deployment()
         reason, approval, idempotency_key = reason.strip(), approval.strip(), idempotency_key.strip()
         if not approval:
             raise GrantRefusedError("approval text is required")
@@ -1555,7 +1558,7 @@ class StripeBillingService:
             text_limit = _LEDGER_DESCRIPTION_MAX_LENGTH - len(_TEST_GRANT_LABEL)
             raise GrantRefusedError(f"reason is too long: it may have at most {text_limit} characters")
         username = username.strip().lower()
-        if not _is_test_account(username, target):
+        if not named_account and not _is_test_account(username, target):
             raise GrantRefusedError(f"the account is not a {target} test account from the test-account tool")
         try:
             result = self._apply_test_grant(username, cents, description, settlement_key)
@@ -1572,6 +1575,48 @@ class StripeBillingService:
                 "Test credit grant: %s cents, key %s, reason %r, approval %r", cents, settlement_key, reason, approval
             )
         return result
+
+    def _check_grant_deployment(self) -> str:
+        """Refuse unless this process runs on staging against the staging database.
+
+        Returns:
+            The grant target, ``staging``.
+
+        Raises:
+            GrantRefusedError: The environment or the database is not staging.
+        """
+        target = _test_grant_target()
+        if target is None:
+            raise GrantRefusedError("APP_ENVIRONMENT must be staging; PR preview environments are refused")
+        if not _is_staging_database(self._engine.url):
+            raise GrantRefusedError("the database is not the staging database")
+        return target
+
+    def account_for_email_sha256(self, digest: str) -> str:
+        """Find the staging account whose lowercased email has this SHA-256.
+
+        The deployment guards run first, so no other database is ever read.
+
+        Args:
+            digest: 64 lowercase hex characters.
+
+        Returns:
+            The account email.
+
+        Raises:
+            GrantRefusedError: The deployment is not staging, the digest is
+                malformed, or no account matches.
+        """
+        self._check_grant_deployment()
+        digest = digest.strip().lower()
+        if not _EMAIL_SHA256.fullmatch(digest):
+            raise GrantRefusedError("account sha256 must be 64 hex characters")
+        with Session(self._engine) as session:
+            emails = session.scalars(select(UserModel.email)).all()
+        for email in emails:
+            if hashlib.sha256(email.strip().lower().encode()).hexdigest() == digest:
+                return email
+        raise GrantRefusedError("no staging account matches the account sha256")
 
     def _apply_test_grant(self, username: str, cents: int, description: str, settlement_key: str) -> GrantResult:
         """Write one checked test grant in one transaction, or replay its key.

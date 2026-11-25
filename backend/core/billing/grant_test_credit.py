@@ -1,15 +1,17 @@
-"""Grant test credit to a staging check account (SKY-573).
+"""Grant test credit to a staging check account (SKY-573) or a named account (SKY-971).
 
 Agents run this command through ECS RunTask on the staging migrate task, which
 has ``APP_ENVIRONMENT`` and ``REMOTE_DB_URL``. The grant goes through
 :meth:`StripeBillingService.grant_test_credit`, so every guard (environment,
 test account, approval text, $50 UTC-day cap, idempotency) applies. Amounts
 are in dollars on the command line and in the output. The output never prints
-the account email.
+the account email. A named account is given as the SHA-256 of its lowercased
+email, so the email stays out of the ECS command too.
 
 Usage:
     python -m core.billing.grant_test_credit --account-id staging-label-a1b2c3 \\
         --dollars 2.50 --reason "..." --approval "..." --idempotency-key KEY
+    python -m core.billing.grant_test_credit --account-sha256 <64 hex> ...
 """
 
 from __future__ import annotations
@@ -77,7 +79,9 @@ def _parser() -> argparse.ArgumentParser:
         prog="python -m core.billing.grant_test_credit",
         description="Grant test credit to a staging check account. Needs Gilad's approval in chat first.",
     )
-    parser.add_argument("--account-id", required=True, help="Account id from the test-account tool.")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--account-id", help="Account id from the test-account tool.")
+    target.add_argument("--account-sha256", help="SHA-256 of a named account's lowercased email.")
     parser.add_argument("--dollars", required=True, help="Amount in dollars, for example 2.50.")
     parser.add_argument("--reason", required=True, help="Why the check needs the money.")
     parser.add_argument("--approval", required=True, help="Gilad's approval text from chat.")
@@ -97,12 +101,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         cents = dollars_to_cents(args.dollars)
-        result = StripeBillingService(engine=_engine()).grant_test_credit(
-            check_account_email(args.account_id),
+        service = StripeBillingService(engine=_engine())
+        if args.account_sha256 is not None:
+            username = service.account_for_email_sha256(args.account_sha256)
+            label = f"account sha256 {args.account_sha256.strip().lower()[:12]}"
+        else:
+            username = check_account_email(args.account_id)
+            label = args.account_id.strip().lower()
+        result = service.grant_test_credit(
+            username,
             cents,
             reason=args.reason,
             approval=args.approval,
             idempotency_key=args.idempotency_key,
+            named_account=args.account_sha256 is not None,
         )
     except GrantRefusedError as error:
         print(f"Grant refused: {error}", file=sys.stderr)
@@ -116,7 +128,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Print the values the grant used, which it strips and lowercases, so the
     # log matches the ledger row and a rerun can copy the key exactly.
     print(
-        f"{verb} ${result.credited_cents / 100:.2f} to {args.account_id.strip().lower()}. "
+        f"{verb} ${result.credited_cents / 100:.2f} to {label}. "
         f"Balance: ${result.balance_cents / 100:.2f}. Key: {args.idempotency_key.strip()}."
     )
     return 0
