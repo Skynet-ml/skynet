@@ -535,10 +535,12 @@ async def _background() -> None:
     """Wait until every other task of the test's event loop ends.
 
     A background kill settles in a thread, so a fixed number of loop turns
-    does not always reach the settle (SKY-969).
+    does not always reach the settle (SKY-969). The time limit makes a stuck
+    background task fail the test instead of hanging the CI job.
     """
-    while others := asyncio.all_tasks() - {asyncio.current_task()}:
-        await asyncio.wait(others)
+    async with asyncio.timeout(10):
+        while others := asyncio.all_tasks() - {asyncio.current_task()}:
+            await asyncio.wait(others)
 
 
 class TestSuperserveEnvironmentContract(SandboxEnvironmentContract):
