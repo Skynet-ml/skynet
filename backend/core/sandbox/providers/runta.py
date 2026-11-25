@@ -818,7 +818,9 @@ class RuntaEnvironment(SandboxEnvironment):
                 # _end_usage tries the confirm again when no runtime id came back.
                 logger.warning("Runta sandbox %s did not confirm its runtime.", self._name)
         create = self._create_task
-        if self._runtime is None and create is not None:
+        # After the runtime deletes, only a duplicate is left: never take the
+        # deleted handle back, or the box keeps a stale runtime.
+        if self._runtime is None and create is not None and not self._deleted:
             await asyncio.wait({create}, timeout=CREATE_GRACE)
             if not create.done():
                 return await self._hand_off_late(create)

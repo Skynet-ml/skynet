@@ -1571,3 +1571,26 @@ async def test_a_job_sweep_forgets_a_box_whose_retried_lookup_finds_nothing(fake
     assert await RuntaEnvironment.stop_job_sandboxes("job-empty") == 0
     assert made[0].names()[-1] == "fail"
     assert "job-empty" not in runta._JOB_BOXES
+
+
+async def test_a_later_stop_does_not_take_back_the_deleted_runtime(fake_sdk: FakeCloud) -> None:
+    """Leave no stale runtime handle and no job entry after a later stop settles the duplicate.
+
+    Args:
+        fake_sdk: The fake Runta cloud.
+    """
+    env, made = _protected(tags={JOB_TAG: "job-stale"})
+    await env.start()
+    duplicate = fake_sdk.make_box({})
+    # A successful create has no duplicate, so this test adds one by hand.
+    env._strays.append(FakeRuntime(duplicate))
+    fake_sdk.delete_fails_for = [duplicate.id]
+    with pytest.raises(UsagePendingError, match="duplicate"):
+        await env.stop()
+    assert env._runtime is None
+    assert env in runta._JOB_BOXES["job-stale"]
+    await env.stop()
+    assert duplicate.deleted
+    assert env._runtime is None
+    assert "job-stale" not in runta._JOB_BOXES
+    assert made[0].names()[-2:] == ["stray_gone", "settle"]
