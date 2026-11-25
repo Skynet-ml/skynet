@@ -21,7 +21,12 @@ MONO_SVG = b'<svg fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d
 CATALOG = SimpleNamespace(
     models=[
         SimpleNamespace(value=value)
-        for value in ("openrouter/meta-llama/llama-4", "openrouter/moonshotai/kimi-k2", "mistral/mistral-large")
+        for value in (
+            "openrouter/meta-llama/llama-4",
+            "openrouter/moonshotai/kimi-k2",
+            "mistral/mistral-large",
+            "openrouter/thinkingmachines/tinker",
+        )
     ],
     providers=[SimpleNamespace(slug="openai")],
 )
@@ -29,7 +34,7 @@ CATALOG = SimpleNamespace(
 
 @pytest.fixture(autouse=True)
 def _catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Serve a small fixed catalog, so the route knows meta, moonshotai, mistral and openai.
+    """Serve a small fixed catalog, so the route knows meta, moonshotai, mistral, thinkingmachines and openai.
 
     Args:
         monkeypatch: Pytest's patch fixture.
@@ -113,12 +118,15 @@ def test_mono_icon_is_tagged_for_the_text_color() -> None:
 
 def test_lab_without_a_cdn_icon_is_404_so_the_frontend_draws_its_mark() -> None:
     """Return 404 for Thinking Machines, which LobeHub lacks, so the page shows its bundled framed mark."""
+    seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        """Serve no icon, as LobeHub does for this lab."""
+        """Record the icon name and serve no icon, as LobeHub does for this lab."""
+        seen.append(request.url.path.rsplit("/", 1)[-1])
         return httpx.Response(404)
 
     assert _app(LabLogoCache(_client_factory(handler))).get("/models/logos/thinkingmachines").status_code == 404
+    assert seen == ["thinkingmachines-color.svg", "thinkingmachines.svg"], "a known lab tries both CDN icons"
 
 
 @pytest.mark.parametrize("slug", ["Bad_Slug", "x" * 41, "not-a-catalog-lab"])
