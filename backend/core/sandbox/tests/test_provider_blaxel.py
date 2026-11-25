@@ -224,6 +224,11 @@ class FakeBox:
         self.process = FakeProcess(self)
         self.fs = FakeFs(self)
 
+    def release(self) -> None:
+        """Delete the box the way Blaxel does: its record stays, with status TERMINATED."""
+        self.deleted = True
+        self.status = "TERMINATED"
+
 
 class FakeBlaxel:
     """Stand in for the ``SandboxInstance`` class methods, with hooks for failures and waits."""
@@ -233,6 +238,8 @@ class FakeBlaxel:
         self.boxes: dict[str, FakeBox] = {}
         self.create_error: Exception | None = None
         self.create_error_makes_box = False
+        self.create_error_box_released = False
+        self.create_timeout: int | None = None
         self.create_gate: asyncio.Event | None = None
         self.create_entered = asyncio.Event()
         self.returned_name: str | None = None
@@ -246,23 +253,33 @@ class FakeBlaxel:
         self.delete_calls: list[str] = []
         self.on_delete: Callable[[], None] | None = None
 
-    async def create(self, config: dict[str, Any], safe: bool = True) -> FakeBox:
+    # The fake keeps the SDK's ``timeout`` parameter name.
+    async def create(
+        self,
+        config: dict[str, Any],
+        safe: bool = True,
+        timeout: int | None = None,  # noqa: ASYNC109
+    ) -> FakeBox:
         """Create a box, or fail as the test asks.
 
         Args:
             config: The create config.
             safe: The SDK's ready check; the provider always sets it.
+            timeout: The create deadline in seconds.
 
         Returns:
             The created box.
         """
         assert safe is True
+        self.create_timeout = timeout
         self.create_entered.set()
         if self.create_gate is not None:
             await self.create_gate.wait()
         if self.create_error is not None:
             if self.create_error_makes_box:
                 self.boxes[config["name"]] = FakeBox(config)
+                if self.create_error_box_released:
+                    self.boxes[config["name"]].release()
             raise self.create_error
         box = FakeBox(config)
         self.boxes[config["name"]] = box
@@ -277,10 +294,10 @@ class FakeBlaxel:
             name: The box name.
 
         Returns:
-            The box.
+            The box; a deleted box keeps its record with status TERMINATED, as in the SDK.
 
         Raises:
-            FakeSandboxAPIError: No live box has the name (404).
+            FakeSandboxAPIError: No box ever had the name (404).
         """
         self.get_calls += 1
         self.get_entered.set()
@@ -289,7 +306,7 @@ class FakeBlaxel:
         if self.get_error is not None:
             raise self.get_error
         box = self.boxes.get(name)
-        if box is None or box.deleted:
+        if box is None:
             raise FakeSandboxAPIError(404)
         return box
 
@@ -313,7 +330,7 @@ class FakeBlaxel:
         box = self.boxes.get(name)
         if box is None or box.deleted:
             raise FakeSandboxAPIError(404)
-        box.deleted = True
+        box.release()
 
     def only_box(self) -> FakeBox:
         """Return the only box that a test created.
@@ -367,8 +384,16 @@ async def _until(predicate: Callable[[], bool]) -> None:
     raise AssertionError("The condition did not hold in time.")
 
 
-async def test_create_sends_the_name_image_memory_and_ttl(fake_blaxel: FakeBlaxel) -> None:
-    """Send a unique name, the default image, 2048 MB for each vCPU and the ttl of the lifetime."""
+async def test_create_sends_the_name_image_memory_and_ttl(
+    fake_blaxel: FakeBlaxel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send a unique name, the default image, 2048 MB for each vCPU, the ttl of the lifetime and a deadline.
+
+    Args:
+        fake_blaxel: The fake SDK.
+        monkeypatch: Pytest fixture that clears ``BL_REGION``.
+    """
+    monkeypatch.delenv("BL_REGION", raising=False)
     async with BlaxelEnvironment(SandboxSpec(lifetime_seconds=600, resources=ResourceRequest(cpus=2))):
         config = fake_blaxel.only_box().config
     assert config["name"].startswith("skynet-")
@@ -377,6 +402,19 @@ async def test_create_sends_the_name_image_memory_and_ttl(fake_blaxel: FakeBlaxe
     assert config["memory"] == 4096
     assert config["ttl"] == "600s"
     assert "network" not in config
+    assert "region" not in config
+    # The SDK maximum, so the boot stays inside the 60 s margin of the hold.
+    assert fake_blaxel.create_timeout == 50
+
+
+def test_region_comes_from_bl_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send the ``BL_REGION`` region when it is set.
+
+    Args:
+        monkeypatch: Pytest fixture that sets ``BL_REGION``.
+    """
+    monkeypatch.setenv("BL_REGION", "us-pdx-1")
+    assert BlaxelEnvironment(SandboxSpec(lifetime_seconds=300))._create_config("skynet-x")["region"] == "us-pdx-1"
 
 
 @pytest.mark.parametrize(("lifetime", "ttl"), [(10, "300s"), (300, "300s"), (300.2, "301s"), (86_400, "86400s")])
@@ -447,15 +485,17 @@ def test_memory_follows_the_vcpus(resources: ResourceRequest, memory: int) -> No
     ],
 )
 def test_egress_policy_is_an_allowlist(spec: SandboxSpec, network: str) -> None:
-    """Send an allowlist, with a domain that never resolves for a box with no network.
+    """Send a proxy allowlist behind the proxy firewall, with a domain that never resolves for no network.
 
     Args:
         spec: The spec.
         network: The expected only allowed domain.
     """
     config = BlaxelEnvironment(spec)._create_config("skynet-x")
-    assert config["network"]["allowedDomains"] == [network]
-    assert config["network"]["proxy"]["routing"] == []
+    assert config["network"] == {
+        "firewall": {"rulesets": ["proxy"]},
+        "proxy": {"allowedDomains": [network], "routing": []},
+    }
 
 
 async def test_exec_runs_bash_in_the_cwd_with_the_merged_env(fake_blaxel: FakeBlaxel) -> None:
@@ -564,6 +604,7 @@ class FakeUsage:
         self.sandbox_name: str | None = None
         self.sandbox_id: str | None = None
         self.sent_at: float | None = None
+        self.stopped_at: float | None = None
         self.absent: bool | None = None
         budget.reservations.append(self)
 
@@ -578,12 +619,17 @@ class FakeUsage:
         self.sent_at = 1.0
 
     def confirm_created(self, sandbox: Any) -> None:
-        """Record the created box.
+        """Record the created box, and refuse another name like the real reservation.
 
         Args:
             sandbox: The fake box.
+
+        Raises:
+            UsagePendingError: The box has another name than the create sent.
         """
         self.calls.append("confirm")
+        if sandbox.metadata.name != self.sandbox_name:
+            raise UsagePendingError("another name")
         self.sandbox_id = sandbox.metadata.name
 
     def pending(self) -> None:
@@ -593,6 +639,7 @@ class FakeUsage:
     def stopped(self) -> None:
         """Record a confirmed delete."""
         self.calls.append("stopped")
+        self.stopped_at = 2.0
 
     def settle(self) -> None:
         """Record the settle."""
@@ -691,6 +738,57 @@ async def test_box_that_a_failed_create_made_is_deleted_and_settled(fake_blaxel:
     assert usage.calls == ["sent", "confirm", "stopped", "settle"]
 
 
+@pytest.mark.parametrize("error", [FakeCreationTimeoutError(), FakeSandboxAPIError(400)])
+async def test_box_that_blaxel_already_deleted_stays_pending(fake_blaxel: FakeBlaxel, error: Exception) -> None:
+    """Keep the hold pending, with no confirm, delete or settle, when the lookup finds a TERMINATED box.
+
+    Args:
+        fake_blaxel: The fake SDK.
+        error: The create error.
+    """
+    fake_blaxel.create_error = error
+    fake_blaxel.create_error_makes_box = True
+    fake_blaxel.create_error_box_released = True
+    env, budget = _protected()
+    with pytest.raises(type(error)):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "fail"]
+    assert usage.absent is False
+    assert fake_blaxel.delete_calls == []
+
+
+async def test_confirm_failure_settles_once(fake_blaxel: FakeBlaxel) -> None:
+    """Settle a box whose confirm failed once, with no second lookup, delete or settle."""
+    fake_blaxel.returned_name = "skynet-other"
+    env, budget = _protected()
+    with pytest.raises(UsagePendingError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "confirm", "stopped", "settle", "fail"]
+    assert fake_blaxel.get_calls == 0
+    assert len(fake_blaxel.delete_calls) == 1
+
+
+async def test_real_hold_of_a_timed_out_create_whose_box_is_gone_stays_pending(
+    fake_blaxel: FakeBlaxel, ledger: Engine, clock: FakeClock
+) -> None:
+    """Keep the real hold pending, not charged, when Blaxel already released the box of a 408.
+
+    Args:
+        fake_blaxel: The fake SDK.
+        ledger: The SQLite ledger.
+        clock: The fake usage clock.
+    """
+    fake_blaxel.create_error = FakeCreationTimeoutError()
+    fake_blaxel.create_error_makes_box = True
+    fake_blaxel.create_error_box_released = True
+    env = BlaxelEnvironment(SandboxSpec(lifetime_seconds=300, operation_key="op-1"), budget=_runtime(ledger))
+    with pytest.raises(FakeCreationTimeoutError):
+        await env.start()
+    assert _operation(ledger).state == "pending"
+
+
 async def test_box_with_another_name_is_deleted_and_the_error_raised(fake_blaxel: FakeBlaxel, tmp_path: Path) -> None:
     """Delete the box and settle the real hold when Blaxel returns another name than the create sent.
 
@@ -705,6 +803,7 @@ async def test_box_with_another_name_is_deleted_and_the_error_raised(fake_blaxel
         with pytest.raises(UsagePendingError, match="another name"):
             await env.start()
         assert fake_blaxel.only_box().deleted
+        assert fake_blaxel.get_calls == 0
         assert _operation(engine).state == "settled"
         assert runtime._pinned == {}
 

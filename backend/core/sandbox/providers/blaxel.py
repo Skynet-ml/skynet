@@ -13,9 +13,11 @@ before the create and settles its measured runtime after the delete
 (SKY-936), the ``ttl`` is the spec lifetime instead of a fixed 24 hours, the
 memory comes from the vCPU count, each create gets a new unique name, a
 failed create looks up its box by that name, a cancel never leaks a box or
-a hold, and the job sweep stops the boxes that this process started.
-Harbor's Dockerfile and compose builds, Docker-in-Docker, directory
-transfer, region pinning and attach are left out.
+a hold, the job sweep stops the boxes that this process started, the
+egress allowlist moves to ``proxy.allowedDomains`` with the ``proxy``
+firewall ruleset, the create has a deadline, and ``BL_REGION`` pins the
+region. Harbor's Dockerfile and compose builds, Docker-in-Docker, directory
+transfer and attach are left out.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import asyncio
 import functools
 import logging
 import math
+import os
 import shlex
 import uuid
 from collections.abc import Callable, Mapping
@@ -62,7 +65,9 @@ logger = logging.getLogger(__name__)
 # Blaxel gives each 2048 MB of memory one vCPU and bills per GB of memory, so
 # the memory size follows the vCPU count. Egress is included in the price,
 # so a protected box may use every network mode. Blaxel sets the egress
-# policy only at create time.
+# policy only at create time. NONE and ALLOWLIST stay declared because the
+# SDK 0.4.28 FirewallConfig docs say the "proxy" ruleset restricts egress to
+# the proxy, and the proxy enforces the allowlist.
 BLAXEL_CAPABILITIES = EnvironmentCapabilities(
     name="blaxel",
     network_modes=frozenset(NetworkMode),
@@ -82,6 +87,14 @@ _NAME_PREFIX = "skynet-"
 # Blaxel enforces egress through an allowlist, so a box with no network gets
 # an allowlist with one domain that never resolves (from Harbor).
 _NO_NETWORK_DOMAIN = "skynet-no-network.invalid"
+# The SDK 0.4.28 "proxy" ruleset blocks egress that does not pass the proxy.
+_FIREWALL = {"rulesets": ["proxy"]}
+# The SDK maximum (MAX_CREATION_TIMEOUT_SECONDS). The usage funds 60 s on top
+# of the ttl for the boot and the delete, so the boot always ends inside it.
+_CREATE_TIMEOUT_SEC = 50
+# A box with one of these statuses was deleted already: Blaxel returns its
+# record from ``get`` for about 5 minutes after the delete, not a 404.
+_GONE_STATUSES = frozenset({"DELETING", "TERMINATED"})
 # The Blaxel create docs (SDK 0.4.28) list these statuses as answers that make
 # no box. 409 and 429 are left out: 409 means the unique name already has a
 # box, and a 429 says nothing about an earlier attempt. A
@@ -460,6 +473,11 @@ class BlaxelEnvironment(SandboxEnvironment):
         )
         if network is not None:
             config["network"] = network
+        # With no region, Blaxel picks one and the SDK warns that the region
+        # becomes required. The box then works, but a later SDK can refuse it.
+        region = os.environ.get("BL_REGION")
+        if region:
+            config["region"] = region
         return config
 
     async def _create(self, name: str, usage: Any | None) -> Any:
@@ -475,7 +493,7 @@ class BlaxelEnvironment(SandboxEnvironment):
         config = self._create_config(name)
         if usage is not None:
             usage.sent(name)
-        sandbox = await SandboxInstance.create(config, safe=True)
+        sandbox = await SandboxInstance.create(config, safe=True, timeout=_CREATE_TIMEOUT_SEC)
         if usage is not None:
             try:
                 await asyncio.to_thread(usage.confirm_created, sandbox)
@@ -527,15 +545,19 @@ def network_config(policy: NetworkPolicy) -> dict[str, Any] | None:
         policy: The egress policy.
 
     Returns:
-        ``None`` for open egress, or an allowlist config. A box with no
-        network gets an allowlist with one domain that never resolves.
+        ``None`` for open egress, or a proxy allowlist with the ``proxy``
+        firewall ruleset. A box with no network gets an allowlist with one
+        domain that never resolves.
     """
     if policy.disabled:
-        return {"allowedDomains": [_NO_NETWORK_DOMAIN], "proxy": {"routing": []}}
-    if not policy.allowed_hosts:
+        hosts = [_NO_NETWORK_DOMAIN]
+    elif policy.allowed_hosts:
+        hosts = list(policy.allowed_hosts)
+    else:
         return None
-    hosts = list(policy.allowed_hosts)
-    return {"allowedDomains": hosts, "proxy": {"routing": [], "bypass": hosts}}
+    # A host in ``proxy.bypass`` goes direct and skips the allowlist, so the
+    # allowed hosts are never put there.
+    return {"firewall": dict(_FIREWALL), "proxy": {"allowedDomains": hosts, "routing": []}}
 
 
 def _require_sdk() -> None:
@@ -621,25 +643,33 @@ async def _find_box(name: str) -> tuple[Any | None, bool]:
         name: The sandbox name that the create sent.
 
     Returns:
-        The box or ``None``, and True when the answer is certain: a box, or a 404.
+        The live box or ``None``, and True only when Blaxel answered 404. A
+        deleted box gives ``(None, False)``: it existed, but it is gone and
+        cannot be confirmed or deleted again.
     """
     try:
-        return await SandboxInstance.get(name), True
+        box = await SandboxInstance.get(name)
     except Exception as error:
         if _status_code(error) == _NOT_FOUND:
             return None, True
         logger.exception("Could not look up a blaxel sandbox after a failed create; its hold stays pending.")
         return None, False
+    if str(getattr(box, "status", "")) in _GONE_STATUSES:
+        logger.warning("The blaxel sandbox %s of a failed create is already deleted; its hold stays pending.", name)
+        return None, False
+    return box, True
 
 
 async def _fail_usage(usage: Any | None, refused: bool = False) -> None:
     """Release or keep the hold of a protected box whose create returned no sandbox.
 
     A sent create may still have made a box. A lookup by its unique name
-    finds it, and the box is deleted and settled. The hold is released only
-    when the create was never sent, or when Blaxel refused it and the lookup
-    answered 404. Otherwise it stays pending with the box name as evidence,
-    and the ttl ends a box that Blaxel makes later.
+    finds a live box, and the box is deleted and settled. The hold is
+    released only when the create was never sent, or when Blaxel refused it
+    and the lookup answered 404. Otherwise it stays pending with the box name
+    as evidence, and the ttl ends a box that Blaxel makes later. A box whose
+    delete was already accepted is not looked up again, so it never settles
+    twice.
 
     Args:
         usage: The usage reservation, or ``None``.
@@ -648,7 +678,7 @@ async def _fail_usage(usage: Any | None, refused: bool = False) -> None:
     if usage is None:
         return
     absent = False
-    if usage.sent_at is not None and usage.sandbox_id is None:
+    if usage.sent_at is not None and usage.sandbox_id is None and usage.stopped_at is None:
         box, certain = await _find_box(usage.sandbox_name)
         if box is not None:
             try:
