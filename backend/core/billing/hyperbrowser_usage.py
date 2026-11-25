@@ -61,8 +61,10 @@ _SECONDS_PER_HOUR = Decimal(3600)
 _MIB_PER_GIB = Decimal(1024)
 # Hyperbrowser publishes no maximum timeout; this is Skynet's own ceiling.
 _MAX_TIMEOUT_MINUTES = 24 * 60
-# The stop call can end after the timeout ends, so the hold funds this much more.
-_LIFETIME_MARGIN_MS = 60_000
+# The stop call can end after the timeout ends, so the hold funds this much
+# more. It equals the provider's 120 s SDK request timeout, so a slow stop
+# that still succeeds stays inside the funded time.
+_LIFETIME_MARGIN_MS = 120_000
 
 
 def _seconds(duration_ms: int) -> int:
@@ -389,7 +391,11 @@ class HyperbrowserUsageReservation:
             )
             self.runtime.unpin(self.operation.id)
         except BaseException:
-            self.pending()
+            # A failed pending call must not replace the first error.
+            try:
+                self.pending()
+            except Exception as pending_error:
+                logger.warning("Hyperbrowser could not mark the hold pending: %s", type(pending_error).__name__)
             raise
 
 

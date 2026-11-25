@@ -23,8 +23,8 @@ from core.sandbox.metering import usage_adapter
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 CREATE = {"image": "default", "timeout_minutes": 1, "vcpus": 2, "memory_mib": 4096}
-# The funded lifetime: the 1 minute timeout plus the 60 s stop margin.
-FUNDED_MS = 120_000
+# The funded lifetime: the 1 minute timeout plus the 120 s stop margin.
+FUNDED_MS = 180_000
 # 2 vCPU at $0.045 per hour plus 4 GiB at $0.015 per hour, per second.
 PER_SECOND = (2 * Decimal("0.045") + 4 * Decimal("0.015")) / 3600
 
@@ -123,8 +123,9 @@ def _run(reservation: HyperbrowserUsageReservation, *, measured_sec: float | Non
 def test_quote_covers_the_padded_timeout_at_the_published_rates() -> None:
     """Price the timeout plus the stop margin at the CPU and memory rates, with no egress charge."""
     quote = quote_hyperbrowser_sandbox(CREATE)
-    assert hyperbrowser_usage._usd(quote.price_snapshot, FUNDED_MS) == 120 * PER_SECOND
-    charge = hyperbrowser_usage.vercel_charge_policy(quote.price_snapshot).convert(120 * PER_SECOND)
+    # 2 vCPU and 4 GiB cost $0.15 per hour, so 180 s cost exactly $0.0075.
+    assert hyperbrowser_usage._usd(quote.price_snapshot, FUNDED_MS) == Decimal("0.0075")
+    charge = hyperbrowser_usage.vercel_charge_policy(quote.price_snapshot).convert(Decimal("0.0075"))
     assert quote.maximum.total == charge.total
     assert quote.price_snapshot["provider"] == "hyperbrowser"
     assert quote.price_snapshot["source"] == "https://www.hyperbrowser.ai/docs/pricing"
@@ -165,7 +166,11 @@ def test_unbounded_box_is_not_quoted(change: dict[str, Any]) -> None:
 
 
 def test_reserve_then_settle_charges_the_measured_runtime(database: Engine) -> None:
-    """Settle a stopped box at its measured seconds and keep the vendor usage as evidence only."""
+    """Settle a stopped box at its measured seconds and keep the vendor usage as evidence only.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     assert _operation(database).state == "dispatched"
@@ -211,7 +216,11 @@ def test_settle_clamps_to_the_hold_and_warns_on_an_over_run(database: Engine, ca
 
 
 def test_unconfirmed_stop_settles_the_whole_funded_lifetime(database: Engine) -> None:
-    """Bill the whole funded lifetime when the stop failed, because Hyperbrowser ends the box at its timeout."""
+    """Bill the whole funded lifetime when the stop failed, because Hyperbrowser ends the box at its timeout.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="unknown")
     _run(reservation, measured_sec=None)
@@ -222,7 +231,11 @@ def test_unconfirmed_stop_settles_the_whole_funded_lifetime(database: Engine) ->
 
 
 def test_settle_twice_charges_once(database: Engine) -> None:
-    """Keep the first settle when a second owner settles the same hold."""
+    """Keep the first settle when a second owner settles the same hold.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     _run(reservation, measured_sec=5)
@@ -234,7 +247,11 @@ def test_settle_twice_charges_once(database: Engine) -> None:
 
 
 def test_settle_without_a_sandbox_id_keeps_the_hold_pending(database: Engine) -> None:
-    """Keep the hold pending when the box has no sandbox id and no confirmed stop."""
+    """Keep the hold pending when the box has no sandbox id and no confirmed stop.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
@@ -243,8 +260,42 @@ def test_settle_without_a_sandbox_id_keeps_the_hold_pending(database: Engine) ->
     assert _operation(database).state == "pending"
 
 
+def test_a_failed_pending_call_keeps_the_settle_error(
+    database: Engine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the first settle error and log the error of the pending call that follows it.
+
+    Args:
+        database: The SQLite ledger.
+        caplog: The log capture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    reservation = HyperbrowserUsageReservation(_runtime(database), CREATE, operation_key="box-one")
+    reservation.sent()
+
+    def broken_pending() -> None:
+        """Fail like a lost ledger connection.
+
+        Raises:
+            ConnectionError: Always.
+        """
+        raise ConnectionError("ledger down")
+
+    monkeypatch.setattr(reservation, "pending", broken_pending)
+    with (
+        caplog.at_level("WARNING", logger=hyperbrowser_usage.__name__),
+        pytest.raises(UsagePendingError, match="sandbox id"),
+    ):
+        reservation.settle()
+    assert "could not mark the hold pending: ConnectionError" in caplog.text
+
+
 def test_confirm_refuses_a_sandbox_with_no_id(database: Engine) -> None:
-    """Refuse a created sandbox that carries no id, and remember that a box existed."""
+    """Refuse a created sandbox that carries no id, and remember that a box existed.
+
+    Args:
+        database: The SQLite ledger.
+    """
     reservation = HyperbrowserUsageReservation(_runtime(database), CREATE, operation_key="box-one")
     reservation.sent()
     with pytest.raises(UsagePendingError, match="sandbox id"):
@@ -255,7 +306,11 @@ def test_confirm_refuses_a_sandbox_with_no_id(database: Engine) -> None:
 
 
 def test_confirm_records_the_start_for_reconciliation(database: Engine) -> None:
-    """Write the sandbox id and wall-clock start into the pending evidence once the sandbox exists."""
+    """Write the sandbox id and wall-clock start into the pending evidence once the sandbox exists.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
@@ -269,7 +324,11 @@ def test_confirm_records_the_start_for_reconciliation(database: Engine) -> None:
 
 
 def test_unsent_create_releases_the_hold(database: Engine) -> None:
-    """Release the hold when no create reached Hyperbrowser."""
+    """Release the hold when no create reached Hyperbrowser.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.fail()
@@ -278,7 +337,11 @@ def test_unsent_create_releases_the_hold(database: Engine) -> None:
 
 
 def test_refused_create_releases_the_hold(database: Engine) -> None:
-    """Release the hold when Hyperbrowser refused the sent create, so no box exists."""
+    """Release the hold when Hyperbrowser refused the sent create, so no box exists.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
@@ -289,7 +352,11 @@ def test_refused_create_releases_the_hold(database: Engine) -> None:
 
 
 def test_unknown_create_keeps_the_hold_and_refuses_a_replay(database: Engine) -> None:
-    """Keep the hold pending when a sent create had no definite answer, and refuse a second dispatch."""
+    """Keep the hold pending when a sent create had no definite answer, and refuse a second dispatch.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
@@ -300,7 +367,11 @@ def test_unknown_create_keeps_the_hold_and_refuses_a_replay(database: Engine) ->
 
 
 def test_refusal_after_a_confirmed_sandbox_keeps_the_hold(database: Engine) -> None:
-    """Keep the hold when a sandbox id exists, even if a later step reported a refusal."""
+    """Keep the hold when a sandbox id exists, even if a later step reported a refusal.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
@@ -310,7 +381,11 @@ def test_refusal_after_a_confirmed_sandbox_keeps_the_hold(database: Engine) -> N
 
 
 def test_confirmed_stop_settles_a_box_with_no_id(database: Engine) -> None:
-    """Settle a box whose id was never confirmed once its stop is confirmed, keyed by the operation id."""
+    """Settle a box whose id was never confirmed once its stop is confirmed, keyed by the operation id.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
@@ -326,7 +401,11 @@ def test_confirmed_stop_settles_a_box_with_no_id(database: Engine) -> None:
 
 
 def test_lease_slice_is_claimed_for_the_same_request(database: Engine) -> None:
-    """Claim a pool lease slice reserved for the same request, and settle it like a fresh hold."""
+    """Claim a pool lease slice reserved for the same request, and settle it like a fresh hold.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     slice_ = runtime.reserve(
         quote_hyperbrowser_sandbox(CREATE), operation_key="slice", cost_kind="sandbox", role="runtime"
@@ -339,7 +418,11 @@ def test_lease_slice_is_claimed_for_the_same_request(database: Engine) -> None:
 
 
 def test_lease_slice_for_another_request_is_refused(database: Engine) -> None:
-    """Refuse a lease slice whose fingerprint belongs to a different sandbox request."""
+    """Refuse a lease slice whose fingerprint belongs to a different sandbox request.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     slice_ = runtime.reserve(
         quote_hyperbrowser_sandbox(CREATE), operation_key="slice", cost_kind="sandbox", role="runtime"
@@ -351,7 +434,11 @@ def test_lease_slice_for_another_request_is_refused(database: Engine) -> None:
 
 
 def test_extend_is_refused(database: Engine) -> None:
-    """Refuse an extension, because Hyperbrowser cannot lengthen a running sandbox's timeout."""
+    """Refuse an extension, because Hyperbrowser cannot lengthen a running sandbox's timeout.
+
+    Args:
+        database: The SQLite ledger.
+    """
     runtime = _runtime(database)
     reservation = HyperbrowserUsageReservation(runtime, CREATE, operation_key="box-one")
     before = _operation(database).max_units
