@@ -640,9 +640,9 @@ class NovitaEnvironment(SandboxEnvironment):
         # Harbor puts the cd in the command: the SDK cwd option fails with a
         # misleading error when the directory does not exist.
         if cwd:
-            # The group keeps every part of a compound command behind the cd,
-            # and the newline ends a trailing comment before the brace.
-            command = f"cd {shlex.quote(cwd)} && {{ {command}\n}}"
+            # eval keeps every part of a compound command behind the cd, and
+            # runs an empty command or one that ends in a backslash unchanged.
+            command = f"cd {shlex.quote(cwd)} && eval {shlex.quote(command)}"
         try:
             # timeout=0 keeps the connection open with no limit; exec applies
             # its own limit and kills the command.

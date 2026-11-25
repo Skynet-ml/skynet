@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import shutil
+import subprocess
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from decimal import Decimal
@@ -801,7 +803,7 @@ async def test_exec_runs_in_the_cwd_and_reports_the_exit_code() -> None:
     assert seen == [("stdout", "out")]
     box = next(iter(FakeSandbox.live.values()))
     command, options = box.commands.runs[-1]
-    assert command == "cd '/my dir' && { echo hi\n}"
+    assert command == "cd '/my dir' && eval 'echo hi'"
     assert options["user"] == "root"
     assert options["background"] is True
     failed = await env.exec("fail")
@@ -1167,3 +1169,39 @@ async def test_network_policy_errors_are_infra_errors(monkeypatch: pytest.Monkey
     with pytest.raises(SandboxInfraError):
         await env.set_network_policy(NetworkPolicy(disabled=True))
     await env.stop()
+
+
+@pytest.mark.parametrize(
+    ("command", "built", "stdout"),
+    [
+        ("", "eval ''", ""),
+        ("echo a\\", "eval 'echo a\\'", "a\\\n"),
+        ("echo a; pwd", "eval 'echo a; pwd'", "a\n{dir}\n"),
+    ],
+)
+async def test_exec_cwd_wraps_any_command(command: str, built: str, stdout: str, tmp_path: Path) -> None:
+    """Build a cd that guards every part of the command, and check that bash runs the built string.
+
+    Args:
+        command: The caller's command.
+        built: The expected text after the cd.
+        stdout: The expected bash output; ``{dir}`` is the working directory.
+        tmp_path: The working directory.
+    """
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    folder = str(tmp_path)
+    await env.exec(command, cwd=folder)
+    box = next(iter(FakeSandbox.live.values()))
+    sent, _ = box.commands.runs[-1]
+    await env.stop()
+    assert sent == f"cd {folder} && {built}"
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not installed")
+    result = await asyncio.to_thread(subprocess.run, [bash, "-c", sent], capture_output=True, text=True, check=False)
+    assert (result.returncode, result.stdout) == (0, stdout.format(dir=folder))
+    missing = sent.replace(folder, folder + "/missing", 1)
+    failed = await asyncio.to_thread(subprocess.run, [bash, "-c", missing], capture_output=True, text=True, check=False)
+    assert failed.returncode != 0
+    assert failed.stdout == ""
