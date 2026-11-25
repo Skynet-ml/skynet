@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -233,6 +234,42 @@ def test_reserve_then_settle_charges_the_measured_runtime(database: Engine, cloc
     assert evidence["measured_ms"] == 10_500
     assert evidence["over_funded"] is False
     assert evidence["attempt"] == "attempt-1"
+
+
+def test_failed_pending_call_does_not_replace_the_settle_error(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Raise the first settle error and log a pending call that also fails."""
+    reservation = SuperserveUsageReservation(_runtime(database), CREATE, operation_key="pending-fails")
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        """Fail as a lost database would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database down")
+
+    def broken_pending() -> None:
+        """Fail the pending call.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("pending down")
+
+    monkeypatch.setattr(reservation.runtime.service, "get_operation", broken)
+    monkeypatch.setattr(reservation, "pending", broken_pending)
+    with (
+        caplog.at_level(logging.WARNING, logger=superserve_usage.__name__),
+        pytest.raises(RuntimeError, match="database down"),
+    ):
+        reservation.settle()
+    assert "could not mark the hold pending: OSError" in caplog.text
 
 
 def test_settle_clamps_to_the_hold_and_warns(

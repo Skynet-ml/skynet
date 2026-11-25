@@ -211,38 +211,81 @@ class FakeBox:
 
 
 class FakeTemplate:
-    """Act as one Superserve template."""
+    """Hold the server-side state of one Superserve template and its builds."""
 
     def __init__(self, sdk: FakeSuperserve, name: str, status: str = "ready", **kwargs: Any) -> None:
-        """Record the template.
+        """Record the template with one build.
 
         Args:
             sdk: The fake SDK.
             name: The template name.
-            status: The build status.
+            status: The status of the first build.
             **kwargs: The create keyword arguments.
         """
         self.sdk = sdk
         self.id = f"tpl-{len(sdk.templates) + 1}"
         self.name = name
-        self.status = status
         self.kwargs = kwargs
         self.rebuilds = 0
+        self.builds: dict[str, str] = {"build-1": status}
+        self.latest_build_id = "build-1"
 
-    async def rebuild(self) -> None:
-        """Start a new build."""
-        self.rebuilds += 1
-        self.status = "building"
+    @property
+    def status(self) -> str:
+        """Return the status of the latest build."""
+        return self.builds[self.latest_build_id]
+
+    @status.setter
+    def status(self, value: str) -> None:
+        """Set the status of the latest build.
+
+        Args:
+            value: The new status.
+        """
+        self.builds[self.latest_build_id] = value
+
+
+class FakeTemplateHandle:
+    """Act as an SDK template handle, which keeps the build id it saw at connect time."""
+
+    def __init__(self, template: FakeTemplate) -> None:
+        """Take the template's latest build id, as the SDK does.
+
+        Args:
+            template: The server-side template.
+        """
+        self.template = template
+        self.id = template.id
+        self.name = template.name
+        self.latest_build_id = template.latest_build_id
+
+    async def rebuild(self) -> Any:
+        """Queue a new build; like the SDK, leave this handle's build id unchanged.
+
+        Returns:
+            The new build info.
+        """
+        template = self.template
+        template.rebuilds += 1
+        build_id = f"build-{len(template.builds) + 1}"
+        template.builds[build_id] = "building"
+        template.latest_build_id = build_id
+        return SimpleNamespace(id=build_id)
 
     async def wait_until_ready(self) -> None:
-        """Finish the build.
+        """Wait for the build this handle knows, and finish it.
 
         Raises:
-            FakeSDKError: The SDK was told to fail the build.
+            FakeSDKError: The build failed, or the SDK was told to fail it.
         """
-        if self.sdk.build_error is not None:
-            raise self.sdk.build_error
-        self.status = "ready"
+        sdk = self.template.sdk
+        if sdk.build_hook is not None:
+            await sdk.build_hook()
+        if sdk.build_error is not None:
+            raise sdk.build_error
+        if self.template.builds[self.latest_build_id] == "failed":
+            raise FakeSDKError("build failed")
+        self.template.builds[self.latest_build_id] = "ready"
 
 
 class FakeSuperserve:
@@ -262,6 +305,7 @@ class FakeSuperserve:
         self.kill_error: Exception | None = None
         self.list_error: Exception | None = None
         self.build_error: Exception | None = None
+        self.build_hook: Callable[[], Awaitable[None]] | None = None
         self.AsyncSandbox = SimpleNamespace(create=self._create, list=self._list, kill_by_id=self._kill)
         self.AsyncTemplate = SimpleNamespace(
             list=self._list_templates, create=self._create_template, connect=self._connect
@@ -325,7 +369,7 @@ class FakeSuperserve:
         """
         return [template for template in self.templates if template.name.startswith(name_prefix)]
 
-    async def _create_template(self, *, name: str, **kwargs: Any) -> FakeTemplate:
+    async def _create_template(self, *, name: str, **kwargs: Any) -> FakeTemplateHandle:
         """Start a template build.
 
         Args:
@@ -333,22 +377,22 @@ class FakeSuperserve:
             **kwargs: The other create arguments.
 
         Returns:
-            The building template.
+            A handle to the building template.
         """
         template = FakeTemplate(self, name, "building", **kwargs)
         self.templates.append(template)
-        return template
+        return FakeTemplateHandle(template)
 
-    async def _connect(self, name_or_id: str) -> FakeTemplate:
-        """Return one template by name or id.
+    async def _connect(self, name_or_id: str) -> FakeTemplateHandle:
+        """Return a fresh handle to one template by name or id.
 
         Args:
             name_or_id: The template name or id.
 
         Returns:
-            The template.
+            The handle.
         """
-        return next(t for t in self.templates if name_or_id in (t.name, t.id))
+        return FakeTemplateHandle(next(t for t in self.templates if name_or_id in (t.name, t.id)))
 
     def box(self) -> FakeBox:
         """Return the only box.
@@ -549,6 +593,21 @@ async def test_failed_template_is_rebuilt(sdk: FakeSuperserve) -> None:
     await env.start()
     await env.stop()
     assert sdk.templates[0].rebuilds == 1
+    assert sdk.templates[0].builds == {"build-1": "failed", "build-2": "ready"}
+
+
+async def test_stuck_template_build_times_out_and_releases_the_unsent_hold(
+    sdk: FakeSuperserve, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop waiting for a build at the build timeout, send no create and release the hold."""
+    monkeypatch.setattr(provider, "_BUILD_TIMEOUT_SEC", 0.01)
+    sdk.build_hook = asyncio.Event().wait
+    usage = FakeUsage()
+    with pytest.raises(SandboxInfraError, match="prepare the template") as raised:
+        await _protected(usage).start()
+    assert isinstance(raised.value.__cause__, TimeoutError)
+    assert not sdk.boxes
+    assert usage.names() == ["fail"]
 
 
 @pytest.mark.parametrize(

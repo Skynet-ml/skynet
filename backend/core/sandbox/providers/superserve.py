@@ -106,6 +106,11 @@ _MAX_LIFETIME_SEC = 604_800
 # The idle timeout's documented floor; the provider assumes timeout_seconds
 # has the same floor, so a short lifetime cannot get a 400.
 _MIN_TIMEOUT_SEC = 60
+# A template build pulls one registry image and runs one short step; a
+# build still running after this is treated as stuck, so start() cannot
+# hold a dispatched budget forever. The create is not sent yet, so the
+# hold is released.
+_BUILD_TIMEOUT_SEC = 900
 # Harbor's file transfer timeout.
 _TRANSFER_TIMEOUT_SEC = 1800
 # The download limit of the other providers (sbx, kernel).
@@ -607,7 +612,8 @@ class SuperserveEnvironment(SandboxEnvironment):
             The template name.
 
         Raises:
-            SandboxInfraError: An SDK call failed or the build failed.
+            SandboxInfraError: An SDK call failed, the build failed, or the
+                build ran past ``_BUILD_TIMEOUT_SEC``.
         """
         vcpu, memory, disk = self._size()
         image = self.spec.image or DEFAULT_IMAGE
@@ -634,7 +640,11 @@ class SuperserveEnvironment(SandboxEnvironment):
                 template = await AsyncTemplate.connect(found[0].id)
                 if status == "failed":
                     await template.rebuild()
-            await template.wait_until_ready()
+                    # A handle keeps the build id it saw at connect time, so the old
+                    # handle would wait on the failed build; a new one sees the rebuild.
+                    template = await AsyncTemplate.connect(found[0].id)
+            async with asyncio.timeout(_BUILD_TIMEOUT_SEC):
+                await template.wait_until_ready()
         return name
 
     async def _create(self, usage: Any | None) -> Any:
