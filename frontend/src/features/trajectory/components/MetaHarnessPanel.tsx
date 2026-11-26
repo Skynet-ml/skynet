@@ -246,7 +246,7 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
               </HelpTip>
             </CardTitle>
           </div>
-          {live ? (
+          {live && (
             <motion.div
               initial={{ opacity: 0, y: -4 }}
               animate={{ opacity: 1, y: 0 }}
@@ -255,10 +255,6 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
               <PingDot size="sm" />
               <span className="tabular-nums">{versionCount}</span>
             </motion.div>
-          ) : (
-            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider rtl:tracking-normal text-muted-foreground tabular-nums">
-              {versionCount}
-            </span>
           )}
         </CardHeader>
         <CardContent className="space-y-4">
