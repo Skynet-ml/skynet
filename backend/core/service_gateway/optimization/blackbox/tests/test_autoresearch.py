@@ -512,6 +512,33 @@ def test_a_round_that_only_probes_gets_one_full_sweep_of_its_last_probed_version
     assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
 
 
+def test_the_end_of_round_sweep_scores_the_text_of_the_last_probe_not_an_earlier_one(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The agent can rewrite a file between probes, and only the last probed text is its latest version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    rewrite = _bash("printf %s seed{x}yyy > work/c{n}.txt")
+    model = _Researcher([_WRITE, _evaluate(example_ids=["0"]), rewrite, _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, stop_at_score=None, max_evals=4)
+
+    # The first probe scores "seedx" (5) and the last probe scores "seedxyyy" (8); only the last gets the sweep.
+    assert [(data["candidate_id"], data["score"]) for kind, data in events if kind == PROGRESS_CANDIDATE] == [
+        ("0", 8.0)
+    ]
+    assert result.total_evals == 4
+    assert (result.best_candidate, result.best_score) == ("seedxyyy", 8.0)
+
+
 def test_a_round_with_a_full_sweep_of_a_new_version_gets_no_extra_sweep(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
