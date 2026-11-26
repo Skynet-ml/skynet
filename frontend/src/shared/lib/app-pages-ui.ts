@@ -1,6 +1,7 @@
 /** Locale and icon bindings for the page registry in `app-pages.ts`. */
 
 import {
+  BookOpen,
   ChartBar,
   Compass,
   Database,
@@ -33,6 +34,7 @@ export const APP_PAGE_ICONS: Record<AppPageId, Icon> = {
   download: DownloadSimple,
   terms: FileText,
   privacy: ShieldCheck,
+  blog: BookOpen,
 };
 
 /** Resolve a registry page's label in the active locale. */

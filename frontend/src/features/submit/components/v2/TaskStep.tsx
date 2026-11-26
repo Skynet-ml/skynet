@@ -11,6 +11,7 @@ import {
   isGeneralistAgentEnabled,
   useAgentFieldLock,
 } from "@/features/agent-panel";
+import { takeLandingGoal } from "@/features/landing";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { taskIssue } from "../../lib/wizard-v2";
@@ -30,6 +31,14 @@ export function TaskStep({ page }: { page: number }) {
   const { state, guided, patchTask } = useWizardV2();
   const task = state.task;
   const t = (key: string) => v2Msg(key, guided);
+
+  // A goal written on the signed-out landing page opens the setup (SKY-922).
+  // It is taken once, so a later setup does not get it again.
+  React.useEffect(() => {
+    const goal = takeLandingGoal();
+    if (goal && !task.objective.trim()) patchTask({ objective: goal });
+    // Runs once, on the first render of the step.
+  }, []);
 
   return (
     <AuthoringShell

@@ -12,7 +12,12 @@ import { proxyRoute } from "@/shared/lib/proxy-route";
 const authProxy = auth as unknown as NextMiddleware;
 
 export default function proxy(request: NextRequest, event: NextFetchEvent) {
-  switch (proxyRoute(request.headers.get("host"), request.nextUrl.pathname)) {
+  switch (proxyRoute(
+      request.headers.get("host"),
+      request.nextUrl.pathname,
+      process.env,
+      request.nextUrl.search,
+    )) {
     case "refuse":
       return new NextResponse("Forbidden", { status: 403 });
     case "pass":

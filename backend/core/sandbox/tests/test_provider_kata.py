@@ -467,6 +467,7 @@ async def test_the_box_runs_on_the_kata_runtime_with_no_network(fake_docker: _Fa
         assert _flag_values(run, "--network") == ["none"]
         assert "skynet.job=job-1" in _flag_values(run, "--label")
         assert not any(value.startswith(("HTTP_PROXY=", "HTTPS_PROXY=")) for value in _flag_values(run, "-e"))
+        assert [value.split("=", 1)[0] for value in _flag_values(run, "-e")] == ["HOME"]
         assert fake_docker.deadlines["run -d"] >= 300
         assert env.container_name in fake_docker.containers
     assert not any(call[:1] == ["network"] for call in fake_docker.calls)

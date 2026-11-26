@@ -85,6 +85,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
+  // The signed-out landing page at "/" ships its own header and footer (SKY-922).
+  if (pathname === "/" && status === "unauthenticated") {
+    return (
+      <main className="min-h-dvh" dir={dir}>
+        {children}
+      </main>
+    );
+  }
+
   // The Mac link and MCP agent consent pages are single focused decisions, like /login.
   if (pathname === "/login" || pathname === "/desktop/link" || pathname === "/mcp/authorize") {
     return (
@@ -94,10 +103,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // The legal pages are public, standalone documents that ship their own
-  // header and footer, so they render bare (no sidebar or app chrome). They
+  // The legal pages and the blog are public, standalone documents that ship
+  // their own header, so they render bare (no sidebar or app chrome). They
   // follow the UI locale, so they take its text direction.
-  if (pathname === "/terms" || pathname === "/privacy") {
+  if (pathname === "/terms" || pathname === "/privacy" || pathname === "/blog" || pathname.startsWith("/blog/")) {
     return (
       <main className="min-h-dvh" dir={dir}>
         {children}

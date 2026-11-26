@@ -54,6 +54,8 @@ export function setupCoversPath(pathname: string): boolean {
     pathname === "/download" ||
     pathname === "/docs" ||
     pathname.startsWith("/docs/") ||
+    pathname === "/blog" ||
+    pathname.startsWith("/blog/") ||
     pathname.startsWith("/share/")
   );
 }

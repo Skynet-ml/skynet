@@ -20,7 +20,8 @@ export type AppPageId =
   | "storage"
   | "download"
   | "terms"
-  | "privacy";
+  | "privacy"
+  | "blog";
 
 export type AppPage = {
   id: AppPageId;
@@ -117,6 +118,13 @@ export const APP_PAGES: readonly AppPage[] = [
     href: "/privacy",
     label: { key: "legal.privacy_link" },
     keywordsKey: "app.shell.search.kw.privacy_policy",
+    group: "navigate",
+  },
+  {
+    id: "blog",
+    href: "/blog",
+    label: { key: "blog.title" },
+    keywordsKey: "app.shell.search.kw.blog",
     group: "navigate",
   },
 ];
