@@ -10,9 +10,10 @@ one ``command`` step, so a killed run resumes from its last step.
 The agent scores a file with an ``evaluate`` tool in place of ``eval.sh``: the
 tool reads the file from the workspace tree and scores it in the worker, as the
 upstream HTTP handler does. A round with no full sweep of a new version ends with
-a sweep of the last probed version, so the run view gets a version score for
-each round. The lab is a tree that the engine builds again from
-its local files before each round, so the frontier can lose a file. After a
+a sweep of the last probed version, so the run view gets a version score for the
+round. The engine skips that sweep when the version already had a full sweep or
+the budget cannot pay for one. The lab is a tree that the engine builds again
+from its local files before each round, so the frontier can lose a file. After a
 round, only the agent's ``work/`` and ``notebook.md`` come back from the tree.
 
 In a repository run (SKY-825), a version is a tree. Each round's session works
