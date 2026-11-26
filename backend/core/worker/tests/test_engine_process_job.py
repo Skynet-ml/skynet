@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import inspect
 import io
 import itertools
@@ -1065,6 +1066,7 @@ def _run_repository_job(
     staged: Any = None,
     sandbox_runtime: Any = None,
     seed: dict[str, Any] | None = None,
+    target: dict[str, Any] | None = None,
 ) -> tuple[MagicMock, MagicMock, Any]:
     """Run one stored repository job with staging that leaves ``snapshot`` on the payload.
 
@@ -1082,6 +1084,7 @@ def _run_repository_job(
         sandbox_runtime: The parent's sandbox runtime, which also gets a
             budget that runs each paid call at once; ``None`` keeps the mock.
         seed: Extra fields on the stored job row.
+        target: Extra fields on the stored payload's target.
 
     Returns:
         The budget gateway, the publish step and the staged repository.
@@ -1097,6 +1100,7 @@ def _run_repository_job(
     payload = request.model_dump(mode="json", by_alias=True)
     if proposer is not None:
         payload["proposer"] = proposer
+    payload["target"].update(target or {})
     store.engine = MagicMock()
     store.seed_job(
         "repo-hardened",
@@ -1182,12 +1186,13 @@ def test_repository_run_adds_its_record_before_the_publish(worker: BackgroundWor
     assert record.call_args.kwargs == {"image": None}
 
 
-def _box_staged(tmp_path: Path, source: tuple[str, str]) -> repo_staging.StagedRepository:
-    """Stage a tree whose ``[run]`` box uses one user image source (SKY-737).
+def _box_staged(tmp_path: Path, source: tuple[str, str], role: str = "run") -> repo_staging.StagedRepository:
+    """Stage a tree whose ``[run]`` or ``[metric]`` box uses one user image source (SKY-737).
 
     Args:
         tmp_path: Pytest temporary folder.
-        source: The ``[run]`` box source as ``(kind, value)``: ``image`` or ``dockerfile``.
+        source: The box source as ``(kind, value)``: ``image`` or ``dockerfile``.
+        role: The box that uses the source.
 
     Returns:
         A staged repository with that box source and no hidden paths.
@@ -1197,7 +1202,7 @@ def _box_staged(tmp_path: Path, source: tuple[str, str]) -> repo_staging.StagedR
         snapshot=RepoSnapshot(commit="c" * 40, archive=_tree(tmp_path, files), readonly_paths=(), size_bytes=1),
         secrets={},
         workdir=tmp_path,
-        box_sources={"run": source},
+        box_sources={role: source},
     )
 
 
@@ -1456,6 +1461,259 @@ def test_a_parallel_start_that_pinned_first_gives_its_box_images(
 
     assert store.pin_box_images.call_args.args[1]["run"]["image"] == image
     assert publish.call_args.args[2].box_images == first
+
+
+_APT_BASE = "skynet-default@sha256:" + "d" * 64
+
+
+def _apt_stage(staged: repo_staging.StagedRepository) -> Callable[..., tuple[dict, repo_staging.StagedRepository]]:
+    """Return a staging step that also gives the payload Skynet's default image (SKY-967).
+
+    Args:
+        staged: What staging returns.
+
+    Returns:
+        A stand-in for ``stage_repository``.
+    """
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, repo_staging.StagedRepository]:
+        """Stage the repository the way the real step leaves the payload, with the default image.
+
+        Args:
+            payload: The run's protected payload.
+            **kwargs: Not used.
+
+        Returns:
+            The payload and the staged repository.
+        """
+        payload["target"]["repo"][engine_module.ENVIRONMENT_KEY] = {}
+        payload[REPO_SNAPSHOT_KEY] = {}
+        payload["_budget_gateway_descriptor"] = {"image": _APT_BASE}
+        return payload, staged
+
+    return stage
+
+
+def _count_setup_model(monkeypatch: pytest.MonkeyPatch, packages: tuple[str, ...]) -> list[Path]:
+    """Make the setup model name ``packages`` and record each time it is asked (SKY-967).
+
+    Args:
+        monkeypatch: Restores the setup model after the test.
+        packages: The Debian packages that the model names.
+
+    Returns:
+        The trees the model was asked about, in order.
+    """
+    asked: list[Path] = []
+
+    def infer(archive: Path, *, ask: Any) -> repo_staging.SetupPlan:
+        """Answer as a setup model that names only Debian packages.
+
+        Args:
+            archive: The fetched tree.
+            ask: Not used.
+
+        Returns:
+            A plan with no command and ``packages``.
+        """
+        asked.append(archive)
+        return repo_staging.SetupPlan(None, packages)
+
+    monkeypatch.setattr(repo_staging, "infer_setup_command", infer)
+    return asked
+
+
+@pytest.mark.usefixtures("_non_root_local_images")
+def test_the_setup_model_names_packages_that_the_run_builds_into_its_run_image(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no [run] image, setup goes first, its packages are stored, and the apt image is built and pinned (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    asked = _count_setup_model(monkeypatch, ("gcc",))
+    staged = dataclasses.replace(_box_staged(tmp_path, ("image", "unused")), box_sources={})
+    builder = _LocalBuilder()
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=staged,
+        sandbox_runtime=_ImageRuntime(),
+        patched={
+            "image_builder": lambda settings: builder,
+            "add_run_record": MagicMock(),
+            "infer_repo_setup": repo_staging.infer_repo_setup,
+            "stage_repository": _apt_stage(staged),
+        },
+    )
+
+    job = store.get_job("repo-hardened")
+    assert len(asked) == 1
+    assert job["payload"]["target"][repo_staging.APT_PACKAGES_KEY] == ["gcc"]
+    assert len(builder.requests) == 1
+    assert publish.call_args.args[2].box_sources["run"] == ("apt", repo_staging.apt_dockerfile(_APT_BASE, ("gcc",)))
+    assert job["box_images"]["run"]["source"] == "apt"
+    assert job["box_images"]["run"]["image"] == _BUILT_IMAGE
+    assert publish.call_args.args[2].box_images == job["box_images"]
+
+
+def test_a_resumed_run_reuses_its_packages_and_pinned_apt_image_without_the_setup_model(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume reads its stored packages, asks the setup model nothing, and boots from the pinned image (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    asked = _count_setup_model(monkeypatch, ("make",))
+    pinned = {"run": {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64, "source": "apt", "input_hash": "h"}}
+    staged = dataclasses.replace(_box_staged(tmp_path, ("image", "unused")), box_sources={})
+    runtime, builder = _ImageRuntime(), _LocalBuilder()
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=staged,
+        sandbox_runtime=runtime,
+        seed={"box_images": pinned},
+        target={"setup_command": None, repo_staging.APT_PACKAGES_KEY: ["gcc"]},
+        patched={
+            "image_builder": lambda settings: builder,
+            "add_run_record": MagicMock(),
+            "infer_repo_setup": repo_staging.infer_repo_setup,
+            "stage_repository": _apt_stage(staged),
+        },
+    )
+
+    assert asked == []
+    assert builder.requests == []
+    assert runtime.specs == []
+    assert store.get_job("repo-hardened")["box_images"] == pinned
+    assert publish.call_args.args[2].box_images == pinned
+    assert publish.call_args.args[2].box_sources["run"][0] == "apt"
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_a_bad_user_dockerfile_stops_the_run_before_the_setup_model(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, role: str
+) -> None:
+    """A [run] or [metric] dockerfile that this deployment cannot build fails the run before the setup model (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        role: The box whose dockerfile ascent.toml names.
+    """
+    setup = MagicMock(return_value=None)
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile"), role),
+        sandbox_runtime=_ImageRuntime(),
+        patched={"image_builder": lambda settings: None, "infer_repo_setup": setup},
+    )
+
+    setup.assert_not_called()
+    publish.assert_not_called()
+    assert store.get_job("repo-hardened")["status"] == "failed"
+
+
+@pytest.mark.usefixtures("_non_root_local_images")
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_a_user_dockerfile_is_built_and_checked_before_the_setup_model(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, role: str
+) -> None:
+    """With a [run] or [metric] dockerfile, the setup model runs only after the image passed its check (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        role: The box whose dockerfile ascent.toml names.
+    """
+    builder, runtime = _LocalBuilder(), _ImageRuntime()
+    seen_at_setup: list[tuple[int, int]] = []
+    setup = MagicMock(
+        side_effect=lambda payload, staged, gateway: seen_at_setup.append((len(builder.requests), len(runtime.checks)))
+    )
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile"), role),
+        sandbox_runtime=runtime,
+        patched={"image_builder": lambda settings: builder, "add_run_record": MagicMock(), "infer_repo_setup": setup},
+    )
+
+    assert seen_at_setup == [(1, 1)]
+    assert store.get_job("repo-hardened")["box_images"][role]["source"] == "dockerfile"
+    publish.assert_called_once()
+
+
+@pytest.mark.usefixtures("_non_root_local_images")
+def test_a_metric_dockerfile_is_checked_before_the_setup_model_and_the_apt_image_after_it(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With only a [metric] dockerfile, its image is checked first; the generated [run] image waits for setup (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    builder, runtime = _LocalBuilder(), _ImageRuntime()
+    seen_at_setup: list[tuple[int, int]] = []
+
+    def infer(archive: Path, *, ask: Any) -> repo_staging.SetupPlan:
+        """Record the builds and checks so far, then name one Debian package.
+
+        Args:
+            archive: The fetched tree.
+            ask: Not used.
+
+        Returns:
+            A plan with no command and ``gcc``.
+        """
+        seen_at_setup.append((len(builder.requests), len(runtime.checks)))
+        return repo_staging.SetupPlan(None, ("gcc",))
+
+    monkeypatch.setattr(repo_staging, "infer_setup_command", infer)
+    staged = _box_staged(tmp_path, ("dockerfile", "box/Dockerfile"), "metric")
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=staged,
+        sandbox_runtime=runtime,
+        patched={
+            "image_builder": lambda settings: builder,
+            "add_run_record": MagicMock(),
+            "infer_repo_setup": repo_staging.infer_repo_setup,
+            "stage_repository": _apt_stage(staged),
+        },
+    )
+
+    pinned = store.get_job("repo-hardened")["box_images"]
+    assert seen_at_setup == [(1, 1)]
+    assert len(builder.requests) == 2
+    assert {role: record["source"] for role, record in pinned.items()} == {"metric": "dockerfile", "run": "apt"}
+    assert publish.call_args.args[2].box_images == pinned
 
 
 def test_a_stored_job_with_the_files_proposer_fails_on_an_engine_that_ignores_it(

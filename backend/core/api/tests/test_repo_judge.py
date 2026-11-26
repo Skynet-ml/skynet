@@ -39,7 +39,17 @@ from ...service_gateway.optimization.blackbox.service import FinalRun
 from ...storage.models import BillingCustomerModel, ExecutionBudgetModel
 from ...storage.preflights import WizardPreflightModel
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore
-from .. import repo_judge
+from ...worker.repo_staging import APT_PACKAGES_KEY, StagedRepository, apt_dockerfile
+from ...worker.tests.test_repo_staging import (
+    _BUILT_IMAGE,
+    _FakeBudget,
+    _FakeBuilder,
+    _FakeRegistry,
+    _ImageRuntime,
+    _ImageStore,
+    _tree,
+)
+from .. import preflight_execution, repo_judge
 from ..auth import AuthenticatedUser
 from ..errors import DomainError
 from ..routers.optimizations import lifecycle
@@ -2380,3 +2390,97 @@ def test_the_end_picks_the_best_call_by_the_contracts_direction(
     result = store.get_job(session_id)["result"]
     assert result["best_candidate"] == patches[winner]
     assert result["direction"] == (direction or "maximize")
+
+
+_DEFAULT_IMAGE = "skynet-default@sha256:" + "d" * 64
+
+
+@pytest.mark.parametrize("packages", [["gcc"], []], ids=["apt", "default"])
+def test_a_judge_session_runs_setup_in_the_image_with_the_setup_packages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, packages: list[str]
+) -> None:
+    """A judge session builds the run's apt image once, reuses it by its input hash, and runs setup in it (SKY-967).
+
+    With no packages the session keeps Skynet's default image and builds nothing.
+
+    Args:
+        monkeypatch: Replaces the credential, staging, gateway and scorer steps.
+        tmp_path: Holds each attempt's fetched tree.
+        packages: The Debian packages that the run's setup named.
+    """
+    builder, image_store, runtime = _FakeBuilder(), _ImageStore(), _ImageRuntime()
+    registry = _FakeRegistry({"sha256:" + "b" * 64})
+    gateway = SimpleNamespace(
+        runtime=_FakeBudget(),
+        protect_payload=lambda payload, **kwargs: payload,
+        parent_sandbox_runtime=lambda: runtime,
+        close=lambda: None,
+    )
+    bound: list[StagedRepository] = []
+    attempts = iter(range(2))
+
+    def stage(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], StagedRepository]:
+        """Stage a fresh tree with no [run] image, on Skynet's default image.
+
+        Args:
+            payload: The protected payload.
+            **kwargs: Not used.
+
+        Returns:
+            The payload and the staged tree.
+        """
+        workdir = tmp_path / str(next(attempts))
+        workdir.mkdir()
+        payload["_budget_gateway_descriptor"] = {"image": _DEFAULT_IMAGE}
+        archive = _tree(workdir, {"src/app.py": "x = 1\n"})
+        return payload, StagedRepository(snapshot=SimpleNamespace(archive=archive), secrets={}, workdir=workdir)
+
+    for name, value in {
+        "alias_blackbox_metric_model": lambda payload: None,
+        "resolve_execution_credentials": lambda payload, **kwargs: payload,
+        "prepare_protected_credentials": lambda payload, **kwargs: payload,
+        "ProtectedCredentialVault": lambda **kwargs: None,
+        "ProviderKeyVault": lambda **kwargs: None,
+        "payload_uses_token_source": lambda *args, **kwargs: False,
+        "BudgetService": lambda **kwargs: None,
+        "BudgetRuntime": lambda *args, **kwargs: None,
+        "ModelGateway": lambda budget_runtime: gateway,
+        "bind_protected_sandbox": lambda *args, **kwargs: None,
+        "judge_lifetime_seconds": lambda payload, case_count: 60.0,
+        "stage_repository": stage,
+        "check_repository": lambda *args, **kwargs: [],
+        "infer_repo_setup": lambda *args: None,
+        "image_builder": lambda settings: builder,
+        "image_registry": lambda settings: registry,
+        "get_job_store": lambda: image_store,
+        "bind_repo_scorer": lambda payload, staged, *args, **kwargs: bound.append(staged),
+    }.items():
+        monkeypatch.setattr(preflight_execution, name, value)
+    payload = {"target": {"kind": "repo", "repo": {"repository": "o/r"}, APT_PACKAGES_KEY: packages}}
+
+    for attempt in range(2):
+        with preflight_execution.judge_scorer(
+            payload,
+            username=USER,
+            budget_id="budget",
+            generation=0,
+            owner_id=f"judge-s-{attempt}",
+            image=_DEFAULT_IMAGE,
+            engine=None,
+            case_count=1,
+        ):
+            pass
+
+    if packages:
+        assert len(builder.requests) == 1
+        assert [charge["operation_key"] for charge in gateway.runtime.charges] == ["image-build:judge-s-0:run"]
+        assert [staged.box_sources["run"] for staged in bound] == [
+            ("apt", apt_dockerfile(_DEFAULT_IMAGE, ("gcc",)))
+        ] * 2
+        assert [staged.box_user_images["run"].reference for staged in bound] == [_BUILT_IMAGE] * 2
+        assert [check.commands[0] for check in runtime.checks] == ["ascent check --image --role candidate"] * 2
+    else:
+        assert builder.requests == []
+        assert gateway.runtime.charges == []
+        assert [(staged.box_sources, staged.box_user_images) for staged in bound] == [({}, {})] * 2
+        assert runtime.checks == []

@@ -958,6 +958,21 @@ box, and the run budget pays for the copy. The box runs linux/amd64, so an
 index gives only its linux/amd64 image. One limit stays: a hardening run
 does not support a user image yet.
 
+### Debian packages that setup names
+
+When the run infers its setup command, the model can also name Debian
+packages, such as a C library or a compiler. Setup never runs `apt-get` or
+`sudo` itself. When `[run]` sets no `image` or `dockerfile`, the run then
+builds a `[run]` image: Skynet's sandbox image plus one
+`apt-get install -y --no-install-recommends` layer of the sorted package
+names. The run keeps only valid Debian names. The build and its image check
+follow the `dockerfile` rules above, and the build is charged in the same
+way. The same base image and the same names reuse the earlier build. The
+setup check builds the image too, and a resume uses the image that the run
+pinned. With no packages, or with no image builder in the deployment, the
+run uses Skynet's sandbox image. A `[run]` `image` or `dockerfile` always
+wins over the packages.
+
 ## The metric: `[metric] entry`
 
 `[metric] entry` names the metric. It has two forms:

@@ -35,17 +35,22 @@ from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
 from ..exceptions import ServiceError
 from ..models import BlackboxRunRequest
+from ..sandbox.image_registry import image_registry
 from ..service_gateway.optimization.blackbox.native_runtime import check_native_runtime
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
+from ..storage import get_job_store
 from ..storage.preflights import PreflightStore
 from ..worker.loop_host import provider_message
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
     StagedRepository,
     bind_repo_scorer,
+    image_builder,
     infer_repo_setup,
     is_repo_payload,
+    prepare_apt_image,
     stage_repository,
+    with_apt_image,
 )
 from ..worker.unified_aliases import alias_blackbox_metric_model
 from ..worker.vercel_dspy import run_vercel_dspy
@@ -623,7 +628,16 @@ def _perform_preflight(
             if gate_failures:
                 raise RepoGateError(gate_failures)
             infer_repo_setup(protected, staged, gateway)
-            unchecked = tuple(role for role in SETUP_NOT_CHECKED if role in staged.box_sources)
+            # The check builds and pays for the generated [run] image as the run does, so it
+            # checks setup in the image the run uses (SKY-967).
+            staged = _with_setup_image(
+                staged, protected, owner_id=f"preflight-{identity}", username=user.username, gateway=gateway
+            )
+            unchecked = tuple(
+                role
+                for role in SETUP_NOT_CHECKED
+                if role in staged.box_sources and staged.box_sources[role][0] != "apt"
+            )
             bind_repo_scorer(
                 protected,
                 staged,
@@ -698,6 +712,37 @@ def _perform_preflight(
                 status = "failed"
                 result.setdefault("checks", []).append(_check("runtime", "failed", str(error)))
     return status, result
+
+
+def _with_setup_image(
+    staged: StagedRepository, protected: dict[str, Any], *, owner_id: str, username: str, gateway: ModelGateway
+) -> StagedRepository:
+    """Build or reuse the generated ``[run]`` image with the Debian packages that setup named (SKY-967).
+
+    Args:
+        staged: The staged repository.
+        protected: The protected payload, with the target's packages.
+        owner_id: Identity that names the paid build and check.
+        username: Account that pays and owns the image.
+        gateway: The metered gateway, whose runtime pays for the build.
+
+    Returns:
+        ``staged`` with the ``[run]`` image, or unchanged when setup named no packages,
+        ascent.toml names the ``[run]`` image, or this deployment cannot build it.
+    """
+    staged = with_apt_image(staged, protected)
+    if staged.box_sources.get("run", ("",))[0] != "apt":
+        return staged
+    return prepare_apt_image(
+        staged,
+        owner_id=owner_id,
+        username=username,
+        runtime=gateway.parent_sandbox_runtime(),
+        builder=image_builder(settings),
+        store=get_job_store(),
+        budget=gateway.runtime,
+        registry=image_registry(settings),
+    )
 
 
 @contextmanager
@@ -803,6 +848,9 @@ def judge_scorer(
         if before_scoring is not None:
             before_scoring(protected, staged)
         infer_repo_setup(protected, staged, gateway)
+        # Each version runs the repository setup, so it needs the run's Debian packages; the
+        # run's build is reused by its input hash (SKY-967).
+        staged = _with_setup_image(staged, protected, owner_id=owner_id, username=username, gateway=gateway)
         bind_repo_scorer(protected, staged, gateway, owner_id=owner_id, managed_key=managed_key)
         yield protected, staged, gateway
     finally:
