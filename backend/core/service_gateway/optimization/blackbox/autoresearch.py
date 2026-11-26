@@ -664,6 +664,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         A repository session has only the bash tool and makes no evaluation, so the write-up grace and the
         no-evaluation watchdog do not apply. The engine scores the version that the session leaves.
 
+        A text session that gives no new version a full evaluation ends with a full evaluation of its last probed
+        text, when that text had none and the budget can pay for it. This can go past the round's quota by one sweep.
+
         Args:
             server: The upstream server adapter, with the engine's recording wrappers.
             directive: This round's directive.

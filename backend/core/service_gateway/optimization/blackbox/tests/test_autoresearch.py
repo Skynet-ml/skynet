@@ -555,7 +555,32 @@ def test_a_round_skips_the_sweep_when_the_budget_cannot_pay_for_it_and_keeps_pro
     # Round 1 spends one probe and one sweep of two cases; rounds 2 and 3 have budget for one probe each.
     assert [data["candidate_id"] for kind, data in events if kind == PROGRESS_CANDIDATE] == ["0"]
     assert result.total_evals == 5
-    assert result.metadata["rounds"] >= 3
+    assert result.metadata["rounds"] == 3
+
+
+def test_a_full_sweep_of_an_old_version_does_not_stop_the_sweep_of_a_new_probed_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Only a full sweep of a version that had none counts, so a round that sweeps the seed again still gets one.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(file="work/seed.txt"), _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, stop_at_score=None, max_evals=8)
+
+    candidates = [(data["candidate_id"], data["score"]) for kind, data in events if kind == PROGRESS_CANDIDATE]
+    # Round 1's seed sweep is new, so its probe gets no sweep; round 2 sweeps the seed again and its probe gets one.
+    assert candidates == [("0", 4.0), ("0", 4.0), ("1", 6.0)]
+    assert result.total_evals == 8
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
 
 
 def test_a_full_sweep_with_a_crashed_case_is_not_swept_again_after_a_probe(
