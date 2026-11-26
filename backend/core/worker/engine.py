@@ -129,6 +129,7 @@ from .repo_staging import (
     image_builder,
     infer_repo_setup,
     is_repo_payload,
+    prepare_apt_image,
     prepare_box_images,
     publish_improvement,
     runs_proposer_entry,
@@ -1045,38 +1046,37 @@ class BackgroundWorker:
                         budget_gateway.allow_guest_hosts(
                             tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
                         )
-                        # A [run] image from ascent.toml is checked before the paid setup model, so a
-                        # bad image costs nothing. With no [run] image the setup model goes first,
-                        # because it names the packages of the generated [run] image (SKY-967).
-                        setup_first = not (
-                            isinstance(staged_repository, StagedRepository) and "run" in staged_repository.box_sources
-                        )
-                        if setup_first:
-                            self._infer_setup(optimization_id, payload_dict, staged_repository, budget_gateway)
-                            if isinstance(staged_repository, StagedRepository):
-                                staged_repository = with_apt_image(staged_repository, payload_dict)
-                        # Before the scorer box, so a bad image stops the run before it pays for
-                        # it; a resume keeps the images it pinned (SKY-737).
-                        if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
-                            user_image_registry = image_registry(settings)
-                            try:
-                                staged_repository = prepare_box_images(
+                        # A user image from ascent.toml is checked before the paid setup model, so a bad
+                        # image costs nothing. Only the generated [run] image waits for the model, which
+                        # names its packages (SKY-967). A resume keeps the images it pinned (SKY-737).
+                        is_staged = isinstance(staged_repository, StagedRepository)
+                        stored_images = job_data.get("box_images")
+                        check_first = is_staged and bool(staged_repository.box_sources) and not stored_images
+                        if check_first:
+                            staged_repository = self._prepare_images(
+                                prepare_box_images,
+                                staged_repository,
+                                optimization_id,
+                                execution_payload.username,
+                                budget_gateway,
+                                cancel_event,
+                                None,
+                            )
+                        self._infer_setup(optimization_id, payload_dict, staged_repository, budget_gateway)
+                        if is_staged:
+                            staged_repository = with_apt_image(staged_repository, payload_dict)
+                            if staged_repository.box_sources:
+                                staged_repository = self._prepare_images(
+                                    prepare_apt_image if check_first else prepare_box_images,
                                     staged_repository,
-                                    owner_id=optimization_id,
-                                    username=execution_payload.username,
-                                    runtime=budget_gateway.parent_sandbox_runtime(),
-                                    builder=image_builder(settings),
-                                    store=self._job_store,
-                                    budget=budget_gateway.runtime,
-                                    registry=user_image_registry,
-                                    pinned=job_data.get("box_images"),
-                                    cancelled=lambda: self._build_cancelled(cancel_event, optimization_id),
+                                    optimization_id,
+                                    execution_payload.username,
+                                    budget_gateway,
+                                    cancel_event,
+                                    None if check_first else stored_images,
                                 )
-                            except ImageBuildCancelledError:
-                                # A stop for a worker shutdown releases the run for a restart; a user
-                                # cancel or pause keeps the status that the endpoint wrote.
-                                self._raise_if_interrupted(cancel_event, optimization_id)
-                                raise CancellationError() from None
+                        # Before the scorer box, so every box of the run uses the images pinned here.
+                        if is_staged and staged_repository.box_sources:
                             pinned_images = self._job_store.pin_box_images(
                                 optimization_id, dict(staged_repository.box_images)
                             )
@@ -1089,11 +1089,9 @@ class BackgroundWorker:
                                     runtime=budget_gateway.parent_sandbox_runtime(),
                                     builder=None,
                                     store=self._job_store,
-                                    registry=user_image_registry,
+                                    registry=image_registry(settings),
                                     pinned=pinned_images,
                                 )
-                        if not setup_first:
-                            self._infer_setup(optimization_id, payload_dict, staged_repository, budget_gateway)
                         bind_repo_scorer(
                             payload_dict,
                             staged_repository,
@@ -1838,6 +1836,52 @@ class BackgroundWorker:
 
         self._threads.clear()
         logger.info("Stopped background workers")
+
+    def _prepare_images(
+        self,
+        step: Callable[..., StagedRepository],
+        staged: StagedRepository,
+        optimization_id: str,
+        username: str,
+        gateway: Any,
+        cancel_event: threading.Event | None,
+        pinned: dict[str, Any] | None,
+    ) -> StagedRepository:
+        """Build and check the run's box images with one image step, or boot from the pinned ones.
+
+        Args:
+            step: :func:`prepare_box_images`, or :func:`prepare_apt_image` for only the generated image.
+            staged: The staged repository.
+            optimization_id: The repository run, which names the paid build and check.
+            username: The run's owner.
+            gateway: The run's model gateway, whose runtime pays for the build.
+            cancel_event: The run's cancel flag.
+            pinned: The images a resume pinned, or ``None``.
+
+        Returns:
+            ``staged`` with its box images.
+
+        Raises:
+            CancellationError: When a cancel or a worker shutdown stopped a build.
+        """
+        try:
+            return step(
+                staged,
+                owner_id=optimization_id,
+                username=username,
+                runtime=gateway.parent_sandbox_runtime(),
+                builder=image_builder(settings),
+                store=self._job_store,
+                budget=gateway.runtime,
+                registry=image_registry(settings),
+                pinned=pinned,
+                cancelled=lambda: self._build_cancelled(cancel_event, optimization_id),
+            )
+        except ImageBuildCancelledError:
+            # A stop for a worker shutdown releases the run for a restart; a user
+            # cancel or pause keeps the status that the endpoint wrote.
+            self._raise_if_interrupted(cancel_event, optimization_id)
+            raise CancellationError() from None
 
     def _infer_setup(self, optimization_id: str, payload: dict[str, Any], staged: Any, gateway: Any) -> None:
         """Infer the repository setup when the run has none, and store what was inferred (SKY-967).
