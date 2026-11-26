@@ -9,7 +9,9 @@ one ``command`` step, so a killed run resumes from its last step.
 
 The agent scores a file with an ``evaluate`` tool in place of ``eval.sh``: the
 tool reads the file from the workspace tree and scores it in the worker, as the
-upstream HTTP handler does. The lab is a tree that the engine builds again from
+upstream HTTP handler does. A round with no full sweep of a new version ends with
+a sweep of the last probed version, so the run view gets a version score for
+each round. The lab is a tree that the engine builds again from
 its local files before each round, so the frontier can lose a file. After a
 round, only the agent's ``work/`` and ``notebook.md`` come back from the tree.
 
@@ -439,6 +441,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         # on trees. Its versions are tree ids: the seed's, then the tree that each session leaves.
         self._repo = ctx.repo_seed
         self._swept: set[str] = set()
+        # The last version that a text round's ``evaluate`` tool probed, for the sweep at the round's end.
+        self._probed: str | None = None
 
     def _layout(self, task: UpstreamTask, server: Any) -> None:
         """Create the native lab, without ``eval.sh``: the ``evaluate`` tool or the engine scores each version.
@@ -497,6 +501,13 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 (
                     "- `./eval.sh <file> <example_id> [<example_id> ...]` is a **probe**",
                     "- The `evaluate` tool with a `file` and `example_ids` is a **probe**",
+                )
+            )
+            edits.append(
+                (
+                    "they never enter the leaderboard.",
+                    "they never enter the leaderboard. When a round gives no new candidate a full evaluation, the "
+                    "engine gives one to the last file that the round probed, after the session ends.",
                 )
             )
         return native_engines.adapt(super()._brief(), edits)
@@ -663,6 +674,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         assert ctx.put_files is not None
         assert ctx.call_model is not None
         start_used = server.budget.used
+        versions = len(self._ids)
+        self._probed = None
         if self._repo is None:
             quota = self._round_quota(server)
             tools = [BASH_TOOL, EVALUATE_TOOL]
@@ -770,6 +783,17 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 break
         if self._repo is None:
             self._pull(tree)
+            # A probe scores some cases, so its mean is not a version score. A round with no full sweep of a new
+            # version would leave no point in the run view's score over time, so the engine sweeps the last probed
+            # version, as it sweeps each repository round's version. A budget too small for the sweep skips it.
+            probed = self._probed
+            if (
+                len(self._ids) == versions
+                and probed is not None
+                and probed not in self._ids
+                and server.budget.remaining >= len(self.example_ids)
+            ):
+                exhausted = not self._sweep(server, probed) or exhausted
         else:
             self._pull_notebook(tree)
             version = loop_tools.drop_lab(ctx, start, tree, parent, _REPO_LAB)
@@ -930,6 +954,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 average, info = server.evaluate_examples(candidate, example_ids=targets)
                 if set(targets) == visible:
                     server.log_progress(average, candidate=candidate)
+                else:
+                    self._probed = candidate
                 body = {
                     "average_score": average,
                     "scores": info.get("scores", {}),
@@ -1025,13 +1051,13 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         return front[0] if front else self._repo.tree_id
 
     def _sweep(self, server: Any, tree: str) -> bool:
-        """Give a repository version a full evaluation, as a full ``evaluate`` call does in a text run.
+        """Give a version a full evaluation, as a full ``evaluate`` call does in a text run.
 
         A version is swept once, also when its sweep fails, so a round that leaves it again spends nothing.
 
         Args:
             server: The upstream server adapter, with the engine's recording wrappers.
-            tree: The version's tree id.
+            tree: The version: a repository version's tree id, or a text round's candidate.
 
         Returns:
             ``False`` when the budget could not score the version.

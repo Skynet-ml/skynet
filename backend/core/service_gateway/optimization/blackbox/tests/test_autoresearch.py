@@ -484,6 +484,56 @@ def test_the_climb_view_gets_events_only_for_full_sweeps(
     ]
 
 
+def test_a_round_that_only_probes_gets_one_full_sweep_of_its_last_probed_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A probe's score is one case, not a version mean, so the engine sweeps the round's last probed version.
+
+    Before the fix, a run whose agent probed one case at a time sent no candidate event, and the climb view
+    had no score over time.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(example_ids=["0"]), _evaluate(example_ids=["1"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, stop_at_score=6.0)
+
+    candidates = [data for kind, data in events if kind == PROGRESS_CANDIDATE]
+    assert [(data["candidate_id"], data["score"]) for data in candidates] == [("0", 5.0), ("1", 6.0)]
+    # Each round spends two probe units and one sweep of two cases.
+    assert result.total_evals == 8
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+
+
+def test_a_round_with_a_full_sweep_of_a_new_version_gets_no_extra_sweep(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The agent's own full sweep already scores the round's version, so a later probe spends nothing more.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(), _evaluate(file="work/seed.txt", example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events)
+
+    assert [data["candidate_id"] for kind, data in events if kind == PROGRESS_CANDIDATE] == ["0", "1"]
+    assert result.total_evals == 6
+
+
 def test_a_refused_sweep_answers_the_marker_and_a_round_with_no_evaluation_ends_the_run(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -1739,6 +1789,7 @@ def test_the_worker_brief_names_the_evaluate_tool_and_not_eval_sh(tmp_path: Path
     assert "eval.sh" not in brief
     assert "The `evaluate` tool with only a `file` is a **full evaluation**" in brief
     assert "The `evaluate` tool with a `file` and `example_ids` is a **probe**" in brief
+    assert "the engine gives one to the last file that the round probed" in brief
     assert "Only `work/` and `notebook.md` carry over" in brief
     assert "is the only memory" not in brief
     assert (
