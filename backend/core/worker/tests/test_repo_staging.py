@@ -89,6 +89,7 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     ServiceSpec,
     TargetStage,
 )
+from core.service_gateway.optimization.blackbox.repo_setup import SetupPlan
 from core.service_gateway.optimization.blackbox.repo_tree import extract_folder
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
@@ -3208,8 +3209,9 @@ def test_inference_asks_the_optimization_model_and_writes_the_target(tmp_path: P
 
     inferred = repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway)
 
-    assert inferred == "make setup"
+    assert inferred == SetupPlan("make setup")
     assert payload["target"]["setup_command"] == "make setup"
+    assert repo_staging.APT_PACKAGES_KEY not in payload["target"]
     assert [(token, path, body["model"]) for token, path, body in gateway.calls] == [
         ("opt-token", "/v1/chat/completions", "opt/model")
     ]
@@ -3230,6 +3232,23 @@ def test_an_explicit_setup_command_is_kept(tmp_path: Path) -> None:
     assert gateway.calls == []
 
 
+def test_inference_records_the_debian_packages_once(tmp_path: Path) -> None:
+    """The model's packages go on the target, and a resume with them asks nothing again (SKY-967).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    payload = _payload("a" * 40)
+    gateway = _ModelGateway(answer="none\napt: libpq-dev gcc")
+
+    inferred = repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway)
+
+    assert inferred == SetupPlan(None, ("gcc", "libpq-dev"))
+    assert payload["target"][repo_staging.APT_PACKAGES_KEY] == ["gcc", "libpq-dev"]
+    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) is None
+    assert len(gateway.calls) == 1
+
+
 @pytest.mark.parametrize(("economy", "status"), [(True, 200), (False, 402)])
 def test_inference_falls_back_to_the_lockfile(economy: bool, status: int, tmp_path: Path) -> None:
     """An economy run never waits on a batch, and a refused call falls back to the manifests.
@@ -3242,7 +3261,7 @@ def test_inference_falls_back_to_the_lockfile(economy: bool, status: int, tmp_pa
     payload = {**_payload("a" * 40), "economy_mode": economy}
     gateway = _ModelGateway(status=status)
 
-    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == "uv sync --frozen"
+    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == SetupPlan("uv sync --frozen")
     assert payload["target"]["setup_command"] == "uv sync --frozen"
     assert len(gateway.calls) == (0 if economy else 1)
 
@@ -3257,7 +3276,7 @@ def test_an_economy_reflection_model_is_not_asked(tmp_path: Path) -> None:
     gateway = _ModelGateway()
     gateway.batched = {"opt-token"}
 
-    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == "uv sync --frozen"
+    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == SetupPlan("uv sync --frozen")
     assert gateway.calls == []
 
 
@@ -3270,7 +3289,7 @@ def test_a_cut_off_setup_answer_falls_back_to_the_lockfile(tmp_path: Path) -> No
     payload = _payload("a" * 40)
     gateway = _ModelGateway(answer="make se", finish_reason="length")
 
-    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == "uv sync --frozen"
+    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == SetupPlan("uv sync --frozen")
     assert len(gateway.calls) == 1
 
 
@@ -10154,3 +10173,197 @@ def test_a_cloud_deployment_without_every_build_setting_has_no_builder(
 
     assert repo_staging.image_builder(config) is None
     assert isinstance(repo_staging.image_builder(SimpleNamespace(local_mode=True)), LocalDockerImageBuilder)
+
+
+_APT_BASE = "skynet-default@sha256:" + "d" * 64
+
+
+def _apt_payload(staged_payload: dict[str, Any], packages: list[str]) -> dict[str, Any]:
+    """Give a staged payload the default image and the Debian packages that setup named (SKY-967).
+
+    Args:
+        staged_payload: The staged payload.
+        packages: The packages on the target.
+
+    Returns:
+        The same payload.
+    """
+    staged_payload["target"][repo_staging.APT_PACKAGES_KEY] = packages
+    staged_payload["_budget_gateway_descriptor"] = {"image": _APT_BASE}
+    return staged_payload
+
+
+def test_the_apt_dockerfile_is_one_layer_on_the_default_image() -> None:
+    """The generated Dockerfile installs the sorted packages in one RUN and gives the box user back (SKY-967)."""
+    dockerfile = repo_staging.apt_dockerfile(_APT_BASE, ("libpq-dev", "gcc", "gcc"))
+
+    assert dockerfile == repo_staging.apt_dockerfile(_APT_BASE, ("gcc", "libpq-dev"))
+    assert dockerfile.splitlines()[:2] == [f"FROM {_APT_BASE}", "USER root"]
+    assert dockerfile.count("RUN ") == 1
+    assert "apt-get update" in dockerfile
+    assert "apt-get install -y --no-install-recommends gcc libpq-dev" in dockerfile
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile
+    assert dockerfile.endswith("USER 1001\n")
+    assert "sudo" not in dockerfile
+
+
+@pytest.mark.parametrize("packages", [[], ["Bad Name", "x", "-rf"]])
+def test_no_valid_packages_keep_the_default_image(packages: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no valid package names, the run builds nothing and keeps today's image (SKY-967).
+
+    Args:
+        packages: The packages on the target.
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_RUN_TREE, monkeypatch)
+    try:
+        assert repo_staging.with_apt_image(staged, _apt_payload(staged_payload, packages)) is staged
+    finally:
+        staged.cleanup()
+
+
+def test_a_run_image_in_ascent_toml_wins_over_the_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``[run]`` image or dockerfile is the user's choice, so no image is generated (SKY-967).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_BOX_TREE, monkeypatch)
+    try:
+        assert repo_staging.with_apt_image(staged, _apt_payload(staged_payload, ["gcc"])) is staged
+        assert staged.box_sources["run"] == ("dockerfile", "box/Dockerfile")
+    finally:
+        staged.cleanup()
+
+
+def test_the_apt_image_builds_and_checks_once_then_a_second_run_reuses_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The image builds through the paid image build, passes the run check, and a second run reuses it (SKY-967).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_RUN_TREE, monkeypatch)
+    builder, store, budget, runtime = _FakeBuilder(), _ImageStore(), _FakeBudget(), _ImageRuntime()
+    registry = _FakeRegistry({"sha256:" + "b" * 64})
+    try:
+        staged = repo_staging.with_apt_image(staged, _apt_payload(staged_payload, ["libpq-dev", "gcc"]))
+        first = _prepare(staged, runtime, builder=builder, store=store, budget=budget, registry=registry)
+        second = _prepare(staged, runtime, builder=builder, store=store, budget=budget, registry=registry)
+        built = (builder.requests[0].context_dir / "Dockerfile").read_text()
+    finally:
+        staged.cleanup()
+
+    assert staged.box_sources["run"][0] == "apt"
+    assert built == repo_staging.apt_dockerfile(_APT_BASE, ("gcc", "libpq-dev"))
+    assert len(builder.requests) == 1
+    assert [charge["operation_key"] for charge in budget.charges] == ["image-build:job-1:run"]
+    assert first.box_images["run"]["image"] == _BUILT_IMAGE
+    assert first.box_images["run"]["source"] == "apt"
+    assert second.box_images == first.box_images
+    assert first.box_user_images["run"].reference == _BUILT_IMAGE
+    assert [check.commands[0] for check in runtime.checks] == ["ascent check --image --role candidate"] * 2
+
+
+def test_other_packages_build_another_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The input hash covers the package list, so another list does not reuse the build (SKY-967).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_RUN_TREE, monkeypatch)
+    builder, store = _FakeBuilder(), _ImageStore()
+    registry = _FakeRegistry({"sha256:" + "b" * 64})
+    try:
+        for packages in (["gcc"], ["gcc", "make"]):
+            _prepare(
+                repo_staging.with_apt_image(staged, _apt_payload(staged_payload, packages)),
+                _ImageRuntime(),
+                builder=builder,
+                store=store,
+                registry=registry,
+            )
+    finally:
+        staged.cleanup()
+
+    assert len(builder.requests) == 2
+    assert len({build["input_hash"] for build in store.builds}) == 2
+
+
+@pytest.mark.parametrize("no_builder", [True, False])
+def test_a_deployment_that_cannot_build_skips_the_apt_image(
+    no_builder: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With no builder, or a runtime that starts no user image, the run keeps today's image and logs it (SKY-967).
+
+    Args:
+        no_builder: Whether the deployment has no builder; otherwise the runtime refuses user images.
+        monkeypatch: Pytest monkeypatch.
+        caplog: Pytest log capture.
+    """
+    staged_payload, staged = _stage_with(_RUN_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    if not no_builder:
+        runtime.accepts_user_images = False  # type: ignore[misc]
+    try:
+        staged = repo_staging.with_apt_image(staged, _apt_payload(staged_payload, ["gcc"]))
+        with caplog.at_level(logging.WARNING, logger=repo_staging.__name__):
+            prepared = _prepare(staged, runtime, builder=None if no_builder else _FakeBuilder())
+    finally:
+        staged.cleanup()
+
+    assert prepared.box_sources == {}
+    assert prepared.box_images == {}
+    assert runtime.checks == []
+    assert "Debian packages" in caplog.text
+
+
+def test_a_resume_reuses_the_pinned_apt_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resume starts the image it pinned and builds and checks nothing (SKY-967).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_RUN_TREE, monkeypatch)
+    builder, runtime = _FakeBuilder(), _ImageRuntime()
+    pinned = {"run": {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64, "source": "apt", "input_hash": "h"}}
+    try:
+        staged = repo_staging.with_apt_image(staged, _apt_payload(staged_payload, ["gcc"]))
+        resumed = _prepare(staged, runtime, builder=builder, pinned=pinned)
+    finally:
+        staged.cleanup()
+
+    assert resumed.box_images == pinned
+    assert resumed.box_user_images["run"].reference == _BUILT_IMAGE
+    assert builder.requests == []
+    assert runtime.checks == []
+
+
+def test_the_setup_check_builds_only_the_apt_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The setup check builds the generated ``[run]`` image and leaves a ``[metric]`` source unbuilt (SKY-967).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_RUN_TREE, monkeypatch)
+    builder, budget = _FakeBuilder(), _FakeBudget()
+    try:
+        staged = dataclasses.replace(staged, box_sources={"metric": ("dockerfile", "box/Dockerfile")})
+        staged = repo_staging.with_apt_image(staged, _apt_payload(staged_payload, ["gcc"]))
+        checked = repo_staging.prepare_apt_image(
+            staged,
+            owner_id="preflight-1",
+            username="alice",
+            runtime=_ImageRuntime(),
+            builder=builder,
+            store=_ImageStore(),
+            budget=budget,
+            registry=_FakeRegistry({"sha256:" + "b" * 64}),
+        )
+    finally:
+        staged.cleanup()
+
+    assert len(builder.requests) == 1
+    assert [charge["operation_key"] for charge in budget.charges] == ["image-build:preflight-1:run"]
+    assert set(checked.box_images) == {"run"}
+    assert checked.box_sources["metric"] == ("dockerfile", "box/Dockerfile")
+    assert checked.box_sources["run"][0] == "apt"

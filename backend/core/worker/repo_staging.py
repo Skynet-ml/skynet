@@ -117,7 +117,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import _SUPERVISOR_BOOT, RepoScorer
 from ..service_gateway.optimization.blackbox.repo_services import box_mcp_config, plan_roles
-from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
+from ..service_gateway.optimization.blackbox.repo_setup import SetupPlan, apt_packages, infer_setup_command
 from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
@@ -1133,8 +1133,8 @@ def _rule_judge(
     return judge
 
 
-def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway: Any) -> str | None:
-    """Fill in the target's setup command from the fetched tree when the client sent none.
+def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway: Any) -> SetupPlan | None:
+    """Fill in the target's setup command and Debian packages from the fetched tree when the client sent none.
 
     Args:
         payload: Protected payload, updated in place.
@@ -1142,17 +1142,91 @@ def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway:
         gateway: The run's model gateway, whose optimization model is asked.
 
     Returns:
-        The inferred command, or ``None`` when the client named one or the
-        repository needs no setup.
+        The inferred plan, or ``None`` when the client named a command or the
+        run already recorded its plan.
     """
     target = payload["target"]
-    if (target.get("setup_command") or "").strip():
+    # A resumed run keeps the packages it recorded, also when its command is none (SKY-967).
+    if (target.get("setup_command") or "").strip() or APT_PACKAGES_KEY in target:
         return None
-    command = infer_setup_command(staged.snapshot.archive, ask=_setup_asker(payload, gateway))
-    target["setup_command"] = command
-    return command
+    plan = infer_setup_command(staged.snapshot.archive, ask=_setup_asker(payload, gateway))
+    target["setup_command"] = plan.command
+    if plan.apt_packages:
+        target[APT_PACKAGES_KEY] = list(plan.apt_packages)
+    return plan
 
 
+def apt_dockerfile(base_image: str, packages: tuple[str, ...]) -> str:
+    """Write the Dockerfile that adds Debian packages to Skynet's default image (SKY-967).
+
+    Args:
+        base_image: The default sandbox image.
+        packages: Valid Debian package names.
+
+    Returns:
+        The Dockerfile text, the same for the same base and the same set of names.
+    """
+    names = " ".join(sorted(set(packages)))
+    return (
+        f"FROM {base_image}\n"
+        "USER root\n"
+        "RUN apt-get update \\\n"
+        f" && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {names} \\\n"
+        " && rm -rf /var/lib/apt/lists/*\n"
+        f"USER {_DEFAULT_IMAGE_USER}\n"
+    )
+
+
+def with_apt_image(staged: StagedRepository, payload: dict[str, Any]) -> StagedRepository:
+    """Give the ``[run]`` box a generated image when setup named Debian packages (SKY-967).
+
+    Args:
+        staged: The staged tree.
+        payload: Protected payload, with the target's packages and the default image.
+
+    Returns:
+        ``staged`` with an ``("apt", dockerfile)`` ``[run]`` source, or ``staged`` unchanged when
+        there are no packages or ascent.toml already names the ``[run]`` image.
+    """
+    packages = apt_packages(payload["target"].get(APT_PACKAGES_KEY) or ())
+    base_image = str((payload.get("_budget_gateway_descriptor") or {}).get("image") or "")
+    if not packages or "run" in staged.box_sources:
+        return staged
+    if not base_image:
+        logger.warning("The run has no default image to build on, so it skips the Debian packages %s", packages)
+        return staged
+    return replace(staged, box_sources={**staged.box_sources, "run": ("apt", apt_dockerfile(base_image, packages))})
+
+
+def prepare_apt_image(staged: StagedRepository, **options: Any) -> StagedRepository:
+    """Build and check only the generated ``[run]`` image, as a setup check does (SKY-967).
+
+    Args:
+        staged: The staged tree, from :func:`with_apt_image`.
+        **options: The keyword arguments of :func:`prepare_box_images`.
+
+    Returns:
+        ``staged`` with the ``[run]`` image, or with the ``[run]`` source removed when this
+        deployment cannot build it; unchanged when the ``[run]`` source is not generated.
+    """
+    source = staged.box_sources.get("run")
+    if source is None or source[0] != "apt":
+        return staged
+    built = prepare_box_images(replace(staged, box_sources={"run": source}), **options)
+    others = {role: value for role, value in staged.box_sources.items() if role != "run"}
+    return replace(
+        staged,
+        box_sources={**others, **built.box_sources},
+        box_images={**staged.box_images, **built.box_images},
+        box_user_images={**staged.box_user_images, **built.box_user_images},
+    )
+
+
+# The payload target key of the Debian packages that setup named (SKY-967).
+APT_PACKAGES_KEY = "apt_packages"
+# backend/Dockerfile ends with ``USER 1001`` (appuser); the generated image must
+# give that user back after its root apt layer, because the image check refuses root.
+_DEFAULT_IMAGE_USER = "1001"
 # The role each box's image check runs as, by the ascent.toml section that names the image.
 _CHECK_ROLES = {"run": "candidate", "metric": "metric"}
 # ``ascent check --image`` ends in about 24 seconds; the rest covers the box start.
@@ -2325,6 +2399,8 @@ def prepare_box_images(
             fails, or a check fails.
         ImageBuildCancelledError: When ``cancelled`` stopped a build.
     """
+    if not pinned and (staged.box_sources.get("run") or ("",))[0] == "apt":
+        staged = _without_unbuildable_apt(staged, runtime, builder)
     if not staged.box_sources:
         return staged
     # Vercel copies each image into its own registry, keyed by the owner's repository, so it
@@ -2372,6 +2448,7 @@ def prepare_box_images(
                     budget=budget,
                     registry=registry,
                     cancelled=cancelled,
+                    source=kind,
                 )
             if role not in user_images:
                 user_images[role] = _user_image(
@@ -2389,44 +2466,45 @@ def prepare_box_images(
     return replace(staged, box_images=images, box_user_images=user_images, record_facts=facts)
 
 
-def _dockerfile_image(
-    staged: StagedRepository,
-    role: str,
-    dockerfile: str,
-    *,
-    owner_id: str,
-    username: str,
-    builder: ImageBuilder | None,
-    store: Any,
-    budget: Any,
-    registry: ImageRegistry | None,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict[str, Any]:
-    """Reuse or build the image of one box's Dockerfile from the staged start commit.
+def _without_unbuildable_apt(staged: StagedRepository, runtime: Any, builder: ImageBuilder | None) -> StagedRepository:
+    """Drop the generated ``[run]`` image when this deployment cannot build or start it (SKY-967).
+
+    The packages are a setup guess, not the user's choice, so the run keeps
+    today's default image in place of a failure.
+
+    Args:
+        staged: The staged tree, with an ``apt`` ``[run]`` source.
+        runtime: The parent's metered sandbox runtime.
+        builder: The Dockerfile builder, or ``None``.
+
+    Returns:
+        ``staged`` unchanged when the image can be built, or without its ``[run]`` source.
+    """
+    if builder is not None and getattr(runtime, "accepts_user_images", False):
+        return staged
+    reason = DOCKERFILE_UNSUPPORTED.format(role="run") if builder is None else USER_IMAGES_UNSUPPORTED
+    logger.warning("The run skips the image with its setup's Debian packages: %s", reason)
+    sources = {role: value for role, value in staged.box_sources.items() if role != "run"}
+    return replace(staged, box_sources=sources)
+
+
+def _dockerfile_request(
+    staged: StagedRepository, role: str, dockerfile: str, username: str
+) -> tuple[BuildRequest, str]:
+    """Make the build request of a repository Dockerfile from the staged start commit.
 
     Args:
         staged: The staged tree.
         role: ``run`` or ``metric``.
         dockerfile: The Dockerfile's repository path; its folder is the build context.
-        owner_id: Job identity naming the build operation.
         username: The run's owner.
-        builder: The Dockerfile builder, or ``None``.
-        store: The job store.
-        budget: The run's budget runtime, or ``None``.
-        registry: The registry that must still hold a reused build, or ``None``.
-        cancelled: Tells whether the run was cancelled, or ``None``.
 
     Returns:
-        The box's image record: image, digest, source, input hash and build log reference.
+        The build request, and the label that names the Dockerfile in errors.
 
     Raises:
-        BoxImageError: When there is no builder, the context is invalid, or the build fails.
-        ImageBuildCancelledError: When ``cancelled`` stopped the build. If CodeBuild started the
-            build, it keeps only the started record with its CodeBuild id, which account deletion
-            checks (SKY-896).
+        BoxImageError: When a hidden scoring path is or lies inside a link.
     """
-    if builder is None:
-        raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
     archive = staged.snapshot.archive
     if role == "run":
         # The candidate image must never hold the hidden scoring files, so its
@@ -2439,14 +2517,66 @@ def _dockerfile_image(
         archive = strip_archive(archive, staged.hidden_paths, staged.workdir / "image-context-run.tgz")
     context = extract_folder(archive, posixpath.dirname(dockerfile) or ".", staged.workdir / f"image-context-{role}")
     request = BuildRequest(context_dir=context, owner=image_owner(username), dockerfile=posixpath.basename(dockerfile))
+    return request, f"[{role}] dockerfile '{dockerfile}'"
+
+
+def _dockerfile_image(
+    staged: StagedRepository,
+    role: str,
+    dockerfile: str,
+    *,
+    owner_id: str,
+    username: str,
+    builder: ImageBuilder | None,
+    store: Any,
+    budget: Any,
+    registry: ImageRegistry | None,
+    cancelled: Callable[[], bool] | None = None,
+    source: str = "dockerfile",
+) -> dict[str, Any]:
+    """Reuse or build the image of one box's Dockerfile from the staged start commit.
+
+    Args:
+        staged: The staged tree.
+        role: ``run`` or ``metric``.
+        dockerfile: The Dockerfile's repository path, whose folder is the build context; for an
+            ``apt`` source, the generated Dockerfile text, built with an empty context (SKY-967).
+        owner_id: Job identity naming the build operation.
+        username: The run's owner.
+        builder: The Dockerfile builder, or ``None``.
+        store: The job store.
+        budget: The run's budget runtime, or ``None``.
+        registry: The registry that must still hold a reused build, or ``None``.
+        cancelled: Tells whether the run was cancelled, or ``None``.
+        source: ``dockerfile`` or ``apt``.
+
+    Returns:
+        The box's image record: image, digest, source, input hash and build log reference.
+
+    Raises:
+        BoxImageError: When there is no builder, the context is invalid, or the build fails.
+        ImageBuildCancelledError: When ``cancelled`` stopped the build. If CodeBuild started the
+            build, it keeps only the started record with its CodeBuild id, which account deletion
+            checks (SKY-896).
+    """
+    if builder is None:
+        raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
+    if source == "apt":
+        context = staged.workdir / "image-context-apt"
+        context.mkdir(parents=True, exist_ok=True)
+        (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+        request = BuildRequest(context_dir=context, owner=image_owner(username), dockerfile="Dockerfile")
+        label = "the image with the setup's Debian packages"
+    else:
+        request, label = _dockerfile_request(staged, role, dockerfile, username)
     kind = builder.kind
     try:
         input_hash = compute_input_hash(
             request, builder=kind, platform=CODEBUILD_PLATFORM if kind == CodeBuildImageBuilder.kind else ""
         )
     except ImageBuildError as error:
-        raise BoxImageError(f"[{role}] dockerfile '{dockerfile}': {error}") from error
-    record = {"source": "dockerfile", "input_hash": input_hash}
+        raise BoxImageError(f"{label}: {error}") from error
+    record = {"source": source, "input_hash": input_hash}
     found = store.find_image_build(username, input_hash)
     if found is not None and _still_held(registry, kind, request.owner, found["image"]):
         return {
@@ -2513,10 +2643,7 @@ def _dockerfile_image(
             username, input_hash, builder=kind, image=None, size_bytes=None, log=outcome.log, row_id=row_id
         )
         tail = outcome.log_tail.strip()
-        raise BoxImageError(
-            f"[{role}] dockerfile '{dockerfile}' did not build: {outcome}"
-            + (f"\n\nBuild log tail:\n{tail}" if tail else "")
-        )
+        raise BoxImageError(f"{label} did not build: {outcome}" + (f"\n\nBuild log tail:\n{tail}" if tail else ""))
     build_id = store.save_image_build(
         username,
         input_hash,

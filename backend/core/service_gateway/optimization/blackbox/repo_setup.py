@@ -3,12 +3,15 @@
 Users never type a setup command for a repository run: the trusted parent
 reads the fetched tree, asks the run's optimization model when one is
 reachable, and otherwise falls back to the manifests and lockfiles it finds.
+The model can also name Debian system packages, which staging installs in a
+generated ``[run]`` image, because the setup command never runs as root (SKY-967).
 """
 
 from __future__ import annotations
 
 import fnmatch
 import logging
+import re
 import tarfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -22,6 +25,11 @@ _MAX_LISTED_PATHS = 400
 _MAX_FILE_CHARS = 4_000
 _MAX_TOTAL_CHARS = 40_000
 _MAX_COMMAND_CHARS = 300
+# Debian policy 5.6.1: lowercase letters, digits, "+", "-" and "."; at least two
+# characters, starting with a letter or digit. The names go into a Dockerfile
+# RUN line, so nothing else may pass.
+_APT_PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+_APT_PREFIX = "apt:"
 _KEY_FILE_PATTERNS = (
     "README*",
     ".github/workflows/*.yml",
@@ -58,6 +66,9 @@ Reply with exactly one line: a single shell command, run from the repository roo
 that installs its dependencies and builds it. Prefer the project's own lockfile and
 tooling (as its CI does). Do not run tests, start servers or use sudo.
 If nothing needs installing, reply with exactly: none
+If the repository also needs Debian system packages (for example a C library or
+a compiler), add a second line: apt: <package names separated by spaces>
+Never put apt-get or sudo in the command: the apt line installs those packages.
 
 File listing:
 {listing}
@@ -65,6 +76,14 @@ File listing:
 Key files:
 {files}
 """
+
+
+@dataclass(frozen=True)
+class SetupPlan:
+    """The setup command of a repository and the Debian packages it needs (SKY-967)."""
+
+    command: str | None
+    apt_packages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,30 +173,52 @@ def _prompt(overview: RepoOverview) -> str:
     return _PROMPT.format(listing="\n".join(listed), files=files or "(none)")
 
 
-def parse_answer(answer: str) -> tuple[bool, str | None]:
-    """Read the model's one-line answer.
+def apt_packages(names: Iterable[str]) -> tuple[str, ...]:
+    """Keep only valid Debian package names, without duplicates and in sorted order.
+
+    Args:
+        names: Package names from the model, or from a stored payload.
+
+    Returns:
+        The valid names, sorted, each once.
+    """
+    names = list(names)
+    kept = [name for name in names if isinstance(name, str) and _APT_PACKAGE.fullmatch(name)]
+    if dropped := len(names) - len(kept):
+        logger.info("Dropped %d invalid Debian package names from the setup answer", dropped)
+    return tuple(sorted(set(kept)))
+
+
+def parse_answer(answer: str) -> SetupPlan | None:
+    """Read the model's answer: one command line and at most one ``apt:`` line.
 
     Args:
         answer: Raw model reply.
 
     Returns:
-        Whether the reply is usable, and the command it names (``None`` when
-        the model said nothing needs setting up).
+        The plan (its command is ``None`` when the model said nothing needs
+        setting up), or ``None`` when the reply is unusable.
     """
     lines = [line.strip().strip("`").strip() for line in answer.strip().strip("`").splitlines()]
     lines = [line for line in lines if line and line.lower() not in {"bash", "sh", "shell"}]
-    if len(lines) != 1:
-        return False, None
+    apt_lines = [line for line in lines if line.lower().startswith(_APT_PREFIX)]
+    lines = [line for line in lines if line not in apt_lines]
+    if len(lines) != 1 or len(apt_lines) > 1:
+        return None
+    packages: tuple[str, ...] = ()
+    if apt_lines:
+        names = apt_lines[0][len(_APT_PREFIX) :].replace(",", " ").split()
+        packages = () if [name.lower() for name in names] == ["none"] else apt_packages(names)
     command = lines[0].removeprefix("$ ").strip()
     if command.lower().rstrip(".") == "none":
-        return True, None
+        return SetupPlan(None, packages)
     if len(command) > _MAX_COMMAND_CHARS or "\x00" in command:
-        return False, None
-    return True, command
+        return None
+    return SetupPlan(command, packages)
 
 
-def infer_setup_command(archive: Path, ask: Callable[[str], str | None] | None = None) -> str | None:
-    """Infer the command that prepares a checkout of the snapshot.
+def infer_setup_command(archive: Path, ask: Callable[[str], str | None] | None = None) -> SetupPlan:
+    """Infer the command that prepares a checkout of the snapshot, and its Debian packages.
 
     Args:
         archive: Packed tree from :func:`fetch_snapshot`.
@@ -186,10 +227,11 @@ def infer_setup_command(archive: Path, ask: Callable[[str], str | None] | None =
             manifests decide.
 
     Returns:
-        A shell command, or ``None`` when the repository needs no setup.
+        The plan; its command is ``None`` when the repository needs no setup.
+        Only the model names packages, so the manifest fallback has none.
     """
     overview = read_overview(archive)
-    fallback = detect_setup_command(overview.paths)
+    fallback = SetupPlan(detect_setup_command(overview.paths))
     if ask is None:
         return fallback
     try:
@@ -197,8 +239,8 @@ def infer_setup_command(archive: Path, ask: Callable[[str], str | None] | None =
     except Exception:  # isolation boundary: the manifest fallback must still set the run up
         logger.warning("Asking the model for a repository setup command failed", exc_info=True)
         return fallback
-    usable, command = parse_answer(answer or "")
-    if not usable:
+    plan = parse_answer(answer or "")
+    if plan is None:
         logger.info("The model's setup command was unusable; using the manifest fallback")
         return fallback
-    return command
+    return plan

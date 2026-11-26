@@ -35,17 +35,22 @@ from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
 from ..exceptions import ServiceError
 from ..models import BlackboxRunRequest
+from ..sandbox.image_registry import image_registry
 from ..service_gateway.optimization.blackbox.native_runtime import check_native_runtime
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
+from ..storage import get_job_store
 from ..storage.preflights import PreflightStore
 from ..worker.loop_host import provider_message
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
     StagedRepository,
     bind_repo_scorer,
+    image_builder,
     infer_repo_setup,
     is_repo_payload,
+    prepare_apt_image,
     stage_repository,
+    with_apt_image,
 )
 from ..worker.unified_aliases import alias_blackbox_metric_model
 from ..worker.vercel_dspy import run_vercel_dspy
@@ -623,7 +628,25 @@ def _perform_preflight(
             if gate_failures:
                 raise RepoGateError(gate_failures)
             infer_repo_setup(protected, staged, gateway)
-            unchecked = tuple(role for role in SETUP_NOT_CHECKED if role in staged.box_sources)
+            # The check builds and pays for the generated [run] image as the run does, so it
+            # checks setup in the image the run uses (SKY-967).
+            staged = with_apt_image(staged, protected)
+            if staged.box_sources.get("run", ("",))[0] == "apt":
+                staged = prepare_apt_image(
+                    staged,
+                    owner_id=f"preflight-{identity}",
+                    username=user.username,
+                    runtime=gateway.parent_sandbox_runtime(),
+                    builder=image_builder(settings),
+                    store=get_job_store(),
+                    budget=gateway.runtime,
+                    registry=image_registry(settings),
+                )
+            unchecked = tuple(
+                role
+                for role in SETUP_NOT_CHECKED
+                if role in staged.box_sources and staged.box_sources[role][0] != "apt"
+            )
             bind_repo_scorer(
                 protected,
                 staged,

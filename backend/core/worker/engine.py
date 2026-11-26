@@ -121,6 +121,7 @@ from .loop_host import LOOP_HOST_KEY, run_loop_job
 from .memory_guard import memory_usage_fraction
 from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import (
+    APT_PACKAGES_KEY,
     ENVIRONMENT_KEY,
     StagedRepository,
     add_run_record,
@@ -132,6 +133,7 @@ from .repo_staging import (
     publish_improvement,
     runs_proposer_entry,
     stage_repository,
+    with_apt_image,
 )
 from .step_recovery import park_run, still_owns_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
@@ -1043,8 +1045,17 @@ class BackgroundWorker:
                         budget_gateway.allow_guest_hosts(
                             tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
                         )
-                        # Before the setup model and the scorer box, so a bad image stops the run
-                        # before it pays for either; a resume keeps the images it pinned (SKY-737).
+                        # Before the image build, because the setup model names the Debian packages of
+                        # the generated [run] image; a resume reuses the recorded plan (SKY-967).
+                        inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
+                        if inferred_setup is not None and (inferred_setup.command or inferred_setup.apt_packages):
+                            self._record_setup_command(
+                                optimization_id, inferred_setup.command, inferred_setup.apt_packages
+                            )
+                        if isinstance(staged_repository, StagedRepository):
+                            staged_repository = with_apt_image(staged_repository, payload_dict)
+                        # Before the scorer box, so a bad image stops the run before it pays for
+                        # it; a resume keeps the images it pinned (SKY-737).
                         if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
                             user_image_registry = image_registry(settings)
                             try:
@@ -1080,9 +1091,6 @@ class BackgroundWorker:
                                     registry=user_image_registry,
                                     pinned=pinned_images,
                                 )
-                        inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
-                        if inferred_setup is not None:
-                            self._record_setup_command(optimization_id, inferred_setup)
                         bind_repo_scorer(
                             payload_dict,
                             staged_repository,
@@ -1828,19 +1836,24 @@ class BackgroundWorker:
         self._threads.clear()
         logger.info("Stopped background workers")
 
-    def _record_setup_command(self, optimization_id: str, command: str) -> None:
-        """Store an inferred repository setup command on the run's own payload.
+    def _record_setup_command(
+        self, optimization_id: str, command: str | None, apt_packages: tuple[str, ...] = ()
+    ) -> None:
+        """Store an inferred repository setup command and its Debian packages on the run's own payload.
 
         The run's configuration page then shows what was inferred, and a
         resumed run reuses it instead of asking again.
 
         Args:
             optimization_id: The repository run.
-            command: The inferred setup command.
+            command: The inferred setup command, or ``None``.
+            apt_packages: The inferred Debian packages of the generated ``[run]`` image (SKY-967).
         """
         stored = self._job_store.get_job(optimization_id).get("payload")
         if isinstance(stored, dict) and isinstance(stored.get("target"), dict):
             stored["target"]["setup_command"] = command
+            if apt_packages:
+                stored["target"][APT_PACKAGES_KEY] = list(apt_packages)
             self._job_store.update_job(optimization_id, payload=stored)
 
     def _record_repo_environment(self, optimization_id: str, environment: dict[str, Any]) -> dict[str, Any] | None:
