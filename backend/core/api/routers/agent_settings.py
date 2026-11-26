@@ -45,6 +45,7 @@ SettingsTab = Literal[
     "usage",
     "providers",
     "connectors",
+    "secrets",
     "api",
     "admin",
 ]

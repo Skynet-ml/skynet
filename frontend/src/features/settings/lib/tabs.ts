@@ -14,6 +14,7 @@ import {
   Gauge,
   HardDrive,
   HardDrives,
+  Key,
   Lock,
   Plug,
   Shapes,
@@ -38,6 +39,7 @@ const SETTINGS_TAB_ORDER = [
   "usage",
   "providers",
   "connectors",
+  "secrets",
   "api",
   "admin",
 ] as const;
@@ -112,6 +114,12 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     icon: HardDrives,
     labelKey: "settings.tab.connectors",
     keywordsKey: "app.shell.search.kw.connectors",
+    group: "access",
+  },
+  secrets: {
+    icon: Key,
+    labelKey: "settings.tab.secrets",
+    keywordsKey: "app.shell.search.kw.secrets",
     group: "access",
   },
   api: {
