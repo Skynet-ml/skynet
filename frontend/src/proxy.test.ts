@@ -57,8 +57,8 @@ test("the proxy runs on every route except build output", () => {
   assert.ok(!matcher.test("/_next/static/chunks/main.js"));
 });
 
-// The docs are public: readers, crawlers and language models read them signed-out.
-test("the public docs and llms.txt skip the login gate", () => {
+// The docs and the blog are public: readers, crawlers and language models read them signed-out.
+test("the public docs, blog and llms.txt skip the login gate", () => {
   const matcher = new RegExp(`^${AUTH_GATED_PATTERN}$`);
   for (const route of [
     "/docs",
@@ -70,8 +70,20 @@ test("the public docs and llms.txt skip the login gate", () => {
     "/docs-search",
     "/llms.txt",
     "/llms-full.txt",
+    "/blog",
+    "/blog/the-most-valuable-skill-of-this-century",
+    "/blog/the-most-valuable-skill-of-this-century/elon-musk.jpg",
   ]) {
     assert.ok(!matcher.test(route), route);
   }
   assert.ok(matcher.test("/llms.json"), "only the two llms text files are public");
+});
+
+// The bare root is the signed-out landing page (SKY-922); every app route stays gated.
+test("the root is public and the app routes stay gated", () => {
+  const matcher = new RegExp(`^${AUTH_GATED_PATTERN}$`);
+  assert.ok(!matcher.test("/"));
+  for (const route of ["/datasets", "/submit", "/x", "/settings"]) {
+    assert.ok(matcher.test(route), route);
+  }
 });
