@@ -267,7 +267,8 @@ class KataEnvironment(DockerEnvironment):
             memory_mb = resources.memory_mb or resources.cpus * 2048
             limits = ["--cpus", str(resources.cpus), "--memory", f"{memory_mb}m"]
         # spec.env can hold secrets, so each command gets it over stdin instead.
-        fixed_env = {"HOME": WORKSPACE_DIR, "TMPDIR": "/tmp"}
+        # No TMPDIR, as on Vercel boxes: the [run] image check refuses it (SKY-975).
+        fixed_env = {"HOME": WORKSPACE_DIR}
         argv = [
             "run",
             "-d",
