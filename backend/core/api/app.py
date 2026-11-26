@@ -73,6 +73,7 @@ from ..service_gateway.embedding_pipeline import (
 from ..service_gateway.language_models import install_openrouter_served_model_patch
 from ..service_gateway.service_builder import wire_registry_aliases
 from ..storage import get_job_store
+from ..storage.tree_compactor import start_tree_compactor
 from ..worker.continuous import start_continuous_sweeper
 from ..worker.engine import BackgroundWorker, get_worker
 from .directory_client import build_directory_client
@@ -742,6 +743,7 @@ def create_app(
     embedding_sweeper = None
     notification_hold_sweeper = None
     continuous_sweeper = None
+    tree_compactor = None
     loop_lag_monitor = None
 
     @asynccontextmanager
@@ -765,6 +767,7 @@ def create_app(
             embedding_sweeper, \
             notification_hold_sweeper, \
             continuous_sweeper, \
+            tree_compactor, \
             worker
         # Reclaim jobs whose worker lease has expired. Under multi-pod scaling
         # this only fails rows whose ``lease_expires_at`` is in the past — a
@@ -782,6 +785,9 @@ def create_app(
         if settings.worker_enabled:
             pending_ids = job_store.recover_pending_jobs()
             worker = get_worker(job_store, pending_optimization_ids=pending_ids)
+            # Hosted, worker_main.py runs the compactor; the Mac app has no worker process (SKY-977).
+            if settings.local_mode:
+                tree_compactor = start_tree_compactor(job_store.engine)
         else:
             # Split deployment: this pod serves the API only; job execution
             # runs in dedicated worker replicas (worker_main.py) so request
@@ -906,6 +912,8 @@ def create_app(
                 notification_hold_sweeper.stop()
             if continuous_sweeper:
                 continuous_sweeper.stop()
+            if tree_compactor:
+                tree_compactor.stop()
             if loop_lag_monitor:
                 loop_lag_monitor.stop()
             await close_transcription_http_client()

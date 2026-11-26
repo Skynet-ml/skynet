@@ -1175,6 +1175,37 @@ def test_bucket_deleter_deletes_from_the_tree_bucket_in_batches(monkeypatch: pyt
     assert all(call["Delete"]["Quiet"] for call in calls)
 
 
+def test_bucket_deleter_deletes_local_pack_files_in_local_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With no bucket, the Mac app purge deletes the pack files under its local state folder (SKY-977).
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: The local state folder.
+    """
+    monkeypatch.setattr(settings, "tree_bucket", None)
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path))
+    store = LocalObjectStore(tmp_path / "objects")
+    store.put("packs/w1/a", b"a")
+    store.put("packs/w1/b", b"b")
+
+    tree_purge.bucket_deleter()(["packs/w1/a", "packs/w1/missing"])
+
+    assert store.list("packs/") == ["packs/w1/b"]
+
+
+def test_bucket_deleter_is_none_for_a_hosted_build_with_no_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hosted build with no bucket has no deleter, so a purge with packs fails.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(settings, "tree_bucket", None)
+    monkeypatch.setattr(settings, "local_mode", False)
+
+    assert tree_purge.bucket_deleter() is None
+
+
 def test_bucket_deleter_names_the_keys_that_s3_did_not_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     """A DeleteObjects response with Errors raises TreePurgeError with the failed keys.
 

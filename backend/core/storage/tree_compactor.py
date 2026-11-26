@@ -102,7 +102,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from .base import ObjectStore
 from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
-from .object_store import S3ObjectStore
+from .object_store import S3ObjectStore, pack_store
 from .shard_map import MAIN, ShardMap
 from .step_log_store import CLAIM_BYTE_SIZE, PACK_PREFIX, UNRECORDED_FLUSH_PACK_AGE_SECONDS, _read_manifest
 
@@ -867,13 +867,16 @@ class TreeCompactor:
 
 
 def start_tree_compactor(engine: Engine) -> TreeCompactor | None:
-    """Start the compactor over the S3 bucket that ``SKYNET_TREE_BUCKET`` names, on every step log shard.
+    """Start the compactor over the pack store, on every step log shard.
+
+    The store is the S3 bucket that ``SKYNET_TREE_BUCKET`` names or, with no bucket in local mode,
+    the local pack folder (SKY-977).
 
     Args:
         engine: The shared main database engine; ``STEP_LOG_SHARDS`` names the other shards.
 
     Returns:
-        The started compactor, or ``None`` when no bucket is set.
+        The started compactor, or ``None`` when this build has no pack store.
 
     Raises:
         RuntimeError: When a bucket is set and boto3 is not installed, or when ``STEP_LOG_SHARDS`` is
@@ -881,14 +884,11 @@ def start_tree_compactor(engine: Engine) -> TreeCompactor | None:
     """
     found = tree_bucket_client()
     if found is None:
-        return None
+        local = pack_store()
+        if local is None:
+            return None
+        return _start(engine, local, local.delete)
     bucket, client = found
-    shards = ShardMap.from_settings(engine)
-    try:
-        shards.check()
-    except Exception:
-        shards.dispose()
-        raise
 
     def delete_object(key: str) -> None:
         """Delete one object; S3 does not fail on a missing key.
@@ -898,6 +898,29 @@ def start_tree_compactor(engine: Engine) -> TreeCompactor | None:
         """
         client.delete_object(Bucket=bucket, Key=key)
 
-    compactor = TreeCompactor(engine, S3ObjectStore(bucket, client), delete_object, shards=shards)
+    return _start(engine, S3ObjectStore(bucket, client), delete_object)
+
+
+def _start(engine: Engine, objects: ObjectStore, delete_object: Callable[[str], None]) -> TreeCompactor:
+    """Start a compactor over one pack store, on every step log shard.
+
+    Args:
+        engine: The shared main database engine; ``STEP_LOG_SHARDS`` names the other shards.
+        objects: The pack store.
+        delete_object: Deletes one object; a missing key is not an error.
+
+    Returns:
+        The started compactor.
+
+    Raises:
+        RuntimeError: When ``STEP_LOG_SHARDS`` is empty and a job records a shard other than ``main``.
+    """
+    shards = ShardMap.from_settings(engine)
+    try:
+        shards.check()
+    except Exception:
+        shards.dispose()
+        raise
+    compactor = TreeCompactor(engine, objects, delete_object, shards=shards)
     compactor.start()
     return compactor
