@@ -12,7 +12,7 @@ import { ensureSandboxImage } from "./sandbox-image";
 import { ensurePrivateDir, loadOrCreateSecrets } from "./secrets";
 import { finishSteps, loadStepTimes, newTimeline, saveStepTimes, startStep, type Timeline } from "./step-timing";
 import { clearPids, psStartOf, recordPid, sweepOrphans } from "./stack-pids";
-import { buildChildEnv, loginShellPath } from "./shell-env";
+import { buildChildEnv, isLoadedEnvFile, loginShellPath } from "./shell-env";
 import {
   computeOnboardingState,
   httpStatus,
@@ -286,7 +286,7 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
     // into the API and next dev, with other vault keys, providers and cookies
     // than the installed app that shares this data folder.
     const envFiles = [backendDir, frontendDir].flatMap((dir) =>
-      fs.readdirSync(dir).filter((name) => name === ".env" || (name.startsWith(".env.") && name !== ".env.example")).map((name) => path.join(dir, name)),
+      fs.readdirSync(dir).filter(isLoadedEnvFile).map((name) => path.join(dir, name)),
     );
     if (envFiles.length > 0) throw new Error(`Dev mode does not run with ${envFiles.join(", ")}. Run it from a checkout without them.`);
     log(`source mode: ${repoRoot}`);
@@ -368,13 +368,15 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
 
   step("frontend");
   const feArgs = sourceMode
-    ? ["--max-old-space-size=8192", path.join(frontendDir, "node_modules", "next", "dist", "bin", "next"), "dev", "-p", String(ports.frontend), "-H", "127.0.0.1"]
+    ? [path.join(frontendDir, "node_modules", "next", "dist", "bin", "next"), "dev", "-p", String(ports.frontend), "-H", "127.0.0.1"]
     : ["server.js"];
   frontend = new ManagedProcess("frontend", nodeBinary(), feArgs, {
     env: buildChildEnv(process.env, {
       PATH: loginPath,
       ELECTRON_RUN_AS_NODE: "1",
       NODE_ENV: sourceMode ? "development" : "production",
+      // next dev forks its server and reads the heap size only from NODE_OPTIONS.
+      NODE_OPTIONS: sourceMode ? "--max-old-space-size=8192" : undefined,
       PORT: String(ports.frontend),
       HOSTNAME: "127.0.0.1",
       APP_LOCAL_MODE: "1",

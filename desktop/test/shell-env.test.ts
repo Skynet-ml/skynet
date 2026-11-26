@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ALLOWED_ENV_KEYS, ALLOWED_ENV_PREFIXES, buildChildEnv, fallbackPath, loginShellPath, parseEnvNul } from "../src/main/shell-env";
+import { ALLOWED_ENV_KEYS, ALLOWED_ENV_PREFIXES, buildChildEnv, fallbackPath, isLoadedEnvFile, loginShellPath, parseEnvNul } from "../src/main/shell-env";
 
 describe("parseEnvNul", () => {
   it("parses NUL-separated records, including values with = and newlines", () => {
@@ -285,5 +285,19 @@ describe("buildChildEnv", () => {
 
   it("removes a key when the override is undefined", () => {
     expect(buildChildEnv({ HOME: "/Users/x" }, { HOME: undefined })).not.toHaveProperty("HOME");
+  });
+});
+
+describe("isLoadedEnvFile", () => {
+  it("matches the dotenv files that the backend and next dev load", () => {
+    for (const name of [".env", ".env.local", ".env.development", ".env.development.local", ".env.production"]) {
+      expect(isLoadedEnvFile(name), name).toBe(true);
+    }
+  });
+
+  it("skips the example file and names that only start with .env", () => {
+    for (const name of [".env.example", ".envrc", ".environment", "env", "app.env"]) {
+      expect(isLoadedEnvFile(name), name).toBe(false);
+    }
   });
 });

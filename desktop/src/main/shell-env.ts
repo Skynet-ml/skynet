@@ -178,3 +178,8 @@ export function buildChildEnv(
   }
   return env;
 }
+
+/** Name a dotenv file that the backend or `next dev` loads: `.env` or `.env.*`, except `.env.example`. */
+export function isLoadedEnvFile(name: string): boolean {
+  return name === ".env" || (name.startsWith(".env.") && name !== ".env.example");
+}
