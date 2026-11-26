@@ -81,6 +81,11 @@ reloads at once; a change in `src/main` or `src/preload` relaunches the app,
 which stops and restarts the local stack. Quit an installed Skynet.app first:
 both use the same data folder and ports.
 
+`npm run dev` runs the checkout's `backend/` and `frontend/`, not the bundled
+copy: the API with `uvicorn --reload` and the web app with `next dev`. A saved
+backend or frontend change shows in the app window at once. Run `npm ci` in
+`frontend/` first; `npm run bundle:stack` is still needed once for `uv`.
+
 ## Where things live
 
 | Path | Contents |

@@ -272,8 +272,16 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   log(`ports api=${ports.api} frontend=${ports.frontend} postgres=${ports.postgres}`);
 
   step("runtime");
-  const { backendDir, frontendDir, bundleId } = stageRuntime();
-  const stampFile = path.join(backendDir, "core", "hosted_target.txt");
+  const staged = stageRuntime();
+  const { bundleId } = staged;
+  const stampFile = path.join(staged.backendDir, "core", "hosted_target.txt");
+  // `npm run dev` runs the checkout's backend and frontend with reload on save,
+  // so a change shows in the app without a new bundle:stack.
+  const sourceMode = process.env.SKYNET_DESKTOP_DEV === "1" && !app.isPackaged;
+  const repoRoot = path.join(__dirname, "..", "..", "..");
+  const backendDir = sourceMode ? path.join(repoRoot, "backend") : staged.backendDir;
+  const frontendDir = sourceMode ? path.join(repoRoot, "frontend") : staged.frontendDir;
+  if (sourceMode) log(`source mode: ${repoRoot}`);
   hostedOrigin = hostedAppOrigin(fs.existsSync(stampFile) ? fs.readFileSync(stampFile, "utf8") : null);
   log(`hosted app ${hostedOrigin}`);
 
@@ -328,7 +336,9 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   }
 
   step("api");
-  const apiArgs = ["run", "--frozen", "python", "main.py"];
+  const apiArgs = sourceMode
+    ? ["run", "--frozen", "uvicorn", "main:app", "--reload", "--host", "127.0.0.1", "--port", String(ports.api)]
+    : ["run", "--frozen", "python", "main.py"];
   api = new ManagedProcess("api", uvBin, apiArgs, {
     env: uvEnv,
     cwd: backendDir,
@@ -343,11 +353,14 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   });
 
   step("frontend");
-  frontend = new ManagedProcess("frontend", nodeBinary(), ["server.js"], {
+  const feArgs = sourceMode
+    ? [path.join(frontendDir, "node_modules", "next", "dist", "bin", "next"), "dev", "-p", String(ports.frontend), "-H", "127.0.0.1"]
+    : ["server.js"];
+  frontend = new ManagedProcess("frontend", nodeBinary(), feArgs, {
     env: buildChildEnv(process.env, {
       PATH: loginPath,
       ELECTRON_RUN_AS_NODE: "1",
-      NODE_ENV: "production",
+      NODE_ENV: sourceMode ? "development" : "production",
       PORT: String(ports.frontend),
       HOSTNAME: "127.0.0.1",
       APP_LOCAL_MODE: "1",
