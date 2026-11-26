@@ -85,6 +85,18 @@ both use the same data folder and ports.
 copy: the API with `uvicorn --reload` and the web app with `next dev`. A saved
 backend or frontend change shows in the app window at once. Run `npm ci` in
 `frontend/` first; `npm run bundle:stack` is still needed once for `uv`.
+Dev mode stops when the checkout has a `backend/.env` or a `frontend/.env*`
+file other than `.env.example`, because those would load into the local stack.
+Some limits:
+
+- The sandbox image builds from the bundled copy. A change in
+  `backend/Dockerfile` or `sandbox-runtime/` needs a new `npm run bundle:stack`.
+- A saved backend file restarts the API and its job worker, which stops the
+  work of a running optimization.
+- Do not run another `next dev` in the same `frontend/` at the same time.
+- `alembic upgrade head` runs the checkout's migrations on the shared data
+  folder. A branch migration can leave a database that the installed app does
+  not know. Reset the local data in that case (see below).
 
 ## Where things live
 

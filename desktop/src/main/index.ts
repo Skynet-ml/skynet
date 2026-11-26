@@ -281,8 +281,18 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   const repoRoot = path.join(__dirname, "..", "..", "..");
   const backendDir = sourceMode ? path.join(repoRoot, "backend") : staged.backendDir;
   const frontendDir = sourceMode ? path.join(repoRoot, "frontend") : staged.frontendDir;
-  if (sourceMode) log(`source mode: ${repoRoot}`);
-  hostedOrigin = hostedAppOrigin(fs.existsSync(stampFile) ? fs.readFileSync(stampFile, "utf8") : null);
+  if (sourceMode) {
+    // The staged copy drops .env files on purpose. The checkout's would load
+    // into the API and next dev, with other vault keys, providers and cookies
+    // than the installed app that shares this data folder.
+    const envFiles = [backendDir, frontendDir].flatMap((dir) =>
+      fs.readdirSync(dir).filter((name) => name.startsWith(".env") && name !== ".env.example").map((name) => path.join(dir, name)),
+    );
+    if (envFiles.length > 0) throw new Error(`Dev mode does not run with ${envFiles.join(", ")}. Run it from a checkout without them.`);
+    log(`source mode: ${repoRoot}`);
+  }
+  const stamp = fs.existsSync(stampFile) ? fs.readFileSync(stampFile, "utf8") : null;
+  hostedOrigin = hostedAppOrigin(stamp);
   log(`hosted app ${hostedOrigin}`);
 
   step("postgres");
@@ -290,7 +300,8 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   await startPostgres(ctx, ports.postgres, secrets.pgPassword);
 
   step("sandbox");
-  const sandboxImage = await ensureSandboxImage(ctx, backendDir, bundleId, path.join(logsDir, "sandbox-build.log"));
+  // The image tag is the staged bundle id, so it builds from the staged copy.
+  const sandboxImage = await ensureSandboxImage(ctx, staged.backendDir, bundleId, path.join(logsDir, "sandbox-build.log"));
 
   const feOrigin = `http://127.0.0.1:${ports.frontend}`;
   const apiOrigin = `http://127.0.0.1:${ports.api}`;
@@ -300,6 +311,9 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
     UV_NO_PROGRESS: "1",
     PYTHONPYCACHEPREFIX: path.join(dataDir, "pycache"),
     APP_LOCAL_MODE: "1",
+    // The checkout has no stamp of its own, so in dev mode the API gets the
+    // same hosted target as the desktop.
+    ...(sourceMode ? { APP_HOSTED_TARGET: stamp?.trim().toLowerCase() === "staging" ? "staging" : "production" } : {}),
     API_HOST: "127.0.0.1",
     API_PORT: String(ports.api),
     // The backend reads API_PORT first and falls back to PORT. buildChildEnv
@@ -354,7 +368,7 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
 
   step("frontend");
   const feArgs = sourceMode
-    ? [path.join(frontendDir, "node_modules", "next", "dist", "bin", "next"), "dev", "-p", String(ports.frontend), "-H", "127.0.0.1"]
+    ? ["--max-old-space-size=8192", path.join(frontendDir, "node_modules", "next", "dist", "bin", "next"), "dev", "-p", String(ports.frontend), "-H", "127.0.0.1"]
     : ["server.js"];
   frontend = new ManagedProcess("frontend", nodeBinary(), feArgs, {
     env: buildChildEnv(process.env, {
