@@ -759,7 +759,7 @@ def test_request_secret_links_to_the_prefilled_settings_page(harness: Any, monke
     monkeypatch.setattr(settings, "app_public_url", "https://app.example.test/")
     assert _payload(_call(client, "request_secret", {"name": "MAPS_KEY"}, token=READ_TOKEN)) == {
         "name": "MAPS_KEY",
-        "url": "https://app.example.test/?settings=connectors&secret=MAPS_KEY",
+        "url": "https://app.example.test/?settings=secrets&secret=MAPS_KEY",
         "already_saved": False,
     }
     SavedSecretStore(store.engine).save(USER, "MAPS_KEY", _SENTINEL)

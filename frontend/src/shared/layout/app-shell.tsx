@@ -4,7 +4,7 @@ import * as React from "react";
 import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import { List } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
@@ -18,6 +18,7 @@ import { JobsStreamProvider } from "@/shared/hooks/use-jobs-stream";
 import { PageContainer } from "@/shared/layout/page-container";
 import { MobileShell } from "@/shared/layout/mobile-shell";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
+import { BalanceChip } from "@/features/billing";
 import { NotificationBell } from "@/features/notifications";
 import { ResourceModeSwitch } from "@/shared/ui/resource-mode-switch";
 import {
@@ -51,6 +52,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const dir = dirForLocale(locale);
   const isPhone = useIsPhone();
   const { status } = useSession();
+
+  if (pathname === "/download") {
+    return (
+      <div className="min-h-dvh" dir={dir}>
+        {children}
+      </div>
+    );
+  }
 
   // Shared-optimization pages render bare — no sidebar, agent panel, or other
   // app chrome — to keep the focus on the shared item. The recipient is still
@@ -210,6 +219,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-1.5" dir={dir}>
+          <BalanceChip />
           <ResourceModeSwitch />
           <NotificationBell />
           <Button

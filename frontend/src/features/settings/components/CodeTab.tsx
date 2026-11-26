@@ -19,7 +19,7 @@ import {
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { GitDiff, Moon, Sun, TextT } from "@/shared/ui/icons";
-import { Input } from "@/shared/ui/primitives/input";
+import { NumberInput } from "@/shared/ui/number-input";
 import {
   Select,
   SelectContent,
@@ -184,15 +184,97 @@ function ThemeColumn({
   );
 }
 
+// The 20 most common coding fonts. The menu lists only the ones this device
+// has, so a pick always changes the preview.
+const MONO_FONTS = [
+  "JetBrains Mono",
+  "Fira Code",
+  "Cascadia Code",
+  "SF Mono",
+  "Menlo",
+  "Monaco",
+  "Consolas",
+  "Source Code Pro",
+  "IBM Plex Mono",
+  "Roboto Mono",
+  "Ubuntu Mono",
+  "Hack",
+  "Inconsolata",
+  "Iosevka",
+  "Victor Mono",
+  "Fira Mono",
+  "DejaVu Sans Mono",
+  "Space Mono",
+  "Anonymous Pro",
+  "Courier New",
+];
+// Brand font names are not translated.
+const APP_MONO_FONT = "Geist Mono";
+const DEFAULT_FONT = "default";
+
+/** Quote a family name for CSS, so names with spaces or digits work. */
+function quoteFont(name: string): string {
+  return `"${name}"`;
+}
+
+/** Tell whether this device draws text in a font: its width differs from a fallback's. */
+function fontInstalled(name: string): boolean {
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return true;
+  const sample = "mmmmmmmmmmlli1WQ@#0O";
+  return ["monospace", "serif", "sans-serif"].some((fallback) => {
+    ctx.font = `72px ${fallback}`;
+    const width = ctx.measureText(sample).width;
+    ctx.font = `72px ${quoteFont(name)}, ${fallback}`;
+    return ctx.measureText(sample).width !== width;
+  });
+}
+
+/** The code font: the app's font or a common coding font installed on this device. */
+function FontField({ value }: { value: string }) {
+  const [installed, setInstalled] = React.useState<string[]>([]);
+  // Measuring needs a canvas, so it runs after mount.
+  React.useEffect(() => setInstalled(MONO_FONTS.filter(fontInstalled)), []);
+  // A font saved before this list existed still shows, so the menu never looks empty.
+  const listed = value === "" || installed.some((f) => quoteFont(f) === value);
+
+  return (
+    <Select
+      value={value || DEFAULT_FONT}
+      onValueChange={(v) => setCodeAppearance({ font: v === DEFAULT_FONT ? "" : v })}
+    >
+      <SelectTrigger size="sm" aria-label={msg("settings.code.font")} className={TRIGGER}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={DEFAULT_FONT}>
+          <span className="flex items-baseline gap-2">
+            <span style={{ fontFamily: "var(--font-mono)" }}>{APP_MONO_FONT}</span>
+            <span className="text-xs text-muted-foreground">
+              {msg("settings.code.font.default")}
+            </span>
+          </span>
+        </SelectItem>
+        {installed.map((f) => (
+          <SelectItem key={f} value={quoteFont(f)}>
+            <span style={{ fontFamily: quoteFont(f) }}>{f}</span>
+          </SelectItem>
+        ))}
+        {!listed && (
+          <SelectItem value={value}>
+            <span style={{ fontFamily: safeFontFamily(value) }}>{value.replace(/^"|"$/g, "")}</span>
+          </SelectItem>
+        )}
+      </SelectContent>
+    </Select>
+  );
+}
+
 /** Settings > Code: the code theme, font, size and diff markers, as in the Claude and Codex apps. */
 export function CodeTab() {
   const prefs = useCodeAppearance();
-  const [font, setFont] = React.useState(prefs.font);
-  React.useEffect(() => setFont(prefs.font), [prefs.font]);
   const size = prefs.size || DEFAULT_CODE_SIZE;
-  const shownFont = safeFontFamily(font);
-  const [sizeText, setSizeText] = React.useState(String(size));
-  React.useEffect(() => setSizeText(String(size)), [size]);
+  const shownFont = safeFontFamily(prefs.font);
 
   return (
     <div className="flex flex-col">
@@ -205,17 +287,7 @@ export function CodeTab() {
         label={msg("settings.code.font")}
         description={msg("settings.code.font.description")}
       >
-        <Input
-          dir="ltr"
-          value={font}
-          placeholder={msg("settings.code.font.placeholder")}
-          onChange={(e) => setFont(e.target.value)}
-          onBlur={() => setCodeAppearance({ font: shownFont })}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") setCodeAppearance({ font: shownFont });
-          }}
-          className={cn(TOUCH_FIELD_SM, "h-8 sm:w-[180px]")}
-        />
+        <FontField value={prefs.font} />
       </SettingsRow>
       <SettingsRow
         icon={TextT}
@@ -223,24 +295,16 @@ export function CodeTab() {
         description={msg("settings.code.size.description")}
       >
         <span className="flex items-center gap-2">
-          <Input
-            type="number"
-            dir="ltr"
-            inputMode="decimal"
+          <NumberInput
+            size="sm"
             min={CODE_SIZE_MIN}
             max={CODE_SIZE_MAX}
             step={0.5}
-            value={sizeText}
+            decimals={1}
+            value={size}
             aria-label={msg("settings.code.size")}
-            onChange={(e) => {
-              setSizeText(e.target.value);
-              const n = Number(e.target.value);
-              // Save while the value is in range, so the steppers update the preview live.
-              if (e.target.value && n >= CODE_SIZE_MIN && n <= CODE_SIZE_MAX)
-                setCodeAppearance({ size: n });
-            }}
-            onBlur={() => setSizeText(String(size))}
-            className={cn(TOUCH_FIELD_SM, "h-8 w-20 tabular-nums")}
+            onChange={(next) => setCodeAppearance({ size: next })}
+            className="w-28"
           />
           <span className="text-xs text-muted-foreground">{msg("settings.code.size.px")}</span>
         </span>

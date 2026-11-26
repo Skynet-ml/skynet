@@ -32,6 +32,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
         "The {tab} settings are not available in this app. Link a hosted account to use billing; security settings are on the web only."
     ),
     "agent_settings.invalid_page": "This page does not exist in the app.",
+    "agent_settings.missing_page": "Give an in-app path such as /submit, or a settings tab.",
     "agent_settings.invalid_value": "The value for {field} is not valid.",
     "agent_settings.missing_target": "The {action} action needs a target.",
     "agent_settings.not_writable": "The chat cannot change {key}. Change it on the {tab} tab.",

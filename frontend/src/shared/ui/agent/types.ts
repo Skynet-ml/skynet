@@ -81,6 +81,8 @@ export interface TurnStats {
   durationMs: number | null;
   /** Time to the first reply token. */
   ttftMs: number | null;
+  /** When the final answer (the reply text after the last tool call) started, in epoch ms. */
+  finalAnswerAt?: number | null;
 }
 
 export interface AgentThinking {

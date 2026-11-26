@@ -788,6 +788,12 @@ export interface CatalogModel {
   lab_tier?: number;
   available: boolean;
   max_input_tokens?: number | null;
+  // Most tokens one reply may hold, and the provider's recommended
+  // temperature; null/absent when the provider does not say.
+  max_output_tokens?: number | null;
+  default_temperature?: number | null;
+  // Whether the model accepts a temperature; null/absent when the listing does not say.
+  takes_temperature?: boolean | null;
   // Provider per-token costs (USD) from LiteLLM; null/absent when unpriced, so
   // the estimate falls back to a default rate rather than treating it as free.
   input_cost_per_token?: number | null;
@@ -813,6 +819,11 @@ export type ModelDataPolicy = "allow" | "deny" | "zdr";
 
 export interface ModelPrivacySettings {
   data_policy: ModelDataPolicy;
+}
+
+/** Whether new runs bill their setup checks to the balance, outside the spending limit. */
+export interface SetupBillingSettings {
+  from_wallet: boolean;
 }
 
 export interface CatalogProvider {

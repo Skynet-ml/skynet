@@ -51,7 +51,7 @@ You can compare a version with another version. The tab also shows the **Scorer 
 
 ### Branches in a new repository
 
-When Skynet created the repository for the run, it pushes each candidate to its own branch, `skynet/candidate-<version id>`. The `skynet/best` branch always points at the best version. It moves when a better version appears.
+When Skynet created the repository for the run on GitHub, it pushes each candidate to its own branch, `skynet/candidate-<version id>`. The `skynet/best` branch always points at the best version. It moves when a better version appears.
 
 ## Serve the best version
 
@@ -103,7 +103,7 @@ Replace `message` with the input fields of your run. The **Integration code** on
 The response contains `outputs`, the `input_fields`, the `output_fields`, the `model_used`, `cents_charged` and `budget`.
 
 > [!TIP]
-> Each call is billed on its own, from the balance of the caller. `max_cost_cents` sets the most this one call may cost, in cents. If you send the same `Idempotency-Key` again, Skynet does not charge the call again.
+> Each call is billed on its own, from the balance of the caller. `max_cost_cents` is optional. It records the most you accept for this one call, in cents. Your balance bounds the call. If you send the same `Idempotency-Key` again, Skynet does not charge the call again.
 
 Read [API](/docs/api) for authentication and the other endpoints.
 

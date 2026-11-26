@@ -35,7 +35,8 @@ class ProviderEntry:
 
 # The provider modules land in later issues (SBX-6 local, SBX-7 docker,
 # SBX-10 vercel, SBX-25+ the hosted providers); until then the factory reports
-# them as "not in this build". A hosted extra joins pyproject with its module.
+# them as "not in this build". A hosted extra joins pyproject with its module
+# or with its registry entry (SKY-928).
 PROVIDERS: dict[str, ProviderEntry] = {
     "local": ProviderEntry("core.sandbox.providers.local", "LocalEnvironment", None, False),
     "docker": ProviderEntry("core.sandbox.providers.docker", "DockerEnvironment", None, False),
@@ -58,6 +59,14 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "smol": ProviderEntry("core.sandbox.providers.smol", "SmolEnvironment", "smol", False),
     "ec2": ProviderEntry("core.sandbox.providers.ec2", "EC2Environment", "ec2", False),
     "gke": ProviderEntry("core.sandbox.providers.gke", "GKEEnvironment", "gke", False),
+    "novita": ProviderEntry("core.sandbox.providers.novita", "NovitaEnvironment", "novita", False),
+    "blaxel": ProviderEntry("core.sandbox.providers.blaxel", "BlaxelEnvironment", "blaxel", False),
+    "hyperbrowser": ProviderEntry(
+        "core.sandbox.providers.hyperbrowser", "HyperbrowserEnvironment", "hyperbrowser", False
+    ),
+    "runta": ProviderEntry("core.sandbox.providers.runta", "RuntaEnvironment", "runta", False),
+    "superserve": ProviderEntry("core.sandbox.providers.superserve", "SuperserveEnvironment", "superserve", False),
+    "hf_sandbox": ProviderEntry("core.sandbox.providers.hf_sandbox", "HfSandboxEnvironment", "hf_sandbox", False),
     "singularity": ProviderEntry("core.sandbox.providers.singularity", "SingularityEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
 }

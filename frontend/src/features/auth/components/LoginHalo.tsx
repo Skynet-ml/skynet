@@ -1,7 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
 import { dirForLocale } from "@/shared/lib/locale";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
 import { msg } from "@/shared/lib/messages";
@@ -15,7 +15,7 @@ const MOBILE_HALO_CARDS = HALO_CARDS.filter((card) => card.mobilePos);
 /**
  * One floating "finished-run" chip: settles in once, then drifts gently and
  * forever, and scales up under the pointer. Positioning lives on the plain
- * wrapper and rotation is animated numerically, so framer-motion only ever
+ * wrapper and rotation is animated numerically, so Motion only ever
  * touches transform/opacity — never the positional unit-conversion path
  * (`positionalValues[name]`) that throws on re-render. `i` seeds the drift so
  * each chip desyncs without Math.random (which would break SSR hydration).

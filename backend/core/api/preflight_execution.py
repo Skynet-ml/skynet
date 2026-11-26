@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import math
 from collections.abc import Callable, Iterator
@@ -36,16 +35,22 @@ from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
 from ..exceptions import ServiceError
 from ..models import BlackboxRunRequest
+from ..sandbox.image_registry import image_registry
 from ..service_gateway.optimization.blackbox.native_runtime import check_native_runtime
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
+from ..storage import get_job_store
 from ..storage.preflights import PreflightStore
+from ..worker.loop_host import provider_message
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
     StagedRepository,
     bind_repo_scorer,
+    image_builder,
     infer_repo_setup,
     is_repo_payload,
+    prepare_apt_image,
     stage_repository,
+    with_apt_image,
 )
 from ..worker.unified_aliases import alias_blackbox_metric_model
 from ..worker.vercel_dspy import run_vercel_dspy
@@ -53,7 +58,7 @@ from .agent_engine import fill_proposer_host_cli
 from .errors import DomainError
 from .model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from .preflight_progress import report_preflight_phase
-from .routers.execution_budgets import ExecutionBudgetResponse, budget_http_error, budget_response
+from .routers import execution_budgets
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +114,7 @@ class WizardPreflightResponse(BaseModel):
     may_advance: bool
     pending_reason: WizardPreflightPendingReason | None = None
     checks: list[WizardPreflightCheck]
-    budget: ExecutionBudgetResponse
+    budget: execution_budgets.ExecutionBudgetResponse
     scorer_result: dict[str, Any] | None = None
     workflow_result: dict[str, Any] | None = None
     terminal: dict[str, Any] | None = None
@@ -176,8 +181,8 @@ def _canonical_execution_payload(request: WizardPreflightRequest, username: str,
 
 
 BUDGET_CHECK_KEY = "budget"
-# A failed budget check names the balance as what to fix when the account,
-# not the spending limit, refused the work: raising the limit cannot help then.
+# A failed budget check always names the balance as what to fix: setup bills
+# the balance only (SKY-925), so raising the spending limit cannot help.
 BALANCE_FIELD = "balance"
 # A runtime reports a budget stop only by its type name; these rebuild it.
 _BUDGET_STOPS = {stop.__name__: stop for stop in (BudgetInsufficientError, AccountFundsError)}
@@ -225,22 +230,19 @@ def _mark_usage_pending(result: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
-def _provider_refusal(response: ModelHTTPResult) -> str:
+def _provider_refusal(response: ModelHTTPResult, token: str) -> str:
     """Summarize a provider's error answer for the check report.
 
     Args:
         response: Non-2xx model response returned through the metered route.
+        token: The route's gateway guest token, not the provider key. It is the credential of the preflight
+            request, so the summary must never show it when the provider or the gateway echoes it.
 
     Returns:
-        The HTTP status, followed by the provider's own message when its body carries one.
+        The HTTP status, followed by the provider's own short message when its body carries one.
     """
-    try:
-        error = json.loads(response.content).get("error")
-    except (ValueError, AttributeError):
-        error = None
-    detail = error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else None
-    summary = f"HTTP {response.status}"
-    return f"{summary}: {str(detail)[:200]}" if detail else summary
+    detail = provider_message(response.body, token)
+    return f"HTTP {response.status}: {detail}" if detail else f"HTTP {response.status}"
 
 
 def _verify_model_routes(gateway: ModelGateway, *, native: bool) -> list[dict[str, Any]]:
@@ -265,12 +267,15 @@ def _verify_model_routes(gateway: ModelGateway, *, native: bool) -> list[dict[st
             {"anthropic-version": "2023-06-01"} if anthropic else {},
         )
         ok = 200 <= response.status < 300
-        detail = f"The selected {route['role']} model rejected its setup request ({_provider_refusal(response)})."
+        detail = None
+        if not ok:
+            refusal = _provider_refusal(response, route["token"])
+            detail = f"The selected {route['role']} model rejected its setup request ({refusal})."
         checks.append(
             _check(
                 f"model.{route['role']}",
                 "succeeded" if ok else "failed",
-                None if ok else detail,
+                detail,
                 route["role"],
             )
         )
@@ -372,29 +377,29 @@ class _Events:
         """Return the runtime's setup evidence, or raise the failure it reported.
 
         Args:
-            gateway: The setup's model gateway, which saw any call the limit refused.
+            gateway: The setup's model gateway, which saw any call the budget refused.
 
         Returns:
             The guest's terminal preflight result.
 
         Raises:
-            BudgetInsufficientError: When the spending limit or the account
-                balance stopped the runtime.
+            BudgetInsufficientError: When the account balance cannot fund
+                setup.
             ValueError: For any other runtime failure, or when no result came back.
         """
         # ``run_vercel_dspy`` turns every exception into an error event, so the
         # budget stop has to be rebuilt from its type name to reach the
         # ``budget`` check instead of the generic ``setup`` one. A guest model
-        # call the limit refused only reaches the guest as a 402, which its
+        # call the balance refused only reaches the guest as a 402, which its
         # client raises under its own type, so the gateway's record of the
         # refusal decides that case.
         # The guest sees an account-funds refusal as a plain budget stop, so
-        # the gateway's record keeps the balance from reading as the limit.
+        # the gateway's record keeps the refusal on the balance.
         if self.error and isinstance(gateway.budget_refusal, AccountFundsError):
             raise gateway.budget_refusal
         stop = _BUDGET_STOPS.get(self.error_type or "")
         if stop is not None:
-            raise stop(self.error or "The spending limit cannot cover setup.")
+            raise stop(self.error or "The account cannot fund the next operation.")
         if self.error and gateway.budget_refusal is not None:
             raise gateway.budget_refusal
         if self.error or self.result is None:
@@ -462,10 +467,10 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
         if snapshot.generation != claim.generation:
             raise BudgetConflictError("Another setup attempt replaced this execution generation.")
     except BudgetError as error:
-        raise budget_http_error(error) from error
+        raise execution_budgets.budget_http_error(error) from error
     if claim.token is None:
         return WizardPreflightResponse.model_validate(
-            {**claim.document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+            {**claim.document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
         )
     try:
         with evidence.heartbeat(claim.document["id"], claim_token=claim.token):
@@ -495,7 +500,7 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
                     result={"checks": [_check("setup", "failed", str(error))]},
                 )
                 return WizardPreflightResponse.model_validate(
-                    {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+                    {**document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
                 )
             parent_request = request.model_copy(update={"payload": parent_payload})
             status, result = _perform_preflight(
@@ -516,9 +521,9 @@ def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -
                 )
             document = evidence.finish(claim.document["id"], claim_token=claim.token, status=status, result=result)
     except BudgetError as error:
-        raise budget_http_error(error) from error
+        raise execution_budgets.budget_http_error(error) from error
     return WizardPreflightResponse.model_validate(
-        {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+        {**document, "budget": execution_budgets.budget_response(snapshot), "proposer_host_cli": host_cli}
     )
 
 
@@ -567,6 +572,14 @@ def _perform_preflight(
                 generation=snapshot.generation,
                 phase="setup",
                 wait_timeout=SETUP_WAIT_SECONDS,
+                # The limit of a setup_in_total budget (continuous-plan cycles, or accounts that
+                # turn off wallet setup billing) bounds setup, and submit needs one lease of that
+                # limit and of the balance left after the check, so the check must not spend into
+                # it. Local mode checks no balance at submit. The lease is read through the router
+                # module, which submit reads too, so a test that patches it changes both rules
+                # (SKY-923, SKY-925).
+                keep_cents=execution_budgets.CHUNK_CENTS if snapshot.setup_in_total else 0,
+                keep_funds=not settings.local_mode,
             )
         )
         # The box's hold is priced on its whole lifetime, so a check gets the
@@ -615,7 +628,16 @@ def _perform_preflight(
             if gate_failures:
                 raise RepoGateError(gate_failures)
             infer_repo_setup(protected, staged, gateway)
-            unchecked = tuple(role for role in SETUP_NOT_CHECKED if role in staged.box_sources)
+            # The check builds and pays for the generated [run] image as the run does, so it
+            # checks setup in the image the run uses (SKY-967).
+            staged = _with_setup_image(
+                staged, protected, owner_id=f"preflight-{identity}", username=user.username, gateway=gateway
+            )
+            unchecked = tuple(
+                role
+                for role in SETUP_NOT_CHECKED
+                if role in staged.box_sources and staged.box_sources[role][0] != "apt"
+            )
             bind_repo_scorer(
                 protected,
                 staged,
@@ -646,7 +668,12 @@ def _perform_preflight(
             ),
         )
     except BudgetInsufficientError as error:
-        field = BALANCE_FIELD if isinstance(error, AccountFundsError) else None
+        # Setup bills the balance only (SKY-925), so a guest that relays a plain budget stop still
+        # ran out of balance, never out of limit. A setup_in_total limit (continuous-plan cycles, or
+        # accounts that turn off wallet setup billing) still bounds setup, so its plain stop names
+        # the limit.
+        on_balance = isinstance(error, AccountFundsError) or not snapshot.setup_in_total
+        field = BALANCE_FIELD if on_balance else None
         result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), field)]}
     except RepoGateError as error:
         result = {
@@ -685,6 +712,37 @@ def _perform_preflight(
                 status = "failed"
                 result.setdefault("checks", []).append(_check("runtime", "failed", str(error)))
     return status, result
+
+
+def _with_setup_image(
+    staged: StagedRepository, protected: dict[str, Any], *, owner_id: str, username: str, gateway: ModelGateway
+) -> StagedRepository:
+    """Build or reuse the generated ``[run]`` image with the Debian packages that setup named (SKY-967).
+
+    Args:
+        staged: The staged repository.
+        protected: The protected payload, with the target's packages.
+        owner_id: Identity that names the paid build and check.
+        username: Account that pays and owns the image.
+        gateway: The metered gateway, whose runtime pays for the build.
+
+    Returns:
+        ``staged`` with the ``[run]`` image, or unchanged when setup named no packages,
+        ascent.toml names the ``[run]`` image, or this deployment cannot build it.
+    """
+    staged = with_apt_image(staged, protected)
+    if staged.box_sources.get("run", ("",))[0] != "apt":
+        return staged
+    return prepare_apt_image(
+        staged,
+        owner_id=owner_id,
+        username=username,
+        runtime=gateway.parent_sandbox_runtime(),
+        builder=image_builder(settings),
+        store=get_job_store(),
+        budget=gateway.runtime,
+        registry=image_registry(settings),
+    )
 
 
 @contextmanager
@@ -790,6 +848,9 @@ def judge_scorer(
         if before_scoring is not None:
             before_scoring(protected, staged)
         infer_repo_setup(protected, staged, gateway)
+        # Each version runs the repository setup, so it needs the run's Debian packages; the
+        # run's build is reused by its input hash (SKY-967).
+        staged = _with_setup_image(staged, protected, owner_id=owner_id, username=username, gateway=gateway)
         bind_repo_scorer(protected, staged, gateway, owner_id=owner_id, managed_key=managed_key)
         yield protected, staged, gateway
     finally:

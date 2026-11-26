@@ -90,7 +90,7 @@ Auto lee el texto de los comentarios de tu evaluador.
 
 | Tu situación                             | Usa                                                                                        |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Tienes código en un repositorio de GitHub | **Usar un repositorio**. El código de la rama o el commit que elijas es el punto de partida. |
+| Tienes código en un repositorio de GitHub, GitLab o Bitbucket | **Usar un repositorio**. El código de la rama o el commit que elijas es el punto de partida. |
 | Solo tienes una tarea y datos            | **Crear un repositorio nuevo**. Skynet escribe una primera solución. Ese es el punto de partida. |
 
 > [!WARNING]

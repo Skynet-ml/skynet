@@ -207,6 +207,42 @@ gke = [
     # core.sandbox.providers.gke; the factory loads it lazily.
     "kubernetes>=32.0.0",
 ]
+novita = [
+    # Novita sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.novita; the default legacy backend never needs it.
+    # 2.1.4 is the first release whose create takes ``resources``.
+    "novita-sandbox>=2.1.4",
+]
+blaxel = [
+    # Blaxel sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.blaxel; the default legacy backend never needs it.
+    "blaxel>=0.4.24",
+]
+hyperbrowser = [
+    # Hyperbrowser sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.hyperbrowser; the default legacy backend never needs it.
+    "hyperbrowser>=1.5.0",
+]
+runta = [
+    # Runta sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.runta; the default legacy backend never needs it.
+    "runta-sdk>=0.2.6,<0.3",
+]
+superserve = [
+    # Superserve sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.superserve; the default legacy backend never needs it.
+    # 0.13.0 is the first release whose SandboxInfo has vcpu_max (memory_max_mib
+    # came in 0.12.0); the funded-size check needs both to see a box that can grow.
+    "superserve>=0.13.0,<0.15",
+]
+hf_sandbox = [
+    # Hugging Face Sandbox provider (SKY-942), imported lazily by
+    # core.sandbox.providers.hf_sandbox. Harbor's hf_sandbox uses
+    # huggingface_hub.Sandbox, which first ships in 1.22.0. The base install
+    # already gets the hub through tokenizers, so this floor also lifts the
+    # base pin. The <2 cap is there because transformers and tokenizers need hub <2.
+    "huggingface-hub>=1.22,<2",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither

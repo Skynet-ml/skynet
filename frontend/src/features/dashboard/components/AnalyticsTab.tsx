@@ -1,7 +1,7 @@
 import { memo, useEffect } from "react";
 import { InlineWarningRow } from "@/shared/ui/inline-warning-row";
 import dynamic from "next/dynamic";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
 import { AnimatedNumber, StaggerContainer, StaggerItem } from "@/shared/ui/motion";
 import { PanelHeading } from "@/shared/ui/panel-heading";
 import { HelpTip } from "@/shared/ui/help-tip";

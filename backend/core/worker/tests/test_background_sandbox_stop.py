@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import patch
@@ -43,6 +43,14 @@ class _Budget:
     reserved_cents: int
     settled_cents: int
     account_available_cents: int = 0
+
+    def limit_view(self) -> dict[str, Any]:
+        """Return the fields the worker stores, as the real budget snapshot does.
+
+        Returns:
+            Every field of the row.
+        """
+        return asdict(self)
 
 
 class _Ledger:

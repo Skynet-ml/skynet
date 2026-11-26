@@ -51,7 +51,7 @@ Skynet 根据验证用例选择版本，并在测试用例上报告最终分数�
 
 ### 新仓库中的分支
 
-当 Skynet 为本次运行创建了仓库时，它会把每个候选推送到各自的分支 `skynet/candidate-<version id>`。`skynet/best` 分支始终指向最佳版本。出现更好的版本时，它会随之移动。
+当 Skynet 在 GitHub 上为本次运行创建了仓库时，它会把每个候选推送到各自的分支 `skynet/candidate-<version id>`。`skynet/best` 分支始终指向最佳版本。出现更好的版本时，它会随之移动。
 
 ## 部署最佳版本
 
@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 响应包含 `outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged` 和 `budget`。
 
 > [!TIP]
-> 每次调用单独计费，从调用者的余额中扣除。`max_cost_cents` 设置这一次调用最多可以花费的金额，单位为美分。如果你再次发送相同的 `Idempotency-Key`，Skynet 不会再次对该调用收费。
+> 每次调用单独计费，从调用者的余额中扣除。`max_cost_cents` 是可选的。它以美分为单位，记录你对这一次调用接受的最高金额。调用的上限由你的余额决定。如果你再次发送相同的 `Idempotency-Key`，Skynet 不会再次对该调用收费。
 
 关于身份验证和其他端点，请阅读 [API](/docs/api)。
 

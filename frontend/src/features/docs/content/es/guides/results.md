@@ -51,7 +51,7 @@ Puedes comparar una versión con otra. La pestaña también muestra los **Coment
 
 ### Ramas en un repositorio nuevo
 
-Cuando Skynet crea el repositorio para la ejecución, sube cada candidato a su propia rama, `skynet/candidate-<version id>`. La rama `skynet/best` siempre apunta a la mejor versión. Se mueve cuando aparece una versión mejor.
+Cuando Skynet crea el repositorio para la ejecución en GitHub, sube cada candidato a su propia rama, `skynet/candidate-<version id>`. La rama `skynet/best` siempre apunta a la mejor versión. Se mueve cuando aparece una versión mejor.
 
 ## Servir la mejor versión
 
@@ -103,7 +103,7 @@ Sustituye `message` por los campos de entrada de tu ejecución. El **Código de 
 La respuesta contiene `outputs`, los `input_fields`, los `output_fields`, el `model_used`, `cents_charged` y `budget`.
 
 > [!TIP]
-> Cada llamada se cobra por separado, del saldo de quien llama. `max_cost_cents` fija lo máximo que puede costar esta llamada, en centavos. Si envías otra vez la misma `Idempotency-Key`, Skynet no vuelve a cobrar la llamada.
+> Cada llamada se cobra por separado, del saldo de quien llama. `max_cost_cents` es opcional. Registra lo máximo que aceptas por esta llamada, en centavos. Tu saldo limita la llamada. Si envías otra vez la misma `Idempotency-Key`, Skynet no vuelve a cobrar la llamada.
 
 Lee [API](/docs/api) para conocer la autenticación y los demás endpoints.
 

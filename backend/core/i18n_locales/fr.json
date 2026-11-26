@@ -422,6 +422,7 @@
     "agent_settings.not_writable": "Le chat ne peut pas modifier {key}. Modifiez-le dans l'onglet {tab}.",
     "agent_settings.missing_target": "L'action {action} nécessite une cible.",
     "agent_settings.invalid_page": "Cette page n'existe pas dans l'app.",
+    "agent_settings.missing_page": "Indiquez un chemin de l'app, comme /submit, ou un onglet des réglages.",
     "hosted_link.failed": "Le site {term.appName} hébergé n'a pas accepté l'association. Relancez l'association.",
     "hosted_link.unreachable": "L'app Mac ne peut pas joindre le site {term.appName} hébergé. Vérifiez votre connexion et réessayez.",
     "hosted_link.revoked": "Ce Mac n'est plus associé à votre compte {term.appName}. Associez-le à nouveau pour continuer.",

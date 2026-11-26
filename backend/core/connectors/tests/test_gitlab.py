@@ -14,6 +14,7 @@ import pytest
 from ...api.errors import DomainError
 from ...i18n import t_locale
 from .. import github_repo, gitlab, transport
+from ..github_create_repo import RepoCreateError
 from ..github_publish import HardeningSummary, RepoPublishError
 from ..github_repo import RepoFetchError, RepoRateLimitError
 from ..vault import ConnectorSecret
@@ -462,3 +463,79 @@ def test_snapshot_clones_a_nested_group_path_from_gitlab(monkeypatch: pytest.Mon
     assert environment["GIT_CONFIG_KEY_0"] == "http.https://gitlab.com/.extraheader"
     basic = base64.b64encode(b"oauth2:glpat").decode()
     assert environment["GIT_CONFIG_VALUE_0"] == f"AUTHORIZATION: basic {basic}"
+
+
+def test_create_repository_posts_the_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Create posts an empty project with the visibility and returns its path and branch."""
+    seen = _serve(
+        monkeypatch, lambda _r: httpx.Response(201, json={"path_with_namespace": "alice/app", "default_branch": None})
+    )
+    assert gitlab.create_repository("glpat", "app", private=True, description="Sorts") == ("alice/app", "main")
+    assert [(r.method, str(r.url)) for r in seen] == [("POST", f"{gitlab.API_URL}/projects")]
+    assert json.loads(seen[0].content) == {
+        "name": "app",
+        "path": "app",
+        "visibility": "private",
+        "initialize_with_readme": False,
+        "description": "Sorts",
+    }
+    assert seen[0].headers["authorization"] == "Bearer glpat"
+
+
+@pytest.mark.parametrize(
+    ("lookup", "message"),
+    [
+        (200, "already has a repository"),
+        (404, "does not accept"),
+        (500, "Could not check GitLab"),
+    ],
+)
+def test_create_repository_explains_a_400(monkeypatch: pytest.MonkeyPatch, lookup: int, message: str) -> None:
+    """A 400 is a taken name only when the user's namespace holds that project."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Refuse the create and answer the follow-up lookups.
+
+        Args:
+            request: The outgoing request.
+
+        Returns:
+            The canned response.
+        """
+        if request.method == "POST":
+            return httpx.Response(400, json={"message": {"name": ["has already been taken"]}})
+        if request.url.path.endswith("/user"):
+            return httpx.Response(200, json={"username": "alice"})
+        return httpx.Response(lookup, json={})
+
+    _serve(monkeypatch, handler)
+    with pytest.raises(RepoCreateError, match=message):
+        gitlab.create_repository("glpat", "app", private=False)
+
+
+def test_create_repository_400_without_a_username_is_a_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An account answer with no username fails the name check instead of crashing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Refuse the create and answer the account lookup without a username.
+
+        Args:
+            request: The outgoing request.
+
+        Returns:
+            The canned response.
+        """
+        if request.method == "POST":
+            return httpx.Response(400, json={"message": {"name": ["has already been taken"]}})
+        return httpx.Response(200, json={})
+
+    _serve(monkeypatch, handler)
+    with pytest.raises(RepoCreateError, match="Could not check GitLab"):
+        gitlab.create_repository("glpat", "app", private=False)
+
+
+def test_create_repository_refusal_asks_to_connect_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 403 means the token cannot create projects, so the user connects again."""
+    _serve(monkeypatch, lambda _r: httpx.Response(403, json={}))
+    with pytest.raises(RepoCreateError, match="Connect GitLab again"):
+        gitlab.create_repository("glpat", "app", private=False)

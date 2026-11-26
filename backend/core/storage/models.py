@@ -577,6 +577,25 @@ class ModelPrivacyPreferenceModel(Base):
     )
 
 
+class SetupBillingPreferenceModel(Base):
+    """Whether a caller's new runs bill their setup checks to the wallet only.
+
+    A missing row means ``True``: setup stays out of the run's spending limit
+    (SKY-925). ``False`` makes new budgets count setup against their limit.
+    """
+
+    __tablename__ = "setup_billing_preferences"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    from_wallet: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class AgentEnginePreferenceModel(Base):
     """Which engine runs a caller's agent turns when no model is picked.
 
@@ -594,15 +613,6 @@ class AgentEnginePreferenceModel(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
-
-
-class PackageRegistryPreferenceModel(Base):
-    """Store a caller's package index independently of local password accounts."""
-
-    __tablename__ = "package_registry_preferences"
-
-    username: Mapped[str] = mapped_column(String(255), primary_key=True)
-    index_url: Mapped[str] = mapped_column(String(2048), nullable=False)
 
 
 class WebAuthnCredentialModel(Base):
@@ -853,6 +863,10 @@ class ExecutionBudgetModel(Base):
     creation_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     total_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     uncapped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # A setup_in_total budget (continuous-plan cycles, or accounts that turn off wallet setup
+    # billing) keeps the policy from before SKY-925: its total caps and counts setup spend. Every
+    # other budget bills setup to the balance.
+    setup_in_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="open")

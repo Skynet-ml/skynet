@@ -21,6 +21,7 @@ from ..agents.github_mcp import (
     github_repo_tools,
     read_only_tools,
     server_parameters,
+    tool_from_mcp,
 )
 
 TOKEN = "test-token-not-real"
@@ -310,3 +311,24 @@ def test_setup_turn_uses_the_configured_binary(monkeypatch: pytest.MonkeyPatch) 
 
     asyncio.run(run())
     assert seen == ["/opt/bin/github-mcp-server"]
+
+
+def test_tool_from_mcp_keeps_the_listing_required_args() -> None:
+    """An arg the listing does not require stays optional for the model."""
+    # FastMCP drops ``"default": null`` from optional args, as for open_page.
+    spec = Tool(
+        name="open_page",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "tab": {"anyOf": [{"type": "string", "enum": ["wizard"]}, {"type": "null"}]},
+                "path": {"anyOf": [{"type": "string", "maxLength": 200}, {"type": "null"}]},
+                "note": {"type": "string"},
+            },
+            "required": ["note"],
+        },
+    )
+
+    function = tool_from_mcp(None, spec).format_as_litellm_function_call()["function"]  # type: ignore[arg-type]
+
+    assert function["parameters"]["required"] == ["note"]

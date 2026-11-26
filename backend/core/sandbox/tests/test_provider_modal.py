@@ -9,13 +9,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
+from core.billing.budgets import BudgetService
+from core.billing.modal_usage import ModalUsageReservation
+from core.billing.runtime import BudgetRuntime, UsagePendingError
+from core.billing.usage_tags import BOX_KEY
 from core.sandbox import (
     JOB_TAG,
     NetworkPolicy,
@@ -35,6 +42,7 @@ from core.sandbox.providers.modal import ModalEnvironment, egress_kwargs, resour
 from core.sandbox.providers.smol import SmolEnvironment
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
 from core.sandbox.timeouts import Phase, PhaseTimeouts
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
 
 _SPEC = SandboxSpec(lifetime_seconds=60)
 
@@ -92,6 +100,7 @@ class FakeSandbox:
             kwargs: The create keyword arguments.
         """
         self.sdk = sdk
+        self.object_id: str | None = None if sdk.no_object_id else f"sb-{len(sdk.boxes) + 1}"
         self.args = args
         self.kwargs = kwargs
         self.tags: dict[str, str] = dict(kwargs.get("tags") or {})
@@ -245,10 +254,19 @@ class FakeModal:
         self.boxes: list[FakeSandbox] = []
         self.create_calls = 0
         self.create_error: Exception | None = None
+        self.create_error_after_box: Exception | None = None
         self.create_gate: asyncio.Event | None = None
         self.create_entered = asyncio.Event()
+        self.builds = 0
+        self.build_error: Exception | None = None
+        self.list_error: Exception | None = None
+        self.list_calls = 0
+        self.list_gate: asyncio.Event | None = None
+        self.list_entered = asyncio.Event()
+        self.list_hook: Callable[[], None] | None = None
+        self.no_object_id = False
         self.App = SimpleNamespace(lookup=_aio(self._lookup))
-        self.Image = SimpleNamespace(from_registry=lambda tag: SimpleNamespace(tag=tag))
+        self.Image = SimpleNamespace(from_registry=lambda tag: SimpleNamespace(tag=tag, build=_aio(self._build)))
         self.Secret = SimpleNamespace(from_dict=FakeSecret)
         self.Sandbox = SimpleNamespace(create=_aio(self._create), list=_aio(self._list))
 
@@ -265,6 +283,19 @@ class FakeModal:
         assert create_if_missing
         return SimpleNamespace(name=name, app_id=f"ap-{name}")
 
+    async def _build(self, app: Any) -> None:
+        """Build the image.
+
+        Args:
+            app: The fake app.
+
+        Raises:
+            Exception: ``build_error`` is set.
+        """
+        self.builds += 1
+        if self.build_error is not None:
+            raise self.build_error
+
     async def _create(self, *args: str, app: Any, **kwargs: Any) -> FakeSandbox:
         """Create a fake sandbox.
 
@@ -277,7 +308,8 @@ class FakeModal:
             The fake sandbox.
 
         Raises:
-            Exception: ``create_error`` is set.
+            Exception: ``create_error`` is set, or ``create_error_after_box`` is
+                set, which raises after the sandbox exists.
         """
         self.create_calls += 1
         self.create_entered.set()
@@ -287,6 +319,8 @@ class FakeModal:
             raise self.create_error
         box = FakeSandbox(self, args, {"app": app, **kwargs})
         self.boxes.append(box)
+        if self.create_error_after_box is not None:
+            raise self.create_error_after_box
         return box
 
     async def _list(self, *, app_id: str, tags: dict[str, str]) -> AsyncIterator[FakeSandbox]:
@@ -295,7 +329,18 @@ class FakeModal:
         Args:
             app_id: The app id.
             tags: The tags to match.
+
+        Raises:
+            Exception: ``list_error`` is set.
         """
+        self.list_calls += 1
+        self.list_entered.set()
+        if self.list_hook is not None:
+            self.list_hook()
+        if self.list_gate is not None:
+            await self.list_gate.wait()
+        if self.list_error is not None:
+            raise self.list_error
         for box in list(self.boxes):
             if box.kwargs["app"].app_id == app_id and not box.terminated and tags.items() <= box.tags.items():
                 yield box
@@ -303,11 +348,21 @@ class FakeModal:
 
 @pytest.fixture(autouse=True)
 def fake_modal(monkeypatch: pytest.MonkeyPatch) -> FakeModal:
-    """Replace the Modal SDK in the provider module with a fresh fake."""
+    """Replace the Modal SDK in the provider module with a fresh fake.
+
+    The fake ``InvalidError`` counts as a refusal, the V2 create is on, and
+    the second lookup after a failed create runs at once.
+
+    Args:
+        monkeypatch: Pytest fixture that restores the module after the test.
+    """
     sdk = FakeModal()
     for name in ("App", "Image", "Secret", "Sandbox"):
         monkeypatch.setattr(modal_provider, name, getattr(sdk, name))
     monkeypatch.setattr(modal_provider, "_EXEC_TIMEOUT_ERRORS", (FakeExecTimeoutError,))
+    monkeypatch.setattr(modal_provider, "_REFUSAL_ERRORS", frozenset({FakeRefusalError}))
+    monkeypatch.setattr(modal_provider, "modal_config", SimpleNamespace(get=lambda key: key == "sandbox_v2"))
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 0)
     return sdk
 
 
@@ -969,12 +1024,716 @@ def test_factory_refuses_the_modal_provider_in_production(monkeypatch: pytest.Mo
 
 
 def test_capabilities_allow_every_network_mode_and_gpus() -> None:
-    """Report dynamic egress for all modes, GPUs, and no billing or protection."""
+    """Report dynamic egress for all modes, GPUs, billing, and no protection."""
     caps = ModalEnvironment.capabilities
     assert caps.name == "modal"
     assert caps.dynamic_network_policy
     assert caps.gpus
     assert caps.gpu_types
-    assert not caps.billable
+    assert caps.billable
     assert not caps.protected
     assert len(caps.network_modes) == 3
+
+
+class FakeUsage:
+    """Record the calls a protected box makes on its usage reservation."""
+
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+        """Record the reservation.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's logical identity.
+        """
+        self.budget = budget
+        self.request = request
+        self.operation_key = operation_key
+        self.box = f"box-{operation_key}"
+        self.calls: list[str] = []
+        self.confirmed: Any = None
+        self.sent_at: float | None = None
+        self.sandbox_id: str | None = None
+        self.absent: bool | None = None
+        self.returned = False
+        budget.reservations.append(self)
+
+    def building(self) -> None:
+        """Accept the start of the runtime clock before the image build."""
+
+    def sent(self) -> None:
+        """Record that the create was sent."""
+        self.calls.append("sent")
+        self.sent_at = 1.0
+
+    def pending(self) -> None:
+        """Record that the hold stays pending."""
+        self.calls.append("pending")
+
+    def confirm_created(self, sandbox: Any) -> None:
+        """Record the created sandbox.
+
+        Args:
+            sandbox: The fake sandbox.
+        """
+        self.returned = True
+        self.calls.append("confirm")
+        self.confirmed = sandbox
+        self.sandbox_id = sandbox.object_id
+
+    def stopped(self) -> None:
+        """Record a confirmed terminate."""
+        self.calls.append("stopped")
+
+    def settle(self) -> None:
+        """Record the settle."""
+        self.calls.append("settle")
+
+    def fail(self, absent: bool = False) -> None:
+        """Record a failure with no sandbox.
+
+        Args:
+            absent: True when Modal refused the create, and no box was found or the lookup failed.
+        """
+        self.calls.append("fail")
+        self.absent = absent
+
+
+def _protected(spec: SandboxSpec | None = None) -> tuple[ModalEnvironment, SimpleNamespace]:
+    """Build a protected box with a fake budget and a fake usage factory.
+
+    Args:
+        spec: The spec, or a default spec with an operation key.
+
+    Returns:
+        The box and the fake budget whose ``reservations`` collects each reservation.
+    """
+    budget = SimpleNamespace(reservations=[])
+    spec = spec or SandboxSpec(
+        lifetime_seconds=60, operation_key="op-1", network_disabled=True, resources=ResourceRequest(cpus=2)
+    )
+    return ModalEnvironment(spec, budget=budget, usage_factory=FakeUsage), budget
+
+
+def test_protected_box_needs_an_operation_key() -> None:
+    """Refuse a protected box with no operation key."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        ModalEnvironment(_SPEC, budget=SimpleNamespace(), usage_factory=FakeUsage)
+
+
+def test_protected_box_refuses_a_gpu() -> None:
+    """Refuse a protected GPU box, because no sandbox GPU rate is published."""
+    spec = SandboxSpec(
+        lifetime_seconds=60, operation_key="op-1", network_disabled=True, resources=ResourceRequest(gpu=1)
+    )
+    with pytest.raises(SandboxSpecError, match="GPU"):
+        ModalEnvironment(spec, budget=SimpleNamespace(), usage_factory=FakeUsage)
+
+
+async def test_protected_box_reserves_before_create_and_settles_after_stop(fake_modal: FakeModal) -> None:
+    """Reserve the lifetime, pin the billed size, confirm the sandbox, then settle after the terminate."""
+    env, budget = _protected()
+    await env.start()
+    (usage,) = budget.reservations
+    assert usage.operation_key == "op-1"
+    assert usage.request == {
+        "image": modal_provider.DEFAULT_IMAGE,
+        "lifetime_ms": 60_000,
+        "cpu_cores": 2,
+        "memory_mib": 4096,
+        "gpu": False,
+    }
+    box = _box(fake_modal)
+    assert box.kwargs["timeout"] == 60
+    assert box.kwargs["outbound_domain_allowlist"] == []
+    assert box.kwargs["outbound_cidr_allowlist"] == []
+    assert box.kwargs["cpu"] == (2, 2)
+    assert box.kwargs["memory"] == (4096, 4096)
+    assert box.tags[BOX_KEY] == usage.box
+    assert fake_modal.builds == 1
+    assert usage.confirmed is box
+    assert usage.calls == ["sent", "confirm"]
+    await env.stop()
+    assert box.terminated
+    assert usage.calls == ["sent", "confirm", "stopped", "settle"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        SandboxSpec(lifetime_seconds=60, operation_key="op-1"),
+        SandboxSpec(lifetime_seconds=60, operation_key="op-1", allowed_hosts=("pypi.org",)),
+    ],
+)
+def test_protected_box_refuses_egress_at_construction(spec: SandboxSpec) -> None:
+    """Refuse open or allowlisted egress, because Modal neither caps nor reports it.
+
+    Args:
+        spec: A protected spec whose network is not disabled.
+    """
+    with pytest.raises(SandboxSpecError, match="egress"):
+        ModalEnvironment(spec, budget=SimpleNamespace(), usage_factory=FakeUsage)
+
+
+@pytest.mark.parametrize("policy", [NetworkPolicy(), NetworkPolicy(allowed_hosts=("pypi.org",))])
+async def test_protected_box_refuses_to_open_egress(fake_modal: FakeModal, policy: NetworkPolicy) -> None:
+    """Refuse a policy that opens egress on a running protected box, and keep it closed.
+
+    Args:
+        fake_modal: The fake SDK.
+        policy: A policy that opens egress.
+    """
+    env, budget = _protected()
+    await env.start()
+    with pytest.raises(SandboxSpecError, match="egress"):
+        await env.set_network_policy(policy)
+    assert _box(fake_modal).policies == []
+    await env.disable_network()
+    assert _box(fake_modal).policies == [{"outbound_domain_allowlist": [], "outbound_cidr_allowlist": []}]
+    assert budget.reservations[0].calls == ["sent", "confirm"]
+    await env.stop()
+
+
+async def test_protected_box_fails_usage_when_create_fails(fake_modal: FakeModal) -> None:
+    """Hand a failed create to the reservation, which keeps or releases the hold."""
+    fake_modal.create_error = RuntimeError("quota")
+    env, budget = _protected()
+    with pytest.raises(RuntimeError, match="quota"):
+        await env.start()
+    assert budget.reservations[0].calls == ["sent", "pending", "fail"]
+    assert budget.reservations[0].absent is False
+    assert env.usage is None
+
+
+class FakeRefusalError(Exception):
+    """Stand in for a refusal type, such as modal.exception.PermissionDeniedError."""
+
+
+class FakeRefusalSubclassError(FakeRefusalError):
+    """Stand in for a subclass of a refusal type, which never counts as a refusal."""
+
+
+class FakeResourceExhaustedError(Exception):
+    """Stand in for modal.exception.ResourceExhaustedError, which the V1 create raises after its box exists."""
+
+
+_CREATE_ERRORS = [
+    FakeRefusalError("bad"),
+    FakeResourceExhaustedError("Insufficient capacity to create sandbox."),
+    RuntimeError("client timeout"),
+]
+_UNREFUSED_ERRORS = _CREATE_ERRORS[1:]
+
+
+async def test_refused_create_releases_after_one_lookup_finds_no_box(fake_modal: FakeModal) -> None:
+    """Report the box as absent when the V2 create was refused and a lookup by the box tag found no sandbox."""
+    fake_modal.create_error = FakeRefusalError("bad")
+    env, budget = _protected()
+    with pytest.raises(FakeRefusalError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "fail"]
+    assert usage.absent is True
+    assert fake_modal.list_calls == 1
+
+
+@pytest.mark.parametrize("error", _UNREFUSED_ERRORS)
+async def test_unrefused_create_keeps_the_hold_after_two_empty_lookups(fake_modal: FakeModal, error: Exception) -> None:
+    """Keep the hold pending after two empty lookups, because the lookup cannot see a box that already ended.
+
+    Args:
+        fake_modal: The fake SDK.
+        error: A create error that does not prove that Modal made no box.
+    """
+    fake_modal.create_error = error
+    env, budget = _protected()
+    with pytest.raises(type(error)):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "pending", "fail"]
+    assert usage.absent is False
+    assert fake_modal.list_calls == 2
+
+
+async def test_refusal_on_the_v1_create_keeps_the_hold(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the hold pending when the V1 create raised a refusal type, because its poll runs after the box exists."""
+    monkeypatch.setattr(modal_provider, "modal_config", SimpleNamespace(get=lambda key: False))
+    fake_modal.create_error = FakeRefusalError("bad")
+    env, budget = _protected()
+    with pytest.raises(FakeRefusalError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "pending", "fail"]
+    assert usage.absent is False
+    assert fake_modal.list_calls == 2
+
+
+async def test_runtime_clock_starts_before_the_image_build(fake_modal: FakeModal) -> None:
+    """Start the runtime clock before the image build, because Modal may bill the build."""
+    builds_at_clock: list[int] = []
+
+    class ClockUsage(FakeUsage):
+        """Record how many builds ran when the clock started."""
+
+        def building(self) -> None:
+            """Record the build count at the clock start."""
+            builds_at_clock.append(fake_modal.builds)
+
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
+    env = ModalEnvironment(spec, budget=SimpleNamespace(reservations=[]), usage_factory=ClockUsage)
+    await env.start()
+    assert builds_at_clock == [0]
+    assert fake_modal.builds == 1
+    await env.stop()
+
+
+@pytest.mark.parametrize("error", _CREATE_ERRORS)
+async def test_protected_box_settles_a_box_made_before_the_create_error(
+    fake_modal: FakeModal, error: Exception
+) -> None:
+    """Find, terminate and settle a box that a failed create made, whatever the error type.
+
+    Args:
+        fake_modal: The fake SDK.
+        error: The error the create raises after the sandbox exists.
+    """
+    fake_modal.create_error_after_box = error
+    env, budget = _protected()
+    with pytest.raises(type(error)):
+        await env.start()
+    (usage,) = budget.reservations
+    assert _box(fake_modal).terminated
+    assert usage.confirmed is _box(fake_modal)
+    assert usage.calls == ["sent", "confirm", "stopped", "settle"]
+    assert env.usage is None
+
+
+@pytest.mark.parametrize(("error", "absent"), [(FakeRefusalError("bad"), True), (RuntimeError("timeout"), False)])
+async def test_failed_lookup_releases_only_a_refused_create(
+    fake_modal: FakeModal, error: Exception, absent: bool
+) -> None:
+    """Release a refused create when the lookup fails, and keep the hold of any other failed create.
+
+    Args:
+        fake_modal: The fake SDK.
+        error: The create error.
+        absent: The expected ``absent`` flag of the fail call.
+    """
+    fake_modal.create_error = error
+    fake_modal.list_error = RuntimeError("list down")
+    env, budget = _protected()
+    with pytest.raises(type(error)):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "fail"]
+    assert usage.absent is absent
+
+
+async def test_subclass_of_a_refusal_type_keeps_the_hold(fake_modal: FakeModal) -> None:
+    """Keep the hold pending for a subclass of a refusal type, because only exact types count."""
+    fake_modal.create_error = FakeRefusalSubclassError("bad")
+    env, budget = _protected()
+    with pytest.raises(FakeRefusalSubclassError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "pending", "fail"]
+    assert usage.absent is False
+    assert fake_modal.list_calls == 2
+
+
+async def test_protected_box_build_failure_is_an_unsent_create(fake_modal: FakeModal) -> None:
+    """Fail the usage before ``sent`` when the image build fails, so the hold is released."""
+    fake_modal.build_error = RuntimeError("build")
+    env, budget = _protected()
+    with pytest.raises(RuntimeError, match="build"):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["fail"]
+    assert usage.absent is False
+    assert fake_modal.create_calls == 0
+
+
+@pytest.mark.parametrize("protected", [True, False])
+@pytest.mark.parametrize("key", ["BAD-KEY", "1ST", "", "FOO\n"])
+def test_env_name_that_modal_refuses_fails_before_any_hold(fake_modal: FakeModal, key: str, protected: bool) -> None:
+    """Refuse an env name that Modal refuses before any hold or create, on a protected and an unprotected box.
+
+    Args:
+        fake_modal: The fake SDK.
+        key: An env name that does not match Modal's rule.
+        protected: True to build the box with a budget.
+    """
+    budget = SimpleNamespace(reservations=[])
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True, env={key: "x"})
+    with pytest.raises(SandboxSpecError, match="env names"):
+        if protected:
+            ModalEnvironment(spec, budget=budget, usage_factory=FakeUsage)
+        else:
+            ModalEnvironment(spec)
+    assert budget.reservations == []
+    assert fake_modal.create_calls == 0
+
+
+async def test_protected_box_cannot_start_again_after_stop(fake_modal: FakeModal) -> None:
+    """Refuse a restart of a stopped protected box before any reservation."""
+    env, budget = _protected()
+    await env.start()
+    await env.stop()
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    assert len(budget.reservations) == 1
+    assert len(fake_modal.boxes) == 1
+
+
+async def test_protected_box_settles_when_terminate_fails(fake_modal: FakeModal) -> None:
+    """Settle at the funded lifetime when Modal does not confirm the terminate."""
+    env, budget = _protected()
+    await env.start()
+    _box(fake_modal).fail_terminate = True
+    with pytest.raises(RuntimeError, match="terminate"):
+        await env.stop()
+    assert budget.reservations[0].calls == ["sent", "confirm", "settle"]
+
+
+async def test_protected_box_settles_when_start_is_cancelled(fake_modal: FakeModal) -> None:
+    """Terminate and settle the sandbox that a cancelled start created."""
+    fake_modal.create_gate = asyncio.Event()
+    env, budget = _protected()
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    fake_modal.create_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _box(fake_modal).terminated
+    assert budget.reservations[0].calls == ["sent", "confirm", "stopped", "settle"]
+
+
+class RefusingUsage(FakeUsage):
+    """Refuse every created sandbox, like a create that returns no sandbox id."""
+
+    def confirm_created(self, sandbox: Any) -> None:
+        """Refuse the sandbox.
+
+        Args:
+            sandbox: The fake sandbox.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        self.returned = True
+        raise RuntimeError("no id")
+
+
+async def test_protected_box_settles_when_confirm_fails(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Terminate and settle a sandbox whose confirm fails, then pass the error on with no box lookup or wait."""
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 60)
+    budget = SimpleNamespace(reservations=[])
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
+    env = ModalEnvironment(spec, budget=budget, usage_factory=RefusingUsage)
+    with pytest.raises(RuntimeError, match="no id"):
+        await env.start()
+    assert _box(fake_modal).terminated
+    assert budget.reservations[0].calls == ["sent", "stopped", "settle", "fail"]
+    assert fake_modal.list_calls == 0
+    assert not modal_provider._LATE_TERMINATES
+
+
+async def _until(predicate: Callable[[], bool]) -> None:
+    """Let the loop run until ``predicate`` holds, for at most two seconds.
+
+    Args:
+        predicate: The condition to wait for.
+
+    Raises:
+        AssertionError: The condition did not hold in time.
+    """
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("The condition did not hold in time.")
+
+
+class BlockingUsage(FakeUsage):
+    """Block the reservation in its thread until the test opens the gate."""
+
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+        """Wait for the gate, then record the reservation.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's logical identity.
+        """
+        BlockingUsage.entered.set()
+        assert BlockingUsage.gate.wait(5)
+        super().__init__(budget, request, operation_key=operation_key)
+
+
+@pytest.mark.parametrize("late", [False, True])
+async def test_cancel_during_reserve_releases_the_hold(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch, late: bool
+) -> None:
+    """Release a reservation that a cancelled start made, also one that ends after the grace time.
+
+    Args:
+        fake_modal: The fake SDK.
+        monkeypatch: Shortens the grace time and resets the gate.
+        late: True when the reservation ends after the grace time.
+    """
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05 if late else 5)
+    monkeypatch.setattr(BlockingUsage, "entered", threading.Event())
+    monkeypatch.setattr(BlockingUsage, "gate", threading.Event())
+    budget = SimpleNamespace(reservations=[])
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
+    env = ModalEnvironment(spec, budget=budget, usage_factory=BlockingUsage)
+    task = asyncio.create_task(env.start())
+    await _until(BlockingUsage.entered.is_set)
+    task.cancel()
+    if late:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert budget.reservations == []
+        BlockingUsage.gate.set()
+    else:
+        await asyncio.sleep(0.05)
+        BlockingUsage.gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await _until(lambda: bool(budget.reservations) and budget.reservations[0].calls == ["fail"])
+    assert budget.reservations[0].absent is False
+    assert fake_modal.create_calls == 0
+    assert env.usage is None
+
+
+async def test_late_create_after_a_cancelled_start_settles_its_box(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminate and settle the box of a create that ends after the cancel passed on."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_modal.create_gate = asyncio.Event()
+    env, budget = _protected()
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent"]
+    fake_modal.create_gate.set()
+    await _until(lambda: usage.calls == ["sent", "confirm", "stopped", "settle"])
+    assert _box(fake_modal).terminated
+    await _until(lambda: not modal_provider._LATE_TERMINATES)
+
+
+@pytest.mark.parametrize(
+    ("error", "calls", "absent"),
+    [
+        (FakeRefusalError("bad"), ["sent", "fail"], True),
+        (RuntimeError("client timeout"), ["sent", "pending", "fail"], False),
+    ],
+)
+async def test_late_create_error_after_a_cancelled_start_looks_up_the_box(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch, error: Exception, calls: list[str], absent: bool
+) -> None:
+    """Look up the box by its tag when a create fails after the cancel passed on, and release only a refusal.
+
+    Args:
+        fake_modal: The fake SDK.
+        monkeypatch: Pytest fixture that shortens the cancel grace time.
+        error: The late create error.
+        calls: The expected usage calls.
+        absent: The expected ``absent`` flag of the fail call.
+    """
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_modal.create_gate = asyncio.Event()
+    env, budget = _protected()
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    (usage,) = budget.reservations
+    fake_modal.create_error = error
+    fake_modal.create_gate.set()
+    await _until(lambda: usage.calls == calls)
+    assert usage.absent is absent
+    await _until(lambda: not modal_provider._LATE_TERMINATES)
+
+
+async def test_confirm_failure_settles_the_real_reservation(fake_modal: FakeModal, tmp_path: Path) -> None:
+    """Settle the real reservation of a box whose confirm failed before it had an id.
+
+    Args:
+        fake_modal: The fake SDK.
+        tmp_path: Per-test directory for the SQLite ledger.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'modal.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    runtime = BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    fake_modal.no_object_id = True
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
+    env = ModalEnvironment(spec, budget=runtime, usage_factory=ModalUsageReservation)
+    try:
+        with pytest.raises(UsagePendingError, match="sandbox id"):
+            await env.start()
+        assert _box(fake_modal).terminated
+        with Session(engine) as session:
+            row = session.scalars(select(ExecutionOperationModel)).one()
+        assert row.state == "settled"
+        assert runtime._pinned == {}
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("error", _UNREFUSED_ERRORS)
+async def test_box_that_appears_after_a_create_error_is_settled(fake_modal: FakeModal, error: Exception) -> None:
+    """Terminate and settle, not release, a box that only the second lookup finds, whatever the error type.
+
+    Args:
+        fake_modal: The fake SDK.
+        error: The create error.
+    """
+    fake_modal.create_error = error
+    env, budget = _protected()
+
+    def make_box_late() -> None:
+        """Make the box of the failed create once the first lookup ran."""
+        if fake_modal.list_calls == 2:
+            (usage,) = budget.reservations
+            app = SimpleNamespace(app_id=f"ap-{env._app_name}")
+            fake_modal.boxes.append(FakeSandbox(fake_modal, ("sleep",), {"app": app, "tags": {BOX_KEY: usage.box}}))
+
+    fake_modal.list_hook = make_box_late
+    with pytest.raises(type(error)):
+        await env.start()
+    (usage,) = budget.reservations
+    assert fake_modal.list_calls == 2
+    assert _box(fake_modal).terminated
+    assert usage.calls == ["sent", "pending", "confirm", "stopped", "settle"]
+
+
+async def test_failed_create_does_not_wait_for_the_second_lookup(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the create error after the cancel grace time and finish the delayed lookup in the background."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 0.5)
+    fake_modal.create_error = RuntimeError("client timeout")
+    env, budget = _protected()
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(env.start(), 0.4)
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "pending"]
+    await _until(lambda: usage.calls == ["sent", "pending", "fail"])
+    assert fake_modal.list_calls == 2
+    await _until(lambda: not modal_provider._LATE_TERMINATES)
+
+
+async def test_cancel_during_the_box_lookup_still_fails_the_usage(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finish the cleanup of a failed create in the background when cancels arrive during the lookup."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_modal.create_error = FakeRefusalError("bad")
+    fake_modal.list_gate = asyncio.Event()
+    env, budget = _protected()
+    task = asyncio.create_task(env.start())
+    await fake_modal.list_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(task, 2)
+    assert isinstance(raised.value.__cause__, FakeRefusalError)
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent"]
+    fake_modal.list_gate.set()
+    await _until(lambda: usage.calls == ["sent", "fail"])
+    assert usage.absent is True
+    assert fake_modal.list_calls == 1
+    await _until(lambda: not modal_provider._LATE_TERMINATES)
+
+
+async def test_cancel_during_the_recheck_wait_leaves_the_hold_pending(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leave the hold pending, never dispatched or released, when the background cleanup is cancelled in its wait."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 60)
+    fake_modal.create_error = RuntimeError("client timeout")
+    env, budget = _protected()
+    with pytest.raises(RuntimeError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent", "pending"]
+    (cleanup,) = modal_provider._LATE_TERMINATES
+    cleanup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+    assert usage.calls == ["sent", "pending"]
+    assert fake_modal.list_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "lookups", "end_state"),
+    [(FakeRefusalError("bad"), 1, "released"), (RuntimeError("client timeout"), 2, "pending")],
+)
+async def test_failed_create_hold_state_in_the_real_ledger(
+    fake_modal: FakeModal, tmp_path: Path, error: Exception, lookups: int, end_state: str
+) -> None:
+    """Release the real hold only after a refused create, and keep it pending after any other create error.
+
+    Args:
+        fake_modal: The fake SDK.
+        tmp_path: Per-test directory for the SQLite ledger.
+        error: The create error.
+        lookups: The expected number of lookups by the box tag.
+        end_state: The expected ledger state of the hold.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'modal.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    runtime = BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    states: list[str] = []
+
+    def record_state() -> None:
+        """Record the ledger state that the first lookup left, when the second lookup runs."""
+        if fake_modal.list_calls == 2:
+            with Session(engine) as session:
+                states.append(session.scalars(select(ExecutionOperationModel)).one().state)
+
+    fake_modal.list_hook = record_state
+    fake_modal.create_error = error
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True)
+    env = ModalEnvironment(spec, budget=runtime, usage_factory=ModalUsageReservation)
+    try:
+        with pytest.raises(type(error)):
+            await env.start()
+        with Session(engine) as session:
+            row = session.scalars(select(ExecutionOperationModel)).one()
+        assert fake_modal.list_calls == lookups
+        assert states == ["pending"] * (lookups - 1)
+        assert row.state == end_state
+        if end_state == "released":
+            assert runtime._pinned == {}
+    finally:
+        engine.dispose()

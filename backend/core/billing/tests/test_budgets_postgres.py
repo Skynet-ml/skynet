@@ -25,6 +25,7 @@ from core.billing.budgets import (
     BudgetInFlightError,
     BudgetService,
 )
+from core.billing.signals import BudgetReached
 from core.config import app_env, settings
 from core.storage.models import (
     AgentConversationModel,
@@ -152,6 +153,45 @@ def test_parallel_admission_cannot_overcommit(database: Engine, shared_budget: b
         assert session.scalar(select(func.count()).select_from(ExecutionOperationModel)) == 1
 
 
+def test_parallel_run_reservations_ignore_setup_settlements(database: Engine) -> None:
+    """Admit run work against the whole limit after setup spend, and still one race winner (SKY-925)."""
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="setup-then-run")
+    setup = _reserve(service, budget.id, "setup-check", maximum=30)
+    service.mark_dispatched(setup.id, "alice")
+    service.settle(setup.id, "alice", evidence_key="setup-usage", actual_cents=30, evidence={"usage": "setup"})
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    barrier = Barrier(2)
+
+    def run(key: str) -> str:
+        """Begin both run admissions together; each fits the limit only while setup spend is ignored."""
+        barrier.wait(timeout=5)
+        try:
+            return service.reserve(
+                budget.id,
+                "alice",
+                operation_key=key,
+                generation=0,
+                phase="run",
+                cost_kind="model",
+                request_fingerprint="fixture",
+                price_snapshot={"version": "fixture-v1"},
+                max_cents=40,
+            ).state
+        except BudgetInFlightError:
+            return "contended"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(run, ["one", "two"]))
+    assert sorted(outcomes) == ["contended", "reserved"]
+    snapshot = service.get(budget.id, "alice")
+    assert (snapshot.setup_spent_cents, snapshot.reserved_cents, snapshot.available_cents) == (30, 40, 10)
+    assert snapshot.billed_cents == 30
+
+
 def test_parallel_first_budgets_of_a_new_account_share_one_wallet(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -237,6 +277,12 @@ def test_migration_applies_from_legacy_credit_ledger_and_is_idempotent(database:
     assert rename_spec.loader is not None
     rename = importlib.util.module_from_spec(rename_spec)
     rename_spec.loader.exec_module(rename)
+    setup_path = path.with_name("d6e8f0a2b4c7_add_execution_budget_setup_in_total.py")
+    setup_spec = importlib.util.spec_from_file_location("setup_in_total_migration_fixture", setup_path)
+    assert setup_spec is not None
+    assert setup_spec.loader is not None
+    setup_flag = importlib.util.module_from_spec(setup_spec)
+    setup_spec.loader.exec_module(setup_flag)
     with database.begin() as connection, Operations.context(MigrationContext.configure(connection)):
         rename.downgrade()
         migration.downgrade()
@@ -248,9 +294,12 @@ def test_migration_applies_from_legacy_credit_ledger_and_is_idempotent(database:
         rename.upgrade()
         # Migration c4f1a7e9d2b6 (SKY-710) adds this column, and ExecutionBudgetModel maps it.
         connection.execute(text("ALTER TABLE execution_budgets ADD COLUMN workspace_id VARCHAR(36)"))
+        setup_flag.upgrade()
+        setup_flag.upgrade()
     service = BudgetService(engine=database)
     budget = service.create("alice", 10, idempotency_key="migrated")
     assert budget.uncapped is False
+    assert budget.setup_in_total is False
     operation = _reserve(service, budget.id, "call", maximum=5)
     service.mark_dispatched(operation.id, "alice")
     result = service.settle(operation.id, "alice", evidence_key="usage", actual_cents=2, evidence={})
@@ -816,7 +865,12 @@ def test_a_later_non_user_stop_keeps_the_user_stop_reason_on_postgres(database: 
 
 
 def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engine, tmp_path: Path) -> None:
-    """Run 1,000 agents of one run in parallel against one workspace budget, under real row locks (SKY-717)."""
+    """Run 1,000 agents of one run in parallel against one workspace budget, under real row locks (SKY-717).
+
+    Args:
+        database: Real PostgreSQL engine.
+        tmp_path: Holds the step log's objects.
+    """
     service = BudgetService(engine=database)
     budget = service.create("alice", 40, idempotency_key="workspace")
     budget = service.attach_to_job(budget.id, "alice", "run-1", expected_revision=budget.revision)
@@ -858,7 +912,8 @@ def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engi
         try:
             for _ in range(3):
                 agent.step("model", 1, work)
-        except LeaseExhaustedError:
+        # The spent cap gives BudgetReached; holds of other agents in flight give LeaseExhaustedError (SKY-914).
+        except (LeaseExhaustedError, BudgetReached):
             pass
         finally:
             agent.close()

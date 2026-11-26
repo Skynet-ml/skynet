@@ -22,7 +22,7 @@ Le montant que vous choisissez est le montant crédité sur votre solde. Les fra
 
 ## Budgets d'exécution
 
-Chaque exécution a un plafond de dépenses. Ce plafond est le maximum que l'exécution peut dépenser. Il couvre la configuration et l'optimisation.
+Chaque exécution a un plafond de dépenses. Ce plafond est le maximum que l'exécution peut dépenser. Il couvre l'optimisation. Les vérifications de configuration sont payées sur votre solde. Pour les compter dans le plafond des nouvelles exécutions, désactivez **Facturer la configuration sur mon solde** dans **Paramètres → Optimisation**. Les plans continus comptent toujours la configuration dans le budget du cycle.
 
 Une exécution n'a pas d'estimation de coût avant de démarrer. Elle dépense jusqu'à son plafond, s'arrête au budget et conserve sa meilleure version. Lisez [Exécutions](/docs/concepts/runs) pour voir comment Skynet décide quand s'arrêter.
 
@@ -45,7 +45,7 @@ L'assistant ne vous laisse pas continuer si le plafond est inférieur à ce mont
 
 ## Réservations
 
-Avant tout travail payant, Skynet réserve une partie du plafond de l'exécution. Skynet libère la réservation quand le travail est réglé et ne facture que le coût réel.
+Avant tout travail payant, Skynet réserve une partie du plafond de l'exécution. Skynet libère la réservation quand le travail est réglé et ne facture que le coût réel. Les vérifications de configuration réservent plutôt sur votre solde, sauf si la configuration compte dans le plafond.
 
 Quand un budget a déjà de l'activité, la carte **Plafond de dépenses** de l'assistant affiche son registre :
 
@@ -106,11 +106,11 @@ Le code de votre dépôt et votre évaluateur s'exécutent dans une sandbox. Sky
 2. Quand la sandbox se termine, Skynet facture l'utilisation finale indiquée par le fournisseur de la sandbox.
 3. La majoration d'utilisation s'applique au calcul en sandbox.
 
-Le calcul en sandbox fait partie du plafond de dépenses de l'exécution, y compris quand les appels de modèle utilisent votre propre clé.
+Le calcul en sandbox fait partie du plafond de dépenses de l'exécution, y compris quand les appels de modèle utilisent votre propre clé. L'utilisation de la sandbox pendant les vérifications de configuration est payée par votre solde, sauf si la configuration compte dans le plafond.
 
 ## Service (serving)
 
-Chaque appel au point de terminaison serve d'une exécution terminée est facturé séparément. L'appelant paie avec son propre solde. Définissez `max_cost_cents` dans la requête pour plafonner un appel. Lisez [Résultats](/docs/guides/results).
+Chaque appel au point de terminaison serve d'une exécution terminée est facturé séparément. L'appelant paie avec son propre solde. Vous pouvez définir `max_cost_cents` dans la requête pour indiquer le maximum que vous acceptez pour un appel. Votre solde borne l'appel. Lisez [Résultats](/docs/guides/results).
 
 ## Offres
 

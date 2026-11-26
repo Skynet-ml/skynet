@@ -48,7 +48,7 @@ export interface RepoDraft {
   commit: string;
   editablePaths: string[];
   setupCommand: string;
-  /** True when the wizard created this repository through `POST /connectors/github/repos`. */
+  /** True when the wizard created this repository through `POST /connectors/{host}/repos`. */
   createdBySkynet?: boolean;
   /** Environment variables the repository needs, each with the hosts it may go to. */
   secrets?: RepoSecretDraft[];
@@ -164,7 +164,7 @@ export interface WizardV2State {
 // The default level mirrors DEFAULT_LEVEL; this module stays free of runtime
 // imports so its tests load without the app's path aliases.
 export function initialWizardV2State(
-  level: ExperienceLevel = "guided",
+  level: ExperienceLevel = "expert",
   maxScorerRuns: number | null = null,
 ): WizardV2State {
   return {

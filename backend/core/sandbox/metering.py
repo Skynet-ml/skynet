@@ -1,13 +1,16 @@
 """Meter sandbox providers through one usage protocol and lease budget slices to a pool.
 
 Every provider that may run paid user work in production needs a usage
-adapter here and a staging cost test (SKY-406 D1). A pool lease reserves the
+adapter and a staging cost test (SKY-406 D1). A provider's adapter is the
+``USAGE`` object in ``core.billing.<provider>_usage``, so each vendor adds
+one module and edits no shared registry. A pool lease reserves the
 budget for all of its boxes in one write. Each box claims one slice and
 settles against it, and the lease returns the slices it never handed out.
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 import threading
 import time
@@ -22,7 +25,6 @@ from core.billing.budgets import (
 )
 from core.billing.operation_pricing import OperationQuote
 from core.billing.runtime import BudgetRuntime, UsagePendingError, generation_operation_key
-from core.billing.vercel_usage import VercelUsage
 
 from .errors import SandboxFatalError
 
@@ -96,7 +98,28 @@ class ProviderUsage(Protocol):
         ...
 
 
-USAGE_ADAPTERS: dict[str, ProviderUsage] = {"vercel": VercelUsage()}
+def usage_adapter(name: str) -> ProviderUsage | None:
+    """Load a provider's usage adapter from its billing module.
+
+    Args:
+        name: Provider registry name, such as ``"vercel"``.
+
+    Returns:
+        The module's ``USAGE`` object, or ``None`` when the provider has no
+        usage module and so cannot run metered work.
+    """
+    if not name.isidentifier():
+        return None
+    module_name = f"core.billing.{name}_usage"
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as error:
+        # A missing dependency inside an existing adapter is a real bug, not
+        # an unmetered provider.
+        if error.name != module_name:
+            raise
+        return None
+    return getattr(module, "USAGE", None)
 
 
 class LeaseExhaustedError(SandboxFatalError):

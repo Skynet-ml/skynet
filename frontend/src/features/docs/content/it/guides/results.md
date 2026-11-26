@@ -51,7 +51,7 @@ Puoi confrontare una versione con un'altra. La scheda mostra anche il **Feedback
 
 ### Branch in un nuovo repository
 
-Quando Skynet crea il repository per l'esecuzione, invia ogni candidato a un proprio branch, `skynet/candidate-<version id>`. Il branch `skynet/best` punta sempre alla versione migliore. Si sposta quando compare una versione migliore.
+Quando Skynet crea il repository per l'esecuzione su GitHub, invia ogni candidato a un proprio branch, `skynet/candidate-<version id>`. Il branch `skynet/best` punta sempre alla versione migliore. Si sposta quando compare una versione migliore.
 
 ## Servire la versione migliore
 
@@ -103,7 +103,7 @@ Sostituisci `message` con i campi di input della tua esecuzione. Il **Codice di 
 La risposta contiene `outputs`, gli `input_fields`, gli `output_fields`, il `model_used`, `cents_charged` e `budget`.
 
 > [!TIP]
-> Ogni chiamata viene addebitata a sé, sul saldo di chi chiama. `max_cost_cents` imposta il costo massimo di questa singola chiamata, in centesimi. Se invii di nuovo la stessa `Idempotency-Key`, Skynet non addebita di nuovo la chiamata.
+> Ogni chiamata viene addebitata a sé, sul saldo di chi chiama. `max_cost_cents` è facoltativo. Registra il massimo che accetti per questa singola chiamata, in centesimi. Il tuo saldo limita la chiamata. Se invii di nuovo la stessa `Idempotency-Key`, Skynet non addebita di nuovo la chiamata.
 
 Leggi [API](/docs/api) per l'autenticazione e gli altri endpoint.
 

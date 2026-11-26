@@ -73,7 +73,6 @@
   "core/api/tests/test_optimization_resume.py": 5.111696969077457,
   "core/api/tests/test_optimizations_router.py": 12.067037519533187,
   "core/api/tests/test_optimizer_catalog.py": 0.5328648468712345,
-  "core/api/tests/test_package_registry.py": 0.7920448038494214,
   "core/api/tests/test_password_reset.py": 2.471665290882811,
   "core/api/tests/test_platform_budget.py": 0.0033874238724820316,
   "core/api/tests/test_preflight_locale.py": 20.14992681914009,

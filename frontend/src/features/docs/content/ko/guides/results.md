@@ -51,7 +51,7 @@ Skynet은 검증 케이스에서 버전을 선택합니다. 최종 점수는 테
 
 ### 새 리포지토리의 브랜치
 
-Skynet이 실행을 위해 리포지토리를 만들었다면, 각 후보를 별도 브랜치 `skynet/candidate-<version id>`에 푸시합니다. `skynet/best` 브랜치는 항상 가장 좋은 버전을 가리킵니다. 더 좋은 버전이 나오면 이 브랜치가 이동합니다.
+Skynet이 실행을 위해 GitHub에 리포지토리를 만들었다면, 각 후보를 별도 브랜치 `skynet/candidate-<version id>`에 푸시합니다. `skynet/best` 브랜치는 항상 가장 좋은 버전을 가리킵니다. 더 좋은 버전이 나오면 이 브랜치가 이동합니다.
 
 ## 최고 버전 서빙하기
 
@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 응답에는 `outputs`, `input_fields`, `output_fields`, `model_used`, `cents_charged`, `budget`이 들어 있습니다.
 
 > [!TIP]
-> 각 호출은 호출자의 잔액에서 따로 청구됩니다. `max_cost_cents`는 이 호출 한 번에 쓸 수 있는 최대 비용을 센트 단위로 설정합니다. 같은 `Idempotency-Key`를 다시 보내면 Skynet은 그 호출을 다시 청구하지 않습니다.
+> 각 호출은 호출자의 잔액에서 따로 청구됩니다. `max_cost_cents`는 선택 사항입니다. 이 호출 한 번에 허용하는 최대 금액을 센트 단위로 기록합니다. 호출은 잔액으로 제한됩니다. 같은 `Idempotency-Key`를 다시 보내면 Skynet은 그 호출을 다시 청구하지 않습니다.
 
 인증과 다른 엔드포인트는 [API](/docs/api)를 읽어 보세요.
 

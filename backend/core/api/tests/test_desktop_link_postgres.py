@@ -42,7 +42,6 @@ from core.storage.models import (
     DesktopLinkCodeModel,
     DesktopLinkModel,
     DesktopTokenModel,
-    PackageRegistryPreferenceModel,
     UserIdentityModel,
     UserModel,
     WebAuthnChallengeModel,
@@ -68,10 +67,9 @@ DELETION_STOPS = {
     "user-identities": "SELECT 1 FROM user_identities WHERE username = :u FOR UPDATE",
     "api-tokens": "SELECT 1 FROM api_tokens WHERE username = :u FOR UPDATE",
     "passkey-challenges": "SELECT 1 FROM webauthn_challenges WHERE user_email = :u FOR UPDATE",
-    "registry-preferences": "SELECT 1 FROM package_registry_preferences WHERE username = :u FOR UPDATE",
     "desktop-tokens": "SELECT 1 FROM desktop_tokens FOR UPDATE",
 }
-SIGN_IN_STOPS = ["agent-conversations", "passkey-challenges", "user-identities", "api-tokens", "registry-preferences"]
+SIGN_IN_STOPS = ["agent-conversations", "passkey-challenges", "user-identities", "api-tokens"]
 
 
 class _Store:
@@ -849,7 +847,6 @@ def sign_in(full_database: Engine, monkeypatch: pytest.MonkeyPatch) -> SimpleNam
         session.add(ApiTokenModel(username=ALICE, token_hash="h" * 64, last4="abcd"))
         session.add(AgentConversationModel(id=str(uuid4()), username=ALICE, title="Notes"))
         session.add(UserIdentityModel(provider="github", provider_account_id="4242", username=ALICE))
-        session.add(PackageRegistryPreferenceModel(username=ALICE, index_url="https://pypi.org/simple"))
         session.add(
             WebAuthnChallengeModel(
                 challenge="registerchallenge1",

@@ -66,6 +66,7 @@ def _github(monkeypatch: pytest.MonkeyPatch, *, taken: bool | None = None) -> li
     sent: list[dict[str, Any]] = []
 
     def fake_request(method: str, url: str, *, json: dict[str, Any], **_: Any) -> httpx.Response:
+        """Record the create body and accept or refuse the create."""
         assert (method, url) == ("POST", "https://api.github.com/user/repos")
         sent.append(json)
         if taken is not None:
@@ -73,6 +74,7 @@ def _github(monkeypatch: pytest.MonkeyPatch, *, taken: bool | None = None) -> li
         return httpx.Response(201, json={"full_name": f"ada/{json['name']}", "default_branch": "main"})
 
     def fake_get_json(url: str, **_: Any) -> dict[str, Any]:
+        """Answer the user lookup and the repository lookup."""
         if url == "https://api.github.com/user":
             return {"login": "ada"}
         assert url == "https://api.github.com/repos/ada/starter"
@@ -141,6 +143,7 @@ def test_existing_repository_lookup_raises_when_github_fails(monkeypatch: pytest
     """A GitHub outage raises instead of reporting the name as free."""
 
     def fake_get_json(url: str, **_: Any) -> dict[str, Any]:
+        """Answer the user lookup and fail the repository lookup."""
         if url == "https://api.github.com/user":
             return {"login": "ada"}
         raise DomainError("connectors.provider_error", status=502, provider="GitHub", status_code=500)
@@ -254,3 +257,42 @@ def test_bad_candidates_push_nothing(tmp_path: Path, versions: list[tuple[str, s
         push_candidates("ada/starter", base, versions, best, None, remote=remote)
 
     assert _git(origin, "branch", "--list") == "* main"
+
+
+@pytest.mark.parametrize(
+    ("provider", "remote", "user"),
+    [
+        ("gitlab", "https://gitlab.com/alice/app.git", "oauth2"),
+        ("bitbucket", "https://bitbucket.org/alice/app.git", "x-token-auth"),
+    ],
+)
+def test_initial_commit_pushes_to_the_host_origin(
+    monkeypatch: pytest.MonkeyPatch, provider: str, remote: str, user: str
+) -> None:
+    """Without a remote override, the push goes to the provider's origin with its token user."""
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def git(args: list[str], _workdir: Path, environment: dict[str, str]) -> str:
+        """Record the git call and stop at the remote setup.
+
+        Args:
+            args: Git arguments.
+            _workdir: Work tree.
+            environment: Git environment.
+
+        Returns:
+            Empty output.
+
+        Raises:
+            RepoFetchError: At the first call after ``remote add``, to end the push.
+        """
+        calls.append((args, environment))
+        if args[0] != "init" and args[:2] != ["remote", "add"]:
+            raise github_create_repo.RepoFetchError("stop")
+        return ""
+
+    monkeypatch.setattr(github_create_repo, "_git", git)
+    with pytest.raises(RepoCreateError, match="stop"):
+        push_initial_commit("alice/app", "main", _FILES, "Initial commit", "tok", provider=provider)
+    assert calls[1][0] == ["remote", "add", "origin", remote]
+    assert calls[1][1] == github_create_repo.git_auth_env("tok", remote.split("/alice")[0], user)

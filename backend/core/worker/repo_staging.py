@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session
 
 from .. import run_log
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
-from ..api.routers.package_registry import package_registry_for
 from ..billing.budgets import BudgetError
 from ..billing.host_agent import HOST_AGENT_TOKEN_KEY, _proposer_model_extra
 from ..billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
@@ -118,7 +117,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import _SUPERVISOR_BOOT, RepoScorer
 from ..service_gateway.optimization.blackbox.repo_services import box_mcp_config, plan_roles
-from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
+from ..service_gateway.optimization.blackbox.repo_setup import SetupPlan, apt_packages, infer_setup_command
 from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
@@ -277,20 +276,6 @@ def is_repo_payload(payload: dict[str, Any]) -> bool:
     """
     target = payload.get("target")
     return isinstance(target, dict) and target.get("kind") == "repo" and isinstance(target.get("repo"), dict)
-
-
-def saved_index_url(engine: Any, username: str) -> str:
-    """Read the package index the account saved, or the PyPI default.
-
-    Args:
-        engine: SQLAlchemy engine for the account settings.
-        username: Owner of the run.
-
-    Returns:
-        The index URL the proposer's box may install from.
-    """
-    with Session(engine) as session:
-        return package_registry_for(session, username).index_url
 
 
 def hidden_repo_paths(constraints: RepoConstraints | None) -> tuple[str, ...]:
@@ -502,8 +487,7 @@ def stage_repository(
             secret_names=secrets,
         )
         hosts = proposer_hosts(
-            environment.constraints.proposer.network if environment.constraints is not None else None,
-            saved_index_url(engine, username),
+            environment.constraints.proposer.network if environment.constraints is not None else None
         )
         if environment.constraints is not None:
             record["roles"] = plan_roles(environment.constraints, proposer_hosts=hosts)
@@ -1149,8 +1133,8 @@ def _rule_judge(
     return judge
 
 
-def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway: Any) -> str | None:
-    """Fill in the target's setup command from the fetched tree when the client sent none.
+def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway: Any) -> SetupPlan | None:
+    """Fill in the target's setup command and Debian packages from the fetched tree when the client sent none.
 
     Args:
         payload: Protected payload, updated in place.
@@ -1158,17 +1142,91 @@ def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway:
         gateway: The run's model gateway, whose optimization model is asked.
 
     Returns:
-        The inferred command, or ``None`` when the client named one or the
-        repository needs no setup.
+        The inferred plan, or ``None`` when the client named a command or the
+        run already recorded its plan.
     """
     target = payload["target"]
-    if (target.get("setup_command") or "").strip():
+    # A resumed run keeps the packages it recorded, also when its command is none (SKY-967).
+    if (target.get("setup_command") or "").strip() or APT_PACKAGES_KEY in target:
         return None
-    command = infer_setup_command(staged.snapshot.archive, ask=_setup_asker(payload, gateway))
-    target["setup_command"] = command
-    return command
+    plan = infer_setup_command(staged.snapshot.archive, ask=_setup_asker(payload, gateway))
+    target["setup_command"] = plan.command
+    if plan.apt_packages:
+        target[APT_PACKAGES_KEY] = list(plan.apt_packages)
+    return plan
 
 
+def apt_dockerfile(base_image: str, packages: tuple[str, ...]) -> str:
+    """Write the Dockerfile that adds Debian packages to Skynet's default image (SKY-967).
+
+    Args:
+        base_image: The default sandbox image.
+        packages: Valid Debian package names.
+
+    Returns:
+        The Dockerfile text, the same for the same base and the same set of names.
+    """
+    names = " ".join(sorted(set(packages)))
+    return (
+        f"FROM {base_image}\n"
+        "USER root\n"
+        "RUN apt-get update \\\n"
+        f" && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {names} \\\n"
+        " && rm -rf /var/lib/apt/lists/*\n"
+        f"USER {_DEFAULT_IMAGE_USER}\n"
+    )
+
+
+def with_apt_image(staged: StagedRepository, payload: dict[str, Any]) -> StagedRepository:
+    """Give the ``[run]`` box a generated image when setup named Debian packages (SKY-967).
+
+    Args:
+        staged: The staged tree.
+        payload: Protected payload, with the target's packages and the default image.
+
+    Returns:
+        ``staged`` with an ``("apt", dockerfile)`` ``[run]`` source, or ``staged`` unchanged when
+        there are no packages or ascent.toml already names the ``[run]`` image.
+    """
+    packages = apt_packages(payload["target"].get(APT_PACKAGES_KEY) or ())
+    base_image = str((payload.get("_budget_gateway_descriptor") or {}).get("image") or "")
+    if not packages or "run" in staged.box_sources:
+        return staged
+    if not base_image:
+        logger.warning("The run has no default image to build on, so it skips the Debian packages %s", packages)
+        return staged
+    return replace(staged, box_sources={**staged.box_sources, "run": ("apt", apt_dockerfile(base_image, packages))})
+
+
+def prepare_apt_image(staged: StagedRepository, **options: Any) -> StagedRepository:
+    """Build and check only the generated ``[run]`` image, as a setup check does (SKY-967).
+
+    Args:
+        staged: The staged tree, from :func:`with_apt_image`.
+        **options: The keyword arguments of :func:`prepare_box_images`.
+
+    Returns:
+        ``staged`` with the ``[run]`` image, or with the ``[run]`` source removed when this
+        deployment cannot build it; unchanged when the ``[run]`` source is not generated.
+    """
+    source = staged.box_sources.get("run")
+    if source is None or source[0] != "apt":
+        return staged
+    built = prepare_box_images(replace(staged, box_sources={"run": source}), **options)
+    others = {role: value for role, value in staged.box_sources.items() if role != "run"}
+    return replace(
+        staged,
+        box_sources={**others, **built.box_sources},
+        box_images={**staged.box_images, **built.box_images},
+        box_user_images={**staged.box_user_images, **built.box_user_images},
+    )
+
+
+# The payload target key of the Debian packages that setup named (SKY-967).
+APT_PACKAGES_KEY = "apt_packages"
+# backend/Dockerfile ends with ``USER 1001`` (appuser); the generated image must
+# give that user back after its root apt layer, because the image check refuses root.
+_DEFAULT_IMAGE_USER = "1001"
 # The role each box's image check runs as, by the ascent.toml section that names the image.
 _CHECK_ROLES = {"run": "candidate", "metric": "metric"}
 # ``ascent check --image`` ends in about 24 seconds; the rest covers the box start.
@@ -1309,6 +1367,63 @@ _ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_FIND,
 # it would hide entries that root runs.
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROOT_TOOLS = ("tail", "head", "base64", "tr")
+# Vercel's init starts every ``sudo: true`` command as a bare ``sudo`` (SKY-912,
+# real box). The command's own PATH did not change which sudo ran, and a sudo
+# in /usr/local/bin did not win over /usr/bin/sudo. So Vercel runs a fixed path
+# or looks sudo up on the image PATH. A box user who could replace that sudo
+# would run every later root step, and get the run's variables. So the probe
+# walks each ``sudo`` in a folder of ``_ROOT_PATH``, and each folder of the box
+# PATH up to and with its first ``sudo``, which must be root's. Sudo reads
+# these files and every entry in these folders as root, and its PAM steps read
+# the PAM stack. Linux-PAM does not check who owns its files, so they must be
+# root's too. Others must be able to list each folder so that no entry goes
+# unchecked. Sudo itself checks the owner of any other file that sudoers
+# includes, but not the folders on its way. Linux-PAM reads /etc/pam.conf only
+# when /etc/pam.d is missing. Debian's Linux-PAM reads a service or @include
+# file from /usr/lib/pam.d when /etc/pam.d does not have it, so an image could
+# remove /etc/pam.d/sudo and put a box-owned one there (SKY-912 review).
+# Its libpam also names /usr/lib/security, a module folder outside the loader
+# folders; stock images do not have it, so it must be missing or root's.
+# /etc/security may hold one level of folders, such as limits.d. Ubuntu's sudo
+# PAM stack reads /etc/default/locale into the root environment. A box user
+# who could change the account files could add itself to the sudo group or set
+# a root password. Shadow files are often 0640 root:shadow or 0000, so the
+# check does not need others to read them. The PAM part of ``_PATH_SCRIPT``
+# lets a stack that sudo reaches load only the stock modules in its
+# ``PAM_MODULES`` list. Modules such as pam_motd, pam_mkhomedir and
+# pam_namespace run a program as root that this probe does not walk, and a
+# module name with no ".so" escapes the loader scan (SKY-912 review). Linux-PAM
+# 1.7 also reads service files from /usr/etc/pam.d. Sudo reads /etc/sudo.conf,
+# and Tumbleweed's sudo reads /usr/etc/sudo.conf when that is missing. Its
+# ``developer_mode`` lets sudo load a plugin that root does not own, so
+# ``_PATH_SCRIPT`` also reads these files. Ubuntu's pam_umask reads
+# /etc/login.defs as root in the sudo stack, and /etc/default/login when
+# login.defs sets no UMASK, so a box-writable one could give root's steps
+# UMASK 000.
+_SUDO_FILES = (
+    "/etc/sudo.conf",
+    "/usr/etc/sudo.conf",
+    "/etc/sudoers",
+    "/etc/environment",
+    "/etc/default/locale",
+    "/etc/pam.conf",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/shadow",
+    "/etc/gshadow",
+    "/etc/login.defs",
+    "/etc/default/login",
+)
+_SUDO_FOLDERS = (
+    "/etc/sudoers.d",
+    "/etc/pam.d",
+    "/usr/lib/pam.d",
+    "/usr/etc/pam.d",
+    "/usr/lib/security",
+    "/etc/security",
+)
+_DEEP_FOLDER = "/etc/security"
+_SUDO_DONE = "sudo checked"
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
     r"""import os
@@ -1318,6 +1433,90 @@ import """
     + ", ".join(_top_level_imports(_ROOT_SCRIPTS))
     + r"""
 import locale
+PAM_ENV_CONF = "/etc/security/pam_env.conf"
+PAM_ENV_FILES = ("/etc/environment", "/etc/default/locale", PAM_ENV_CONF)
+# Newer Linux-PAM builds also read drop-in folders and vendor copies. The check does not parse them, so it refuses them.
+PAM_ENV_EXTRA = (
+    "/etc/security/pam_env.conf.d",
+    "/usr/etc/security/pam_env.conf",
+    "/usr/etc/security/pam_env.conf.d",
+    "/usr/etc/environment",
+    "/usr/lib/security/pam_env.conf",
+    "/usr/lib/security/pam_env.conf.d",
+    "/usr/lib/environment",
+    "/etc/environment.d",
+    "/usr/etc/environment.d",
+    "/usr/lib/environment.d",
+)
+PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d")
+# Stock login and sshd stacks show this file with pam_motd.so motd=, which is the only use the check allows.
+PAM_MOTD = "/run/motd.dynamic"
+PAM_RUNNERS = ("pam_exec", "pam_script", "pam_python", "pam_xauth")
+# The only modules that a stack which sudo reaches may load: all that the sudo stacks of python:3.12-slim, Debian 12,
+# Ubuntu 24.04 and Tumbleweed use. None runs a program as root, and each file it reads is one that the probe walks.
+PAM_MODULES = (
+    # Accounts from /etc/passwd and /etc/shadow. It runs unix_chkpwd only when it does not run as root, and sudo is
+    # root.
+    "pam_unix.so",
+    # A fixed answer, or a syslog line.
+    "pam_permit.so",
+    "pam_deny.so",
+    "pam_warn.so",
+    # PAM_ENV_FILES, which this script reads, with the options that it checks below.
+    "pam_env.so",
+    # /etc/security/limits.conf and limits.d, which the probe walks.
+    "pam_limits.so",
+    # /etc/login.defs and /etc/default/login, which the probe walks.
+    "pam_umask.so",
+    # Kernel keyring calls only.
+    "pam_keyinit.so",
+    # A D-Bus call to logind, which runs outside the box.
+    "pam_systemd.so",
+)
+# Sudo reads its own configuration as root, and Tumbleweed's sudo reads the vendor copy when /etc has none.
+SUDO_CONFS = ("/etc/sudo.conf", "/usr/etc/sudo.conf")
+# The stock sudoers plugin, by name in plugin_dir or by its full path on Debian, Ubuntu and Tumbleweed.
+SUDO_PLUGINS = (
+    "sudoers.so",
+    "/usr/libexec/sudo/sudoers.so",
+    "/usr/lib/sudo/sudoers.so",
+    "/usr/libexec/sudo/sudo/sudoers.so",
+)
+# The stock values of the Path settings that run or load a file as root.
+SUDO_PATHS = (
+    ("plugin_dir", "/usr/libexec/sudo"),
+    ("plugin_dir", "/usr/lib/sudo"),
+    ("plugin_dir", "/usr/libexec/sudo/sudo"),
+    ("noexec", "/usr/libexec/sudo/sudo_noexec.so"),
+    ("noexec", "/usr/lib/sudo/sudo_noexec.so"),
+    ("intercept", "/usr/libexec/sudo/sudo_intercept.so"),
+    ("intercept", "/usr/lib/sudo/sudo_intercept.so"),
+    ("sesh", "/usr/libexec/sudo/sesh"),
+    ("sesh", "/usr/lib/sudo/sesh"),
+)
+# Linux-PAM loads a relative module name from its module folder, such as /usr/lib/x86_64-linux-gnu/security.
+PAM_LIBS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
+module_folders = []
+for lib in PAM_LIBS:
+    module_folders.append(lib + "/security")
+    try:
+        module_folders += [os.path.join(lib, arch, "security") for arch in sorted(os.listdir(lib))]
+    except (FileNotFoundError, NotADirectoryError):
+        continue
+module_folders = [folder for folder in module_folders if os.path.isdir(folder)]
+def module_names(word):
+    # A module link loads its target, so the check reads the real file's name too.
+    names = {word}
+    for folder in module_folders:
+        if os.path.exists(os.path.join(folder, word)):
+            names.add(os.path.basename(os.path.realpath(os.path.join(folder, word))))
+    return names
+def bare(word):
+    # Linux-PAM reads a word in brackets as one argument, and an escaped ] in it as a plain ].
+    return word[1:-1].replace("\\]", "]") if word.startswith("[") else word
+def printable(row):
+    # A \r or another control byte could make this scan read a row otherwise than Linux-PAM does.
+    return all(c == "\t" or " " <= c <= "~" for c in row)
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in names:
@@ -1329,6 +1528,194 @@ for name in names:
         if not (value.isascii() and value.isprintable()):
             sys.exit("a locale value is not printable ASCII")
         print("locale", name + "=" + value)
+ROOT_UID = 0
+for extra in PAM_ENV_EXTRA:
+    try:
+        info = os.lstat(extra)
+        # systemd ships this folder with only root's link to /etc/environment, which the check reads already.
+        # The box user could add a file later to a folder that is not root's, or that the group or others may write.
+        accepted = (
+            extra == "/usr/lib/environment.d"
+            and stat.S_ISDIR(info.st_mode)
+            and info.st_uid == ROOT_UID
+            and not info.st_mode & 0o022
+            and all(
+                entry.is_symlink()
+                and entry.stat(follow_symlinks=False).st_uid == ROOT_UID
+                and os.path.realpath(entry.path) == os.path.realpath(PAM_ENV_FILES[0])
+                for entry in os.scandir(extra)
+            )
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        continue
+    except OSError:
+        # A folder that the box user cannot search could hide a file that root's PAM reads.
+        sys.exit("the check cannot look for " + extra)
+    if not accepted:
+        sys.exit("the image has " + extra + ", which the check does not read")
+for file in PAM_ENV_FILES:
+    try:
+        with open(file, encoding="latin-1", newline="") as text:
+            rows = text.read().split("\n")
+    except FileNotFoundError:
+        continue
+    for row in rows:
+        if not printable(row):
+            sys.exit("a PAM environment file has a character that is not printable ASCII")
+        row = row.strip()
+        if not row or row.startswith("#"):
+            continue
+        if row.endswith("\\"):
+            # pam_env joins a line that ends in a backslash with the next line, so a name could span two rows.
+            sys.exit("a PAM environment file continues a line")
+        if file == PAM_ENV_CONF:
+            # Its values can expand other variables, so a locale set there counts as unsafe.
+            name, value = row.split()[0], "?"
+        else:
+            name, _, value = (row[7:] if row.startswith("export ") else row).partition("=")
+            name, value = name.strip(), value.replace('"', "").replace("'", "")
+        if not (name and all(c == "_" or (c.isascii() and c.isalnum()) for c in name)):
+            sys.exit("a PAM environment variable name is not letters, digits and underscores")
+        print("env", name)
+        if name in ("LANG", "LANGUAGE") or name.startswith("LC_"):
+            if not (value.isascii() and value.isprintable()):
+                sys.exit("a PAM locale value is not printable ASCII")
+            print("locale", name + "=" + value)
+pam_configs, stack_words = ["/etc/pam.conf"], {}
+for stack in PAM_STACKS:
+    try:
+        pam_configs += [os.path.join(stack, service) for service in sorted(os.listdir(stack))]
+    except FileNotFoundError:
+        continue
+for config in pam_configs:
+    try:
+        with open(config, encoding="latin-1", newline="") as text:
+            rows = text.read().split("\n")
+    except (FileNotFoundError, IsADirectoryError):
+        continue
+    stack_words[config] = []
+    for row in rows:
+        if not printable(row):
+            sys.exit("the PAM configuration " + config + " has a character that is not printable ASCII")
+        # Linux-PAM 1.5 reads a configuration line in 1023-byte parts, so the rest of a longer row is its own line.
+        if len(row) > 1022:
+            sys.exit("the PAM configuration " + config + " has a line longer than 1022 characters")
+        # Linux-PAM joins a line that ends in a backslash with the next one, but versions differ on a comment or a
+        # blank line after it. A # ends the line before any backslash, in all of them.
+        if "#" not in row and row.rstrip(" \t").endswith("\\"):
+            sys.exit("the PAM configuration " + config + " continues a line")
+        # This scan copies Linux-PAM's: only a space or a tab splits words, a word that starts with [ ends at the
+        # first ] that has no \ before it, also inside a word, and the text after that ] starts the next word.
+        words, line, start = [], row.split("#")[0], 0
+        while True:
+            while start < len(line) and line[start] in " \t":
+                start += 1
+            if start == len(line):
+                break
+            end = start + 1
+            if line[start] == "[":
+                while end < len(line) and not (line[end] == "]" and line[end - 1] != "\\"):
+                    end += 1
+                if end == len(line):
+                    sys.exit("the PAM configuration " + config + " does not close " + line[start:])
+                end += 1
+            else:
+                while end < len(line) and line[end] not in " \t":
+                    end += 1
+            words.append(line[start:end])
+            start = end
+        stack_words[config].append(words)
+# Sudo starts the sudo or sudo-i service, Linux-PAM falls back to other, and a stack reaches each file it includes.
+todo, reached = ["/etc/pam.conf"] + [os.path.join(s, n) for s in PAM_STACKS for n in ("sudo", "sudo-i", "other")], set()
+while todo:
+    config = todo.pop()
+    if config in reached:
+        continue
+    reached.add(config)
+    for words in stack_words.get(config, ()):
+        for at, word in enumerate(words):
+            # Linux-PAM takes the brackets off every word, so [include] is an include too, and it opens a path as
+            # written.
+            if bare(word).lower() in ("@include", "include", "substack") and at + 1 < len(words):
+                target = bare(words[at + 1])
+                if "/" in target:
+                    sys.exit(
+                        "the PAM stack " + config + " includes " + words[at + 1] + ", which is not a PAM file name"
+                    )
+                todo += [os.path.join(stack, target) for stack in PAM_STACKS]
+for config, rows in stack_words.items():
+    for words in rows:
+        for word in words:
+            plain = bare(word)
+            key, _, value = plain.partition("=")
+            # These modules run a program that an argument names (pam_xauth: xauthpath=), and a relative name resolves
+            # in sudo's folder.
+            if any(runner in name for runner in PAM_RUNNERS for name in module_names(plain)):
+                sys.exit("the PAM configuration " + config + " runs " + word)
+            # The check does not read another envfile or conffile, and user_readenv reads a file in the target
+            # user's home (root's). Another module name can load pam_env, so the check reads these keys on every
+            # line of a stack that sudo reaches. Stock sshd sets user_readenv=1, but sudo does not reach it.
+            if config in reached and (
+                (key == "envfile" and value not in PAM_ENV_FILES)
+                or (key == "conffile" and value != PAM_ENV_CONF)
+                or (key == "user_readenv" and value != "0")
+            ):
+                sys.exit("the PAM stack " + config + " gives pam_env " + word)
+            # pam_limits reads conf= as written, so a relative name resolves in the box user's working folder.
+            if config in reached and key == "conf":
+                sys.exit("the PAM stack " + config + " gives pam_limits " + word)
+            # Linux-PAM opens a module, include or argument path as written, so a path may only be a stock option
+            # value: a pam_env file, or the stock motd= file.
+            if "/" in plain and ("/" in key or not (value in PAM_ENV_FILES or (key == "motd" and value == PAM_MOTD))):
+                sys.exit("the PAM configuration " + config + " names " + word)
+for config in sorted(reached & stack_words.keys()):
+    for words in stack_words[config]:
+        # A pam.conf line starts with the service name. An include line names a file, not a module.
+        words = words[1:] if config == "/etc/pam.conf" else words
+        if len(words) < 3 or bare(words[0]).lower() == "@include" or bare(words[1]).lower() in ("include", "substack"):
+            continue
+        # Linux-PAM loads the word as written from its module folder, with no ".so" added, and a link loads its target.
+        if words[2] not in PAM_MODULES or not module_names(words[2]) <= set(PAM_MODULES):
+            sys.exit(
+                "the PAM stack " + config + ", which sudo reaches, loads " + words[2] + ", which is not a stock module"
+            )
+        for folder in module_folders:
+            if os.path.lexists(os.path.join(folder, words[2])):
+                print("file", os.path.join(folder, words[2]))
+for conf in SUDO_CONFS:
+    try:
+        with open(conf, encoding="latin-1", newline="") as text:
+            rows = text.read().split("\n")
+    except FileNotFoundError:
+        continue
+    except OSError:
+        sys.exit("the check cannot read " + conf)
+    for row in rows:
+        if not printable(row):
+            sys.exit(conf + " has a character that is not printable ASCII")
+        # Sudo joins a line that ends in a backslash with the next one, also after a comment.
+        if row.rstrip(" \t").endswith("\\"):
+            sys.exit(conf + " continues a line")
+        words = row.split()
+        if not words or words[0].startswith("#"):
+            continue
+        # A # after a word may or may not start a comment, so the check takes no such line.
+        if "#" in row:
+            sys.exit(conf + " has a # after a setting")
+        key = words[0].lower()
+        if key == "set" and len(words) == 3 and words[1].lower() == "developer_mode":
+            if words[2].lower() not in ("false", "off", "no", "0"):
+                # It lets sudo load a plugin that root does not own.
+                sys.exit(conf + " turns on developer_mode")
+        elif key == "set" and len(words) == 3:
+            continue
+        elif key == "plugin" and len(words) == 3 and words[2] in SUDO_PLUGINS:
+            # More words would be plugin options, such as sudoers_file=, that move what sudo reads as root.
+            continue
+        elif key == "path" and len(words) == 3 and (words[1], words[2]) in SUDO_PATHS:
+            continue
+        else:
+            sys.exit(conf + " has the line " + row.strip() + ", which is not a stock setting")
 for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
@@ -1389,12 +1776,20 @@ for name in os.listdir("/etc"):
         with open("/etc/" + name, encoding="ascii") as paths:
             folders.update(paths.read().replace(":", "\n").split())
 """
-    + f"programs = {[*_ROOT_PROGRAMS, _ROOT_FIND, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in _ROOT_TOOLS)]!r}"
+    + f"programs = {[*_ROOT_PROGRAMS, _ROOT_FIND, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in (*_ROOT_TOOLS, 'sudo'))]!r}"
     + r"""
+for folder in os.environ.get("PATH", "").split(":"):
+    if folder.startswith("/") and os.path.lexists(os.path.join(folder, "sudo")):
+        programs.append(os.path.join(folder, "sudo"))
+        break
+sudos = {os.path.realpath(name) for name in programs if name.endswith("/sudo") and os.path.exists(name)}
 for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.exists(name)}):
     with open(name, "rb") as elf:
         data = elf.read()
     if data[:4] != b"\x7fELF":
+        # A script sudo names its own interpreter, which the scan would never walk.
+        if name in sudos:
+            sys.exit("a sudo is not an ELF file")
         continue
     if data[4:6] != b"\x02\x01":
         sys.exit("a mapped file is not a 64-bit little-endian ELF file")
@@ -1509,6 +1904,33 @@ _TRUSTED_PYTHON_PROBE = (
     f"for b in {_ROOT_PATH.replace(':', ' ')}; do for t in {' '.join(_ROOT_TOOLS)}; do\n"
     '  if [ -e "$b/$t" ] || [ -h "$b/$t" ]; then printf \'tool %s\\n\' "$b/$t"; w "$b/$t"; else printf \'notool %s\\n\' "$b/$t"; fi\n'
     "done; done\n"
+    f"for b in {_ROOT_PATH.replace(':', ' ')}; do\n"
+    '  if [ -e "$b/sudo" ] || [ -h "$b/sudo" ]; then printf \'sudo %s\\n\' "$b/sudo"; w "$b/sudo"; else printf \'nosudo %s\\n\' "$b/sudo"; fi\n'
+    "done\n"
+    # Vercel may look sudo up on the image PATH, which the box commands inherit.
+    "p=$PATH:\n"
+    'while [ -n "$p" ]; do\n'
+    "  b=${p%%:*}; p=${p#*:}\n"
+    "  case $b in /*) ;; *) exit 1;; esac\n"
+    "  case $b in *[![:print:]]*) exit 1;; esac\n"
+    '  printf \'pathdir %s\\n\' "$b"; w "$b"\n'
+    '  if [ -e "$b" ] && [ ! -x "$b" ]; then exit 1; fi\n'
+    # The mode alone does not show that the box user can run it: a group entry or an ACL may stop the box user.
+    '  if [ -e "$b/sudo" ] || [ -h "$b/sudo" ]; then printf \'sudo %s\\n\' "$b/sudo"; w "$b/sudo"; [ -x "$b/sudo" ] || exit 1; break; fi\n'
+    "done\n"
+    "k() {\n"
+    '  [ -r "$1" ] && [ -x "$1" ] || exit 1\n'
+    '  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do\n'
+    '    if [ -e "$e" ] || [ -h "$e" ]; then\n'
+    "      case $e in *[![:print:]]*) exit 1;; esac\n"
+    '      printf \'entry %s\\n\' "$e"; w "$e"\n'
+    f'      if [ "$1" = {_DEEP_FOLDER} ] && [ -d "$e" ]; then k "$e"; fi\n'
+    "    fi\n"
+    "  done\n"
+    "}\n"
+    f'for b in {" ".join(_SUDO_FILES)}; do printf \'conf %s\\n\' "$b"; w "$b"; done\n'
+    f'for b in {" ".join(_SUDO_FOLDERS)}; do printf \'conf %s\\n\' "$b"; w "$b"; if [ -d "$b" ]; then k "$b"; fi; done\n'
+    f"printf '%s\\n' '{_SUDO_DONE}'\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
     '  if [ $m = clean ]; then o=$(/usr/bin/env -i OPENSSL_CONF=/dev/null "$s" -I -S -c "$y") || exit 1\n'
@@ -1624,7 +2046,11 @@ _VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
 # Root runs ``/usr/bin/env``, ``/bin/bash --noprofile --norc -c`` and the
 # supervisor with the box's environment, which holds the image ENV. The
 # loader, the shell and libc read these names before ``env -i`` can clear
-# anything, as no root process here is setuid (SKY-737). Each group:
+# anything, as no root process here is setuid (SKY-737). Root steps that start
+# through the image's sudo also get the variables that pam_env reads from
+# /etc/environment, /etc/default/locale and /etc/security/pam_env.conf
+# (Ubuntu's sudo PAM stack), so the probe lists those names too (SKY-912).
+# Each group:
 # - ``LD_*``: the glibc and musl loader search paths, preloads and audit
 #   libraries. An empty ``LD_LIBRARY_PATH`` element means the work folder.
 # - ``GCONV_PATH``, ``LOCPATH``, ``GLIBC_TUNABLES``: iconv modules, locale
@@ -1678,12 +2104,13 @@ _ROOT_VARIABLES = frozenset(
 # A UTF-8 locale name, with no ``/``, so glibc reads it from its own locale files.
 _UTF8_LOCALE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\.(?:utf-8|utf8)", re.IGNORECASE)
 ROOT_ENVIRONMENT = (
-    "The [run] image '{image}' sets {names} in its environment. {app} runs its root steps in the box with the"
-    " image environment, and these variables change which code the shell, the system loader or the C library"
-    " runs, or which files and folders they use. Remove them from the image ENV: every LD_*, OPENSSL_* and"
-    " BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they name C, POSIX or a"
-    " UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such as CUDA images,"
-    " are not supported yet."
+    "The [run] image '{image}' sets {names} in its environment, /etc/environment, /etc/default/locale or"
+    " /etc/security/pam_env.conf. {app} runs its root steps in the box with the image environment and, through"
+    " sudo, with those files. These variables change which code the shell, the system loader or the C library"
+    " runs, or which files and folders they use. Remove them from the image ENV and from those files: every"
+    " LD_*, OPENSSL_* and BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they"
+    " name C, POSIX or a UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such"
+    " as CUDA images, are not supported yet."
 )
 _RUN_MODES = ("clean", "box")
 _MISSING = "missing"
@@ -1697,10 +2124,27 @@ UNTRUSTED_PYTHON = (
     " below that path (except site-packages), and every folder from / down to each of them, must be owned by"
     " root and not writable by group or others. Others must be able to read each of those files,"
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
+    " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
+    " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf,"
+    " /usr/etc/sudo.conf, /etc/sudoers,"
+    " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow,"
+    " /etc/login.defs and /etc/default/login when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d,"
+    " /usr/etc/pam.d, /usr/lib/security and /etc/security when present, with every entry in them."
+    " Others must be able to read each sudo and search each of those image PATH folders. Others must be"
+    " able to run the first sudo on the"
+    " image PATH, and each sudo must resolve to an ELF file. Others must be able to list each of those six folders,"
+    " for example with chmod 755 /etc/sudoers.d. Each entry in them must be a regular file, except one level of"
+    " folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
-    " of the folders, and no entry may be a dangling link."
+    " of the folders, and no entry may be a dangling link. The PAM files also have content rules: no module that"
+    " runs a program, only stock modules and no other pam_env options in a stack that sudo reaches, and no pam_env"
+    " drop-ins. In every PAM file, a path may appear only as a pam_env file or as motd=/run/motd.dynamic, so"
+    " each include target must be a plain PAM file name. In a stack that sudo reaches, no module may take a"
+    " conf= option. The sudo.conf files may hold only Set lines that do not turn on developer_mode, and the"
+    " stock Plugin and Path lines."
+    " See docs/repository-constraints.md."
 )
 NO_ACCOUNT = (
     "The [run] image '{image}' has no /etc/passwd line for the box user (uid {uid})."
@@ -1955,6 +2399,8 @@ def prepare_box_images(
             fails, or a check fails.
         ImageBuildCancelledError: When ``cancelled`` stopped a build.
     """
+    if not pinned and (staged.box_sources.get("run") or ("",))[0] == "apt":
+        staged = _without_unbuildable_apt(staged, runtime, builder)
     if not staged.box_sources:
         return staged
     # Vercel copies each image into its own registry, keyed by the owner's repository, so it
@@ -2002,6 +2448,7 @@ def prepare_box_images(
                     budget=budget,
                     registry=registry,
                     cancelled=cancelled,
+                    source=kind,
                 )
             if role not in user_images:
                 user_images[role] = _user_image(
@@ -2019,44 +2466,45 @@ def prepare_box_images(
     return replace(staged, box_images=images, box_user_images=user_images, record_facts=facts)
 
 
-def _dockerfile_image(
-    staged: StagedRepository,
-    role: str,
-    dockerfile: str,
-    *,
-    owner_id: str,
-    username: str,
-    builder: ImageBuilder | None,
-    store: Any,
-    budget: Any,
-    registry: ImageRegistry | None,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict[str, Any]:
-    """Reuse or build the image of one box's Dockerfile from the staged start commit.
+def _without_unbuildable_apt(staged: StagedRepository, runtime: Any, builder: ImageBuilder | None) -> StagedRepository:
+    """Drop the generated ``[run]`` image when this deployment cannot build or start it (SKY-967).
+
+    The packages are a setup guess, not the user's choice, so the run keeps
+    today's default image in place of a failure.
+
+    Args:
+        staged: The staged tree, with an ``apt`` ``[run]`` source.
+        runtime: The parent's metered sandbox runtime.
+        builder: The Dockerfile builder, or ``None``.
+
+    Returns:
+        ``staged`` unchanged when the image can be built, or without its ``[run]`` source.
+    """
+    if builder is not None and getattr(runtime, "accepts_user_images", False):
+        return staged
+    reason = DOCKERFILE_UNSUPPORTED.format(role="run") if builder is None else USER_IMAGES_UNSUPPORTED
+    logger.warning("The run skips the image with its setup's Debian packages: %s", reason)
+    sources = {role: value for role, value in staged.box_sources.items() if role != "run"}
+    return replace(staged, box_sources=sources)
+
+
+def _dockerfile_request(
+    staged: StagedRepository, role: str, dockerfile: str, username: str
+) -> tuple[BuildRequest, str]:
+    """Make the build request of a repository Dockerfile from the staged start commit.
 
     Args:
         staged: The staged tree.
         role: ``run`` or ``metric``.
         dockerfile: The Dockerfile's repository path; its folder is the build context.
-        owner_id: Job identity naming the build operation.
         username: The run's owner.
-        builder: The Dockerfile builder, or ``None``.
-        store: The job store.
-        budget: The run's budget runtime, or ``None``.
-        registry: The registry that must still hold a reused build, or ``None``.
-        cancelled: Tells whether the run was cancelled, or ``None``.
 
     Returns:
-        The box's image record: image, digest, source, input hash and build log reference.
+        The build request, and the label that names the Dockerfile in errors.
 
     Raises:
-        BoxImageError: When there is no builder, the context is invalid, or the build fails.
-        ImageBuildCancelledError: When ``cancelled`` stopped the build. If CodeBuild started the
-            build, it keeps only the started record with its CodeBuild id, which account deletion
-            checks (SKY-896).
+        BoxImageError: When a hidden scoring path is or lies inside a link.
     """
-    if builder is None:
-        raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
     archive = staged.snapshot.archive
     if role == "run":
         # The candidate image must never hold the hidden scoring files, so its
@@ -2069,14 +2517,66 @@ def _dockerfile_image(
         archive = strip_archive(archive, staged.hidden_paths, staged.workdir / "image-context-run.tgz")
     context = extract_folder(archive, posixpath.dirname(dockerfile) or ".", staged.workdir / f"image-context-{role}")
     request = BuildRequest(context_dir=context, owner=image_owner(username), dockerfile=posixpath.basename(dockerfile))
+    return request, f"[{role}] dockerfile '{dockerfile}'"
+
+
+def _dockerfile_image(
+    staged: StagedRepository,
+    role: str,
+    dockerfile: str,
+    *,
+    owner_id: str,
+    username: str,
+    builder: ImageBuilder | None,
+    store: Any,
+    budget: Any,
+    registry: ImageRegistry | None,
+    cancelled: Callable[[], bool] | None = None,
+    source: str = "dockerfile",
+) -> dict[str, Any]:
+    """Reuse or build the image of one box's Dockerfile from the staged start commit.
+
+    Args:
+        staged: The staged tree.
+        role: ``run`` or ``metric``.
+        dockerfile: The Dockerfile's repository path, whose folder is the build context; for an
+            ``apt`` source, the generated Dockerfile text, built with an empty context (SKY-967).
+        owner_id: Job identity naming the build operation.
+        username: The run's owner.
+        builder: The Dockerfile builder, or ``None``.
+        store: The job store.
+        budget: The run's budget runtime, or ``None``.
+        registry: The registry that must still hold a reused build, or ``None``.
+        cancelled: Tells whether the run was cancelled, or ``None``.
+        source: ``dockerfile`` or ``apt``.
+
+    Returns:
+        The box's image record: image, digest, source, input hash and build log reference.
+
+    Raises:
+        BoxImageError: When there is no builder, the context is invalid, or the build fails.
+        ImageBuildCancelledError: When ``cancelled`` stopped the build. If CodeBuild started the
+            build, it keeps only the started record with its CodeBuild id, which account deletion
+            checks (SKY-896).
+    """
+    if builder is None:
+        raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
+    if source == "apt":
+        context = staged.workdir / "image-context-apt"
+        context.mkdir(parents=True, exist_ok=True)
+        (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+        request = BuildRequest(context_dir=context, owner=image_owner(username), dockerfile="Dockerfile")
+        label = "the image with the setup's Debian packages"
+    else:
+        request, label = _dockerfile_request(staged, role, dockerfile, username)
     kind = builder.kind
     try:
         input_hash = compute_input_hash(
             request, builder=kind, platform=CODEBUILD_PLATFORM if kind == CodeBuildImageBuilder.kind else ""
         )
     except ImageBuildError as error:
-        raise BoxImageError(f"[{role}] dockerfile '{dockerfile}': {error}") from error
-    record = {"source": "dockerfile", "input_hash": input_hash}
+        raise BoxImageError(f"{label}: {error}") from error
+    record = {"source": source, "input_hash": input_hash}
     found = store.find_image_build(username, input_hash)
     if found is not None and _still_held(registry, kind, request.owner, found["image"]):
         return {
@@ -2143,10 +2643,7 @@ def _dockerfile_image(
             username, input_hash, builder=kind, image=None, size_bytes=None, log=outcome.log, row_id=row_id
         )
         tail = outcome.log_tail.strip()
-        raise BoxImageError(
-            f"[{role}] dockerfile '{dockerfile}' did not build: {outcome}"
-            + (f"\n\nBuild log tail:\n{tail}" if tail else "")
-        )
+        raise BoxImageError(f"{label} did not build: {outcome}" + (f"\n\nBuild log tail:\n{tail}" if tail else ""))
     build_id = store.save_image_build(
         username,
         input_hash,
@@ -2556,9 +3053,10 @@ def _trusted_python(probe: Any) -> bool:
         missing or one that group and others cannot write and others can
         search, the probe reports each folder and tool pair once, every entry of
         ``_ROOT_TOOLS`` in those folders resolves to such a file and each
-        tool has one, both runs find a passwd line for the box user, and both runs
-        list at least one ``path``, ``file`` and ``dir`` entry, each of which
-        passes :func:`_walk` with the file type that its tag allows, every
+        tool has one, :func:`_trusted_sudo` accepts the sudo part, both runs
+        find a passwd line for the box user, and both runs list at least one
+        ``path``, ``file`` and ``dir`` entry, each of which passes
+        :func:`_walk` with the file type that its tag allows, every
         regular file among them is readable by others, and every ``absent``
         entry is missing.
     """
@@ -2603,7 +3101,7 @@ def _trusted_python(probe: Any) -> bool:
             if entry in (None, _MISSING) or not _readable_file(entry):
                 return False
             found.add(tool)
-    if found != set(_ROOT_TOOLS):
+    if found != set(_ROOT_TOOLS) or not _trusted_sudo(lines):
         return False
     for mode in _RUN_MODES:
         if not lines or lines.pop() != f"run {mode}":
@@ -2630,6 +3128,101 @@ def _trusted_python(probe: Any) -> bool:
         if not {"account", "path", "file", "dir"} <= tags:
             return False
     return not lines
+
+
+def _trusted_sudo(lines: list[str]) -> bool:
+    """Tell whether every sudo that Vercel may run, and the sudo and PAM files it reads, are safe from the box user.
+
+    Args:
+        lines: The probe's remaining lines, last line first; the check pops
+            the sudo part of the listing.
+
+    Returns:
+        True when all of these hold. The probe reports the sudo of each
+        ``_ROOT_PATH`` folder once, and each one that exists resolves to a
+        file that :func:`_readable_file` accepts. Each image PATH folder up to
+        the first one with a sudo is missing, or a folder that group and
+        others cannot write and others can search, and that sudo is such a
+        file that others can run. Each of ``_SUDO_FILES`` is missing or a regular
+        file that group and others cannot write. Each of ``_SUDO_FOLDERS`` is
+        missing or a folder that :func:`_trusted_folder` accepts. The listing
+        ends with ``_SUDO_DONE``.
+    """
+    for folder in _ROOT_PATH.split(":"):
+        line = lines.pop() if lines else ""
+        if line == f"nosudo {folder}/sudo":
+            continue
+        if line != f"sudo {folder}/sudo":
+            return False
+        entry = _walk(lines, f"{folder}/sudo")
+        if entry in (None, _MISSING) or not _readable_file(entry):
+            return False
+    while lines and lines[-1].startswith("pathdir "):
+        folder = lines.pop().removeprefix("pathdir ")
+        if not _PRINTABLE_PATH.fullmatch(folder):
+            return False
+        entry = _walk(lines, folder)
+        if entry is None or (
+            entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022 or not entry[0] & 0o001)
+        ):
+            return False
+        if lines and lines[-1] == f"sudo {folder}/sudo":
+            lines.pop()
+            entry = _walk(lines, f"{folder}/sudo")
+            # A non-root PATH lookup skips a file it cannot run and goes on to folders that the probe never
+            # walks, so others must be able to run this sudo.
+            if entry in (None, _MISSING) or not _readable_file(entry) or not entry[0] & 0o001:
+                return False
+            break
+    for path in (*_SUDO_FILES, *_SUDO_FOLDERS):
+        if not lines or lines.pop() != f"conf {path}":
+            return False
+        entry = _walk(lines, path)
+        if entry is None:
+            return False
+        if entry == _MISSING:
+            continue
+        if path in _SUDO_FILES and (entry[1] != "regular file" or entry[0] & 0o022):
+            return False
+        if path in _SUDO_FOLDERS and not _trusted_folder(lines, path, entry, path == _DEEP_FOLDER):
+            return False
+    return bool(lines) and lines.pop() == _SUDO_DONE
+
+
+def _trusted_folder(lines: list[str], folder: str, entry: tuple[int, str], deep: bool) -> bool:
+    """Tell whether a sudo or PAM folder and each entry that the probe listed in it are out of the box user's reach.
+
+    Args:
+        lines: The probe's remaining lines, last line first; the check pops
+            the folder's ``entry`` lines and their walks.
+        folder: The folder's path.
+        entry: The folder's walked mode and type.
+        deep: Whether the folder may hold folders, whose entries the probe
+            lists next.
+
+    Returns:
+        True when the folder is a folder that group and others cannot write
+        and others can list. Each entry is directly in it, has a printable
+        name, and is a regular file that group and others cannot write. When
+        ``deep`` is set, an entry may also be such a folder, with such files.
+    """
+    # Sudo and PAM read every entry as root, so the box user must see them all.
+    if entry[1] != "directory" or entry[0] & 0o022 or entry[0] & 0o005 != 0o005:
+        return False
+    while lines and lines[-1].startswith(f"entry {folder}/"):
+        path = lines.pop().removeprefix("entry ")
+        name = path.removeprefix(f"{folder}/")
+        if name in ("", ".", "..") or "/" in name or not _PRINTABLE_PATH.fullmatch(path):
+            return False
+        entry = _walk(lines, path)
+        if entry in (None, _MISSING):
+            return False
+        if deep and entry[1] == "directory":
+            if not _trusted_folder(lines, path, entry, False):
+                return False
+        elif entry[1] != "regular file" or entry[0] & 0o022:
+            return False
+    return True
 
 
 def _readable_file(entry: tuple[int, str]) -> bool:
@@ -2764,7 +3357,11 @@ def _stat_entry(line: str, name: str) -> tuple[int, str] | None:
     if not line.endswith(" " + name):
         return None
     parts = line[: -len(name) - 1].split(" ", 2)
-    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]) or parts[2] not in _FILE_TYPES:
+    # GNU stat names a zero-byte file so, as Debian's own /etc/environment is (SKY-912).
+    if len(parts) == 3 and parts[2] == "regular empty file":
+        parts[2] = "regular file"
+    # ``%a`` prints a mode-0000 file, such as a Red Hat /etc/shadow, as ``0`` (SKY-912).
+    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{1,4}", parts[1]) or parts[2] not in _FILE_TYPES:
         return None
     return int(parts[1], 8), parts[2]
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
 import { CaretRight } from "@/shared/ui/icons";
 import {
   LIST_ROW_CLASS,

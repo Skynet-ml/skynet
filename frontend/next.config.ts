@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
+import { withMotionStudio } from "motion-studio/next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -69,7 +70,7 @@ const nextConfig: NextConfig = {
   },
   experimental: {
     optimizePackageImports: [
-      "framer-motion",
+      "motion",
       "react-toastify",
       "radix-ui",
       "@radix-ui/react-direction",
@@ -98,9 +99,14 @@ const nextConfig: NextConfig = {
 // Sentry auth token, so the plugin also creates no Sentry release. `release`
 // keeps its default on purpose: `create: false` would also stop the plugin from
 // baking the detected release name (the commit SHA) into the bundle.
-export default withSentryConfig(nextConfig, {
+const sentryConfig = withSentryConfig(nextConfig, {
   silent: true,
   sourcemaps: { disable: true },
   webpack: { treeshake: { removeDebugLogging: true } },
   telemetry: false,
 });
+
+// Motion Studio (https://motion.dev/docs/studio) edits animations in the running
+// app. It changes the config only under `next dev`; production builds are as before.
+// Its config type wants an index signature that NextConfig's turbopack type lacks.
+export default withMotionStudio(sentryConfig as Parameters<typeof withMotionStudio>[0]);

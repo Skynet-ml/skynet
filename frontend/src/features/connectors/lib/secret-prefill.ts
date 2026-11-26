@@ -11,7 +11,7 @@ export function cleanSecretHost(host: string): string {
 
 /**
  * Read the secret name that a remote MCP `request_secret` link fills in
- * (`?settings=connectors&secret=NAME`, SKY-641). A link carries a name only;
+ * (`?settings=secrets&secret=NAME`, SKY-641). A link carries a name only;
  * anything that is not a valid name is ignored.
  */
 export function secretNameFromSearch(search: string): string | null {

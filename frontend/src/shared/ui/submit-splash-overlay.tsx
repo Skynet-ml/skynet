@@ -1,7 +1,7 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 
 import { EvolutionMorph } from "@/shared/ui/evolution-morph";
 

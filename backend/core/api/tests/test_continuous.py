@@ -30,10 +30,11 @@ from core.api import preflight_execution
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.errors import DomainError
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
-from core.api.routers import submissions
+from core.api.routers import execution_budgets, submissions
 from core.api.routers._helpers import automated_run_ids
 from core.api.routers.continuous import _HISTORY_LIMIT, create_continuous_router
 from core.api.tests.test_protected_submissions import _Gateway, _Harness, _SQLiteJobStore
+from core.billing import budgets
 from core.billing.budget_amounts import CENT_SCALE, budget_wallet_hold
 from core.billing.budgets import BudgetService
 from core.storage.models import (
@@ -42,6 +43,7 @@ from core.storage.models import (
     ContinuousPlanModel,
     ExecutionBudgetModel,
     JobModel,
+    SetupBillingPreferenceModel,
 )
 from core.worker import continuous
 
@@ -340,6 +342,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
     monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
     monkeypatch.setattr(submissions, "validate_blackbox_payload", lambda payload: None)
     monkeypatch.setattr(submissions.settings, "usage_markup", 1.0)
+    # These fixtures size budgets in cents to test holds, so the one-lease floor of a run limit stays out of the way.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
     monkeypatch.setattr(submissions.settings, "worker_enabled", False)
     monkeypatch.setattr(submissions.settings, "submissions_paused", False)
     monkeypatch.setattr(submissions.settings, "max_concurrent_jobs_per_user", 0)
@@ -566,6 +570,59 @@ def test_a_run_without_a_repository_cannot_enable_a_plan(env: _Env) -> None:
         json={"schedule": WEEKLY, "permitted": {"reflection_model": True}, "cycle_budget_cents": CYCLE_BUDGET},
     )
     assert (refused.status_code, refused.json()["code"]) == (409, "continuous.not_eligible")
+
+
+@pytest.mark.parametrize(("cycle_budget", "status"), [(budgets.CHUNK_CENTS - 1, 409), (budgets.CHUNK_CENTS, 201)])
+def test_a_plan_with_a_run_budget_below_one_lease_is_refused(
+    env: _Env, monkeypatch: pytest.MonkeyPatch, cycle_budget: int, status: int
+) -> None:
+    """Submit refuses a run limit below one lease, so a plan with one would fail every check (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease.
+        cycle_budget: The plan's run budget.
+        status: The expected status.
+    """
+    optimization_id = _incumbent(env)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+
+    response = env.client.post(
+        f"/optimizations/{optimization_id}/continuous",
+        json={"schedule": WEEKLY, "permitted": {"reflection_model": True}, "cycle_budget_cents": cycle_budget},
+    )
+
+    assert response.status_code == status, response.text
+    if status == 409:
+        assert response.json()["code"] == "budget.below_minimum"
+        assert response.json()["params"] == {"minimum_total_cents": budgets.CHUNK_CENTS}
+        assert env.client.get(f"/optimizations/{optimization_id}/continuous").json()["plan"] is None
+    else:
+        assert response.json()["cycle_budget_cents"] == budgets.CHUNK_CENTS
+
+
+def test_a_local_plan_with_a_run_budget_below_one_lease_is_accepted(env: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local check's run gets an uncapped budget, so its plan has no lease floor (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease and turns local mode on.
+    """
+    optimization_id = _incumbent(env)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(submissions.settings, "local_mode", True)
+
+    enabled = env.client.post(
+        f"/optimizations/{optimization_id}/continuous",
+        json={
+            "schedule": WEEKLY,
+            "permitted": {"reflection_model": True},
+            "cycle_budget_cents": budgets.CHUNK_CENTS - 1,
+        },
+    )
+
+    assert enabled.status_code == 201, enabled.text
+    assert enabled.json()["cycle_budget_cents"] == budgets.CHUNK_CENTS - 1
 
 
 def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env) -> None:
@@ -1513,6 +1570,47 @@ def test_the_sidebar_flags_every_run_of_a_plan(env: _Env) -> None:
     }
 
 
+def test_a_plan_cycle_budget_counts_its_setup_in_the_total(env: _Env) -> None:
+    """A plan cycle keeps the policy from before SKY-925, while the source run's budget does not."""
+    source_id = _incumbent(env)
+    _, _, cycle = _started(env)
+    service = BudgetService(engine=env.store.engine)
+
+    assert service.get(cycle.execution_budget_id, "alice").setup_in_total
+    assert not service.get(env.store.get_job(source_id)["execution_budget_id"], "alice").setup_in_total
+
+
+def _choose_setup_billing(env: _Env, *, from_wallet: bool) -> None:
+    """Store alice's setup billing setting.
+
+    Args:
+        env: Test environment.
+        from_wallet: Whether setup bills the wallet only.
+    """
+    with Session(env.store.engine) as session:
+        session.add(SetupBillingPreferenceModel(username="alice", from_wallet=from_wallet))
+        session.commit()
+
+
+def test_a_run_budget_counts_setup_in_its_total_when_the_owner_turns_wallet_billing_off(env: _Env) -> None:
+    """The setting off makes a new run's budget count setup against its limit."""
+    _choose_setup_billing(env, from_wallet=False)
+    source_id = _incumbent(env)
+    budget_id = env.store.get_job(source_id)["execution_budget_id"]
+    assert BudgetService(engine=env.store.engine).get(budget_id, "alice").setup_in_total
+
+
+def test_a_plan_cycle_counts_setup_in_its_total_whatever_the_owner_chose(env: _Env) -> None:
+    """A plan cycle ignores the setting: with wallet billing on, it still counts setup."""
+    _choose_setup_billing(env, from_wallet=True)
+    source_id = _incumbent(env)
+    _, _, cycle = _started(env)
+    service = BudgetService(engine=env.store.engine)
+
+    assert service.get(cycle.execution_budget_id, "alice").setup_in_total
+    assert not service.get(env.store.get_job(source_id)["execution_budget_id"], "alice").setup_in_total
+
+
 def test_a_plan_without_amounts_reuses_the_run_budget_and_has_no_monthly_limit(env: _Env) -> None:
     """With no amounts, each run gets the source run's budget and only the wallet gates it."""
     source_id = _incumbent(env)
@@ -1777,6 +1875,35 @@ def test_failing_checks_in_a_row_pause_the_plan_until_resumed(env: _Env) -> None
     resumed = env.client.post(f"/continuous/{plan['id']}/resume").json()
     assert (resumed["status"], resumed["pause_reason"]) == ("active", None)
     assert resumed["next_check_at"] is not None
+
+
+def test_an_old_plan_with_a_run_budget_below_one_lease_stops_after_a_streak(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan enabled before the lease floor fails each check for free, then pauses as failing (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease size after the plan is enabled, as for a plan made before the floor.
+    """
+    source_id = _incumbent(env)
+    _enable(env, source_id, schedule=DAILY)
+    assert CYCLE_BUDGET < budgets.CHUNK_CENTS
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    env.better()
+    jobs, run_budgets = env.count(JobModel), env.count(ExecutionBudgetModel)
+    for _ in range(continuous.FAILURE_STREAK):
+        env.sweep(_due(env))
+
+    current = env.plan()
+    cycles = env.cycles()
+    assert (current.status, current.pause_reason, current.next_check_at) == ("paused", "failing", None)
+    assert [(c.status, c.detail_code) for c in cycles] == [
+        ("failed", "continuous.run_rejected")
+    ] * continuous.FAILURE_STREAK
+    assert all("below the minimum" in c.detail_params["reason"] for c in cycles)
+    assert (env.count(JobModel), env.count(ExecutionBudgetModel)) == (jobs, run_budgets)
+    assert env.sweep(datetime.now(UTC) + timedelta(days=30)) == []
 
 
 def test_a_waiting_check_is_reported_as_busy(env: _Env) -> None:

@@ -33,6 +33,8 @@ Object.assign(globalThis, {
   HTMLInputElement: dom.window.HTMLInputElement,
   Element: dom.window.Element,
   Node: dom.window.Node,
+  // The commit select renders its closed list into a fragment.
+  DocumentFragment: dom.window.DocumentFragment,
   Event: dom.window.Event,
   MouseEvent: dom.window.MouseEvent,
   CustomEvent: dom.window.CustomEvent,
@@ -59,15 +61,18 @@ Object.assign(dom.window, { matchMedia });
 (dom.window as unknown as { __APP_MESSAGES__: unknown }).__APP_MESSAGES__ =
   buildActiveCatalog("en");
 
-// No account is linked, so the card shows the typed branch and commit fields.
-globalThis.fetch = (async () =>
-  new Response(JSON.stringify({ connectors: [] }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  })) as typeof fetch;
+// GitHub is linked, but its branch and commit lists fail, so the branch is a typed field.
+globalThis.fetch = (async (input: RequestInfo | URL) =>
+  String(input).endsWith("/connectors")
+    ? new Response(
+        JSON.stringify({ connectors: [{ provider: "github", connected: true, status: "ok" }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )
+    : new Response("{}", { status: 500 })) as typeof fetch;
 
 const { createRoot } = await import("react-dom/client");
 const { RepoTargetCard } = await import("./RepoTargetCard");
+const { TooltipProvider } = await import("@/shared/ui/primitives/tooltip");
 
 after(() => dom.window.close());
 
@@ -95,43 +100,268 @@ function leave(input: HTMLInputElement) {
   input.dispatchEvent(new dom.window.FocusEvent("focusout", { bubbles: true }));
 }
 
-void test("a typed branch or commit reaches the draft only on blur, and only when it changed", async () => {
-  const sent: RepoDraft[] = [];
+/** Render the card for this draft and wait for the connectors to load. */
+async function mount(
+  draft: RepoDraft,
+  onChange: (next: RepoDraft) => void = () => {},
+  objective = "",
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  try {
-    await React.act(async () => {
-      root.render(
+  await React.act(async () => {
+    root.render(
+      // The app mounts this provider once at the root; the secrets header needs it.
+      <TooltipProvider>
         <RepoTargetCard
-          repo={repo}
-          onChange={(next) => sent.push(next)}
+          repo={draft}
+          onChange={onChange}
           issue={null}
           guided={false}
-          seed={{ objective: "", scorerCode: "", cases: [] }}
-        />,
-      );
-    });
-    for (const [id, field] of [
-      ["v2-repo-branch", "branch"],
-      ["v2-repo-commit", "commit"],
-    ] as const) {
-      const input = container.querySelector<HTMLInputElement>(`#${id}`);
-      assert.ok(input, `no field #${id}`);
-      // Each patch of another branch or commit drops the draft files.
-      await React.act(async () => type(input, "d"));
-      await React.act(async () => type(input, "de"));
-      assert.deepEqual(sent, []);
-      await React.act(async () => type(input, ""));
-      await React.act(async () => leave(input));
-      assert.deepEqual(sent, []);
-      await React.act(async () => type(input, "dev"));
-      await React.act(async () => leave(input));
-      assert.deepEqual(sent, [{ ...repo, [field]: "dev" }]);
-      sent.length = 0;
-    }
-  } finally {
+          seed={{ objective, scorerCode: "", cases: [] }}
+        />
+      </TooltipProvider>,
+    );
+  });
+  const unmount = async () => {
     await React.act(async () => root.unmount());
     container.remove();
+  };
+  return { container, unmount };
+}
+
+void test("a typed branch reaches the draft only on blur, and only when it changed", async () => {
+  const sent: RepoDraft[] = [];
+  const { container, unmount } = await mount(repo, (next) => sent.push(next));
+  try {
+    const input = container.querySelector<HTMLInputElement>("#v2-repo-branch");
+    assert.ok(input, "no field #v2-repo-branch");
+    // Each patch of another branch drops the draft files.
+    await React.act(async () => type(input, "d"));
+    await React.act(async () => type(input, "de"));
+    assert.deepEqual(sent, []);
+    await React.act(async () => type(input, ""));
+    await React.act(async () => leave(input));
+    assert.deepEqual(sent, []);
+    await React.act(async () => type(input, "dev"));
+    await React.act(async () => leave(input));
+    assert.deepEqual(sent, [{ ...repo, branch: "dev" }]);
+    assert.ok(container.querySelector("#v2-repo-commit"), "no field #v2-repo-commit");
+    assert.ok(container.querySelector('[aria-controls="v2-repo-secrets-panel"]'));
+  } finally {
+    await unmount();
+  }
+});
+
+void test("branch and commit wait until a repository is picked", async () => {
+  const { container, unmount } = await mount({ ...repo, repository: "" });
+  try {
+    assert.equal(container.querySelector("#v2-repo-branch"), null);
+    assert.equal(container.querySelector("#v2-repo-commit"), null);
+  } finally {
+    await unmount();
+  }
+});
+
+void test("an empty draft picks the source, then the host, with nothing preselected", async () => {
+  const empty: RepoDraft = { ...repo, provider: undefined, repository: "" };
+  const sent: RepoDraft[] = [];
+  const { container, unmount } = await mount(empty, (next) => sent.push(next));
+  try {
+    assert.equal(container.querySelector('[role="radio"]'), null);
+    const cards = [...container.querySelectorAll<HTMLButtonElement>("button[aria-pressed]")];
+    assert.equal(cards.length, 2);
+    await React.act(async () => cards[0]!.click());
+    // Both source cards stay after the pick, so the user can switch back.
+    assert.equal(container.querySelectorAll("button[aria-pressed]").length, 2);
+    assert.equal(cards[0]!.getAttribute("aria-pressed"), "true");
+    const hosts = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    assert.equal(hosts.length, 3);
+    assert.ok(hosts.every((h) => h.getAttribute("aria-checked") === "false"));
+    // GitHub is linked, so the pick sets the host and starts no sign-in.
+    await React.act(async () => hosts[0]!.click());
+    assert.deepEqual(sent, [
+      { ...empty, provider: "github", branch: "", commit: "", createdBySkynet: false },
+    ]);
+    assert.equal(hosts[0]!.getAttribute("aria-checked"), "true");
+  } finally {
+    await unmount();
+  }
+});
+
+void test("Create new offers every host, starts no sign-in, and signs in to an unlinked pick", async () => {
+  const linkedFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    return String(input).endsWith("/connectors")
+      ? new Response(JSON.stringify({ connectors: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      : new Response("{}", { status: 500 });
+  }) as typeof fetch;
+  const empty: RepoDraft = { ...repo, provider: undefined, repository: "" };
+  const { container, unmount } = await mount(empty);
+  try {
+    const cards = [...container.querySelectorAll<HTMLButtonElement>("button[aria-pressed]")];
+    await React.act(async () => cards[1]!.click());
+    assert.equal(cards[1]!.getAttribute("aria-pressed"), "true");
+    assert.deepEqual(
+      calls.filter((url) => !url.endsWith("/connectors")),
+      [],
+    );
+    const hosts = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    assert.equal(hosts.length, 3);
+    assert.ok(hosts.every((h) => h.getAttribute("aria-checked") === "false"));
+    assert.deepEqual(
+      hosts.map((h) => h.disabled),
+      [false, false, false],
+    );
+    assert.equal(container.querySelector("#v2-repo-new-name"), null);
+    // GitLab is not linked, so picking it starts its sign-in.
+    await React.act(async () => hosts[1]!.click());
+    assert.ok(calls.some((url) => url.endsWith("/connectors/gitlab/oauth/start")));
+  } finally {
+    await unmount();
+    globalThis.fetch = linkedFetch;
+  }
+});
+
+void test("Create new reopens on the host the user signed in to", async () => {
+  const linkedFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) =>
+    new Response(
+      JSON.stringify(
+        String(input).endsWith("/connectors")
+          ? { connectors: [] }
+          : { authorize_url: "about:blank" },
+      ),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+  const empty: RepoDraft = { ...repo, provider: undefined, repository: "" };
+  try {
+    const first = await mount(empty);
+    try {
+      const cards = [
+        ...first.container.querySelectorAll<HTMLButtonElement>("button[aria-pressed]"),
+      ];
+      await React.act(async () => cards[1]!.click());
+      const hosts = [...first.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+      await React.act(async () => hosts[1]!.click());
+    } finally {
+      await first.unmount();
+    }
+    const back = await mount(empty);
+    try {
+      assert.deepEqual(
+        [...back.container.querySelectorAll("button[aria-pressed]")].map((c) =>
+          c.getAttribute("aria-pressed"),
+        ),
+        ["false", "true"],
+      );
+      const hosts = [...back.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+      assert.deepEqual(
+        hosts.map((h) => h.getAttribute("aria-checked")),
+        ["false", "true", "false"],
+      );
+      assert.equal(dom.window.sessionStorage.getItem("skynet.submit.repo-new-host.v1"), null);
+    } finally {
+      await back.unmount();
+    }
+  } finally {
+    globalThis.fetch = linkedFetch;
+    dom.window.sessionStorage.clear();
+  }
+});
+
+for (const host of ["gitlab", "bitbucket"] as const) {
+  void test(`a linked ${host} account creates the new repository on ${host}`, async () => {
+    const linkedFetch = globalThis.fetch;
+    const posts: Array<{ url: string; body: unknown }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/connectors"))
+        return new Response(
+          JSON.stringify({ connectors: [{ provider: host, connected: true, status: "ok" }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      if (init?.method === "POST") {
+        posts.push({ url, body: JSON.parse(String(init.body)) });
+        return new Response(
+          JSON.stringify({
+            full_name: "alice/app",
+            default_branch: "main",
+            commit: "a".repeat(40),
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 500 });
+    }) as typeof fetch;
+    const empty: RepoDraft = { ...repo, provider: undefined, repository: "" };
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mount(empty, (next) => sent.push(next), "Sort fast.");
+    try {
+      const cards = [...container.querySelectorAll<HTMLButtonElement>("button[aria-pressed]")];
+      await React.act(async () => cards[1]!.click());
+      const hosts = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+      await React.act(async () => hosts[host === "gitlab" ? 1 : 2]!.click());
+      const name = container.querySelector<HTMLInputElement>("#v2-repo-new-name");
+      assert.ok(name, "no field #v2-repo-new-name");
+      await React.act(async () => type(name, "app"));
+      const create = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+        b.textContent?.includes("Create repository"),
+      );
+      assert.ok(create && !create.disabled, "the Create button is not enabled");
+      await React.act(async () => create.click());
+      assert.equal(posts.length, 1);
+      assert.ok(posts[0]!.url.endsWith(`/connectors/${host}/repos`), posts[0]!.url);
+      assert.deepEqual(posts[0]!.body, {
+        name: "app",
+        private: true,
+        objective: "Sort fast.",
+        scorer_code: null,
+        cases: null,
+      });
+      // The run pushes candidate branches only to GitHub, so this is not marked as created by Skynet.
+      assert.deepEqual(sent.at(-1), {
+        ...empty,
+        provider: host,
+        repository: "alice/app",
+        branch: "main",
+        commit: "",
+        createdBySkynet: false,
+      });
+    } finally {
+      await unmount();
+      globalThis.fetch = linkedFetch;
+    }
+  });
+}
+
+void test("after a pick both source cards stay and there is no back button", async () => {
+  const empty: RepoDraft = { ...repo, provider: undefined, repository: "" };
+  const { container, unmount } = await mount(empty);
+  try {
+    const cards = () => [...container.querySelectorAll<HTMLButtonElement>("button[aria-pressed]")];
+    await React.act(async () => cards()[1]!.click());
+    assert.equal(cards().length, 2);
+    assert.deepEqual(
+      cards().map((c) => c.getAttribute("aria-pressed")),
+      ["false", "true"],
+    );
+    assert.ok(container.querySelector('[role="radio"]'), "no host picker");
+    assert.ok(
+      ![...container.querySelectorAll("button")].some((b) => b.textContent === "Back"),
+      "a back button is still shown",
+    );
+    await React.act(async () => cards()[0]!.click());
+    assert.deepEqual(
+      cards().map((c) => c.getAttribute("aria-pressed")),
+      ["true", "false"],
+    );
+  } finally {
+    await unmount();
   }
 });

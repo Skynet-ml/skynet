@@ -13,7 +13,7 @@ import {
   Books,
   Sparkle,
 } from "@/shared/ui/icons";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "motion/react";
 import { Button } from "@/shared/ui/primitives/button";
 import {
   Card,
@@ -29,7 +29,7 @@ import { tip } from "@/shared/lib/tooltips";
 import { getDatasetRows, listDatasets } from "@/shared/lib/api";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
-import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
+import { ModelConfigModal } from "@/features/submit";
 import { DatasetPickerDialog } from "@/features/datasets";
 import { ModelChip } from "@/shared/ui/model-chip";
 import { WizardStepper } from "@/shared/ui/wizard-stepper";
@@ -157,9 +157,6 @@ export function TaggerSetup({ onStart }: TaggerSetupProps) {
   // settings-modal default; the chip in the assist step overrides per session.
   const [assistModel, setAssistModel] = useState<ModelConfig>(() => readPref("taggerAssistModel"));
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
-  // The same recents the submit wizard's model dialog keeps — one shared
-  // localStorage list across every model-config surface.
-  const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
   // Managed catalog for the model dialog's thinking detection and the chip's
   // vision badge — same source the submit wizard feeds it.
   const [catalogModels, setCatalogModels] = useState<CatalogModel[] | null>(null);
@@ -727,13 +724,10 @@ export function TaggerSetup({ onStart }: TaggerSetupProps) {
         onOpenChange={setModelDialogOpen}
         config={assistModel}
         onSave={(cfg) => {
-          saveToRecent(cfg);
           setAssistModel(cfg);
         }}
         roleLabel={msg("tagger.assist.model.title")}
         catalogModels={catalogModels ?? undefined}
-        recentConfigs={recentConfigs}
-        onRemoveRecent={removeRecentConfig}
         byokOnlyLocally
       />
       <WizardStepper

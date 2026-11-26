@@ -51,7 +51,7 @@ Skynet 用驗證案例揀版本。佢用測試案例報告最終分數。引擎�
 
 ### 新倉庫入面嘅分支
 
-如果 Skynet 為呢次運行建立咗個倉庫，佢會將每個候選版本推去佢自己嘅分支 `skynet/candidate-<version id>`。`skynet/best` 分支一直指住最佳版本。有更好嘅版本出現時，佢會跟住移動。
+如果 Skynet 為呢次運行喺 GitHub 建立咗個倉庫，佢會將每個候選版本推去佢自己嘅分支 `skynet/candidate-<version id>`。`skynet/best` 分支一直指住最佳版本。有更好嘅版本出現時，佢會跟住移動。
 
 ## 提供最佳版本
 
@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 回應包括 `outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged` 同 `budget`。
 
 > [!TIP]
-> 每次呼叫都會分開收費，由呼叫者嘅餘額扣。`max_cost_cents` 設定呢一次呼叫最多可以用幾多錢，以仙計。如果你再發送同一個 `Idempotency-Key`，Skynet 唔會再收一次費。
+> 每次呼叫都會分開收費，由呼叫者嘅餘額扣。`max_cost_cents` 係可選嘅。佢記錄你呢一次呼叫最多接受幾多錢，以仙計。呼叫嘅上限由你嘅餘額決定。如果你再發送同一個 `Idempotency-Key`，Skynet 唔會再收一次費。
 
 身份驗證同其他端點，睇 [API](/docs/api)。
 

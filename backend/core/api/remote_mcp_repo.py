@@ -40,7 +40,7 @@ from pydantic import Field, ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from ..billing.budgets import BudgetConflictError, BudgetError, BudgetService
+from ..billing.budgets import CHUNK_CENTS, BudgetConflictError, BudgetError, BudgetService
 from ..billing.operation_pricing import json_fingerprint
 from ..billing.service import StripeBillingService
 from ..config import settings
@@ -96,6 +96,7 @@ from .routers.connectors import connector_secret
 from .routers.execution_budgets import budget_http_error
 from .routers.hardening import _load as _load_hardening_job
 from .routers.models import box_hold_cents, call_hold_cents
+from .routers.setup_billing import bills_setup_from_wallet
 from .routers.submissions import (
     _BLACKBOX_WORKFLOW,
     _enforce_balance,
@@ -117,6 +118,14 @@ _DRAFT_MAX_AGE = timedelta(days=7)
 # default limit is at least five dollars.
 _MIN_CALL_HOLD_CENTS = 100
 _MIN_SUGGESTED_LIMIT_CENTS = 500
+# The run takes its budget in leases, so a limit below one lease is refused. The account's setup
+# billing setting decides whether the setup check bills the balance or this limit (SKY-923, SKY-925).
+_LIMIT_DESCRIPTION = (
+    "Spending limit of this run, in cents. The account's setup billing setting decides whether the setup "
+    f"check bills the balance or this limit. Outside local mode, the limit must be at least {CHUNK_CENTS} cents, "
+    "and more when the setup check bills this limit. Use min_max_cost_cents and suggested_max_cost_cents from "
+    "repo_draft_review."
+)
 _PENDING_RETRY_SECONDS = 5
 # A score can take minutes, longer than an MCP client waits for one tool call, so the tool answers
 # in_progress at this bound while the score continues in the background.
@@ -852,7 +861,12 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
 
 
 def review_draft(
-    spec: dict[str, Any], user: AuthenticatedUser, *, job_store: Any, http_client: Callable[[], httpx.Client]
+    spec: dict[str, Any],
+    user: AuthenticatedUser,
+    *,
+    job_store: Any,
+    http_client: Callable[[], httpx.Client],
+    judge_session: bool = False,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
     """Check a whole draft again, and price it when it is complete.
 
@@ -861,6 +875,7 @@ def review_draft(
         user: Account that owns it.
         job_store: Store that holds staged data, connectors and the wallet.
         http_client: Factory for the model catalog client.
+        judge_session: True to price a judge session instead of a run.
 
     Returns:
         The issues, the notes, and the price fields (empty while steps are missing).
@@ -906,9 +921,19 @@ def review_draft(
         validate_job(request)
     except ServiceError as error:
         issues.append(str(error))
+    # A capped run takes its budget in leases, so the limit needs at least one lease. A setup check
+    # that bills the balance takes none of the limit; one that bills the limit spends up to the floor
+    # and must keep one lease for the run, as submit requires (SKY-925). A local run's budget is
+    # uncapped, and a judge session charges each scored call directly and takes no lease (SKY-923).
+    if settings.local_mode or judge_session:
+        minimum = floor
+    elif bills_setup_from_wallet(job_store.engine, user.username):
+        minimum = max(floor, CHUNK_CENTS)
+    else:
+        minimum = floor + CHUNK_CENTS
     price = {
-        "min_max_cost_cents": floor,
-        "suggested_max_cost_cents": max(_MIN_SUGGESTED_LIMIT_CENTS, floor),
+        "min_max_cost_cents": minimum,
+        "suggested_max_cost_cents": max(_MIN_SUGGESTED_LIMIT_CENTS, minimum),
         "unpriced_models": unpriced,
         "spendable_cents": StripeBillingService(engine=job_store.engine).spendable_cents(user.username),
     }
@@ -952,7 +977,9 @@ def _ready_request(
             or the key already made a higher limit.
         DomainError: 404 when the account has no such hardening job.
     """
-    issues, _notes, price = review_draft(spec, user, job_store=job_store, http_client=http_client)
+    issues, _notes, price = review_draft(
+        spec, user, job_store=job_store, http_client=http_client, judge_session=session_minimum is not None
+    )
     if issues:
         raise ToolError(json.dumps({"code": "draft.not_ready", "issues": issues, "next_tool": "repo_draft_review"}))
     floor = price["min_max_cost_cents"]
@@ -1036,7 +1063,11 @@ def preflight_draft(
             if not settings.local_mode:
                 _enforce_balance(job_store, user.username, request.token_source)
             budget = budgets.create(
-                user.username, max_cost_cents, idempotency_key=budget_key, uncapped=settings.local_mode
+                user.username,
+                max_cost_cents,
+                idempotency_key=budget_key,
+                uncapped=settings.local_mode,
+                setup_in_total=not bills_setup_from_wallet(job_store.engine, user.username),
             )
     except BudgetError as error:
         raise budget_http_error(error) from error
@@ -1678,7 +1709,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
     )
     def repo_draft_preflight(
         draft_id: Annotated[str, Field(max_length=64)],
-        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description="Spending limit of this run, in cents.")],
+        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description=_LIMIT_DESCRIPTION)],
         confirm: Annotated[bool, Field(description="True only after the user agreed to max_cost_cents.")],
         hardening_job_id: Annotated[
             str | None, Field(min_length=1, max_length=36, description="A metric-hardening job of this account.")
@@ -1722,7 +1753,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
     )
     def repo_draft_submit(
         draft_id: Annotated[str, Field(max_length=64)],
-        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description="Spending limit of this run, in cents.")],
+        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description=_LIMIT_DESCRIPTION)],
         confirm: Annotated[bool, Field(description="True only after the user agreed to max_cost_cents.")],
         idempotency_key: Annotated[
             str | None, Field(max_length=128, description="Send the same key to retry without a second run.")

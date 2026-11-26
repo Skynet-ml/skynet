@@ -10,6 +10,7 @@ import pytest
 
 from ...api.errors import DomainError
 from .. import bitbucket, transport
+from ..github_create_repo import RepoCreateError
 from ..github_publish import RepoPublishError
 from ..github_repo import RepoFetchError, RepoRateLimitError
 from ..vault import ConnectorSecret
@@ -411,3 +412,151 @@ def test_open_change_keeps_a_mixed_case_slug(monkeypatch: pytest.MonkeyPatch) ->
     change = bitbucket.open_change("bbtok", "Team/My.Repo", head="skynet/best", base_branch="main", title="T", body="B")
     assert (change.number, change.url) == (9, opened["links"]["html"]["href"])
     assert seen[-1].url.path == "/2.0/repositories/Team/My.Repo/pullrequests"
+
+
+def test_create_repository_posts_to_the_personal_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Create posts to ``workspace/slug`` with the lowercase slug and returns the main branch."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Answer the account lookup and the create.
+
+        Args:
+            request: The outgoing request.
+
+        Returns:
+            The canned response.
+        """
+        if request.url.path.endswith("/user/workspaces"):
+            return _workspaces("team", "alice")
+        if request.method == "GET":
+            return httpx.Response(200, json={"username": "alice"})
+        return httpx.Response(200, json={"full_name": "alice/my-app", "mainbranch": None})
+
+    seen = _serve(monkeypatch, handler)
+    assert bitbucket.create_repository("bbtok", "My-App", private=True, description="Sorts") == ("alice/my-app", "main")
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/2.0/user"),
+        ("GET", "/2.0/user/workspaces"),
+        ("POST", "/2.0/repositories/alice/my-app"),
+    ]
+    assert dict(seen[1].url.params) == {"administrator": "true", "pagelen": "100"}
+    assert json.loads(seen[2].content) == {"scm": "git", "name": "My-App", "is_private": True, "description": "Sorts"}
+
+
+@pytest.mark.parametrize(
+    ("lookup", "message"),
+    [
+        (200, "already has a repository"),
+        (404, "does not accept"),
+        (500, "Could not check Bitbucket"),
+    ],
+)
+def test_create_repository_explains_a_400(monkeypatch: pytest.MonkeyPatch, lookup: int, message: str) -> None:
+    """A 400 is a taken name only when the workspace already holds that repository."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Refuse the create and answer the lookups.
+
+        Args:
+            request: The outgoing request.
+
+        Returns:
+            The canned response.
+        """
+        if request.method == "POST":
+            return httpx.Response(
+                400, json={"error": {"message": "Repository with this Slug and Owner already exists."}}
+            )
+        if request.url.path.endswith("/user"):
+            return httpx.Response(200, json={"username": "alice"})
+        if request.url.path.endswith("/user/workspaces"):
+            return _workspaces("alice")
+        return httpx.Response(lookup, json={"full_name": "alice/app"})
+
+    _serve(monkeypatch, handler)
+    with pytest.raises(RepoCreateError, match=message):
+        bitbucket.create_repository("bbtok", "app", private=False)
+
+
+@pytest.mark.parametrize("account", [httpx.Response(401, json={}), httpx.Response(200, json={})])
+def test_create_repository_without_a_workspace_asks_to_connect_again(
+    monkeypatch: pytest.MonkeyPatch, account: httpx.Response
+) -> None:
+    """A token that cannot read its own account, such as a workspace token, cannot create."""
+    _serve(monkeypatch, lambda _r: account)
+    with pytest.raises(RepoCreateError, match="Connect Bitbucket again"):
+        bitbucket.create_repository("bbtok", "app", private=False)
+
+
+def _workspaces(*slugs: str) -> httpx.Response:
+    """Answer ``/user/workspaces`` with the given admin workspaces.
+
+    Args:
+        *slugs: Workspace slugs, in order.
+
+    Returns:
+        The canned response.
+    """
+    return httpx.Response(
+        200, json={"values": [{"administrator": True, "workspace": {"slug": slug}} for slug in slugs]}
+    )
+
+
+def _account_then(workspaces: httpx.Response) -> Callable[[httpx.Request], httpx.Response]:
+    """Build a handler that answers the account lookup, then ``workspaces``, then the create.
+
+    Args:
+        workspaces: The answer to ``/user/workspaces``.
+
+    Returns:
+        The request handler.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Answer one request.
+
+        Args:
+            request: The outgoing request.
+
+        Returns:
+            The canned response.
+        """
+        if request.url.path.endswith("/user"):
+            return httpx.Response(200, json={"username": "alice"})
+        if request.url.path.endswith("/user/workspaces"):
+            return workspaces
+        return httpx.Response(200, json={"full_name": f"{request.url.path.split('/')[-2]}/app"})
+
+    return handler
+
+
+def test_create_repository_uses_an_admin_workspace_without_a_personal_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An account with no personal workspace creates in the first workspace it administers."""
+    seen = _serve(monkeypatch, _account_then(_workspaces("team", "other")))
+    assert bitbucket.create_repository("bbtok", "app", private=True) == ("team/app", "main")
+    assert seen[-1].url.path == "/2.0/repositories/team/app"
+
+
+@pytest.mark.parametrize(
+    ("workspaces", "message"),
+    [
+        (_workspaces(), "not an admin of any workspace"),
+        (httpx.Response(403, json={}), "Connect Bitbucket again"),
+    ],
+)
+def test_create_repository_without_an_admin_workspace_refuses(
+    monkeypatch: pytest.MonkeyPatch, workspaces: httpx.Response, message: str
+) -> None:
+    """No admin workspace, or a failed lookup, stops before the create."""
+    seen = _serve(monkeypatch, _account_then(workspaces))
+    with pytest.raises(RepoCreateError, match=message):
+        bitbucket.create_repository("bbtok", "app", private=True)
+    assert all(r.method == "GET" for r in seen)
+
+
+def test_create_repository_refuses_a_bad_name_before_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name with a slash never reaches Bitbucket."""
+    seen = _serve(monkeypatch, _account_then(_workspaces("alice")))
+    with pytest.raises(RepoCreateError, match="does not accept"):
+        bitbucket.create_repository("bbtok", "a/b", private=False)
+    assert all(r.method == "GET" for r in seen)

@@ -51,6 +51,7 @@ class I18nKey(StrEnum):
     AGENT_SETTINGS_HOSTED_ONLY = 'agent_settings.hosted_only'
     AGENT_SETTINGS_INVALID_PAGE = 'agent_settings.invalid_page'
     AGENT_SETTINGS_INVALID_VALUE = 'agent_settings.invalid_value'
+    AGENT_SETTINGS_MISSING_PAGE = 'agent_settings.missing_page'
     AGENT_SETTINGS_MISSING_TARGET = 'agent_settings.missing_target'
     AGENT_SETTINGS_NOT_WRITABLE = 'agent_settings.not_writable'
     ANALYTICS_OTHER_BUCKET = 'analytics.other_bucket'

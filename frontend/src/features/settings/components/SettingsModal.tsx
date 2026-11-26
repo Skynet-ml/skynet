@@ -10,7 +10,7 @@ import { useTableSort } from "@/shared/hooks/use-table-sort";
 import { createPortal } from "react-dom";
 import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
 import {
   BookOpen,
   Columns,
@@ -103,8 +103,8 @@ import { CodeTab } from "./CodeTab";
 import { PrivacyTab } from "./PrivacyTab";
 import { ColorThemeControl } from "./ColorThemeControl";
 import { OptimizationDefaults } from "./OptimizationDefaults";
-import { PackageRegistrySetting } from "./PackageRegistrySetting";
 import { SecurityTab } from "./SecurityTab";
+import { SetupBillingSetting } from "./SetupBillingSetting";
 import { SETTINGS_TABS, visibleSettingsTabs, type SettingsTab } from "../lib/tabs";
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { isLocalMode } from "@/shared/lib/runtime-env";
@@ -115,8 +115,9 @@ import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
 function WizardTab() {
   return (
     <div className="space-y-1">
-      <PackageRegistrySetting />
       <OptimizationDefaults />
+      {/* Local budgets are uncapped and check no balance, so the setting changes nothing there. */}
+      {!isLocalMode() && <SetupBillingSetting />}
     </div>
   );
 }
@@ -1266,8 +1267,10 @@ export function SettingsModal() {
               <TabsContent value="providers">
                 <ByokKeysSection />
               </TabsContent>
-              <TabsContent value="connectors" className="space-y-6">
+              <TabsContent value="connectors">
                 <ConnectorsTab />
+              </TabsContent>
+              <TabsContent value="secrets">
                 <SavedSecretsSection />
               </TabsContent>
               <TabsContent value="api">

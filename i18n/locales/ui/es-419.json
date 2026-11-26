@@ -1,5 +1,4 @@
 {
-  "downloads.desktop_description": "Un espacio de trabajo en tu computadora.",
   "app.shell.search.kw.about": "acerca de versión URL de API comentarios restablecer preferencias about version feedback reset",
   "app.shell.search.kw.account": "cuenta nombre de usuario rol idioma interfaz opciones avanzadas account username role language",
   "app.shell.search.kw.admin": "administración almacenamiento cuota presupuestos usuarios admin storage quota users",
@@ -10,7 +9,7 @@
   "app.shell.search.kw.security": "seguridad dos factores autenticador códigos de recuperación llaves de acceso códigos por correo inicio de sesión security 2FA TOTP recovery passkey login",
   "app.shell.search.kw.tagging": "etiquetado etiquetas asistido por IA etiquetado automático modelo predeterminado tagging labels autotag model",
   "app.shell.search.kw.usage": "uso gasto costo dólares gastados tokens ejecuciones por modelo actividad usage spend cost tokens",
-  "app.shell.search.kw.wizard": "optimización asistente generación de código conjunto de datos división registro de paquetes modelos optimization wizard split package registry pip models",
+  "app.shell.search.kw.wizard": "optimización asistente generación de código conjunto de datos división modelos optimization wizard split pip models",
   "common.empty": "—",
   "optimizations.detail.title": "Optimization Details",
   "optimizations.duration.lt_0_1s": "<0.1s",
@@ -67,7 +66,7 @@
   "settings.code.dark_theme": "Tema de código oscuro",
   "settings.code.font": "Fuente del código",
   "settings.code.font.description": "Define una fuente monoespaciada para el código y los diffs.",
-  "settings.code.font.placeholder": "p. ej. JetBrains Mono",
+  "settings.code.font.default": "Predeterminado",
   "settings.code.size": "Tamaño de fuente del código",
   "settings.code.size.description": "Se aplica a archivos abiertos, diffs y bloques de código.",
   "settings.code.size.px": "px",

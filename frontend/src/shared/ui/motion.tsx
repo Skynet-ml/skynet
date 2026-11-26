@@ -1,6 +1,6 @@
 "use client";
 
-import { motion, useReducedMotion, type HTMLMotionProps } from "framer-motion";
+import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 import * as React from "react";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 

@@ -22,7 +22,7 @@ L'importo che scegli è l'importo che entra nel tuo saldo. La commissione di ric
 
 ## Budget delle esecuzioni
 
-Ogni esecuzione ha un limite di spesa. Il limite è il massimo che l'esecuzione può spendere. Copre la configurazione e l'ottimizzazione.
+Ogni esecuzione ha un limite di spesa. Il limite è il massimo che l'esecuzione può spendere. Copre l'ottimizzazione. I controlli di configurazione vengono pagati dal tuo saldo. Per contarli nel limite delle nuove esecuzioni, disattiva **Addebita la configurazione sul mio saldo** in **Impostazioni → Ottimizzazione**. I piani continui contano sempre la configurazione nel budget del ciclo.
 
 Un'esecuzione non ha una stima dei costi prima di partire. Spende fino al suo limite, si ferma al budget e conserva la sua versione migliore. Leggi [Esecuzioni](/docs/concepts/runs) per vedere come Skynet decide quando fermarsi.
 
@@ -45,7 +45,7 @@ La procedura guidata non ti fa proseguire quando il limite è inferiore a questo
 
 ## Riserve
 
-Prima di svolgere un lavoro a pagamento, Skynet riserva una parte del limite dell'esecuzione. Skynet rilascia la riserva quando il lavoro viene regolato e addebita solo il costo reale.
+Prima di svolgere un lavoro a pagamento, Skynet riserva una parte del limite dell'esecuzione. Skynet rilascia la riserva quando il lavoro viene regolato e addebita solo il costo reale. I controlli di configurazione riservano invece dal tuo saldo, a meno che la configurazione conti nel limite.
 
 Quando un budget ha già delle attività, la scheda **Limite di spesa** nella procedura guidata ne mostra il registro:
 
@@ -106,11 +106,11 @@ Il codice del tuo repository e il tuo scorer girano in una sandbox. Skynet misur
 2. Quando la sandbox termina, Skynet addebita l'uso finale riportato dal provider della sandbox.
 3. Il ricarico sull'utilizzo si applica al calcolo della sandbox.
 
-Il calcolo della sandbox fa parte del limite di spesa dell'esecuzione, anche quando le chiamate ai modelli usano la tua chiave.
+Il calcolo della sandbox fa parte del limite di spesa dell'esecuzione, anche quando le chiamate ai modelli usano la tua chiave. L'uso della sandbox nei controlli di configurazione è pagato dal tuo saldo, a meno che la configurazione conti nel limite.
 
 ## Serving
 
-Ogni chiamata all'endpoint di serving di un'esecuzione terminata viene fatturata a parte. Chi chiama paga con il proprio saldo. Imposta `max_cost_cents` nella richiesta per limitare una chiamata. Leggi [Risultati](/docs/guides/results).
+Ogni chiamata all'endpoint di serving di un'esecuzione terminata viene fatturata a parte. Chi chiama paga con il proprio saldo. Puoi impostare `max_cost_cents` nella richiesta per registrare il massimo che accetti per una chiamata. Il tuo saldo limita la chiamata. Leggi [Risultati](/docs/guides/results).
 
 ## Piani
 

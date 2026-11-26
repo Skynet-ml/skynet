@@ -14,10 +14,15 @@ from sqlalchemy.orm import Session
 
 from core.billing.budget_amounts import wallet_reserved_cents
 from core.billing.budgets import BudgetConflictError
-from core.billing.model_dispatch import OpenRouterDispatcher, generation_charge
+from core.billing.model_dispatch import (
+    GenerationNotFoundError,
+    OpenRouterDispatcher,
+    generation_charge,
+    lookup_generation,
+)
 from core.billing.model_reconciliation import OpenRouterUsageReconciler, UnsettleableUsageError
 from core.billing.openrouter_quotes import price_text_request, resolve_model_slug
-from core.billing.operation_pricing import ChargePolicy, json_fingerprint
+from core.billing.operation_pricing import ChargePolicy, json_fingerprint, operation_quote
 from core.billing.runtime import BudgetRuntime, PaidResult, UsagePendingError
 from core.billing.tests.test_protected_dispatch import CATALOG, REQUEST, _runtime
 from core.billing.tests.test_protected_dispatch import database as _database_fixture
@@ -441,6 +446,186 @@ def test_late_receipt_after_release_bills_nothing(database, monkeypatch: pytest.
         OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private").reconcile(operation_id, "alice")
     snapshot = runtime.service.get(runtime.budget_id, "alice")
     assert (snapshot.pending_operations, snapshot.reserved_cents, snapshot.setup_spent_cents) == (0, 0, 0)
+
+
+def _age_returns(database, minutes: int) -> None:
+    """Move every operation's dispatch and last change back by the given minutes.
+
+    Args:
+        database: Ledger database.
+        minutes: How long ago every operation now started and returned.
+    """
+    with Session(database) as session:
+        for operation in session.scalars(select(ExecutionOperationModel)):
+            operation.dispatched_at = operation.updated_at = datetime.now(UTC) - timedelta(minutes=minutes)
+        session.commit()
+
+
+def test_sweep_releases_a_generation_that_openrouter_does_not_find_after_a_short_grace(
+    database, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Release a hold whose generation lookup gives HTTP 404, 5 minutes after the call returned, not 15.
+
+    OpenRouter can answer 404 for a short time while it indexes a bill (SKY-657), so the grace counts from the
+    return. A late bill after the release bills nothing, and the release logs the operation and the 404.
+
+    Args:
+        database: Ledger database.
+        monkeypatch: Sends the provider lookup to a stand-in OpenRouter that answers 404.
+        caplog: Captures the release log line.
+    """
+    # The real lookup builds the reason from the response, so the test breaks if its text and the 404 check part.
+    not_found = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+    monkeypatch.setattr(
+        OpenRouterDispatcher,
+        "_lookup_generation",
+        lambda self, identity: lookup_generation(not_found, "key", identity, self.model),
+    )
+    runtime = _runtime(database)
+    operation_id = _park_model_call(runtime, "gen-missing")
+    reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private")
+    with pytest.raises(GenerationNotFoundError, match="HTTP 404"):
+        reconciler.reconcile(operation_id, "alice")
+    # A call that ran 10 minutes and returned just now keeps its hold: the 404 can still be index lag.
+    _age_operations(database, 10)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["pending"]
+    _age_returns(database, 4)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["pending"]
+    _age_returns(database, 6)
+    caplog.set_level(logging.INFO, logger="core.billing.model_reconciliation")
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["released"]
+    assert any(operation_id in record.getMessage() and "HTTP 404" in record.getMessage() for record in caplog.records)
+    monkeypatch.setattr(
+        OpenRouterDispatcher,
+        "reconcile",
+        lambda self, identity: (Decimal("0.004"), {"id": identity, "total_cost": "0.004"}),
+    )
+    with pytest.raises(BudgetConflictError):
+        reconciler.reconcile(operation_id, "alice")
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.pending_operations, snapshot.reserved_cents, snapshot.setup_spent_cents) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("reason", ["HTTP 500", "HTTP 429", "no total_cost", "a transport error (ConnectError)"])
+def test_sweep_keeps_the_15_minute_window_for_every_other_lookup_failure(
+    database, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    """Keep the SKY-784 window when the lookup fails for any reason other than HTTP 404.
+
+    Args:
+        database: Ledger database.
+        monkeypatch: Replaces the provider lookup.
+        reason: The lookup's failure reason.
+    """
+    monkeypatch.setattr(OpenRouterDispatcher, "_lookup_generation", lambda self, identity: (None, reason, True))
+    runtime = _runtime(database)
+    operation_id = _park_model_call(runtime, "gen-slow")
+    reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private")
+    with pytest.raises(UsagePendingError) as caught:
+        reconciler.reconcile(operation_id, "alice")
+    assert not isinstance(caught.value, GenerationNotFoundError)
+    _age_returns(database, 6)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["pending"]
+    _age_returns(database, 16)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["released"]
+
+
+@pytest.mark.parametrize(
+    ("dispatch", "reason"),
+    [
+        (
+            lambda: PaidResult(None, None, {"provider": "openrouter", "status": 200, "interrupted": False}),
+            "the provider answer carried no request id",
+        ),
+        (
+            lambda: PaidResult(None, None, {"provider": "openrouter", "status": 200, "interrupted": True}),
+            "the answer ended before it was complete",
+        ),
+        (
+            lambda: PaidResult(
+                None, None, {"provider": "openrouter", "status": 503, "interrupted": False}, failure="upstream"
+            ),
+            "the provider sent an error answer (HTTP 503)",
+        ),
+        (lambda: (_ for _ in ()).throw(httpx.ReadTimeout("hello secret")), "dispatch raised ReadTimeout"),
+    ],
+    ids=["no-id", "interrupted", "error-answer", "raised"],
+)
+def test_execute_logs_why_a_held_model_call_has_no_request_id(
+    database, caplog: pytest.LogCaptureFixture, dispatch, reason: str
+) -> None:
+    """Log one structured line that says why a held model call has no provider request id (SKY-914).
+
+    A hold with no request id can never be looked up, so the sweep releases it after one minute. The line must
+    give the reason, and hold no secret and no prompt or error text.
+
+    Args:
+        database: Ledger database.
+        caplog: Captures the log line.
+        dispatch: The fake dispatch.
+        reason: Text that the log line must contain.
+    """
+    runtime = _runtime(database)
+    policy = ChargePolicy("managed_model")
+    quote = price_text_request(REQUEST, CATALOG, policy).quote
+    caplog.set_level(logging.WARNING, logger="core.billing.runtime")
+    with pytest.raises((UsagePendingError, httpx.ReadTimeout)):
+        runtime.execute(quote, policy, dispatch, operation_key="no-id", cost_kind="model", role="task")
+    with Session(database) as session:
+        operation_id = session.scalar(select(ExecutionOperationModel.id))
+    [record] = [record for record in caplog.records if "no provider request id" in record.getMessage()]
+    assert record.levelno == logging.WARNING
+    message = record.getMessage()
+    assert operation_id in message
+    assert reason in message
+    assert "role=task" in message
+    assert "hello" not in message
+    assert "secret" not in message
+
+
+def test_execute_logs_a_missing_request_id_at_debug_off_openrouter(database, caplog: pytest.LogCaptureFixture) -> None:
+    """Keep the missing request id of a route that never names its generations at debug (SKY-923).
+
+    Args:
+        database: Ledger database.
+        caplog: Captures the log lines.
+    """
+    runtime = _runtime(database)
+    policy = ChargePolicy("byok_model", byok_fee_fraction=Decimal("0.05"))
+    quote = operation_quote(REQUEST, Decimal(0), policy, {"provider": "anthropic", "model": "claude"})
+    caplog.set_level(logging.DEBUG, logger="core.billing.runtime")
+    with pytest.raises(UsagePendingError):
+        runtime.execute(
+            quote,
+            policy,
+            lambda: PaidResult(None, None, {"provider": "anthropic", "status": 200, "interrupted": False}),
+            operation_key="byok-no-id",
+            cost_kind="model",
+        )
+    [record] = [record for record in caplog.records if "no provider request id" in record.getMessage()]
+    assert record.levelno == logging.DEBUG
+
+
+def test_execute_does_not_log_a_held_model_call_with_a_request_id(database, caplog: pytest.LogCaptureFixture) -> None:
+    """Log nothing about the request id when the held model call has one.
+
+    Args:
+        database: Ledger database.
+        caplog: Captures the log lines.
+    """
+    runtime = _runtime(database)
+    policy = ChargePolicy("managed_model")
+    quote = price_text_request(REQUEST, CATALOG, policy).quote
+    caplog.set_level(logging.WARNING, logger="core.billing.runtime")
+    with pytest.raises(UsagePendingError):
+        runtime.execute(
+            quote,
+            policy,
+            lambda: PaidResult(None, None, {"provider": "openrouter"}, provider_request_id="gen-held"),
+            operation_key="with-id",
+            cost_kind="model",
+        )
+    assert not [record for record in caplog.records if "no provider request id" in record.getMessage()]
 
 
 @pytest.mark.parametrize(

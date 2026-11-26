@@ -122,10 +122,13 @@ function colorBrand({
   title,
   viewBox,
   paths,
+  disc = "#fff",
 }: {
   title: string;
   viewBox: string;
   paths: ReadonlyArray<readonly [d: string, fill: string]>;
+  /** The avatar disc's colour, for a logo whose own background is part of the mark. */
+  disc?: string;
 }): Brand {
   const Mark = ({ size }: BrandMarkProps) => (
     <svg
@@ -144,8 +147,8 @@ function colorBrand({
   const Avatar = ({ size }: BrandMarkProps) => (
     <span
       dir="ltr"
-      className="inline-flex shrink-0 items-center justify-center rounded-full bg-white shadow-[inset_0_0_0_1px_rgba(0,0,0,0.08)]"
-      style={{ width: size, height: size }}
+      className="inline-flex shrink-0 items-center justify-center rounded-full shadow-[inset_0_0_0_1px_rgba(0,0,0,0.08)]"
+      style={{ width: size, height: size, background: disc }}
     >
       <Mark size={Math.round(size * AVATAR_ICON_MULTIPLE)} />
     </span>
@@ -316,6 +319,35 @@ export const DSPy = colorBrand({
     [
       "M1017.82,1886.52l-89.77-.66c.02-2.24,1.62-224.98.03-267.92-.52-13.88-2.08-56.12,30.81-78.69,31.88-21.89,72.39-9.08,104.11,4.51,33.61,14.41,67.96,17.25,87.52,7.25,7.54-3.85,18.19-11.85,23.77-36.69,13.4-59.78,1.93-115.99-16.32-140.62-8.49-11.46-15.11-11.95-17.28-12.12-45.46-3.4-110.65,16.98-131.95,25.12-20.8,7.96-44.34-.53-55.22-19.96-5.2-9.26-30.83-62.27-25.55-196.47,3.39-86.35,26.74-233.2,43.78-340.42,6.93-43.57,14.07-88.51,15.38-102.99-43.08,6.66-101.53,2.29-144.98-30.15-25.61-19.12-56.89-56.24-60.48-124.51-3.52-66.9,10.46-120.09,41.55-158.09,32.97-40.3,74.7-50.73,96.64-53.37,25.75-3.1,50.66-.23,70.55,2.73,4.69-52.06,7.87-157.65,8.38-248.69l89.77.5c0,.74-.44,74.87-2.91,148.45-1.46,43.66-3.36,78.77-5.62,104.34-3.49,39.4-7.1,80.14-45.76,87.83-14.72,2.92-30.18.52-48.1-2.27-17.73-2.76-37.82-5.9-55.61-3.76-41.32,4.96-62.92,47.83-59.24,117.61,1.43,27.29,9.46,46.04,24.55,57.29,24.08,17.98,64.82,16.82,86.34,11.66,12.49-2.99,45.67-10.96,71.54,10.37,25.87,21.32,24.48,53.19,23.26,81.3-.65,15.03-6.14,50.06-16.6,115.84-15.75,99.08-39.55,248.82-42.74,329.86-2.09,53.22,1.32,90.16,5.4,114.1,34.14-9.39,81.56-19.02,124.33-15.83,32.55,2.44,61.14,19.1,82.69,48.19,37.17,50.16,49.65,134.04,31.79,213.7-12.75,56.88-45.37,84.13-70.49,96.98-64.67,33.07-141.69,4.79-163.75-4.67-3.61-1.55-6.82-2.83-9.64-3.9,1.3,57.89-.13,255.35-.19,264.15Z",
       "#ef4036",
+    ],
+  ],
+});
+
+/** Reflection AI's ring-and-dot mark, from the vendor's own favicon (reflection.ai/icon.svg). */
+export const Reflection = colorBrand({
+  title: "Reflection AI",
+  viewBox: "14 14 72 72",
+  paths: [
+    [
+      "M17 50a15.51 15.51 0 1 0 31.02 0a15.51 15.51 0 1 0-31.02 0ZM21.5 50a11.01 11.01 0 1 1 22.02 0a11.01 11.01 0 1 1-22.02 0ZM51.99 50a15.51 15.51 0 1 0 31.02 0a15.51 15.51 0 1 0-31.02 0Z",
+      "#1a1b1a",
+    ],
+  ],
+});
+
+/**
+ * Thinking Machines Lab's favicon (thinkingmachines.ai/images/apple-touch-icon.png):
+ * a dark rounded square in a light-grey frame. The frame is the disc, so the mark
+ * does not read as a bare "stop" square on white.
+ */
+export const ThinkingMachines = colorBrand({
+  title: "Thinking Machines",
+  viewBox: "16 16 148 148",
+  disc: "#ebebeb",
+  paths: [
+    [
+      "M41 31h98a10 10 0 0 1 10 10v98a10 10 0 0 1-10 10H41a10 10 0 0 1-10-10V41a10 10 0 0 1 10-10Z",
+      "#31373d",
     ],
   ],
 });

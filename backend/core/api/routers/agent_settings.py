@@ -24,7 +24,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,7 @@ SettingsTab = Literal[
     "usage",
     "providers",
     "connectors",
+    "secrets",
     "api",
     "admin",
 ]
@@ -206,13 +207,13 @@ class ProtectedSettingRequest(BaseModel):
 
 
 class OpenPageRequest(BaseModel):
-    tab: SettingsTab | None = Field(default=None, description="The settings tab to open.")
+    tab: SettingsTab | None = Field(default=None, description="A settings tab. Use it only to open settings.")
     path: str | None = Field(
         default=None,
         max_length=200,
         description=(
-            "An in-app route such as /submit, /optimizations or /tagger?dataset=<id>. "
-            "A safe path wins over tab when both are given."
+            "An in-app route that starts with /: /submit opens a new optimization setup; also "
+            "/optimizations or /tagger?dataset=<id>. No full URLs. Path wins over tab when both are given."
         ),
     )
 
@@ -468,12 +469,22 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
         summary="Open a settings tab or an in-app page in the user's browser",
         tags=["agent"],
     )
-    def open_page(req: OpenPageRequest, user: AuthenticatedUserDep) -> dict[str, Any]:
-        """Return a navigation instruction the chat panel follows.
+    def open_page(
+        user: AuthenticatedUserDep, req: Annotated[OpenPageRequest, Body(default_factory=OpenPageRequest)]
+    ) -> dict[str, Any]:
+        """Open a page for the user. Send path (an in-app route such as /submit for a new optimization setup) or tab (a settings tab), at least one. No other arguments and no full URLs.
+
+        The chat panel follows the returned navigation instruction. The body
+        has a default only so that a call with no usable argument reaches this
+        handler: FastMCP sends no body when the model gives only null or
+        unknown arguments, and FastAPI's bare "body: Field required" did not
+        tell the model how to fix the call. The type stays non-optional:
+        ``OpenPageRequest | None`` turns the schema into an ``anyOf`` that
+        FastMCP cannot map ``path`` and ``tab`` into.
 
         Args:
-            req: An in-app path, or the tab when no safe path is given.
             user: Authenticated caller.
+            req: An in-app path, or the tab when no safe path is given.
 
         Returns:
             ``{"navigate": {"kind": "settings", "tab": ...}}`` or
@@ -481,7 +492,8 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
 
         Raises:
             DomainError: 409 when the tab is hidden in this app; 422 when
-                neither a tab nor a safe in-app path is given.
+                neither a path nor a tab is given, or the path is not a safe
+                in-app path.
         """
         # A model can send both fields; a stray tab beside /submit sent users
         # to settings, so the more specific route wins.
@@ -490,6 +502,8 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
         if req.tab:
             _reject_hidden(req.tab, user.username)
             return {"navigate": {"kind": "settings", "tab": req.tab}}
+        if not req.path:
+            raise DomainError("agent_settings.missing_page", status=422)
         raise DomainError("agent_settings.invalid_page", status=422)
 
     return router

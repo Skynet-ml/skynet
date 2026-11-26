@@ -18,11 +18,11 @@ import {
 } from "../lib/secret-prefill";
 
 /**
- * Settings → Connectors → Saved secrets: the secrets saved on the account, by
- * name, with a form to save or replace one (SKY-641). A remote MCP
- * `request_secret` link fills in the name. A saved value never comes back
- * from the server, so the list shows names and approved hosts only. A run
- * sends a secret only to its approved hosts, and the server enforces them.
+ * Settings → Secrets: the secrets saved on the account, by name, with a form
+ * to save or replace one (SKY-641). A remote MCP `request_secret` link fills
+ * in the name. A saved value never comes back from the server, so the list
+ * shows names and approved hosts only. A run sends a secret only to its
+ * approved hosts, and the server enforces them.
  */
 export function SavedSecretsSection() {
   const [secrets, setSecrets] = React.useState<SavedSecret[] | null>(null);

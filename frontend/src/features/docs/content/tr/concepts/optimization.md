@@ -90,7 +90,7 @@ Auto, puanlayıcınızın geri bildirim metnini okur.
 
 | Durumunuz                            | Kullanın                                                                                  |
 | ------------------------------------ | ----------------------------------------------------------------------------------------- |
-| Bir GitHub deposunda kodunuz var     | **Bir depo kullan**. Seçtiğiniz dal veya commit'teki kod başlangıçtır.                    |
+| Bir GitHub, GitLab veya Bitbucket deposunda kodunuz var     | **Bir depo kullan**. Seçtiğiniz dal veya commit'teki kod başlangıçtır.                    |
 | Yalnızca bir göreviniz ve veriniz var | **Yeni depo oluştur**. Skynet ilk çözümü yazar. Bu çözüm başlangıçtır.               |
 
 > [!WARNING]

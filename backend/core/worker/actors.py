@@ -41,6 +41,7 @@ from ..billing.budgets import (
     BudgetUnreconciledError,
     OperationSnapshot,
 )
+from ..billing.signals import BudgetReached
 from ..storage import storage_version
 from ..storage.step_log_store import (
     AGENT_ID_MAX,
@@ -406,13 +407,18 @@ class Run:
         if the reservation committed.
 
         Returns:
-            A reserved slice, or ``None`` when the run is closed, the budget is stopped or the budget cannot give
-            one now.
+            A reserved slice, or ``None`` when the run is closed, the budget is stopped or in-flight holds keep
+            even one slice out now.
+
+        Raises:
+            BudgetReached: When the budget's remaining room cannot cover one slice. This is the run's normal budget
+                stop, with the ledger's message, and not a failure (SKY-914).
         """
         with self._lock:
             if self._closed or self._blocked:
                 return None
             slices = self._lease_slices
+            refusal: ValueError | None = None
             while not self._pool and slices >= 1:
                 if self._retry is None:
                     # A new key for each refused try: a lease key replayed with another slice count is a conflict.
@@ -435,9 +441,14 @@ class Run:
                         error, (BudgetInsufficientError, BudgetInFlightError)
                     ):
                         raise
+                    refusal = error
                     slices //= 2
                 else:
                     self._retry = None
+            if not self._pool and isinstance(refusal, BudgetInsufficientError):
+                # The cap or the wallet has less room than one slice, so the run ends on its budget like any
+                # other capped run. A plain failure here showed a capped run as an internal error (SKY-914).
+                raise BudgetReached(str(refusal)) from refusal
             return self._pool.pop() if self._pool else None
 
     def _reserve(self, lease_key: str, slices: int) -> list[OperationSnapshot]:
@@ -667,6 +678,7 @@ class Agent:
             LeaseExhaustedError: No lease covers the bound, or the budget is blocked (bound_exceeded or
                 funding_lost) or closed (a cancel or a reached limit), or a recovery moved the budget generation or
                 the job's ``execution_generation`` past the run's own; the work did not start.
+            BudgetReached: The budget's remaining room cannot cover a new lease; the work did not start.
             BudgetBoundExceededError: A settle found a spend above its lease bound, and the ledger blocked the
                 budget. From the final settle of the old lease, before a new lease, the work did not start.
                 From the settle after the commit, the work ran and its step is committed.
@@ -822,6 +834,7 @@ class Agent:
 
         Raises:
             LeaseExhaustedError: The run cannot give a new chunk.
+            BudgetReached: The budget's remaining room cannot cover one chunk.
         """
         lease = self._lease
         if lease is not None and not lease.closing and lease.max_cents - lease.spent_cents >= bound:

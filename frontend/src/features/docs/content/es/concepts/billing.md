@@ -22,7 +22,7 @@ La cantidad que eliges es la cantidad que entra en tu saldo. La tarifa de recarg
 
 ## Presupuestos de ejecución
 
-Cada ejecución tiene un límite de gasto. El límite es lo máximo que puede gastar la ejecución. Cubre la configuración y la optimización.
+Cada ejecución tiene un límite de gasto. El límite es lo máximo que puede gastar la ejecución. Cubre la optimización. Las comprobaciones de configuración se pagan con tu saldo. Para contarlas en el límite de las ejecuciones nuevas, desactiva **Cobrar la configuración de mi saldo** en **Ajustes → Optimización**. Los planes continuos siempre cuentan la configuración en el presupuesto del ciclo.
 
 Una ejecución no tiene una estimación de coste antes de empezar. Gasta hasta su límite, se detiene al llegar al presupuesto y conserva su mejor versión. Lee [Ejecuciones](/docs/concepts/runs) para ver cómo decide Skynet cuándo detenerse.
 
@@ -45,7 +45,7 @@ El asistente no te deja continuar cuando el límite está por debajo de esta can
 
 ## Reservas
 
-Antes de que Skynet haga trabajo de pago, reserva una parte del límite de la ejecución. Skynet libera la reserva cuando el trabajo se liquida y cobra solo el coste real.
+Antes de que Skynet haga trabajo de pago, reserva una parte del límite de la ejecución. Skynet libera la reserva cuando el trabajo se liquida y cobra solo el coste real. Las comprobaciones de configuración reservan de tu saldo, salvo que la configuración cuente en el límite.
 
 Cuando un presupuesto ya tiene actividad, la tarjeta **Límite de gasto** del asistente muestra su libro de cuentas:
 
@@ -106,11 +106,11 @@ El código de tu repositorio y tu evaluador se ejecutan en un sandbox. Skynet mi
 2. Cuando el sandbox termina, Skynet cobra el uso final que informa el proveedor del sandbox.
 3. El recargo por uso se aplica al cómputo del sandbox.
 
-El cómputo del sandbox forma parte del límite de gasto de la ejecución, también cuando las llamadas al modelo usan tu propia clave.
+El cómputo del sandbox forma parte del límite de gasto de la ejecución, también cuando las llamadas al modelo usan tu propia clave. El uso del sandbox en las comprobaciones de configuración se paga con tu saldo, salvo que la configuración cuente en el límite.
 
 ## Servicio
 
-Cada llamada al endpoint de servicio de una ejecución terminada se factura por separado. Quien llama paga con su propio saldo. Define `max_cost_cents` en la solicitud para limitar una llamada. Lee [Resultados](/docs/guides/results).
+Cada llamada al endpoint de servicio de una ejecución terminada se factura por separado. Quien llama paga con su propio saldo. Puedes definir `max_cost_cents` en la solicitud para registrar lo máximo que aceptas por una llamada. Tu saldo limita la llamada. Lee [Resultados](/docs/guides/results).
 
 ## Planes
 

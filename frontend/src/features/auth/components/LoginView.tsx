@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { signIn, getProviders, getSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import { CircleNotch, GithubLogo, Fingerprint } from "@/shared/ui/icons";
 import { GoogleMark } from "@/shared/ui/google-mark";
 import {

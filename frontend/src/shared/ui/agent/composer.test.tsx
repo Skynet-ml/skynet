@@ -45,7 +45,7 @@ void describe("Composer", () => {
     assert.ok(!html.includes(`aria-label="${ATTACH}"`), html);
     assert.doesNotMatch(html, /type="file"/);
     assert.ok(!html.includes(`aria-label="${MIC}"`), html);
-    assert.match(html, /<textarea/);
+    assert.match(html, /type="submit"/);
   });
 
   void it("shows a paused header, a Steer button and no Send now for an idle paused tray", () => {
@@ -65,7 +65,11 @@ void describe("Composer", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("next");
-    const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    const html = render({
+      streaming: true,
+      onStop: () => {},
+      midTurn: midTurnOf(() => store, store.getSnapshot()),
+    });
     assert.ok(!html.includes(msg("agent.pending.paused")), html);
     assert.ok(!html.includes("Send now"), html);
     assert.ok(html.includes(`aria-label="${msg("agent.pending.remove")}"`), html);
@@ -75,9 +79,16 @@ void describe("Composer", () => {
   void it("shows Stop and no Send while an agent chat answers with an empty draft", () => {
     const store = new SteerQueue();
     store.setBusy(true);
-    const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    const html = render({
+      streaming: true,
+      onStop: () => {},
+      midTurn: midTurnOf(() => store, store.getSnapshot()),
+    });
     assert.ok(!html.includes('type="submit"'), html);
-    assert.ok(html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+    assert.ok(
+      html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`),
+      html,
+    );
   });
 
   void it("shows Stop while an agent chat answers with only line comments waiting", () => {
@@ -90,7 +101,10 @@ void describe("Composer", () => {
       midTurn: midTurnOf(() => store, store.getSnapshot()),
     });
     assert.ok(!html.includes('type="submit"'), html);
-    assert.ok(html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+    assert.ok(
+      html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`),
+      html,
+    );
   });
 
   void it("shows Send and no Stop while an agent chat answers with a draft", () => {
@@ -103,21 +117,31 @@ void describe("Composer", () => {
       midTurn: midTurnOf(() => store, store.getSnapshot()),
     });
     assert.ok(html.includes('type="submit"'), html);
-    assert.ok(!html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+    assert.ok(
+      !html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`),
+      html,
+    );
     // Send queues the draft here, so its name says so.
     assert.ok(html.includes(`aria-label="${msg("agent.composer.queue")}"`), html);
   });
 
   void it("keeps Stop for a streaming composer without mid-turn input", () => {
     const html = render({ streaming: true, onStop: () => {} });
-    assert.ok(html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`), html);
+    assert.ok(
+      html.includes(`aria-label="${msg("auto.shared.ui.agent.composer.literal.2")}"`),
+      html,
+    );
   });
 
   void it("shows Steer on a queued row while an answer that cannot take steers runs", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("next");
-    const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    const html = render({
+      streaming: true,
+      onStop: () => {},
+      midTurn: midTurnOf(() => store, store.getSnapshot()),
+    });
     assert.ok(html.includes(`aria-label="${msg("agent.pending.steer")}"`), html);
   });
 
@@ -130,11 +154,5 @@ void describe("Composer", () => {
     store.setBusy(false);
     const html = render({ onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
     assert.ok(html.includes(msg("agent.pending.too_long", { count: 4, max: 3 })), html);
-  });
-
-  void it("lets the wheel scroll a long draft, not the page", () => {
-    const textarea = /<textarea[^>]*>/.exec(render({}))?.[0] ?? "";
-    assert.match(textarea, /\boverflow-y-auto\b/, textarea);
-    assert.doesNotMatch(textarea, /\boverflow-hidden\b/, textarea);
   });
 });

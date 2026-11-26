@@ -937,7 +937,7 @@ class RepoWorkspace:
             hidden_paths: The metric files and exploit folder. Only the
                 metric box gets them; a version's edits to them are dropped.
             run_hosts: The ``[run] network`` hosts of the candidate box; empty keeps it offline.
-            run_vcpus: The ``[run] vcpus`` of the candidate box; ``None`` keeps ``spec.vcpus``.
+            run_vcpus: The ``[run] vcpus`` of the setup and candidate boxes; ``None`` keeps ``spec.vcpus``.
             metric_hosts: The ``[metric] network`` hosts of the metric box; empty keeps it offline.
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
             metric_setup: The ``[metric] setup`` command, run once in the metric
@@ -1118,8 +1118,11 @@ class RepoWorkspace:
                 image=self._run_image,
                 user_image=self._run_user_image,
                 operation_key=self._next_key("setup"),
-                services=(),
                 snapshot_id=None,
+                # A candidate box opens from this box's snapshot, and a restore
+                # may keep the snapshot's size, so both take [run] vcpus and the
+                # room for the compose services. No call here starts them (SKY-980).
+                vcpus=self._run_vcpus or self._spec.vcpus,
             )
         )
         try:
@@ -1378,7 +1381,7 @@ class RepoWorkspace:
 
         Args:
             kind: ``candidate`` or ``metric``.
-            vcpus: The role's ``vcpus``; ``None`` keeps the setup's.
+            vcpus: The role's ``vcpus``; ``None`` keeps ``spec.vcpus``.
             services: Whether the box runs the compose services.
 
         Returns:

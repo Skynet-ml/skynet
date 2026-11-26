@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
@@ -265,7 +265,9 @@ export function SetupTour({
             >
               {msg(stop.title)}
             </h2>
-            <p className="text-sm leading-relaxed text-muted-foreground">{msg(stop.body)}</p>
+            {stop.body && (
+              <p className="text-sm leading-relaxed text-muted-foreground">{msg(stop.body)}</p>
+            )}
           </div>
           {children}
           <div className="flex items-center gap-2 pt-1">

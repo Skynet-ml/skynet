@@ -3,6 +3,7 @@ import type {
   BlackboxRunRequest,
   ModelCatalogResponse,
   ModelPrivacySettings,
+  SetupBillingSettings,
   OptimizationPayloadResponse,
   OptimizationSubmissionResponse,
   OptimizationStatusResponse,
@@ -1110,37 +1111,6 @@ export function checkAscentToml(text: string, signal?: AbortSignal) {
   }>("/wizard/ascent-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
 }
 
-export interface PackageRegistryPreference {
-  index_url: string;
-}
-
-export function getPackageRegistry() {
-  return request<PackageRegistryPreference>("/account/package-registry");
-}
-
-export function updatePackageRegistry(indexUrl: string) {
-  return request<PackageRegistryPreference>("/account/package-registry", {
-    method: "PUT",
-    body: JSON.stringify({ index_url: indexUrl }),
-  });
-}
-
-export interface PackageRegistryCheckResult {
-  ok: boolean;
-  /** Stable outcome slug the UI maps to a message (e.g. "healthy", "not_an_index"). */
-  reason: string;
-  /** HTTP status of the probe, when a response arrived — names the exact failure. */
-  status_code: number | null;
-}
-
-/** Probe a candidate index for reachability without persisting it. */
-export function checkPackageRegistry(indexUrl: string) {
-  return request<PackageRegistryCheckResult>("/account/package-registry/check", {
-    method: "POST",
-    body: JSON.stringify({ index_url: indexUrl }),
-  });
-}
-
 export type NotificationEventType =
   | "budget_near"
   | "failed"
@@ -1499,6 +1469,19 @@ export function getModelPrivacy() {
 /** Persist the caller's model data-privacy policy. */
 export function updateModelPrivacy(settings: ModelPrivacySettings) {
   return request<ModelPrivacySettings>("/account/model-privacy", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
+/** Fetch whether the caller's new runs bill setup checks to the balance only. */
+export function getSetupBilling() {
+  return request<SetupBillingSettings>("/account/setup-billing");
+}
+
+/** Persist whether the caller's new runs bill setup checks to the balance only. */
+export function updateSetupBilling(settings: SetupBillingSettings) {
+  return request<SetupBillingSettings>("/account/setup-billing", {
     method: "PUT",
     body: JSON.stringify(settings),
   });
@@ -2137,9 +2120,9 @@ export interface CreatedGithubRepository {
   commit: string;
 }
 
-/** Create a repository in the linked GitHub account and push its first commit. */
-export function createGithubRepository(body: CreateGithubRepositoryRequest) {
-  return request<CreatedGithubRepository>("/connectors/github/repos", {
+/** Create a repository in the linked host account and push its first commit. */
+export function createGithubRepository(body: CreateGithubRepositoryRequest, host: RepoHost = "github") {
+  return request<CreatedGithubRepository>(`/connectors/${host}/repos`, {
     method: "POST",
     body: JSON.stringify(body),
   });

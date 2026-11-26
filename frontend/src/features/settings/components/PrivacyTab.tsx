@@ -15,6 +15,8 @@ import {
   Eraser,
   Feather,
   FileText,
+  Globe,
+  Lock,
   Package,
   ShieldCheck,
   Stack,
@@ -74,16 +76,22 @@ const MODEL_POLICY_KEYS = {
   allow: {
     label: "settings.model_privacy.allow.label",
     description: "settings.model_privacy.allow.description",
+    icon: Globe,
   },
   deny: {
     label: "settings.model_privacy.deny.label",
     description: "settings.model_privacy.deny.description",
+    icon: ShieldCheck,
   },
   zdr: {
     label: "settings.model_privacy.zdr.label",
     description: "settings.model_privacy.zdr.description",
+    icon: Lock,
   },
-} as const satisfies Record<ModelDataPolicy, { label: MessageKey; description: MessageKey }>;
+} as const satisfies Record<
+  ModelDataPolicy,
+  { label: MessageKey; description: MessageKey; icon: React.ComponentType<{ className?: string }> }
+>;
 
 /** A monospace value with the app-standard animated copy button. */
 function CopyValueRow({
@@ -207,12 +215,17 @@ export function PrivacyTab() {
   const modelPolicyDisabled = signedOut || modelPolicy === null || modelPolicySaving;
   const modelPolicyOptions: Array<SegmentedOption<ModelDataPolicy>> = (
     Object.keys(MODEL_POLICY_KEYS) as ModelDataPolicy[]
-  ).map((policy) => ({
-    value: policy,
-    label: msg(MODEL_POLICY_KEYS[policy].label),
-    tip: msg(MODEL_POLICY_KEYS[policy].description),
-    disabled: modelPolicyDisabled,
-  }));
+  ).map((policy) => {
+    const { label, description, icon: PolicyIcon } = MODEL_POLICY_KEYS[policy];
+    return {
+      value: policy,
+      label: msg(label),
+      icon: <PolicyIcon className="size-4" aria-hidden="true" />,
+      // Icon-only, so the tip names the option before it explains it.
+      tip: `${msg(label)}: ${msg(description)}`,
+      disabled: modelPolicyDisabled,
+    };
+  });
 
   const handleClearCache = React.useCallback(() => {
     invalidateCache();
@@ -312,12 +325,10 @@ export function PrivacyTab() {
               options={modelPolicyOptions}
               label={msg("settings.model_privacy.label")}
               size="sm"
-              className="w-full sm:w-auto"
+              iconOnly
+              segmentClassName="px-4"
+              className="w-auto"
             />
-            <p className="text-xs text-muted-foreground/80" aria-live="polite">
-              {modelPolicy ? msg(MODEL_POLICY_KEYS[modelPolicy].description) : null}{" "}
-              {msg("settings.model_privacy.byok_note")}
-            </p>
           </div>
         </div>
       </div>

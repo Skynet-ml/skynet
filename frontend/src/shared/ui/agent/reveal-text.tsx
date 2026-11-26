@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { PresenceContext, motion, useReducedMotion } from "framer-motion";
+import { PresenceContext, motion, useReducedMotion } from "motion/react";
 
 const WORD_STAGGER_S = 0.035;
 const MAX_REVEAL_DELAY_S = 1;

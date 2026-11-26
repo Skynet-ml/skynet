@@ -223,6 +223,17 @@ def test_a_run_deadline_caps_only_the_guest_so_the_scorer_outlives_it() -> None:
     assert staging_seconds + guest < scorer
 
 
+def test_a_parent_box_opens_with_the_vcpus_of_its_own_spec() -> None:
+    """A contract's [run] vcpus sizes the candidate box; a guest box keeps the broker's size (SKY-980)."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120, vcpus=8)
+    parent = broker.parent_runtime(())
+    parent.open(SandboxSpec(lifetime_seconds=60, vcpus=4, operation_key="candidate"))
+    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="setup"))
+    broker.handle("open", _open_payload())
+    assert [spec.vcpus for spec in runtime.specs] == [4, 2, 8]
+
+
 def test_a_guest_lifetime_cannot_exceed_the_profile() -> None:
     """A guest lifetime above the broker maximum is refused, so a deadline only shortens boxes."""
     with pytest.raises(ServiceError, match="duration"):

@@ -49,3 +49,8 @@ test("reads the part of the cost that a compaction took", () => {
   assert.equal(parseTurnStats({ cents: 3, compaction_cents: 1 })?.compactionCents, 1);
   assert.equal(parseTurnStats({ cents: 3 })?.compactionCents, undefined);
 });
+
+test("reads when the final answer started, and leaves it out when absent", () => {
+  assert.equal(parseTurnStats({ final_answer_at: 1_700_000_000_000 })?.finalAnswerAt, 1_700_000_000_000);
+  assert.equal("finalAnswerAt" in parseTurnStats({ ttft_ms: 5 })!, false);
+});

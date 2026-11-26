@@ -443,6 +443,7 @@
     "agent_settings.not_writable": "אי אפשר לשנות את {key} מהצ'אט. שנו את ההגדרה בלשונית {tab}.",
     "agent_settings.missing_target": "הפעולה {action} צריכה יעד.",
     "agent_settings.invalid_page": "הדף הזה לא קיים באפליקציה.",
+    "agent_settings.missing_page": "ציינו נתיב באפליקציה, כמו /submit, או לשונית הגדרות.",
     "hosted_link.failed": "האתר של {term.appName} לא אישר את הקישור. התחילו את הקישור שוב.",
     "hosted_link.unreachable": "אפליקציית ה-Mac לא מצליחה להתחבר לאתר של {term.appName}. בדקו את החיבור ונסו שוב.",
     "hosted_link.revoked": "ה-Mac הזה כבר לא מקושר לחשבון {term.appName} שלכם. קשרו אותו שוב כדי להמשיך.",

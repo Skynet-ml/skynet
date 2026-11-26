@@ -17,6 +17,7 @@ from ..api.errors import DomainError
 from ..config import settings
 from .base import Credential, Entry, range_header
 from .github import REPO_NAME, clean_file_path
+from .github_create_repo import RepoCreateError
 from .github_publish import HardeningSummary, PublishedChange, RepoPublishError, hardening_line
 from .github_repo import COMMIT_LIMIT, RepoFetchError, RepoRateLimitError, commit_summary, rate_limit_message
 from .gitlab import display_file, has_dot_segment, matches_search, repo_path, search_words
@@ -513,6 +514,125 @@ def read_repo_file(token: str | None, full_name: str, ref: str, path: str, max_b
     """
     clean = clean_file_path(path)
     return display_file(clean, file_at(token, full_name, ref, clean, max_bytes))
+
+
+def _repository_exists(token: str, url: str, name: str) -> bool:
+    """Report whether a repository already exists at ``url``.
+
+    Args:
+        token: Bitbucket token.
+        url: API URL of the repository.
+        name: Repository name, for the message.
+
+    Returns:
+        Whether it exists.
+
+    Raises:
+        RepoCreateError: When Bitbucket fails with anything but 404, so an
+            outage never looks like a free name.
+    """
+    try:
+        get_json(url, provider=PROVIDER, headers=_headers(token))
+    except DomainError as error:
+        if error.code == "connectors.not_found":
+            return False
+        raise RepoCreateError(f"Could not check Bitbucket for a repository named '{name}'. Retry later.") from error
+    return True
+
+
+def _admin_workspace(token: str, username: str, refused: str) -> str:
+    """Pick the workspace a new repository goes into.
+
+    Not every account has a personal workspace named after the user, so the
+    choice comes from the workspaces the user administers. The personal one
+    wins when it is among them.
+
+    Args:
+        token: Bitbucket token.
+        username: The account's username.
+        refused: Message for a failed lookup.
+
+    Returns:
+        The workspace slug.
+
+    Raises:
+        RepoCreateError: When the lookup fails or the user administers no workspace.
+    """
+    try:
+        page = get_json(
+            f"{API_URL}/user/workspaces",
+            provider=PROVIDER,
+            headers=_headers(token),
+            params={"administrator": "true", "pagelen": 100},
+        )
+    except DomainError as error:
+        raise RepoCreateError(refused) from error
+    values = page.get("values") if isinstance(page, dict) else None
+    slugs = [
+        value["workspace"]["slug"]
+        for value in values or []
+        if isinstance(value, dict)
+        and isinstance(value.get("workspace"), dict)
+        and isinstance(value["workspace"].get("slug"), str)
+    ]
+    if username in slugs:
+        return username
+    if not slugs:
+        raise RepoCreateError("Your Bitbucket account is not an admin of any workspace. Create one and retry.")
+    return slugs[0]
+
+
+def create_repository(token: str, name: str, *, private: bool, description: str | None = None) -> tuple[str, str]:
+    """Create an empty repository in a Bitbucket workspace the user administers.
+
+    Bitbucket needs the ``repository:admin`` permission on the OAuth consumer
+    for this call. A token granted before the consumer had it gets 403, which
+    asks the user to connect Bitbucket again.
+
+    Args:
+        token: Bitbucket token with ``repository:admin``.
+        name: Repository name; its lowercase form is the slug.
+        private: Whether only the user can see the repository.
+        description: Optional one-line description.
+
+    Returns:
+        The ``workspace/slug`` and the main branch Bitbucket chose.
+
+    Raises:
+        RepoCreateError: When the name is taken or Bitbucket refuses the request.
+    """
+    refused = "Bitbucket refused to create the repository. Connect Bitbucket again and retry."
+    try:
+        account = get_json(f"{API_URL}/user", provider=PROVIDER, headers=_headers(token))
+    except DomainError as error:
+        raise RepoCreateError(refused) from error
+    username = account.get("username") if isinstance(account, dict) else None
+    if not isinstance(username, str) or not username:
+        raise RepoCreateError(refused)
+    workspace = _admin_workspace(token, username, refused)
+    try:
+        url = _repo_url(f"{workspace}/{name.lower()}")
+    except DomainError as error:
+        raise RepoCreateError(f"Bitbucket does not accept '{name}' as a repository name here.") from error
+    fields: dict[str, object] = {"scm": "git", "name": name, "is_private": private}
+    if description:
+        fields["description"] = description
+    try:
+        response = request("POST", url, provider=PROVIDER, headers=_headers(token), json=fields)
+    except DomainError as error:
+        # Bitbucket answers 400 both for a taken slug and for an invalid name or visibility.
+        if error.params.get("status_code") == 400:
+            if _repository_exists(token, url, name):
+                raise RepoCreateError(
+                    f"Your Bitbucket account already has a repository named '{name}'. Choose another name."
+                ) from error
+            raise RepoCreateError(f"Bitbucket does not accept '{name}' as a repository name here.") from error
+        raise RepoCreateError(refused) from error
+    created = response.json()
+    main = created.get("mainbranch")
+    branch = main.get("name") if isinstance(main, dict) else None
+    # An empty repository has no main branch yet; the first push then sets it.
+    return str(created["full_name"]), str(branch or "main")
 
 
 def resolve_commit(token: str, repository: str, branch: str | None) -> str:

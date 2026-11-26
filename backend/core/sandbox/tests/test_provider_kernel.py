@@ -8,12 +8,20 @@ import contextlib
 import itertools
 import json
 import shlex
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
+from core.billing.budgets import BudgetService
+from core.billing.runtime import BudgetRuntime, UsagePendingError
+from core.config import settings
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
@@ -22,6 +30,7 @@ from core.sandbox.pacing import ProviderAtCapacityError
 from core.sandbox.providers import kernel
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
 
 pytest.importorskip("kernel", reason="The kernel extra is not installed.")
 
@@ -85,7 +94,36 @@ class FakeBrowser:
         self.cdp_ws_url = cdp_ws_url
         self.webdriver_ws_url = f"wss://wd.example.invalid/{session_id}"
         self.base_url = f"https://base.example.invalid/{session_id}"
+        self.headless = options.get("headless")
+        self.gpu = False
+        self.memory = options.get("memory", "8GiB")
+        self.timeout_seconds = options.get("timeout_seconds")
         self.files: dict[str, bytes] = {}
+
+
+class FakeDetails:
+    """Act as the SDK details of a deleted browser."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        """Keep the details.
+
+        Args:
+            data: The JSON form of the details.
+        """
+        self.data = data
+        self.deleted_at = data.get("deleted_at")
+
+    def to_dict(self, *, mode: str) -> dict[str, Any]:
+        """Return the details as JSON data.
+
+        Args:
+            mode: The SDK dump mode.
+
+        Returns:
+            The details.
+        """
+        assert mode == "json"
+        return dict(self.data)
 
 
 class FakeResponse:
@@ -142,6 +180,14 @@ class FakeState:
     exec_responses: ClassVar[list[Any]] = []
     spawns: ClassVar[list[dict[str, Any]]] = []
     deleted: ClassVar[list[str]] = []
+    retrieves: ClassVar[list[str]] = []
+    retrieve_errors: ClassVar[list[BaseException]] = []
+    delete_errors: ClassVar[list[BaseException]] = []
+    list_error: ClassVar[BaseException | None] = None
+    # Act as a stale list that does not show the live browsers yet.
+    list_hidden: ClassVar[bool] = False
+    usage_statuses: ClassVar[list[str]] = []
+    uptime_ms: ClassVar[int] = 60_000
     closed: ClassVar[int] = 0
     # The real list pages by offset; a small page shows any skip.
     page_size: ClassVar[int] = 3
@@ -161,6 +207,13 @@ class FakeState:
         cls.exec_responses = []
         cls.spawns = []
         cls.deleted = []
+        cls.retrieves = []
+        cls.retrieve_errors = []
+        cls.delete_errors = []
+        cls.list_error = None
+        cls.list_hidden = False
+        cls.usage_statuses = []
+        cls.uptime_ms = 60_000
         cls.closed = 0
 
     @classmethod
@@ -340,7 +393,14 @@ class FakeBrowsers:
 
         Yields:
             Each match.
+
+        Raises:
+            BaseException: The scripted list error.
         """
+        if FakeState.list_error is not None:
+            raise FakeState.list_error
+        if FakeState.list_hidden:
+            return
         offset = 0
         while True:
             matches = [
@@ -362,11 +422,41 @@ class FakeBrowsers:
             session_id: The browser id.
 
         Raises:
+            Exception: The next scripted delete error.
             NotFoundError: The browser does not exist.
         """
+        if FakeState.delete_errors:
+            raise FakeState.delete_errors.pop(0)
         if FakeState.browsers.pop(session_id, None) is None:
             raise _status_error(kernel.NotFoundError, 404)
         FakeState.deleted.append(session_id)
+
+    async def retrieve(self, session_id: str, *, include_deleted: bool) -> FakeDetails:
+        """Return the details of a deleted browser, or raise the next scripted error.
+
+        Args:
+            session_id: The browser id.
+            include_deleted: Must be True to read a deleted browser.
+
+        Returns:
+            The details with the usage report.
+
+        Raises:
+            BaseException: The next scripted read error.
+        """
+        assert include_deleted is True
+        FakeState.retrieves.append(session_id)
+        if FakeState.retrieve_errors:
+            raise FakeState.retrieve_errors.pop(0)
+        status = FakeState.usage_statuses.pop(0) if FakeState.usage_statuses else "ready"
+        return FakeDetails(
+            {
+                "session_id": session_id,
+                "deleted_at": None if session_id in FakeState.browsers else "2026-11-24T00:05:00Z",
+                "usage_status": status,
+                "usage": {"uptime_ms": FakeState.uptime_ms},
+            }
+        )
 
 
 class FakeKernel:
@@ -447,14 +537,14 @@ def test_capabilities_reject_more_than_eight_vcpus() -> None:
 async def test_create_turns_off_sdk_retries_and_sends_the_spec() -> None:
     """Send max_retries=0, a headful browser, the tags and the clamped timeout."""
     spec = _spec(name="box-a", tags={JOB_TAG: "job-1"}, env={"A": "1"})
-    async with kernel.KernelEnvironment(spec):
+    async with kernel.KernelEnvironment(spec) as env:
         pass
     assert FakeState.clients[0]["max_retries"] == 0
     (call,) = FakeState.create_calls
     assert call["headless"] is False
     assert call["name"] == "box-a"
     assert call["timeout_seconds"] == 300
-    assert call["tags"] == {JOB_TAG: "job-1", kernel.BOX_TAG: "box-a"}
+    assert call["tags"] == {JOB_TAG: "job-1", kernel.BOX_TAG: env._box_tag}
     assert "memory" not in call
 
 
@@ -677,10 +767,10 @@ async def test_stop_sweeps_other_browsers_with_the_box_tag() -> None:
     """Delete the known browser and any other browser with the same box tag."""
     env = kernel.KernelEnvironment(_spec(name="box-b"))
     await env.start()
-    FakeState.new_browser({"name": "box-b", "tags": {kernel.BOX_TAG: "box-b"}})
-    FakeState.new_browser({"name": "keep", "tags": {kernel.BOX_TAG: "keep"}})
+    FakeState.new_browser({"name": "box-b", "tags": {kernel.BOX_TAG: env._box_tag}})
+    FakeState.new_browser({"name": "box-b", "tags": {kernel.BOX_TAG: "another-box"}})
     await env.stop()
-    assert [b.name for b in FakeState.browsers.values()] == ["keep"]
+    assert len(FakeState.browsers) == 1
     assert len(FakeState.deleted) == 2
     assert FakeState.closed == 1
 
@@ -764,7 +854,7 @@ async def test_stop_sweep_deletes_box_browsers_on_every_page() -> None:
     env = kernel.KernelEnvironment(_spec(name="box-p"))
     await env.start()
     for _ in range(5):
-        FakeState.new_browser({"name": "box-p", "tags": {kernel.BOX_TAG: "box-p"}})
+        FakeState.new_browser({"name": "box-p", "tags": {kernel.BOX_TAG: env._box_tag}})
     await env.stop()
     assert FakeState.browsers == {}
     assert len(FakeState.deleted) == 6
@@ -929,3 +1019,713 @@ async def test_real_sdk_exec_without_timeout_has_no_read_timeout(monkeypatch: py
         limited = server.timeouts["POST /browsers/ses-real/process/exec"]
     assert unlimited["read"] is None
     assert limited["read"] == 5 + kernel.EXEC_HTTP_MARGIN
+
+
+class FakeUsage:
+    """Record the calls that a protected box makes on its usage reservation."""
+
+    def __init__(self, request: dict[str, Any], operation_key: str, billing_error: Exception | None = None) -> None:
+        """Keep the funded request and start with the reserve call.
+
+        Args:
+            request: The usage request that the box reserved.
+            operation_key: The operation key of the box.
+            billing_error: The error that ``settle`` and ``fail`` raise, or ``None``.
+        """
+        self.request = request
+        self.operation_key = operation_key
+        self.billing_error = billing_error
+        self.calls: list[str] = ["reserve"]
+        self.browser: Any = None
+        self.receipt: dict[str, Any] | None = None
+        self.measured_ms: int | None = None
+        self.error: BaseException | None = None
+        self.no_browser: bool | None = None
+
+    def confirm(self, browser: Any) -> None:
+        """Record the confirm call.
+
+        Args:
+            browser: The created browser.
+        """
+        self.calls.append("confirm")
+        self.browser = browser
+
+    def record(self, receipt: dict[str, Any], *, measured_ms: int | None) -> None:
+        """Record the usage evidence.
+
+        Args:
+            receipt: Kernel's details of the deleted browser.
+            measured_ms: The measured wall time.
+        """
+        self.calls.append("record")
+        self.receipt = receipt
+        self.measured_ms = measured_ms
+
+    def settle(self) -> None:
+        """Record the settle call, or raise the scripted error.
+
+        Raises:
+            Exception: The scripted settle error.
+        """
+        self.calls.append("settle")
+        if self.billing_error is not None:
+            raise self.billing_error
+
+    def fail(self, error: BaseException, *, no_browser: bool) -> None:
+        """Record the fail call, or raise the scripted error.
+
+        Args:
+            error: The create failure.
+            no_browser: Whether the tag sweep found no browser.
+
+        Raises:
+            Exception: The scripted billing error.
+        """
+        self.calls.append("fail")
+        self.error = error
+        self.no_browser = no_browser
+        if self.billing_error is not None:
+            raise self.billing_error
+
+    def pending(self) -> None:
+        """Record the pending call."""
+        self.calls.append("pending")
+
+    def release(self, reason: str) -> None:
+        """Record the release call.
+
+        Args:
+            reason: Why the create call did not go out.
+        """
+        self.calls.append("release")
+
+
+def _protected(
+    spec: SandboxSpec | None = None,
+    *,
+    billing_error: Exception | None = None,
+    reserve_delay: float = 0.0,
+    **options: Any,
+) -> tuple[kernel.KernelEnvironment, list[FakeUsage]]:
+    """Return a protected box and the list that collects its usage fakes.
+
+    Args:
+        spec: The spec, or ``None`` for a small spec with an operation key.
+        billing_error: The error that the fake settle and fail raise.
+        reserve_delay: Seconds that the reserve thread blocks.
+        **options: More provider options.
+
+    Returns:
+        The box and the usage list.
+    """
+    usages: list[FakeUsage] = []
+
+    def usage_factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make one recording usage fake.
+
+        Args:
+            budget: The budget runtime.
+            request: The usage request.
+            operation_key: The operation key.
+
+        Returns:
+            The fake.
+        """
+        assert budget == "budget"
+        time.sleep(reserve_delay)
+        usages.append(FakeUsage(request, operation_key, billing_error))
+        return usages[-1]
+
+    env = kernel.KernelEnvironment(
+        spec or _spec(operation_key="box-op"), budget="budget", usage_factory=usage_factory, **options
+    )
+    return env, usages
+
+
+def test_protected_box_is_billable_and_needs_an_operation_key() -> None:
+    """Mark the provider billable, and refuse a protected box with no operation key."""
+    assert kernel.KERNEL_CAPABILITIES.billable is True
+    assert kernel.KernelEnvironment.capabilities.protected is False
+    env, _ = _protected()
+    assert env.capabilities.protected is True
+    with pytest.raises(SandboxSpecError):
+        kernel.KernelEnvironment(_spec(), budget="budget")
+
+
+async def test_protected_box_reserves_confirms_and_settles_on_stop() -> None:
+    """Reserve before the create, confirm after it, and settle from Kernel's report after the delete."""
+    env, usages = _protected(clock=FakeClock())
+    async with env:
+        (usage,) = usages
+        assert usage.calls == ["reserve", "confirm"]
+        assert FakeState.create_calls[0]["memory"] == "8GiB"
+    assert usage.operation_key == "box-op"
+    assert usage.request == {
+        "lifetime_ms": 300_000,
+        "timeout_seconds": 300,
+        "memory_gib": 8,
+        "headless": False,
+        "gpu": False,
+    }
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.receipt is not None
+    assert usage.receipt["usage"] == {"uptime_ms": 60_000}
+    assert usage.measured_ms is not None
+    assert FakeState.retrieves == FakeState.deleted == [usage.browser.session_id]
+
+
+async def test_protected_box_settles_after_a_failed_start() -> None:
+    """Delete the browser and settle when the container setup fails."""
+    FakeState.exec_responses = [FakeResponse(1, "", "no network")]
+    env, usages = _protected(_spec(image="img", operation_key="box-op"))
+    with pytest.raises(SandboxInfraError, match="install"):
+        await env.start()
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+    assert FakeState.browsers == {}
+
+
+async def test_protected_box_settles_after_a_cancelled_start() -> None:
+    """Delete the browser and settle when the caller cancels the start after the create."""
+    entered = asyncio.Event()
+
+    async def hang() -> Any:
+        """Never answer the exec call.
+
+        Returns:
+            Nothing; the call waits until it is cancelled.
+        """
+        entered.set()
+        await asyncio.Event().wait()
+
+    FakeState.exec_responses = [hang]
+    env, usages = _protected(_spec(image="img", operation_key="box-op"))
+    start = asyncio.ensure_future(env.start())
+    await entered.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+    assert FakeState.browsers == {}
+
+
+async def test_stop_during_a_protected_create_fails_the_reservation() -> None:
+    """Pass the reservation to ``fail`` when the stop ends the start before a browser exists."""
+    FakeState.create_delay = 0.05
+    env, usages = _protected()
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.01)
+    await env.stop()
+    with pytest.raises(SandboxInfraError):
+        await start
+    assert usages[0].calls == ["reserve", "fail"]
+    assert usages[0].no_browser is True
+
+
+async def test_cancel_during_the_reserve_releases_the_hold() -> None:
+    """Release the hold when the start is cancelled before the create call goes out."""
+    env, usages = _protected(reserve_delay=0.05)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert FakeState.create_calls == []
+    assert usages[0].calls == ["reserve", "release"]
+
+
+async def test_failed_create_with_one_swept_browser_settles_it() -> None:
+    """Bind and settle the one browser that a failed create left, at the measured time."""
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.leak_on_error = True
+    env, usages = _protected(_spec(name="leaky", operation_key="box-op"))
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.browser.session_id == FakeState.deleted[0]
+    assert usage.measured_ms is not None
+    assert FakeState.browsers == {}
+
+
+async def test_failed_create_with_two_swept_browsers_keeps_the_hold() -> None:
+    """Keep the hold when the sweep finds more than one browser, because the funded one is unknown."""
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.leak_on_error = True
+    env, usages = _protected(_spec(name="twin", operation_key="box-op"))
+    FakeState.new_browser({"name": "twin", "tags": {kernel.BOX_TAG: env._box_tag}})
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    assert usages[0].calls == ["reserve", "fail"]
+    assert usages[0].no_browser is False
+
+
+def test_protected_box_refuses_more_than_the_priced_memory() -> None:
+    """Refuse a protected spec above 8 GiB, because Kernel publishes no price for a larger browser."""
+    with pytest.raises(SandboxSpecError, match="8 GiB"):
+        _protected(_spec(operation_key="box-op", resources=ResourceRequest(cpus=1, memory_mb=8 * 1024 + 1)))
+
+
+async def test_late_stop_of_an_ended_browser_bills_no_extra_time() -> None:
+    """Cap the measured time at the funded lifetime plus one inactivity timeout when Kernel already ended the browser."""
+    FakeState.retrieve_errors = [_status_error(kernel.APIStatusError, 500) for _ in range(40)]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    await env.start()
+    FakeState.browsers.clear()
+    clock.now += 10_000
+    await env.stop()
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.receipt == {}
+    # 300 s funded lifetime + 300 s inactivity timeout + 120 s stop margin.
+    assert usage.measured_ms == 720_000
+
+
+async def test_failed_delete_that_went_through_is_settled() -> None:
+    """Settle the known browser when its delete fails but the finished sweep no longer lists it."""
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    await env.start()
+    clock.now += 30
+    FakeState.browsers.clear()
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    await env.stop()
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.measured_ms == 30_000
+
+
+async def test_stale_list_after_a_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold when the list leaves out a browser that Kernel does not report as deleted."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.list_hidden = True
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+
+
+async def test_not_found_retrieve_after_a_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold when a stale list leaves out the browser and its retrieve raises NotFound."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.list_hidden = True
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.retrieve_errors = [_status_error(kernel.NotFoundError, 404)]
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
+async def test_second_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold and raise from stop when the first delete and the sweep delete both fail."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500) for _ in range(2)]
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
+async def test_failed_list_after_a_failed_delete_keeps_the_hold() -> None:
+    """Keep the hold with no measured time when the sweep list fails after the delete failed."""
+    env, usages = _protected(clock=FakeClock())
+    await env.start()
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.list_error = _status_error(kernel.APIStatusError, 500)
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
+async def test_failed_create_browser_gets_the_measured_time_cap() -> None:
+    """Cap the measured time of a browser that a failed create left, as for a created one."""
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    clock = FakeClock()
+    env, _ = _protected(clock=clock)
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    clock.now += 10_000
+    # 300 s funded lifetime + 300 s inactivity timeout + 120 s stop margin.
+    assert env._measured_ms() == 720_000
+
+
+async def test_measured_time_cap_ignores_float_clock_error() -> None:
+    """Cap a late stop at the integer reservation bound when the clock base is not a whole number."""
+    clock = FakeClock()
+    # At this base, funded end minus create time is 300.0000000000009 s.
+    clock.now = 8184.81
+    env, usages = _protected(clock=clock)
+    async with env:
+        clock.now += 10_000
+    # 300 s funded lifetime + 300 s inactivity timeout + 120 s stop margin.
+    assert usages[0].measured_ms == 720_000
+
+
+async def test_second_start_is_refused() -> None:
+    """Refuse a second start, so no second browser runs on the first reservation."""
+    env, usages = _protected()
+    await env.start()
+    with pytest.raises(SandboxInfraError, match="already started"):
+        await env.start()
+    assert len(FakeState.create_calls) == 1
+    assert len(usages) == 1
+    await env.stop()
+
+
+async def test_job_sweep_counts_an_already_ended_browser_as_gone() -> None:
+    """Count a job browser whose delete finds that Kernel already ended it."""
+    FakeState.new_browser({"name": "job-0", "tags": {JOB_TAG: "job-9"}})
+    FakeState.delete_errors = [_status_error(kernel.NotFoundError, 404)]
+    assert await kernel.KernelEnvironment.stop_job_sandboxes("job-9") == 1
+
+
+async def test_sweep_counts_an_already_ended_browser_as_gone() -> None:
+    """Settle the one swept browser when its delete finds that Kernel already ended it."""
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    FakeState.leak_on_error = True
+    env, usages = _protected()
+    FakeState.delete_errors = [_status_error(kernel.NotFoundError, 404)]
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+    assert usages[0].measured_ms is not None
+
+
+async def test_boxes_with_one_name_do_not_sweep_each_other() -> None:
+    """Keep and leave unbilled the browser of another box that shares ``spec.name``."""
+    other, _ = _protected(_spec(name="same", operation_key="box-a"))
+    await other.start()
+    FakeState.create_errors = [_status_error(kernel.APIStatusError, 500)]
+    env, usages = _protected(_spec(name="same", operation_key="box-b"))
+    with pytest.raises(kernel.APIStatusError):
+        await env.start()
+    assert usages[0].calls == ["reserve", "fail"]
+    assert usages[0].no_browser is True
+    assert len(FakeState.browsers) == 1
+    await other.stop()
+    assert FakeState.browsers == {}
+
+
+async def test_failed_fail_is_raised_from_stop_once() -> None:
+    """Raise a pending-usage error from the stop after a failed create whose fail call also failed."""
+    FakeState.create_errors = [_status_error(kernel.RateLimitError, 429)]
+    env, _ = _protected(billing_error=RuntimeError("database detail"))
+    with pytest.raises(kernel.RateLimitError):
+        await env.start()
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    await env.stop()
+
+
+async def test_protected_box_does_not_wait_for_capacity() -> None:
+    """Fail the start on a capacity answer, so no reservation waits for capacity."""
+    FakeState.create_errors = [_status_error(kernel.RateLimitError, 429)]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    with pytest.raises(kernel.RateLimitError):
+        await env.start()
+    assert len(FakeState.create_calls) == 1
+    assert clock.sleeps == []
+    assert usages[0].calls == ["reserve", "fail"]
+    assert isinstance(usages[0].error, kernel.RateLimitError)
+    assert usages[0].no_browser is True
+
+
+async def test_usage_read_failure_settles_from_the_measured_time() -> None:
+    """Pass an empty report and the measured time when every usage read fails."""
+    FakeState.retrieve_errors = [_status_error(kernel.APIStatusError, 500) for _ in range(40)]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    async with env:
+        clock.now += 42
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.receipt == {}
+    assert usage.measured_ms == 42_000
+    assert len(FakeState.retrieves) == int(kernel.USAGE_WAIT / kernel.USAGE_POLL)
+
+
+def _clock_wait_for(monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> list[tuple[str, float | None]]:
+    """Make ``asyncio.wait_for`` time out on the fake clock, and record each timeout.
+
+    Args:
+        monkeypatch: Replaces ``asyncio.wait_for`` for the test.
+        clock: The fake clock of the box.
+
+    Returns:
+        The coroutine name and the timeout of each call, in order.
+    """
+    calls: list[tuple[str, float | None]] = []
+
+    async def wait_for(awaitable: Any, seconds: float | None) -> Any:
+        """Await the work, then time out when it used more fake time than allowed.
+
+        Args:
+            awaitable: The coroutine to await.
+            seconds: The allowed fake seconds.
+
+        Returns:
+            The result of the work.
+
+        Raises:
+            TimeoutError: The work used up the timeout; the clock stops at the timeout.
+        """
+        calls.append((awaitable.cr_code.co_name, seconds))
+        begin = clock.now
+        result = await awaitable
+        if seconds is not None and clock.now - begin >= seconds:
+            clock.now = begin + seconds
+            raise TimeoutError
+        return result
+
+    monkeypatch.setattr(kernel.asyncio, "wait_for", wait_for)
+    return calls
+
+
+def _reads(calls: list[tuple[str, float | None]], name: str) -> list[float | None]:
+    """Return the timeouts of the recorded calls to one coroutine.
+
+    Args:
+        calls: The recorded calls.
+        name: The coroutine name.
+
+    Returns:
+        The timeouts, in order.
+    """
+    return [timeout for called, timeout in calls if called == name]
+
+
+async def test_slow_usage_reads_stop_at_the_usage_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each slow usage read only the time left, and end all reads at USAGE_WAIT.
+
+    Args:
+        monkeypatch: Replaces the browser read and ``asyncio.wait_for``.
+    """
+    clock = FakeClock()
+    calls = _clock_wait_for(monkeypatch, clock)
+
+    async def slow_retrieve(self: FakeBrowsers, session_id: str, *, include_deleted: bool) -> FakeDetails:
+        """Use up 20 fake seconds and report the usage as not ready.
+
+        Args:
+            self: The fake browsers resource.
+            session_id: The browser id.
+            include_deleted: Must be True to read a deleted browser.
+
+        Returns:
+            Details with a pending usage report.
+        """
+        clock.now += 20
+        return FakeDetails({"session_id": session_id, "usage_status": "pending"})
+
+    monkeypatch.setattr(FakeBrowsers, "retrieve", slow_retrieve)
+    env, usages = _protected(clock=clock)
+    await env.start()
+    start = clock.now
+    await env.stop()
+    # Read 1 gets the full 30 s and uses 20; after one 2 s poll, read 2 gets the 8 s left.
+    assert _reads(calls, "slow_retrieve") == [min(kernel.STOP_TIMEOUT, kernel.USAGE_WAIT), 8]
+    assert clock.now - start <= kernel.USAGE_WAIT
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+
+
+async def test_slow_bucket_wait_stays_inside_the_usage_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound the read bucket wait by the same USAGE_WAIT deadline as the reads.
+
+    Args:
+        monkeypatch: Replaces ``asyncio.wait_for``.
+    """
+    FakeState.usage_statuses = ["pending"] * 5
+    clock = FakeClock()
+    calls = _clock_wait_for(monkeypatch, clock)
+    pacing = _ClockPacing(clock)
+    env, usages = _protected(clock=clock, pacing=pacing)
+    await env.start()
+    pacing.reads.step = 25
+    start = clock.now
+    await env.stop()
+    # Bucket wait 1 uses 25 of 30 s, read 1 gets the 5 s left, and after one
+    # 2 s poll bucket wait 2 hits the deadline, so no second read starts.
+    assert _reads(calls, "_pace_read") == [kernel.USAGE_WAIT, 3]
+    assert _reads(calls, "retrieve") == [5]
+    assert clock.now - start <= kernel.USAGE_WAIT
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+
+
+async def test_delete_check_stays_inside_the_stop_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound the delete check's bucket wait and read by one STOP_TIMEOUT, and keep the hold when it times out.
+
+    Args:
+        monkeypatch: Replaces the browser read and ``asyncio.wait_for``.
+    """
+    clock = FakeClock()
+    calls = _clock_wait_for(monkeypatch, clock)
+
+    async def slow_retrieve(self: FakeBrowsers, session_id: str, *, include_deleted: bool) -> FakeDetails:
+        """Use up 20 fake seconds and report the browser as deleted.
+
+        Args:
+            self: The fake browsers resource.
+            session_id: The browser id.
+            include_deleted: Must be True to read a deleted browser.
+
+        Returns:
+            Details with ``deleted_at``, which the timeout must discard.
+        """
+        clock.now += 20
+        return FakeDetails({"session_id": session_id, "deleted_at": "2026-11-24T00:05:00Z"})
+
+    monkeypatch.setattr(FakeBrowsers, "retrieve", slow_retrieve)
+    pacing = _ClockPacing(clock)
+    env, usages = _protected(clock=clock, pacing=pacing)
+    await env.start()
+    FakeState.list_hidden = True
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    pacing.reads.step = 50
+    start = clock.now
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    # The bucket wait uses 50 of 60 s, so the read gets the 10 s left and times out.
+    assert _reads(calls, "_pace_read") == [kernel.STOP_TIMEOUT]
+    assert _reads(calls, "slow_retrieve") == [kernel.STOP_TIMEOUT - 50]
+    assert clock.now - start <= kernel.STOP_TIMEOUT
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
+async def test_usage_read_waits_for_a_ready_report() -> None:
+    """Read the report again while Kernel still computes the uptime."""
+    FakeState.usage_statuses = ["pending", "ready"]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    async with env:
+        pass
+    assert len(FakeState.retrieves) == 2
+    assert kernel.USAGE_POLL in clock.sleeps
+    assert usages[0].receipt is not None
+    assert usages[0].receipt["usage_status"] == "ready"
+
+
+async def test_settle_failure_is_raised_from_stop_once() -> None:
+    """Raise a pending-usage error from the first stop and return quietly from the next."""
+    env, _ = _protected(billing_error=RuntimeError("database detail"))
+    await env.start()
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    await env.stop()
+
+
+async def test_protected_commands_stop_at_the_funded_end() -> None:
+    """Cap a command at the funded time left and refuse one after the funded end."""
+    clock = FakeClock()
+    env, _ = _protected(clock=clock)
+    async with env:
+        clock.now += 100
+        await env.exec("true", timeout_sec=1000)
+        assert FakeState.execs[-1]["timeout_sec"] == 200
+        clock.now += 200
+        with pytest.raises(SandboxInfraError, match="funded"):
+            await env.exec("true")
+
+
+class _ClockReads:
+    """Move a fake clock forward on each read wait once armed."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        """Keep the clock and start disarmed.
+
+        Args:
+            clock: The fake clock of the box.
+        """
+        self.clock = clock
+        self.step = 0.0
+
+    async def acquire(self) -> None:
+        """Advance the clock by the armed step."""
+        self.clock.now += self.step
+
+
+class _ClockPacing:
+    """Hold a clock-moving read bucket and an open create bucket."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        """Create the buckets.
+
+        Args:
+            clock: The fake clock of the box.
+        """
+        self.reads = _ClockReads(clock)
+        self.creates = _GateBucket()
+
+
+async def test_protected_command_cap_counts_the_read_wait() -> None:
+    """Compute the funded cap after the read wait, so the wait does not extend a command."""
+    clock = FakeClock()
+    pacing = _ClockPacing(clock)
+    env, _ = _protected(clock=clock, pacing=pacing)
+    async with env:
+        pacing.reads.step = 100
+        await env.exec("true", timeout_sec=1000)
+        pacing.reads.step = 0
+        assert FakeState.execs[-1]["timeout_sec"] == 200
+
+
+async def test_stopped_box_cannot_start_again() -> None:
+    """Refuse a start after a stop, so no second browser runs on a settled reservation."""
+    env, usages = _protected()
+    await env.start()
+    await env.stop()
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    assert len(FakeState.create_calls) == 1
+    assert len(usages) == 1
+
+
+async def test_failed_delete_gets_a_second_delete_from_the_sweep() -> None:
+    """Delete the known browser again in the sweep after its first delete fails, then settle it."""
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    await env.start()
+    clock.now += 30
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    await env.stop()
+    usage = usages[0]
+    assert FakeState.browsers == {}
+    assert FakeState.deleted == [usage.browser.session_id]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.measured_ms == 30_000
+
+
+async def test_protected_box_settles_on_a_real_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle a protected box at Kernel's reported uptime through the real adapter and ledger.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite file.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(settings, "usage_markup", 1.0)
+    engine = create_engine(f"sqlite:///{tmp_path / 'kernel.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    runtime = BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    async with kernel.KernelEnvironment(_spec(operation_key="box-op"), budget=runtime, clock=FakeClock()):
+        pass
+    with Session(engine) as session:
+        operation = session.scalar(select(ExecutionOperationModel))
+        assert operation.state == "settled"
+    # 60 s x $0.0001333336/s = $0.0080000160.
+    assert service.get_operation(operation.id, "alice").actual_cents == Decimal("0.80000160")
+    assert runtime._pinned == {}
+    engine.dispose()

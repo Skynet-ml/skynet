@@ -19,10 +19,12 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import re
 import shutil
 import tarfile
 import tempfile
+import time
 import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -35,11 +37,18 @@ import httpx
 import litellm
 from sqlalchemy.engine import Engine
 
-from ..billing.budgets import BudgetService
+from ..billing.budgets import CHUNK_CENTS, BudgetService
 from ..billing.byok_upstreams import resolve_upstream
 from ..billing.data_policy import DEFAULT_DATA_POLICY, DataPolicy, apply_data_policy
 from ..billing.mcp_broker import _pinned_address, _PinnedTransport
-from ..billing.model_dispatch import data_policy_refusal, usage_charge
+from ..billing.model_dispatch import (
+    GENERATION_ID,
+    GENERATION_LOOKUP_DELAYS,
+    data_policy_refusal,
+    lookup_generation,
+    response_usage,
+    usage_charge,
+)
 from ..billing.openrouter_quotes import fetch_endpoint_prices, price_text_request, resolve_model_slug
 from ..billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from ..config import settings
@@ -81,8 +90,6 @@ from .subprocess_runner import run_service_in_subprocess, safe_queue_put
 logger = logging.getLogger(__name__)
 
 LOOP_HOST_KEY = "_loop_host"
-# One lease is one ledger hold. A dollar keeps the ledger calls few, and a stopped run gives back what it held.
-CHUNK_CENTS = 100
 # The bound of one model call must fit in one lease. A reply that costs more stops the loop.
 MODEL_MAX_CENTS = 100
 # The longest that one command or metric box lives.
@@ -91,6 +98,32 @@ STEP_BOX_SECONDS = 900
 _PACK_SECONDS = 300
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
+# A rate limit (429) or a busy service (503) refuses the call before the model runs, and often clears in seconds, so
+# a model call tries again on these answers, unless the body names a generation or reports usage: the model dispatch
+# counts such an answer as billed (see model_dispatch's ``refused``). A 502 or 504 can come after the model ran and
+# the provider billed it, and the lease pays one reply only once, so these answers are final, as all other error
+# answers are.
+_MODEL_RETRY_STATUSES = frozenset({429, 503})
+# These errors come before the request reaches the provider, so the provider cannot bill the try. A read, write or
+# protocol error can come after the provider got the request, so it gets no new try.
+_MODEL_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+# OpenRouter's free models allow some calls each minute, so the waits together pass one minute. With the default
+# stall timeout of 1800 s, a refusal that comes back fast leaves room for all three waits and a last full try in the
+# deadline below.
+_MODEL_BACKOFF_SECONDS = (5.0, 15.0, 40.0)
+_MODEL_RETRIES = len(_MODEL_BACKOFF_SECONDS)
+_MODEL_RETRY_AFTER_CAP_SECONDS = 60.0
+# An epoch reset above this value is in milliseconds, as OpenRouter sends it; below it, the value is in seconds.
+_RESET_MILLISECONDS_ABOVE = 1e11
+# The worker forwards no log of this module, so nothing resets the stall watchdog during a model step. A new try
+# starts only when it can end, at its full timeout, within this fraction of job_stall_timeout_seconds. The rest of the
+# window is for the price read before the first try.
+_MODEL_RETRY_STALL_FRACTION = 0.5
+_PROVIDER_MESSAGE_CHARS = 200
+# Tests replace these, so a retry test does not wait.
+_sleep = time.sleep
+_clock = time.monotonic
+_wall = time.time
 _TREE_ID = re.compile(r"[0-9a-f]{64}")
 _HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 _RETRYABLE_STATUSES = frozenset({408, 424, 429})
@@ -184,18 +217,22 @@ class LeaseModelClient:
             self._client.close()
 
     def __call__(self, prompt: Prompt, tools: list[ToolDefinition] | None) -> ModelReply:
-        """Call the model once.
+        """Call the model.
+
+        A managed or custom endpoint call gets a new try after a rate limit (429), a busy service (503) or a
+        connection error, see :meth:`_post`.
 
         Args:
             prompt: The prompt text, or the chat messages.
             tools: The tool definitions, or ``None`` for no tools.
 
         Returns:
-            The reply, with the provider's cost in ledger cents; 0 for a BYOK call.
+            The reply, with the provider's cost in ledger cents; 0 for a BYOK call. A managed reply that gives
+            no complete cost pays its generation's looked-up bill, or 0 with a warning when no bill is confirmed.
 
         Raises:
-            ServiceError: When a managed or custom endpoint call fails, or a managed reply gives no complete cost.
-                The loop then records a failed call with no cost.
+            ServiceError: When a managed or custom endpoint call fails. The loop then records a failed call with
+                no cost.
             ModelCallBilledError: When a managed reply that gave its cost cannot be read. The loop records a
                 failed call with that cost.
             UnpricedOperationError: When no provider meets the owner's data policy, the model has no verified
@@ -213,14 +250,7 @@ class LeaseModelClient:
         except (httpx.HTTPError, json.JSONDecodeError) as error:
             raise ServiceError(f"The model price read failed: {type(error).__name__}") from error
         body = self._bounded(apply_data_policy(request, self._data_policy), catalog)
-        try:
-            answer = self._client.post(
-                OPENROUTER_CHAT_URL,
-                headers={"Authorization": f"Bearer {self._key}"},
-                json={**body, "usage": {"include": True}},
-            )
-        except httpx.HTTPError as error:
-            raise ServiceError(f"The model call failed: {type(error).__name__}") from error
+        answer = self._post(OPENROUTER_CHAT_URL, {**body, "usage": {"include": True}})
         if answer.status_code == 404 and b"data policy" in answer.content.lower():
             # No provider meets the setting, so every later call fails too: the loop stops with the reason.
             refusal = json.loads(data_policy_refusal(self._model, self._data_policy))
@@ -229,17 +259,48 @@ class LeaseModelClient:
             answer.raise_for_status()
             body = answer.json()
         except (httpx.HTTPError, ValueError) as error:
-            raise ServiceError(f"The model call failed: {type(error).__name__}") from error
-        usd = usage_charge(body.get("usage") or {})
+            raise self._failed(error, answer) from error
+        usd, reason = usage_charge(body.get("usage") or {}), "a complete usage receipt"
         if usd is None:
-            raise ServiceError("The model reply gave no complete cost.")
-        cents = ChargePolicy("managed_model").convert(usd).total
+            usd, reason = self._looked_up_charge(body.get("id"))
+        if usd is not None:
+            cents = ChargePolicy("managed_model").convert(usd).total
+        else:
+            # Skynet absorbs a bill it cannot confirm rather than charge the user an estimate; the warning lets
+            # operators count that gap (Gilad, SKY-914).
+            logger.warning(
+                "A managed model reply (generation %s) gave no complete cost, and the lookup gave %s; "
+                "the call is charged 0 cents.",
+                body.get("id") if GENERATION_ID.fullmatch(str(body.get("id"))) else "unknown",
+                reason,
+            )
+            cents = Decimal(0)
         try:
             message = body["choices"][0]["message"]
             return ModelReply(str(message.get("content") or ""), cents, tool_calls_from_openai(message))
         except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
             # The provider billed the call, so the lease pays its cost even with no reply to read.
             raise ModelCallBilledError(cents) from error
+
+    def _looked_up_charge(self, identity: Any) -> tuple[Decimal | None, str]:
+        """Look up the confirmed bill of a managed reply that gave no complete cost.
+
+        Args:
+            identity: The reply's ``id`` field.
+
+        Returns:
+            The provider's USD charge, or ``None``; and a short reason with no secret or prompt text.
+        """
+        if not isinstance(identity, str) or not GENERATION_ID.fullmatch(identity):
+            return None, "nothing, because the reply has no generation id"
+        found, reason, retry = lookup_generation(self._client, self._key, identity, self._model)
+        # OpenRouter can answer 404 for a short time while it indexes the bill (SKY-657).
+        for delay in GENERATION_LOOKUP_DELAYS:
+            if found is not None or not retry:
+                break
+            time.sleep(delay)
+            found, reason, retry = lookup_generation(self._client, self._key, identity, self._model)
+        return (found[0] if found is not None else None), reason
 
     def _bounded(self, request: Mapping[str, Any], catalog: Mapping[str, Any]) -> dict[str, Any]:
         """Give the request the largest output limit whose price bound fits one call's bound.
@@ -292,15 +353,178 @@ class LeaseModelClient:
             response = litellm.completion(api_key=self._key, api_base=self._api_base, **request)
             message = response.choices[0].message.model_dump()
         else:
+            answer = self._post(self._custom_url, request)
             try:
-                answer = self._client.post(
-                    self._custom_url, headers={"Authorization": f"Bearer {self._key}"}, json=request
-                )
                 answer.raise_for_status()
                 message = answer.json()["choices"][0]["message"]
             except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as error:
-                raise ServiceError(f"The model call failed: {type(error).__name__}") from error
+                raise self._failed(error, answer) from error
         return ModelReply(str(message.get("content") or ""), Decimal(0), tool_calls_from_openai(message))
+
+    def _post(self, url: str, body: Mapping[str, Any]) -> httpx.Response:
+        """Post one model call, and try it again after an answer that a short wait can clear.
+
+        Only an answer that refuses the call before the model runs, or an error before the request reaches the
+        provider, leads to a new try, so a new try never follows a call that the provider billed. A new try starts
+        only when it can end, at its full timeout, within a fraction of the stall watchdog's window. The loop saves
+        the call's step only after this returns, so a resume does not replay a failure that a new try clears.
+
+        Args:
+            url: The chat completions URL.
+            body: The chat request.
+
+        Returns:
+            The first answer that is not a retryable status, or the last retryable answer.
+
+        Raises:
+            ServiceError: When the last try gets no answer, or a try fails with an error that gets no new try.
+        """
+        started = _clock()
+        for attempt in range(_MODEL_RETRIES + 1):
+            answer: httpx.Response | None = None
+            try:
+                answer = self._client.post(url, headers={"Authorization": f"Bearer {self._key}"}, json=body)
+            except _MODEL_RETRY_ERRORS as error:
+                failure: httpx.HTTPError = error
+            except (httpx.HTTPError, ValueError, TypeError) as error:
+                # httpx encodes the JSON body here, and refuses a value such as NaN with a ValueError.
+                raise self._failed(error) from error
+            else:
+                if answer.status_code not in _MODEL_RETRY_STATUSES or _maybe_billed(answer):
+                    return answer
+            if attempt == _MODEL_RETRIES:
+                break
+            wait = _retry_wait(answer, attempt)
+            if _clock() - started + wait + MODEL_TIMEOUT_SECONDS > _retry_deadline():
+                break
+            reason = f"HTTP {answer.status_code}" if answer is not None else type(failure).__name__
+            logger.warning("The model call failed with %s; starting try %d in %.1f s.", reason, attempt + 2, wait)
+            _sleep(wait)
+        if answer is None:
+            raise self._failed(failure) from failure
+        return answer
+
+    def _failed(self, error: Exception, answer: httpx.Response | None = None) -> ServiceError:
+        """Describe a failed model call with its status and the provider's own short message.
+
+        Args:
+            error: The call's error.
+            answer: The provider's answer, when one came back.
+
+        Returns:
+            The error for the loop to record.
+        """
+        text = f"The model call failed: {type(error).__name__}"
+        if answer is None or not answer.is_error:
+            return ServiceError(text)
+        text += f" (HTTP {answer.status_code})"
+        detail = provider_message(answer.content, self._key)
+        if detail:
+            text = f"{text}: {detail}"
+        # The engine loop records only the error's class, so the worker process log is where the provider's reason
+        # shows: the job log does not get this module's records.
+        logger.warning("%s", text)
+        return ServiceError(text)
+
+
+def _maybe_billed(answer: httpx.Response) -> bool:
+    """Tell whether an error answer can follow a billed call, by the model dispatch's rule.
+
+    Args:
+        answer: The provider's answer.
+
+    Returns:
+        ``True`` when the body names a generation or reports usage, or when the body cannot be read.
+    """
+    try:
+        identity, usage = response_usage(answer.content, answer.headers.get("content-type", ""))
+    except ValueError:
+        # An event stream that is not UTF-8 cannot be read, so it can hide a bill, and a new try could bill twice.
+        return True
+    return identity is not None or usage is not None
+
+
+def _retry_deadline() -> float:
+    """Return the time from a call's first try by which its last try must end.
+
+    Returns:
+        A fraction of ``job_stall_timeout_seconds``, or no limit when the stall watchdog is off.
+    """
+    stall = settings.job_stall_timeout_seconds
+    return stall * _MODEL_RETRY_STALL_FRACTION if stall > 0 else float("inf")
+
+
+def _retry_wait(answer: httpx.Response | None, attempt: int) -> float:
+    """Return the wait before the next try of a model call.
+
+    Args:
+        answer: The retryable answer, or ``None`` when no answer came back.
+        attempt: The index of the try that failed, from 0.
+
+    Returns:
+        The provider's numeric ``Retry-After``, or else the time to the rate limit reset in the body, up to their
+        cap; or else the backoff of the try.
+    """
+    asked: float | None = None
+    if answer is not None:
+        try:
+            asked = float(answer.headers["Retry-After"])
+        except (KeyError, ValueError):
+            asked = None
+        if asked is None or not asked >= 0:
+            asked = _rate_limit_reset_wait(answer.content)
+    if asked is not None:
+        return min(asked, _MODEL_RETRY_AFTER_CAP_SECONDS)
+    return _MODEL_BACKOFF_SECONDS[attempt]
+
+
+def _rate_limit_reset_wait(body: bytes) -> float | None:
+    """Return the time until the rate limit resets, from OpenRouter's ``error.metadata.headers`` in the body.
+
+    OpenRouter puts the upstream limit's headers in the 429 body, with ``X-RateLimit-Reset`` as epoch milliseconds,
+    and often sends no ``Retry-After``.
+
+    Args:
+        body: The provider's error answer body.
+
+    Returns:
+        The seconds until the reset, or ``None`` when the body has no usable reset or the reset is past.
+    """
+    try:
+        reset = float(json.loads(body)["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
+    except (ValueError, KeyError, TypeError, OverflowError):
+        return None
+    if not math.isfinite(reset):
+        return None
+    if reset > _RESET_MILLISECONDS_ABOVE:
+        reset /= 1000
+    wait = reset - _wall()
+    return wait if wait > 0 else None
+
+
+def provider_message(body: bytes, secret: str) -> str:
+    """Return the provider's error message from an error answer, short, on one line and with no credential.
+
+    Only ``error.message``, or ``error`` when it is a string, is read: other body text can echo the request, which
+    holds the prompt.
+
+    Args:
+        body: The provider's error answer body.
+        secret: The call's credential, which the message must never show.
+
+    Returns:
+        The message, or an empty string when the body has none.
+    """
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return ""
+    message = error.get("message") if isinstance(error, dict) else error
+    if not isinstance(message, str):
+        return ""
+    if secret:
+        message = message.replace(secret, "[key]")
+    return " ".join(message.split())[:_PROVIDER_MESSAGE_CHARS]
 
 
 def tree_patch(trees: TreeStore, run_id: str, base_tree: str, candidate_tree: str) -> str:

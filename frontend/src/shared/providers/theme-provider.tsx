@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { DirectionProvider } from "@radix-ui/react-direction";
-import { MotionConfig } from "framer-motion";
+import { MotionConfig } from "motion/react";
 import { dirForLocale } from "@/shared/lib/locale";
 import { useLocale } from "@/shared/providers/locale-provider";
 import {
@@ -76,7 +76,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   return (
     <ColorThemeContext.Provider value={colorTheme}>
       <DirectionProvider dir={dirForLocale(locale)}>
-        {/* framer-motion defaults to "never"; "user" honours the OS reduced-motion setting. */}
+        {/* Motion defaults to "never"; "user" honours the OS reduced-motion setting. */}
         <MotionConfig reducedMotion="user">{children}</MotionConfig>
       </DirectionProvider>
     </ColorThemeContext.Provider>

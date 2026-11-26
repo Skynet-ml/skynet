@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { toast } from "react-toastify";
 
-import { CircleNotch, FolderOpen, GithubLogo, Globe, Lock, Plus } from "@/shared/ui/icons";
+import { cn } from "@/shared/lib/utils";
+import { CheckCircle, CircleNotch, FolderOpen, Globe, Lock, Plus } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
 import { Label } from "@/shared/ui/primitives/label";
@@ -35,13 +37,15 @@ import { userErrorMessage } from "@/shared/lib/user-error";
 import type { RepoDraft } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { HostMark, RepoPicker } from "./RepoPicker";
-import { RepoSecretsField } from "./RepoSecretsField";
+import { InfoTip, RepoSecretsField } from "./RepoSecretsField";
 
 /** GitHub's repository-name rule, the same one the create route checks. */
 const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
 /** The commit picker's value for "latest on the branch"; Radix Select items cannot use "". */
 const LATEST = "__latest__";
+// Session key that carries the "Create new" host pick across a sign-in redirect.
+const NEW_HOST_KEY = "skynet.submit.repo-new-host.v1";
 
 /**
  * Monospace for a typed branch or SHA only. An empty field shows its translated
@@ -59,8 +63,8 @@ export interface RepoSeed {
 /**
  * A repository run's target: which GitHub, GitLab or Bitbucket repository, the branch or pinned
  * commit it starts from. The user picks an existing repository or creates
- * a new one seeded with the task; Skynet creates new repositories on GitHub
- * only. The host link lives in Settings; this offers it when it is missing.
+ * a new one on any of the hosts, seeded with the task. The host link lives in
+ * Settings; this offers it when it is missing.
  */
 export function RepoTargetCard({
   repo,
@@ -78,20 +82,42 @@ export function RepoTargetCard({
 }) {
   const t = (key: string) => v2Msg(key, guided);
   const { byProvider, loading } = useConnectors();
-  const host: RepoHost = repo.provider ?? "github";
-  const account = byProvider(host);
-  const linked = account?.connected === true && account.status !== "invalid";
-  // GitHub keeps its own wording, so its flow reads as before.
-  const hostMsg = (githubKey: string, hostKey: string) =>
-    host === "github" ? msg(githubKey as never) : msg(hostKey as never, { host: HOST_NAMES[host] });
+  const isLinked = (target: RepoHost) => {
+    const account = byProvider(target);
+    return account?.connected === true && account.status !== "invalid";
+  };
+  // Nothing is preselected: the user (or the agent, through the draft) picks the
+  // source and then the host. A draft that already names one opens on it.
+  const [source, setSource] = useState<"existing" | "new" | null>(
+    repo.repository || repo.provider ? "existing" : null,
+  );
+  const [hostPicked, setHostPicked] = useState<RepoHost | null>(
+    repo.provider ?? (repo.repository ? "github" : null),
+  );
+  const host: RepoHost = hostPicked ?? "github";
+  const linked = hostPicked !== null && isLinked(hostPicked);
+  const reduceMotion = useReducedMotion();
   const [connecting, setConnecting] = useState(false);
   const [branches, setBranches] = useState<string[]>([]);
   const [commits, setCommits] = useState<RepoCommit[]>([]);
-  const [source, setSource] = useState<"existing" | "new">("existing");
   const [newName, setNewName] = useState("");
   const [isPrivate, setIsPrivate] = useState(true);
   const [creating, setCreating] = useState(false);
   const patch = (next: Partial<RepoDraft>) => onChange({ ...repo, ...next });
+
+  // The draft keeps no host for "Create new", so a sign-in started there saves
+  // the pick and the card reopens on it after the redirect.
+  useEffect(() => {
+    let saved: string | null = null;
+    try {
+      saved = window.sessionStorage.getItem(NEW_HOST_KEY);
+      window.sessionStorage.removeItem(NEW_HOST_KEY);
+    } catch {}
+    const restored = REPO_HOSTS.find((value) => value === saved);
+    if (!restored) return;
+    setSource("new");
+    setHostPicked(restored);
+  }, []);
 
   const repository = repo.repository.trim();
   useEffect(() => {
@@ -133,17 +159,27 @@ export function RepoTargetCard({
       ? [{ sha: repo.commit, title: "", date: null }, ...commits]
       : commits;
 
-  const connect = async () => {
+  // Picking a host that has no linked account starts its sign-in; there is no separate connect card.
+  const connect = async (target: RepoHost) => {
+    if (loading || connecting || isLinked(target)) return;
     setConnecting(true);
     try {
-      const { authorize_url } = await startConnectorOAuth(host);
+      const { authorize_url } = await startConnectorOAuth(target);
       rememberOAuthReturn(`${window.location.pathname}${window.location.search}`);
+      if (source === "new") {
+        try {
+          window.sessionStorage.setItem(NEW_HOST_KEY, target);
+        } catch {}
+      }
       window.location.assign(authorize_url);
     } catch (err) {
       toast.error(
         userErrorMessage(
           err,
-          hostMsg("submit.blackbox.repo.connect_failed", "submit.v2.repo.host.connect_failed"),
+          // GitHub keeps its own wording.
+          target === "github"
+            ? msg("submit.blackbox.repo.connect_failed")
+            : msg("submit.v2.repo.host.connect_failed", { host: HOST_NAMES[target] }),
         ),
       );
       setConnecting(false);
@@ -158,19 +194,24 @@ export function RepoTargetCard({
   const create = async () => {
     setCreating(true);
     try {
-      const created = await createGithubRepository({
-        name,
-        private: isPrivate,
-        objective,
-        scorer_code: seed.scorerCode.trim() ? seed.scorerCode : null,
-        cases: seed.cases.length > 0 ? seed.cases.map((c) => ({ ...c })) : null,
-      });
+      const created = await createGithubRepository(
+        {
+          name,
+          private: isPrivate,
+          objective,
+          scorer_code: seed.scorerCode.trim() ? seed.scorerCode : null,
+          cases: seed.cases.length > 0 ? seed.cases.map((c) => ({ ...c })) : null,
+        },
+        host,
+      );
       patch({
-        provider: "github",
+        provider: host,
         repository: created.full_name,
         branch: created.default_branch,
         commit: "",
-        createdBySkynet: true,
+        // The run pushes candidate branches only to GitHub; on the other hosts it
+        // opens a merge request, as for any repository the user already had.
+        createdBySkynet: host === "github",
       });
       toast.success(v2Msg("submit.v2.repo.new.created", guided, { name: created.full_name }));
       setNewName("");
@@ -183,258 +224,265 @@ export function RepoTargetCard({
   };
 
   return (
-    <div className="flex flex-col gap-5">
-      <Segmented<"existing" | "new">
-        label={t("submit.v2.repo.repository_label")}
-        value={source}
-        onChange={(next) => {
-          setSource(next);
-          // Skynet creates new repositories on GitHub only.
-          if (next === "new" && host !== "github") {
-            onChange({
-              ...repo,
-              provider: "github",
-              repository: "",
-              branch: "",
-              commit: "",
-              createdBySkynet: false,
-            });
-          }
-        }}
-        className="w-full"
-        options={[
-          {
-            value: "existing",
-            label: t("submit.v2.repo.source.existing"),
-            icon: <FolderOpen className="size-3.5" aria-hidden="true" />,
-          },
-          {
-            value: "new",
-            label: t("submit.v2.repo.source.new"),
-            icon: <Plus className="size-3.5" aria-hidden="true" />,
-          },
-        ]}
-      />
-
-      {source === "existing" && (
-        <Segmented<RepoHost>
-          label={t("submit.v2.repo.host_label")}
-          value={host}
-          onChange={(next) =>
-            next !== host &&
-            onChange({
-              ...repo,
-              provider: next,
-              repository: "",
-              branch: "",
-              commit: "",
-              createdBySkynet: false,
-            })
-          }
-          className="w-full"
-          options={REPO_HOSTS.map((value) => ({
-            value,
-            label: HOST_NAMES[value],
-            icon: <HostMark host={value} size={14} className="size-3.5" />,
-          }))}
-        />
-      )}
-
-      {!loading && !linked && (
-        <div className="flex flex-col gap-3 rounded-xl border border-border bg-muted/30 p-4 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-sm text-muted-foreground">
-            {hostMsg("submit.blackbox.repo.connect_hint", "submit.v2.repo.host.connect_hint")}
-          </p>
-          <Button
-            type="button"
-            onClick={() => void connect()}
-            disabled={connecting || account?.oauth_available === false}
-            className="min-h-11 shrink-0 gap-2"
-          >
-            <HostMark host={host} size={16} className="size-4" />
-            {hostMsg("submit.blackbox.repo.connect", "submit.v2.repo.host.connect")}
-          </Button>
-        </div>
-      )}
-
-      {source === "new" ? (
-        <div className="flex flex-col gap-4 rounded-xl border border-border p-4">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="v2-repo-new-name">{t("submit.v2.repo.new.name_label")}</Label>
-            <p className="text-xs text-muted-foreground">{t("submit.v2.repo.new.name_hint")}</p>
-            <Input
-              id="v2-repo-new-name"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="my-optimized-app"
-              autoComplete="off"
-              spellCheck={false}
-              dir="ltr"
-              aria-invalid={nameInvalid}
-              className={`${TOUCH_FIELD} font-mono`}
+    // Before a pick, the two source rows share the height the screen has left,
+    // so they line up with the agent chat beside them. A pick lets them settle
+    // to their content height and makes room for the host picker below.
+    <div className="flex flex-1 flex-col gap-5">
+      <div
+        role="group"
+        aria-label={t("submit.v2.repo.repository_label")}
+        className="flex flex-col gap-3 transition-[flex-grow] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+        style={{ flexGrow: source ? 0 : 1 }}
+      >
+        <SourceCard
+          selected={source === "existing"}
+          onSelect={() => {
+            setSource("existing");
+            setHostPicked(repo.provider ?? (repo.repository ? "github" : null));
+          }}
+          title={t("submit.v2.repo.source.existing")}
+          desc={t("submit.v2.repo.source.existing_desc")}
+          icon={
+            <FolderOpen
+              className="size-5 transition-transform duration-300 ease-out group-hover:-rotate-12 group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
+              aria-hidden="true"
             />
-            {nameInvalid && (
-              <p role="alert" className="text-xs text-destructive">
-                {t("submit.v2.repo.new.name_invalid")}
-              </p>
-            )}
-          </div>
-          <Segmented<"private" | "public">
-            label={t("submit.v2.repo.new.visibility_label")}
-            value={isPrivate ? "private" : "public"}
-            onChange={(value) => setIsPrivate(value === "private")}
-            options={[
-              {
-                value: "private",
-                label: t("submit.v2.repo.new.private"),
-                icon: <Lock className="size-3.5" aria-hidden="true" />,
-              },
-              {
-                value: "public",
-                label: t("submit.v2.repo.new.public"),
-                icon: <Globe className="size-3.5" aria-hidden="true" />,
-              },
-            ]}
+          }
+        />
+        <SourceCard
+          selected={source === "new"}
+          onSelect={() => {
+            setSource("new");
+            // The user picks the host next; picking the card starts no sign-in.
+            setHostPicked(null);
+          }}
+          title={t("submit.v2.repo.source.new")}
+          desc={t("submit.v2.repo.source.new_desc")}
+          icon={
+            <Plus
+              className="size-5 transition-transform duration-300 ease-out group-hover:rotate-90 group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
+              aria-hidden="true"
+            />
+          }
+        />
+      </div>
+
+      {source && (
+        <motion.div
+          key={source}
+          initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
+          className="flex flex-col gap-5"
+        >
+          <Segmented<RepoHost>
+            label={t("submit.v2.repo.host_label")}
+            value={hostPicked}
+            onChange={(next) => {
+              setHostPicked(next);
+              if (source === "existing" && next !== repo.provider)
+                onChange({
+                  ...repo,
+                  provider: next,
+                  repository: "",
+                  branch: "",
+                  commit: "",
+                  createdBySkynet: false,
+                });
+              void connect(next);
+            }}
+            className="w-full"
+            options={REPO_HOSTS.map((value) => ({
+              value,
+              label: HOST_NAMES[value],
+              icon: <HostMark host={value} size={14} className="size-3.5" />,
+              tip: !isLinked(value)
+                ? msg("submit.v2.repo.host.connect", { host: HOST_NAMES[value] })
+                : source === "new"
+                  ? msg("submit.v2.repo.host.create_tip", { host: HOST_NAMES[value] })
+                  : msg("submit.v2.repo.host.pick_tip", { host: HOST_NAMES[value] }),
+            }))}
           />
-          <p className="text-xs text-muted-foreground">
-            {objective ? t("submit.v2.repo.new.seed_hint") : t("submit.v2.repo.new.needs_objective")}
-          </p>
-          <Button
-            type="button"
-            onClick={() => void create()}
-            disabled={!canCreate}
-            className="min-h-11 gap-2 self-start"
-          >
-            {creating ? (
-              <CircleNotch className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-            ) : (
-              <GithubLogo className="size-4" aria-hidden="true" />
-            )}
-            {creating ? t("submit.v2.repo.new.creating") : t("submit.v2.repo.new.create")}
-          </Button>
-        </div>
-      ) : (
-        <>
-          <div className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-foreground">
-              {t("submit.v2.repo.repository_label")}
-            </span>
-            {linked ? (
-              <RepoPicker
-                key={host}
-                host={host}
-                value={repo.repository}
-                onPick={(picked) =>
-                  patch({
-                    repository: picked.full_name,
-                    branch: picked.default_branch ?? "",
-                    commit: "",
-                    createdBySkynet: false,
-                  })
-                }
-              />
-            ) : (
-              <Input
-                id="v2-repo-name"
-                value={repo.repository}
-                onChange={(e) => patch({ repository: e.target.value, createdBySkynet: false })}
-                placeholder="owner/repository"
-                autoComplete="off"
-                spellCheck={false}
-                dir="ltr"
-                className={`${TOUCH_FIELD} font-mono`}
-              />
-            )}
-          </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="v2-repo-branch">{msg("submit.blackbox.repo.branch_label")}</Label>
-              {branchOptions.length > 0 ? (
-                <Select
-                  value={repo.branch}
-                  onValueChange={(next) => patch({ branch: next, commit: "" })}
-                >
-                  <SelectTrigger
-                    id="v2-repo-branch"
-                    dir="ltr"
-                    className={`${TOUCH_FIELD} w-full ${monoWhenSet(repo.branch)}`}
+          {source === "new"
+            ? linked && (
+                <div className="flex flex-col gap-4 rounded-xl border border-border p-4">
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-1">
+                      <Label htmlFor="v2-repo-new-name">{t("submit.v2.repo.new.name_label")}</Label>
+                      {objective && <InfoTip text={t("submit.v2.repo.new.seed_hint")} />}
+                    </div>
+                    <Input
+                      id="v2-repo-new-name"
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      placeholder="my-optimized-app"
+                      autoComplete="off"
+                      spellCheck={false}
+                      dir="ltr"
+                      aria-invalid={nameInvalid}
+                      className={`${TOUCH_FIELD} font-mono`}
+                    />
+                    {nameInvalid && (
+                      <p role="alert" className="text-xs text-destructive">
+                        {t("submit.v2.repo.new.name_invalid")}
+                      </p>
+                    )}
+                  </div>
+                  <Segmented<"private" | "public">
+                    label={t("submit.v2.repo.new.visibility_label")}
+                    value={isPrivate ? "private" : "public"}
+                    onChange={(value) => setIsPrivate(value === "private")}
+                    options={[
+                      {
+                        value: "private",
+                        label: t("submit.v2.repo.new.private"),
+                        icon: <Lock className="size-3.5" aria-hidden="true" />,
+                      },
+                      {
+                        value: "public",
+                        label: t("submit.v2.repo.new.public"),
+                        icon: <Globe className="size-3.5" aria-hidden="true" />,
+                      },
+                    ]}
+                  />
+                  {!objective && (
+                    <p className="text-xs text-muted-foreground">
+                      {t("submit.v2.repo.new.needs_objective")}
+                    </p>
+                  )}
+                  <Button
+                    type="button"
+                    onClick={() => void create()}
+                    disabled={!canCreate}
+                    className="min-h-11 w-full gap-2"
                   >
-                    <SelectValue placeholder={msg("submit.blackbox.repo.branch_default")} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {branchOptions.map((name) => (
-                      <SelectItem key={name} value={name} className="font-mono">
-                        {name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <Input
-                  // Uncontrolled until blur: each patch of another branch drops
-                  // the draft files, so a keystroke must not send one. The key
-                  // resets the field when the branch changes elsewhere.
-                  key={repo.branch}
-                  id="v2-repo-branch"
-                  defaultValue={repo.branch}
-                  onBlur={(e) => {
-                    if (e.target.value !== repo.branch) patch({ branch: e.target.value });
-                  }}
-                  placeholder={msg("submit.blackbox.repo.branch_default")}
-                  autoComplete="off"
-                  spellCheck={false}
-                  dir="ltr"
-                  className={`${TOUCH_FIELD} ${monoWhenSet(repo.branch)}`}
-                />
-              )}
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="v2-repo-commit">{t("submit.v2.repo.commit_label")}</Label>
-              {linked && repository ? (
-                <Select
-                  value={repo.commit || LATEST}
-                  onValueChange={(next) => patch({ commit: next === LATEST ? "" : next })}
-                >
-                  <SelectTrigger id="v2-repo-commit" dir="ltr" className={`${TOUCH_FIELD} w-full`}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="max-w-sm">
-                    <SelectItem value={LATEST}>{t("submit.v2.repo.commit_placeholder")}</SelectItem>
-                    {commitOptions.map((c) => (
-                      <SelectItem key={c.sha} value={c.sha}>
-                        <span className="flex min-w-0 items-center gap-2">
-                          <span className="font-mono text-xs text-muted-foreground">
-                            {c.sha.slice(0, 7)}
-                          </span>
-                          {c.title && <span className="truncate">{c.title}</span>}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <Input
-                  // Uncontrolled until blur, like the branch field above.
-                  key={repo.commit}
-                  id="v2-repo-commit"
-                  defaultValue={repo.commit}
-                  onBlur={(e) => {
-                    if (e.target.value !== repo.commit) patch({ commit: e.target.value });
-                  }}
-                  placeholder={t("submit.v2.repo.commit_placeholder")}
-                  autoComplete="off"
-                  spellCheck={false}
-                  dir="ltr"
-                  className={`${TOUCH_FIELD} ${monoWhenSet(repo.commit)}`}
-                />
-              )}
-            </div>
-          </div>
-        </>
-      )}
+                    {creating ? (
+                      <CircleNotch
+                        className="size-4 animate-spin motion-reduce:animate-none"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <HostMark host={host} size={16} className="size-4" />
+                    )}
+                    {creating ? t("submit.v2.repo.new.creating") : t("submit.v2.repo.new.create")}
+                  </Button>
+                </div>
+              )
+            : // With no host account there is nothing to pick from; branch and
+              // commit wait for a repository.
+              linked && (
+                <>
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-sm font-medium text-foreground">
+                      {t("submit.v2.repo.repository_label")}
+                    </span>
+                    <RepoPicker
+                      key={host}
+                      host={host}
+                      value={repo.repository}
+                      onPick={(picked) =>
+                        patch({
+                          repository: picked.full_name,
+                          branch: picked.default_branch ?? "",
+                          commit: "",
+                          createdBySkynet: false,
+                        })
+                      }
+                    />
+                  </div>
 
-      <RepoSecretsField secrets={repo.secrets ?? []} onChange={(secrets) => patch({ secrets })} t={t} />
+                  {repository && (
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="v2-repo-branch">
+                          {msg("submit.blackbox.repo.branch_label")}
+                        </Label>
+                        {branchOptions.length > 0 ? (
+                          <Select
+                            value={repo.branch}
+                            onValueChange={(next) => patch({ branch: next, commit: "" })}
+                          >
+                            <SelectTrigger
+                              id="v2-repo-branch"
+                              dir="ltr"
+                              className={`${TOUCH_FIELD} w-full ${monoWhenSet(repo.branch)}`}
+                            >
+                              <SelectValue
+                                placeholder={msg("submit.blackbox.repo.branch_default")}
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {branchOptions.map((name) => (
+                                <SelectItem key={name} value={name} className="font-mono">
+                                  {name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <Input
+                            // Uncontrolled until blur: each patch of another branch drops
+                            // the draft files, so a keystroke must not send one. The key
+                            // resets the field when the branch changes elsewhere.
+                            key={repo.branch}
+                            id="v2-repo-branch"
+                            defaultValue={repo.branch}
+                            onBlur={(e) => {
+                              if (e.target.value !== repo.branch) patch({ branch: e.target.value });
+                            }}
+                            placeholder={msg("submit.blackbox.repo.branch_default")}
+                            autoComplete="off"
+                            spellCheck={false}
+                            dir="ltr"
+                            className={`${TOUCH_FIELD} ${monoWhenSet(repo.branch)}`}
+                          />
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="v2-repo-commit">{t("submit.v2.repo.commit_label")}</Label>
+                        <Select
+                          value={repo.commit || LATEST}
+                          onValueChange={(next) => patch({ commit: next === LATEST ? "" : next })}
+                        >
+                          <SelectTrigger
+                            id="v2-repo-commit"
+                            dir="ltr"
+                            className={`${TOUCH_FIELD} w-full`}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="max-w-sm">
+                            <SelectItem value={LATEST}>
+                              {t("submit.v2.repo.commit_placeholder")}
+                            </SelectItem>
+                            {commitOptions.map((c) => (
+                              <SelectItem key={c.sha} value={c.sha}>
+                                <span className="flex min-w-0 items-center gap-2">
+                                  <span className="font-mono text-xs text-muted-foreground">
+                                    {c.sha.slice(0, 7)}
+                                  </span>
+                                  {c.title && <span className="truncate">{c.title}</span>}
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+          {linked && (
+            <RepoSecretsField
+              secrets={repo.secrets ?? []}
+              onChange={(secrets) => patch({ secrets })}
+              t={t}
+            />
+          )}
+        </motion.div>
+      )}
 
       {/* Gilad asked to drop the repository hint (SKY-401); the picker already
           says what to type, and the key still blocks Continue. */}
@@ -444,5 +492,77 @@ export function RepoTargetCard({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * One of the two ways to start: a wide pressable row. Hover lifts it, lights a
+ * glow under the cursor side and animates its icon; the chosen card keeps a primary
+ * border and a check.
+ */
+function SourceCard({
+  selected,
+  onSelect,
+  title,
+  desc,
+  icon,
+}: {
+  selected: boolean;
+  onSelect: () => void;
+  title: string;
+  desc: string;
+  icon: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onSelect}
+      className={cn(
+        "group relative isolate flex min-h-20 flex-1 cursor-pointer items-center gap-4 overflow-hidden rounded-xl border bg-card px-5 py-4 text-start outline-none",
+        "transition-[transform,border-color,box-shadow,background-color] duration-300 ease-out motion-reduce:transition-none",
+        "hover:-translate-y-0.5 hover:shadow-[0_10px_30px_-12px] hover:shadow-primary/40 active:translate-y-0 active:scale-[0.99] motion-reduce:hover:translate-y-0",
+        "focus-visible:ring-[3px] focus-visible:ring-ring/50",
+        selected
+          ? "border-primary bg-primary/5 shadow-[0_0_0_1px] shadow-primary/40"
+          : "border-border hover:border-primary/50",
+      )}
+    >
+      {/* A soft glow that rises from the card's top corner on hover. */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute -top-16 -start-16 -z-10 size-48 rounded-full bg-primary/20 blur-3xl transition-opacity duration-500",
+          selected ? "opacity-70" : "opacity-0 group-hover:opacity-100",
+        )}
+      />
+      {/* A light sweep crosses the card once on hover. */}
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-y-0 -start-1/2 -z-10 w-1/3 -skew-x-12 bg-gradient-to-r from-transparent via-foreground/[0.06] to-transparent opacity-0 transition-[inset-inline-start,opacity] duration-700 ease-out group-hover:start-[120%] group-hover:opacity-100 motion-reduce:hidden"
+      />
+      <span
+        className={cn(
+          "flex size-11 shrink-0 items-center justify-center rounded-lg border transition-colors duration-300",
+          selected
+            ? "border-primary/30 bg-primary text-primary-foreground"
+            : "border-border bg-muted text-muted-foreground group-hover:border-primary/30 group-hover:bg-primary/10 group-hover:text-primary",
+        )}
+      >
+        {icon}
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="text-sm font-semibold text-foreground">{title}</span>
+        <span className="text-xs leading-relaxed text-muted-foreground">{desc}</span>
+      </span>
+      <CheckCircle
+        weight="fill"
+        aria-hidden="true"
+        className={cn(
+          "size-5 shrink-0 text-primary transition-[opacity,transform] duration-300 ease-out motion-reduce:transition-none",
+          selected ? "scale-100 opacity-100" : "scale-50 opacity-0",
+        )}
+      />
+    </button>
   );
 }

@@ -16,8 +16,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import {
-  formatMessageAge,
-  formatMessageDate,
+  messageTimeText,
   minuteClockNow,
   subscribeMinuteClock,
 } from "./message-time";
@@ -204,13 +203,12 @@ export function MessageActions({
   );
 }
 
-/** The secondary "5 minutes ago" beside a message's actions; nothing when unknown. */
+/** The secondary "5m ago" or "3:04 PM" beside a message's actions; nothing when unknown. */
 export function MessageTime({ createdAt }: { createdAt?: number }) {
   const now = React.useSyncExternalStore(subscribeMinuteClock, minuteClockNow, minuteClockNow);
   const locale = getActiveIntlLocale();
-  const label = formatMessageAge(createdAt, now, locale);
-  if (!label) return null;
-  const fullDate = formatMessageDate(createdAt as number, locale);
+  const text = messageTimeText(createdAt, now, locale);
+  if (!text) return null;
   // Its own provider: the user bubble renders it outside the actions row.
   return (
     <TooltipProvider>
@@ -218,7 +216,7 @@ export function MessageTime({ createdAt }: { createdAt?: number }) {
         {/* The hidden text gives screen readers the full date. An explicit undefined
           replaces the aria-describedby that Radix sets while open, so it is not read twice. */}
         <TooltipTrigger asChild aria-describedby={undefined}>
-          {/* dir="auto" keeps "Nov 7" and "5 minutes ago" in order inside an RTL page.
+          {/* dir="auto" keeps "3:04 PM" and "5m ago" in order inside an RTL page.
             Focus opens the tooltip. */}
           <time
             dir="auto"
@@ -226,8 +224,8 @@ export function MessageTime({ createdAt }: { createdAt?: number }) {
             dateTime={new Date(createdAt as number).toISOString()}
             className="rounded-sm px-1 text-xs font-medium tabular-nums text-foreground/70 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           >
-            {label}
-            <span className="sr-only">, {fullDate}</span>
+            {text.label}
+            <span className="sr-only">, {text.spoken}</span>
           </time>
         </TooltipTrigger>
         <TooltipContent
@@ -237,7 +235,7 @@ export function MessageTime({ createdAt }: { createdAt?: number }) {
           dir={getActiveDir()}
           className="max-w-none whitespace-nowrap px-2 py-0.5 text-[11px] leading-4 tabular-nums"
         >
-          {fullDate}
+          {text.tooltip}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
