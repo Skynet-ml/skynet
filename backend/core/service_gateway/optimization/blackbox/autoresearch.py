@@ -674,7 +674,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         assert ctx.put_files is not None
         assert ctx.call_model is not None
         start_used = server.budget.used
-        versions = len(self._ids)
+        swept = len(self._swept)
         self._probed = None
         if self._repo is None:
             quota = self._round_quota(server)
@@ -788,9 +788,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             # version, as it sweeps each repository round's version. A budget too small for the sweep skips it.
             probed = self._probed
             if (
-                len(self._ids) == versions
+                len(self._swept) == swept
                 and probed is not None
-                and probed not in self._ids
+                and probed not in self._swept
                 and server.budget.remaining >= len(self.example_ids)
             ):
                 exhausted = not self._sweep(server, probed) or exhausted
@@ -953,6 +953,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 targets = list(example_ids or self.example_ids)
                 average, info = server.evaluate_examples(candidate, example_ids=targets)
                 if set(targets) == visible:
+                    # A sweep with a crashed case is not a full observation, so ``_ids`` alone would miss it.
+                    self._swept.add(candidate)
                     server.log_progress(average, candidate=candidate)
                 else:
                     self._probed = candidate

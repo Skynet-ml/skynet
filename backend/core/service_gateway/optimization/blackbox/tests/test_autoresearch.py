@@ -534,6 +534,44 @@ def test_a_round_with_a_full_sweep_of_a_new_version_gets_no_extra_sweep(
     assert result.total_evals == 6
 
 
+def test_a_full_sweep_with_a_crashed_case_is_not_swept_again_after_a_probe(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A crashed case keeps a sweep out of the leaderboard, but the round still scored its version in full.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Crash on case ``b``, else score the candidate by its length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            No score on case ``b``, else the length, and no side information.
+        """
+        return (None, {}) if case["id"] == "b" else _score(loop, candidate, case)
+
+    model = _Researcher([_WRITE, _evaluate(), _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, score=score, stop_at_score=None, max_evals=9)
+
+    rounds = result.metadata["rounds"]
+    assert len([data for kind, data in events if kind == PROGRESS_CANDIDATE]) == rounds
+    # Each round spends one sweep of two cases and one probe unit, and no second sweep.
+    assert result.total_evals == 3 * rounds
+
+
 def test_a_refused_sweep_answers_the_marker_and_a_round_with_no_evaluation_ends_the_run(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
