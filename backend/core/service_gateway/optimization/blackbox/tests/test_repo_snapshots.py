@@ -20,15 +20,17 @@ from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelUsageReservation
 from core.exceptions import ServiceError
+from core.sandbox import SandboxSpecError
 from core.sandbox.providers.vercel import box_name
 from core.sandbox.services import ComposeService
 from core.storage.models import Base, BillingCustomerModel
 
-from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError, RepoScorer
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError, RepoScorer, _spec_refused
 from ..repo_workspace import PREPARED_DIR, SERVICES_DIR, WORK_DIR, CandidateBox, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 from ..sandbox_contract import SandboxSession
+from ..sandbox_runtime import AsyncBridgeRuntime
 from .test_repo_scorer import STAGES, _stage_scorer
 from .test_repo_workspace import _ONLINE, _archive, _Box, _patch
 from .test_sandbox_broker import IMAGE, FakeRuntime
@@ -858,6 +860,94 @@ def test_stage_runtime_without_snapshots_opens_no_builder(tmp_path: Path) -> Non
         scorer.close()
     assert len(runtime.specs) == 2
     assert all(spec.snapshot_id is None for spec in runtime.specs)
+
+
+def test_stages_of_different_sizes_open_unpacked_without_a_builder(tmp_path: Path) -> None:
+    """Skip the stage snapshot when the stages ask for different vCPUs (SKY-980).
+
+    A restore may keep the builder box's size, so no stage box starts from a
+    snapshot of another size.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps")
+    stages = {"double": STAGES["double"], "shout": replace(STAGES["shout"], vcpus=4)}
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, stages)
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+    finally:
+        scorer.close()
+    assert not runtime.keys
+    assert sorted(spec.vcpus for spec in runtime.specs) == [2, 4]
+    assert all(spec.snapshot_id is None for spec in runtime.specs)
+
+
+class _SizeLimitRuntime(_StageSnapshotRuntime):
+    """Refuse every box above 2 vCPUs, as the bridged runtime raises a provider's size limit."""
+
+    closed = 0
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Refuse a box above the limit, or open it.
+
+        Args:
+            spec: The requested stage box.
+
+        Returns:
+            The box, when its size fits the limit.
+
+        Raises:
+            ServiceError: When the box asks for more than 2 vCPUs.
+        """
+        if spec.vcpus > 2:
+            self.specs.append(spec)
+            try:
+                raise SandboxSpecError("The test sandbox allows at most 2 vCPUs.")
+            except SandboxSpecError as error:
+                raise ServiceError(f"The sandbox cannot open this request: {error}") from error
+        session = super().open(spec)
+        close = session.close
+
+        def counting_close() -> None:
+            """Count the close, then close the box."""
+            self.closed += 1
+            close()
+
+        session.close = counting_close  # type: ignore[method-assign]
+        return session
+
+
+def test_the_bridged_runtime_raises_a_size_refusal_the_scorer_stops_on() -> None:
+    """Raise a box above the provider's vCPU limit as the spec refusal that stops the score (SKY-980)."""
+    runtime = AsyncBridgeRuntime("docker", image="python:3.12-slim", docker_bin="/nonexistent/docker")
+    with pytest.raises(ServiceError, match="at most 32 vCPUs") as caught:
+        runtime.open(SandboxSpec(lifetime_seconds=60, vcpus=34, network_disabled=True))
+    assert _spec_refused(caught.value)
+
+
+@pytest.mark.parametrize("sizes", [(4, 4), (2, 4)], ids=["builder", "stage-box"])
+def test_a_stage_size_the_provider_refuses_stops_the_score(tmp_path: Path, sizes: tuple[int, int]) -> None:
+    """Raise the provider's size refusal at once, from the snapshot builder or a stage box (SKY-980).
+
+    Args:
+        tmp_path: Scratch folder.
+        sizes: The vCPUs of the two stages; equal sizes build a stage snapshot.
+    """
+    runtime = _SizeLimitRuntime(tmp_path / "stage-snaps")
+    stages = {"double": replace(STAGES["double"], vcpus=sizes[0]), "shout": replace(STAGES["shout"], vcpus=sizes[1])}
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, stages)
+    try:
+        for _ in range(2):
+            with pytest.raises(ServiceError, match="at most 2 vCPUs"):
+                scorer.score("")
+    finally:
+        scorer.close()
+    assert not runtime.keys
+    builders = [spec for spec in runtime.specs if spec.operation_key.startswith("stage:snapshot-")]
+    assert len(builders) == (1 if sizes[0] == sizes[1] else 0)
+    opened = sum(spec.vcpus <= 2 for spec in runtime.specs)
+    assert runtime.closed == opened == (2 if sizes[0] == 2 else 0)
 
 
 @pytest.mark.parametrize("fault", ["open", "open-503", "tree"])

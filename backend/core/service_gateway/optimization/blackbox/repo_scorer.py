@@ -89,6 +89,7 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.usage_tags import LANE_KEY, box_tag, current_tags
+from ....sandbox import SandboxSpecError
 from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
@@ -854,7 +855,10 @@ class RepoScorer:
 
         Raises:
             RepoScoreError: When a stage box cannot open for a reason other
-                than the budget, or cannot lay out the version.
+                than the budget or its spec, or cannot lay out the version.
+            ServiceError: When the provider refuses a stage box's spec, such
+                as its vCPUs. A runtime that is not bridged raises the
+                ``SandboxSpecError`` itself.
             Exception: A temporary provider error from a stage box, raw, only
                 when ``raw_provider_errors`` is set; the stage snapshot stays.
             BudgetReached: When the budget refuses a stage box.
@@ -904,6 +908,8 @@ class RepoScorer:
             Exception: A temporary provider error (``SandboxTransientError``,
                 or a sandbox API 429 or 5xx) from a box open or layout, raw,
                 only when ``raw_provider_errors`` is set.
+            ServiceError: When the provider refuses a stage box's spec. A
+                runtime that is not bridged raises the ``SandboxSpecError`` itself.
             BudgetReached: And the other budget errors, from a stage box.
         """
         evaluation_id = uuid.uuid4().hex
@@ -927,6 +933,8 @@ class RepoScorer:
             # RepoScoreError it would store a lasting failure, and as a
             # _StageSnapshotError it would drop a good snapshot.
             if self.raw_provider_errors and is_temporary_provider_error(error):
+                raise
+            if _spec_refused(error):
                 raise
             logger.warning("Stage boxes did not open: %s", error)
             failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
@@ -1056,14 +1064,21 @@ class RepoScorer:
         then starts from it and only applies the version.
 
         Returns:
-            The snapshot id, or ``None`` when the runtime has no snapshots or
-            the build failed; stage boxes then unpack the tree themselves.
+            The snapshot id, or ``None`` when the runtime has no snapshots, the
+            stages have different vCPUs, or the build failed; stage boxes then
+            unpack the tree themselves.
 
         Raises:
             BudgetReached: And the other budget errors, from the builder box.
+            ServiceError: When the provider refuses the builder box's spec. A
+                runtime that is not bridged raises the ``SandboxSpecError`` itself.
         """
         take = getattr(self._stage_runtime, "snapshot", None)
         if take is None or not getattr(self._stage_runtime, "supports_snapshots", False) or not self._stages:
+            return None
+        if len({stage.vcpus for stage in self._stages.values()}) > 1:
+            # A restore may keep the builder box's size, and the builder has
+            # one stage's size, so stages of different sizes unpack (SKY-980).
             return None
         with self._stage_snapshot_lock:
             if self._stage_snapshot_done:
@@ -1086,6 +1101,10 @@ class RepoScorer:
             except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
                 raise
             except Exception as error:
+                if _spec_refused(error):
+                    # Every later score would refuse the same builder again.
+                    self._stage_snapshot_done = True
+                    raise
                 # Only the type: the provider's text can name the snapshot.
                 logger.warning("The stage snapshot failed (%s); stage boxes unpack the tree", type(error).__name__)
                 self._stage_snapshot_id = None
@@ -1222,6 +1241,23 @@ class RepoScorer:
             raise
         except Exception as error:
             logger.warning("The stage snapshot was not deleted (%s); the run end retries it", type(error).__name__)
+
+
+def _spec_refused(error: BaseException) -> bool:
+    """Return whether the provider refused a stage box's spec, such as its vCPUs.
+
+    No spec refusal depends on the snapshot, so an unpacked box with the same
+    spec fails the same way, and no retry fixes it. The bridged runtime raises
+    it as a ``ServiceError`` from the spec error, so the run stops at once
+    with the provider's limit, as a ``[run]`` or ``[metric]`` box does (SKY-980).
+
+    Args:
+        error: The error from a stage box, or from the builder box and its snapshot.
+
+    Returns:
+        Whether the error is, or comes from, a ``SandboxSpecError``.
+    """
+    return isinstance(error, SandboxSpecError) or isinstance(error.__cause__, SandboxSpecError)
 
 
 def _control_answer(error: BaseException) -> dict[str, Any] | None:

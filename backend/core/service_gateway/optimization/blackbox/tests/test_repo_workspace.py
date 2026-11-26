@@ -35,6 +35,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
+from core.sandbox.services import ComposeService
 
 from .. import repo_tree, repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
@@ -1780,6 +1781,43 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
     assert not candidate.spec.private
     assert metric.spec.private
     assert candidate.spec.operation_key != metric.spec.operation_key
+
+
+def test_the_setup_box_opens_at_the_run_size_of_the_candidate_boxes(tmp_path: Path) -> None:
+    """A candidate box restores the setup snapshot, so the setup box takes ``[run] vcpus`` too (SKY-980)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime, run_vcpus=4, metric_vcpus=2)
+    try:
+        _open(space, "").close()
+    finally:
+        space.close()
+    setup, candidate = runtime.boxes
+    assert (setup.spec.vcpus, candidate.spec.vcpus) == (4, 4)
+
+
+def test_the_setup_box_has_the_room_of_the_compose_services_but_does_not_start_them(tmp_path: Path) -> None:
+    """A provider grows a box by its services, so the setup box asks for them as the candidate box does (SKY-980)."""
+    runtime = _Runtime()
+    services = (ComposeService(name="db", command="sleep 60", cpus=2),)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=replace(_ONLINE, services=services),
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command="true",
+        secrets={},
+        run_vcpus=2,
+    )
+    try:
+        with pytest.raises(RepoSetupError, match="cannot start the repository's compose services"):
+            space.open_candidate("")
+    finally:
+        space.close()
+    setup, candidate = runtime.boxes
+    assert setup.spec.services == candidate.spec.services == services
+    assert setup.spec.vcpus == candidate.spec.vcpus == 2
 
 
 def test_each_role_opens_its_own_user_image_and_the_metric_uses_its_checked_python(tmp_path: Path) -> None:

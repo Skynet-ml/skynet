@@ -282,7 +282,7 @@ class _ParentSandboxRuntime:
         """Open one parent-only box.
 
         Args:
-            spec: Lifetime, operation identity and hosts for the box.
+            spec: Lifetime, vcpus, operation identity and hosts for the box.
 
         Returns:
             The box.
@@ -291,7 +291,7 @@ class _ParentSandboxRuntime:
             ServiceError: When the spec asks for a GPU, or for hosts the run was not funded for.
         """
         if spec.gpu is not None:
-            # The parent's boxes use one fixed runtime profile with no GPU.
+            # The parent's boxes run on the broker's CPU-only provider profile.
             raise ServiceError(f"The parent's box cannot start with GPU type {spec.gpu!r}.")
         if not set(spec.allowed_hosts) <= set(self._allowed_hosts):
             raise ServiceError("The parent's box cannot reach hosts this run was not funded for.")
@@ -373,7 +373,7 @@ class SandboxBroker:
             guest_lifetime_seconds: Largest session a guest-opened box gets, such
                 as a per-run deadline; ``max_lifetime_seconds`` when None. It
                 never exceeds ``max_lifetime_seconds``.
-            vcpus: Fixed allocation selected by the parent.
+            vcpus: Fixed allocation for guest-opened boxes; parent boxes use their own spec.
             tags: Parent-owned job identity used by cleanup and reconciliation.
             command_runner: Optional model mailbox command wrapper.
             parent_command_runner: Mailbox wrapper for the parent's own boxes.
@@ -542,10 +542,10 @@ class SandboxBroker:
         return _ParentSandboxRuntime(self, tuple(sorted(set(allowed_hosts))))
 
     def _open_parent(self, spec: SandboxSpec) -> ParentSandboxSession:
-        """Open a parent-only box on the broker's fixed image and billing.
+        """Open a parent-only box on the broker's billing, sized by its own spec.
 
         Args:
-            spec: Lifetime, operation identity and hosts for the box.
+            spec: Lifetime, vcpus, operation identity and hosts for the box.
 
         Returns:
             The box, closed with the broker if the parent never closes it.
@@ -568,7 +568,10 @@ class SandboxBroker:
                     # A user image replaces the broker's image only through the
                     # runtime, which refuses it when it cannot pull or copy it.
                     image=spec.user_image.reference if spec.user_image is not None else self._image,
-                    vcpus=self._vcpus,
+                    # The parent's own spec sizes its box: the contract's [run],
+                    # [metric] and [target.*] vcpus reach the candidate, metric and
+                    # stage boxes (SKY-980).
+                    vcpus=spec.vcpus,
                     tags=self._tags,
                     network_disabled=not hosts,
                     allowed_hosts=hosts,
