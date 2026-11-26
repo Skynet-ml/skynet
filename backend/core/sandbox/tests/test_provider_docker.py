@@ -318,6 +318,9 @@ async def test_offline_start_runs_a_hardened_box(fake_docker: _FakeDocker) -> No
     for flag in ("--read-only", "--init", "--rm"):
         assert flag in run
     assert run[run.index("--cap-drop") + 1] == "ALL"
+    env_names = [run[index + 1].split("=", 1)[0] for index, item in enumerate(run) if item == "-e"]
+    assert "HOME" in env_names
+    assert "TMPDIR" not in env_names
     labels = {run[index + 1] for index, item in enumerate(run) if item == "--label"}
     assert {"skynet=blackbox", "skynet.job=job-1", "skynet_job=job-1", f"{TEST_LABEL}={TEST_RUN}"} <= labels
     assert env.container_name is not None
