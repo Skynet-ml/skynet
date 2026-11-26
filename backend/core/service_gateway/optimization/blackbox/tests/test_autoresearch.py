@@ -1827,7 +1827,7 @@ def test_the_worker_brief_names_the_evaluate_tool_and_not_eval_sh(tmp_path: Path
     assert "eval.sh" not in brief
     assert "The `evaluate` tool with only a `file` is a **full evaluation**" in brief
     assert "The `evaluate` tool with a `file` and `example_ids` is a **probe**" in brief
-    assert "the engine gives one to the last file that the round probed" in brief
+    assert "the engine gives one to the text of the round's last probe" in brief
     assert "Only `work/` and `notebook.md` carry over" in brief
     assert "is the only memory" not in brief
     assert (

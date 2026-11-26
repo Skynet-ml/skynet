@@ -507,7 +507,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 (
                     "they never enter the leaderboard.",
                     "they never enter the leaderboard. When a round gives no new candidate a full evaluation, the "
-                    "engine gives one to the last file that the round probed, after the session ends.",
+                    "engine gives one to the text of the round's last probe, after the session ends. It skips this "
+                    "when that text already had a full evaluation or the budget cannot pay for one.",
                 )
             )
         return native_engines.adapt(super()._brief(), edits)
