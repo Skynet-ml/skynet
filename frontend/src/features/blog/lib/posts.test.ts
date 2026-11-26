@@ -42,10 +42,14 @@ test("every post has a source, and every figure marker has its HTML", () => {
 test("the essay parses into figures, levers and numbered sources", () => {
   const body = parsePostBody(source(SLUG));
   const figures = body.blocks.filter((block) => block.kind === "figure");
+  // A figure with a caption takes the next number. A figure with no caption takes none.
+  const captioned = figures.filter((f) => f.caption);
+  assert.ok(captioned.length > 0 && captioned.length < figures.length);
   assert.deepEqual(
-    figures.map((f) => f.number),
-    figures.map((_, i) => i + 1),
+    captioned.map((f) => f.number),
+    captioned.map((_, i) => i + 1),
   );
+  for (const f of figures) if (!f.caption) assert.equal(f.number, null, f.id);
   for (const block of body.blocks) {
     if (block.kind === "lever")
       for (const n of block.levers) assert.ok(LEVERS[n - 1], `lever ${n}`);

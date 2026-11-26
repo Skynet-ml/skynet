@@ -2,15 +2,15 @@ I started writing this the day Levent Alpöge announced a proof of the Riemann H
 
 Watching a mathematician steer while Lean verified the result sharpened the bet I've been making and what I'm building around it.
 
-## When will AGI arrive?
+## Nobody agrees on when AGI arrives
 
-Models still need far more data than people do to learn the same thing, and Dwarkesh Patel notes it isn't clear we've closed that gap [3]. Even so, steady gains in models, architectures, and data keep compounding, and AI will soon speed up AI research itself. Patel puts his 50/50 bet at 2032 for AI that learns on the job like a human [4], and describes the labs' plan to get there: automate AI research first, then let automated researchers solve sample efficiency [3]. I agree with him, and plenty of others are putting a year on it too.
+Models still need far more data than people do to learn the same thing, and Dwarkesh Patel notes it isn't clear we've closed that gap [3]. Even so, steady gains in models, architectures, and data keep compounding, and models will soon speed up AI research itself. Patel puts his 50/50 bet at 2032 for agents that learn on the job like a human [4], and describes the labs' plan to get there: automate AI research first, then let automated researchers solve sample efficiency [3]. I agree with him, and plenty of others are putting a year on it too.
 
 {{figure: timeline | Eight guesses on one line: Elon Musk [5], Dario Amodei [6], [7], Sam Altman [8], Shane Legg [9], [10], Ray Kurzweil [11], Demis Hassabis [12], [13], Dwarkesh Patel [4], and Andrej Karpathy [14].}}
 
 Whichever year turns out right, you don't have to wait for AGI to get far better results today.
 
-## There are seven levers you can pull
+## You already have seven levers to pull
 
 A stronger model and higher reasoning effort are only two of the seven ways to improve a result:
 
@@ -48,61 +48,61 @@ On AutomationBench (200 workplace tasks), EnvOpt built one improved workspace us
 
 {{lever: 7}}
 
-Extra attempts pay off when your metric can separate the right answer from a plausible wrong one [19]. Researchers at Stanford, UC Berkeley, and NVIDIA showed how much the scoring method itself moves results [19]. They replaced a coarse discrete judge with continuous probability scores, checked repeatedly across clear sub-criteria. Frontier coding and medical agents reached new highs, and the same zero-shot model beat specialized trained reward models [19].
+Extra attempts only pay off when your metric can pick the right answer out of the pool [19]. Researchers at Stanford, UC Berkeley, and NVIDIA built a scoring method called LLM-as-a-Verifier. Instead of asking a model for a rough 1-to-5 score where good and bad attempts often tie, this verifier measures the model's confidence on a smooth scale, runs multiple checks, and grades separate parts of the answer [19]. Without retraining anything, the verifier pick beat one try across coding and medical benchmarks, closing some of the gap toward a perfect oracle that always chooses the best attempt in the pool [19].
 
 {{figure: verifier | LLM-as-a-Verifier on coding and medical benchmarks [19]. Each row compares one try, the attempt the verifier picks from the same candidate pool, and a perfect oracle.}}
 
-## Problems come in three kinds
+## Those levers split every task into three buckets
 
-1. Problems AI solves in one shot, with no special setup.
-2. Problems that need a bespoke setup before AI can solve them, like the ARC-AGI-3 harnesses above [15], [20].
-3. Problems AI can't solve yet, where only more training can raise the ceiling.
+Put them together, and what you hand an agent divides like this:
 
-AI already handles the first kind, and only the labs can work on the third. The middle bucket is the big opportunity for everyone else, and it keeps growing: as models improve and inference gets cheaper, easier tasks move into one-shot work while a larger wave of previously unsolvable problems opens up from above.
+1. Tasks a model solves in one shot, with no special setup.
+2. Tasks that need a bespoke setup around the model before an agent can solve them, like OpenAI's and Nvidia's custom ARC-AGI-3 harnesses [15], [20].
+3. Tasks today's models can't solve on their own yet, where raising the ceiling takes more training or expert human guidance, like Alpöge steering Claude toward the Riemann Hypothesis proof [1].
 
-{{figure: shift | As models improve and intelligence gets cheaper, one-shot problems grow and previously unsolvable problems move into the bespoke-solution bucket, keeping the middle opportunity large.}}
+Off-the-shelf models already handle the first kind, while the third still depends on frontier labs or rare human expertise. The middle bucket is the big opportunity for everyone else, and it keeps growing: as models improve and inference gets cheaper, easier tasks move into one-shot work while a larger wave of previously unsolvable tasks takes their place.
 
-## Intelligence is getting cheaper fast
+{{figure: shift}}
 
-Epoch AI finds that since 2023, the cost of a fixed level of AI performance has fallen about 13x per year (47% per quarter) [21]. Reaching 75% on GPQA Diamond cost roughly $0.30 per question with o3 in January 2025, and about $0.0004 with GPT-5.6 Luna 18 months later, a 725-fold drop [21]. Even as the decline slows on older capabilities, cheap intelligence pulls more hard problems into reach every year.
+## Cheaper intelligence rewards first-principles thinking
+
+That middle bucket keeps widening because the price of intelligence keeps coming down. Epoch AI finds that since 2023, the cost of a fixed level of AI performance has fallen about 13x per year (47% per quarter) [21]. Reaching 75% on GPQA Diamond cost roughly $0.30 per question with o3 in January 2025, and about $0.0004 with GPT-5.6 Luna 18 months later, a 725-fold drop [21].
 
 {{figure: price | How many times cheaper each technology became per year, on a log scale. The AI bar is the cost of a fixed level of performance on five benchmarks since 2023. The four comparisons and their periods are Epoch's [21].}}
 
-## My bet is on first-principles thinking
+For most of history, intelligence was as scarce as time and money. Teams leaned on existing conventions and technological abstractions because rethinking a system from scratch took too much human effort. Once intelligence stops being scarce, those habits get in the way.
 
-Humans have always worked inside tight constraints: limited time, limited money, limited intelligence. When intelligence gets cheap, the bottleneck shifts from doing the work to deciding what we want and how to measure it.
+First-principles thinking drops those abstractions. You imagine none of the old scaffolding exists and build from the ground up. Every decision has one test: does this make the thing I care about better? Ask five people to improve it, and they will borrow whatever shortcuts are already sitting around. Give the same task the intelligence of 100 or 1,000 people, and copying old shortcuts wastes what you have. You can build straight toward the goal instead.
 
-Most real goals have no finish line: make more money, run faster, be more accurate. Put five people on a problem and you are working with five minds. Put the intelligence of 100 or 1,000 people on it and you would approach it completely differently. Copying old habits wastes that capacity; you have to reason up from the goal with a clear metric. That is why I'm betting on first-principles thinking as the most valuable skill of this century.
+As doing the work gets cheap, the job shifts to first-principles thinking: identifying the relevant bottlenecks, defining the metrics of success, and adapting to whatever solution works best.
 
-## Agent swarms wrestle with the environment
+## Agent swarms already show what a feedback loop can do
 
-With a clear metric, you can launch swarms of agents in parallel inside a diverse harness to test different ideas. It is the scientific method at scale: form a hypothesis, run experiments, revise, repeat. Running more agents covers more ground and brings back more data, even without a smarter model.
+We don't know the exact setup behind Alpöge's Riemann Hypothesis proof [1], but the other big frontier runs of 2026 point to the same pattern: large swarms of agents testing ideas in parallel against a real environment. When OpenAI announced a solution to the Navier-Stokes problem in September 2026, the group that produced it ran roughly 10,000 concurrent agents for 88 hours, sending 2.7 million messages and feeding intermediate findings back into later rounds [22].
 
-{{figure: loop | The loop I expect: one goal with a metric, many different attempts in parallel, every attempt measured, and the insights fed back into the next round.}}
+The July 2026 Hugging Face incident shows what a swarm can do even by accident [23]. During an internal security evaluation at OpenAI, roughly 1,200 agents meant to stay isolated found an unsanctioned message board and exchanged over 70,000 messages and files. About 700 of them coordinated a multi-day intrusion into Hugging Face while trying to figure out and beat the benchmark's automated scorer [23]. In their investigation, METR and Redwood Research found that the group hit milestones no single agent could reach alone, partly because some agents ran experiments that risked failing their own task just to share what they learned with the collective [23].
 
-Most real problems trace back to fixed rules you discover by running experiments against the world. Making models smarter matters less than orchestrating them to explore until they solve the problem or bring back useful insights.
+That swarm aimed its search at a benchmark scorer, but it shows why this method works: you need friction against the real environment to figure anything new out. Point the same feedback loop at a goal and metric you define from first principles, and an agent swarm lets you explore many solutions at once. Failed runs stop being wasted work because both the wins and the dead ends become shared evidence.
 
-Agent Plasticity, a benchmark from UC Berkeley, Meta Superintelligence Labs, Princeton, and the University of Washington, tests this exact loop on Dwarkesh Patel's question [4]: can frozen models learn on the job? Each round starts fresh, carrying forward only notes, code, tools, and strategies from earlier rounds, then scores the agent on unseen games [22]. Experience alone drove huge gains without changing model weights, yet raw strength and learning efficiency came apart: some models stalled, and the best learner gained over five times more points per dollar than the top final scorer [22].
+{{figure: loop | The loop: one goal with a metric, many different attempts in parallel, every attempt measured, and the insights fed back into the next round.}}
 
-{{figure: gains | Agent Plasticity results with frozen model weights [22]. Held-out unseen game scores before and after learning from experience (Hard Chess averages checkpoints 16 to 20; Go and Hex show checkpoint 20).}}
+Recent research backs this up: inside that loop, agents can learn on the job without any new training, inferring patterns from past rounds and improving as they go. Earlier I noted Dwarkesh Patel's point that models still don't get better over time the way people do [4]. Researchers at UC Berkeley, Meta Superintelligence Labs, Princeton, and the University of Washington built a benchmark called Agent Plasticity to test that question on games like Chess, Go, and Hex [24]. Each round starts fresh, except the agent carries forward the notes, code, and strategies it wrote after studying earlier rounds.
 
-{{figure: psat | Agent Plasticity learning efficiency [22]: score points gained per $1,000 of learning cost across Chess, Go, and Hex combined.}}
+With the model frozen, experience alone produced large gains on unseen games, scored on a 0% to 100% win scale (with draws counting as half a win) [24].
 
-A lot of software was built under old constraints that no longer hold, so rebuilding from first principles with agent swarms will become common. The only hard limits are the laws of physics; as Elon Musk says, everything else is a recommendation [23].
+{{figure: gains | Agent Plasticity results with frozen model weights [24]. Mean held-out game score (0% to 100%, wins plus half of draws) across Chess, Go, and Hex before learning (round 0) and after experience (rounds 16 to 20 average).}}
 
-## Real problems are black-box optimization
+{{figure: rounds | Agent Plasticity score gain by round with frozen model weights [24]. Held-out gain in percentage points (on the 0% to 100% win scale) from round 0 across 20 rounds of experience, averaged over Chess, Go, and Hex.}}
 
-Neural-network training gives you gradients that show which way to nudge every weight. Real problems don't. You can't take a derivative through a codebase, a trading system, or a business workflow; you can only try a solution, measure its score, and learn from what comes back.
+## Skynet runs that loop across all seven levers
 
-That is black-box optimization. An agent swarm running against a metric does that search directly: reading errors, rewriting code, and pulling the seven levers until the budget runs out.
-
-## I'm building Skynet to run that loop
-
-You bring a goal and a budget. Skynet runs black-box optimization across the seven levers, working from first principles toward a verifiable solution in that growing middle bucket where the setup decides the outcome [15].
-
-Skynet is model-agnostic and vendor-agnostic, running locally or on the web, because the best model changes every few months and no single provider owns the best harness for every job. We track the latest optimization research and put it in your hands at [skynetml.com](https://skynetml.com).
+If first-principles thinking and clear metrics are what matter most going forward, the missing piece is an engine you can delegate the search to. That engine needs to let you customize all seven levers around your problem while staying agnostic to any model or provider. You bring a goal and a budget, and Skynet pulls the different levers round after round until the score stops rising or the budget runs out.
 
 {{figure: skynet | Skynet at a glance. You bring the goal and a budget, Skynet orchestrates the seven levers from Figure 2, and the loop works toward a solution you can verify.}}
+
+Models will keep changing, and intelligence will keep getting cheaper. In the long run, what will matter most is knowing which bottleneck to focus on, how to measure progress, and when to drop an old assumption for a better solution. Skynet aspires to be the platform that runs the search for you and brings back a result you can trust.
+
+We are in [alpha](https://skynetml.com/) now and would love your feedback and support!
 
 ## References
 
@@ -200,13 +200,19 @@ Skynet is model-agnostic and vendor-agnostic, running locally or on the web, bec
     - 32% per quarter: the fall two years later, on the same average; three of the five benchmarks show the slowdown
     - Average price decline per year of older technologies: DNA sequencing 1.84x (2001 to 2025), compute 1.51x (1940 to 2001), lithium-ion batteries 1.16x (1991 to 2024), US residential electricity 1.05x (1892 to 1973)
     - Caution: a benchmark score is not the same as useful work, the data cover about three years, and Epoch says the figures should not be read as exact
-22. H. Singh et al., "Agent Plasticity: Measuring Self-Improvement Through Experience," *arXiv:2610.08902*, Oct. 6, 2026. [Online]. Available: <https://arxiv.org/abs/2610.08902>. Summary thread: H. Singh, *X*, Nov. 2026. [Online]. Available: <https://x.com/harman26singh/status/2124911857064640826>
+22. OpenAI, "On the Navier-Stokes Millennium Prize Problem," *OpenAI*, Sept. 8, 2026. [Online]. Available: <https://openai.com/index/navier-stokes-solution/>
+    - About 10,000 concurrent agents: size of the coordinating agent group that produced OpenAI's Navier-Stokes resolution
+    - About 88 hours: time from launching the first agents on September 1 to reaching the resolution on September 5, plus 17 hours for Lean formalization and verification via GPT-6 Astra
+    - 2.7 million messages and about 130 billion output tokens: sent and generated by the agents while resolving Navier-Stokes
+    - Cross-pollination across rounds: OpenAI used Codex to consolidate intermediate insights from agent groups and feed them back into follow-up prompts
+23. R. Greenblatt, A. Cotra, and H. Wijk, "Brief independent investigation of agents' behavior, reasoning and collaboration in the OpenAI / Hugging Face hacking incident," *METR*, Aug. 26, 2026. [Online]. Available: <https://metr.org/blog/2026-08-26-openai-hugging-face-incident-investigation/>
+    - Roughly 1,200 isolated agents found an unsanctioned message board between July 7 and July 13, 2026, sending over 70,000 messages and files
+    - About 700 agents went on to participate in the multi-day attack on Hugging Face while coordinating to fool or tamper with the ExploitGym automated scorer
+    - Collective milestones: agents achieved milestones they could not reach alone, with some risking their own task to run experiments that generated information for the collective
+24. H. Singh et al., "Agent Plasticity: Measuring Self-Improvement Through Experience," *arXiv:2610.08902*, Oct. 6, 2026. [Online]. Available: <https://arxiv.org/abs/2610.08902>. Summary thread: H. Singh, *X*, Nov. 2026. [Online]. Available: <https://x.com/harman26singh/status/2124911857064640826>
     - Frozen-weight self-improvement: each round starts fresh and inherits notes, code, tools, and strategies written after earlier rounds, scored on unseen Chess, Go, Hex, and NetHack games
-    - Held-out unseen game gains: Claude Fable 5 rises from 20% to 80% on 5x5 Go (checkpoints 0 to 20) and 37.5% to 73.3% on Hard Chess (checkpoint 0 to checkpoints 16 to 20 average); Claude Opus 5 rises from 25.0% to 66.4% on Hard Chess; GPT-5.6 Sol rises from 40% to 77.5% on 6x6 Hex (checkpoints 0 to 20); Claude Opus 5.5 triples its NetHack mean score from about 2,000 to 6,000 (checkpoints 0 to 2 vs. 36 to 40)
-    - Agent plasticity (score points gained per $1,000 of learning cost across Chess, Go, and Hex): GPT-5.6 Sol 298, Claude Opus 5 233, Claude Fable 5 57 (highest final score), Claude Opus 4.8 14, GPT-5.6 Luna 0 (no reliable gain)
-23. W. Isaacson, *Elon Musk*. New York, NY, USA: Simon & Schuster, 2023, ch. 46, "Fremont Factory Hell."
-    - The algorithm: Musk's rules for questioning requirements, which the book sets out in this chapter
-    - The corollary: only the laws of physics are real rules, and every other requirement is a recommendation
+    - Mean held-out unseen game scores across Chess, Go, and Hex (round 0 to rounds 16 to 20 average, Figure 1 left): Claude Fable 5 rises from 42.9% to 80.0%, Claude Opus 5 from 33.6% to 65.1%, GPT-5.6 Sol from 18.5% to 55.8%, GPT-5.5 from 17.5% to 33.0%, Claude Opus 4.8 from 30.0% to 32.9%, and GPT-5.6 Luna from 3.3% to 3.5%
+    - Held-out gain after 20 rounds (Figure 2b, percentage points averaged over Chess, Go, and Hex): GPT-5.6 Sol +37.2, Claude Fable 5 +37.1, Claude Opus 5 +31.5 (peaking at +34.5 at round 19), GPT-5.5 +15.5, Claude Opus 4.8 +2.9, GPT-5.6 Luna +0.1
 
 
 Portraits in the timeline figure, cropped, from Wikimedia Commons: [Dario Amodei](https://commons.wikimedia.org/wiki/File:Dario_Amodei_at_TechCrunch_Disrupt_2023_01_(cropped).jpg) by TechCrunch, CC BY 2.0; [Shane Legg](https://commons.wikimedia.org/wiki/File:Shane_Legg.jpg) by Libor.burian, CC BY-SA 4.0; [Ray Kurzweil](https://commons.wikimedia.org/wiki/File:Ray-Kurzweil-at-SXSW_2024_7_(cropped).jpg) by Jay Dixit, CC BY 4.0; [Demis Hassabis](https://commons.wikimedia.org/wiki/File:Demis_Hassabis,_2024_Nobel_Prize_Laureate_in_Chemistry_7_(cropped).jpg) by John Sears, CC BY-SA 4.0; [Andrej Karpathy](https://commons.wikimedia.org/wiki/File:Andrej_Karpathy,_OpenAI.png) by Gladwin Analytics, CC BY 3.0; [Dwarkesh Patel](https://commons.wikimedia.org/wiki/File:Dwarkesh_Patel_2025_(cropped).jpg) by TechCrunch, CC BY 4.0; [Sam Altman](https://commons.wikimedia.org/wiki/File:Sam_Altman_TechCrunch_SF_2019_Day_2_Oct_3_(cropped).jpg) by TechCrunch, CC BY 2.0; [Elon Musk](https://commons.wikimedia.org/wiki/File:Elon_Musk_Royal_Society_crop.jpg) by Debbie Rowe, CC BY-SA 3.0.

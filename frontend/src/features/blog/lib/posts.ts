@@ -20,7 +20,7 @@ export const BLOG_POSTS: readonly BlogPost[] = [
     slug: "the-most-valuable-skill-of-this-century",
     title: "The most valuable skill of this century",
     summary:
-      "Six levers beyond the model, why a benchmark score measures the harness too, and why first-principles thinking with a clear metric matters most as intelligence gets cheaper.",
+      "Seven levers, cheaper intelligence, first-principles thinking, and agent-swarm feedback loops.",
     author: "Gilad Morad",
     date: "2026-11-22",
   },

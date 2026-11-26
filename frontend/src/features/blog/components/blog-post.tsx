@@ -68,6 +68,7 @@ function CaptionText({ text }: { text: string }) {
 /**
  * One live essay figure: the dark chart card, wider than the text, with its
  * numbered caption inside the card, so the zoom view carries the caption too.
+ * A figure with no caption has no number and no caption line.
  */
 function Figure({
   block,
@@ -81,19 +82,21 @@ function Figure({
   const label = `fh-${block.id}`;
   return (
     <figure
-      id={`figure-${block.number}`}
+      id={block.number === null ? undefined : `figure-${block.number}`}
       className="bf not-prose my-12 scroll-mt-6"
       aria-labelledby={figure.html.includes(`id="${label}"`) ? label : undefined}
     >
       <div className={zoomable ? "card zoomable" : "card"} id={`fig-${block.id}`}>
         {/* The HTML is the essay's own figure export, a trusted file in this repository. */}
         <div className="contents" dangerouslySetInnerHTML={{ __html: figure.html }} />
-        <figcaption>
-          <b>
-            {POST_WORDS.figure} {block.number}.
-          </b>{" "}
-          <CaptionText text={block.caption} />
-        </figcaption>
+        {block.number !== null && (
+          <figcaption>
+            <b>
+              {POST_WORDS.figure} {block.number}.
+            </b>{" "}
+            <CaptionText text={block.caption} />
+          </figcaption>
+        )}
       </div>
     </figure>
   );

@@ -3,6 +3,7 @@
  *
  * Post-only syntax, on a line of its own:
  * - `{{figure: <id> | <caption>}}` shows live figure <id> from content/<slug>.figures.json with its caption.
+ *   `{{figure: <id>}}` shows the figure with no caption; it takes no figure number.
  * - `{{lever: 1}}` or `{{lever: 2, 4}}` is a heading that names the levers.
  * `## References` starts the numbered source list; a `[n]` in the text links to source n.
  *
@@ -11,7 +12,7 @@
 
 export type PostBlock =
   | { kind: "markdown"; text: string }
-  | { kind: "figure"; id: string; caption: string; number: number }
+  | { kind: "figure"; id: string; caption: string; number: number | null }
   | { kind: "lever"; levers: number[] };
 
 export interface PostReference {
@@ -92,12 +93,13 @@ export function parsePostBody(source: string): PostBody {
     flush();
     const value = marker[2] ?? "";
     if (marker[1] === "figure") {
-      const [id = "", ...caption] = value.split("|");
+      const [id = "", ...rest] = value.split("|");
+      const caption = rest.join("|").trim();
       blocks.push({
         kind: "figure",
         id: id.trim(),
-        caption: caption.join("|").trim(),
-        number: ++figures,
+        caption,
+        number: caption ? ++figures : null,
       });
     } else {
       blocks.push({ kind: "lever", levers: value.split(",").map((n) => Number(n.trim())) });

@@ -106,17 +106,18 @@ export function BlogFigureBehavior() {
     const figures = Array.from(document.querySelectorAll<HTMLElement>(".bf"));
 
     // A figure in view at load keeps its final state, so nothing on screen blinks out.
-    // A figure starts when 60% of it shows, or when it fills 60% of the window (a tall figure).
+    // A figure starts when 35% of it shows, or when it fills 35% of the window (a tall figure).
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
-          if (e.intersectionRatio >= 0.6 || e.intersectionRect.height >= innerHeight * 0.6) {
+          if (e.intersectionRatio >= 0.35 || e.intersectionRect.height >= innerHeight * 0.35) {
             e.target.classList.add("in");
             io.unobserve(e.target);
           }
         }
       },
-      { threshold: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1] },
+      // Steps of 5%, so the callback runs close to the 35% mark.
+      { threshold: Array.from({ length: 21 }, (_, i) => i / 20) },
     );
     for (const fig of figures) {
       const card = fig.querySelector(".card");
@@ -246,11 +247,13 @@ export function BlogFigureBehavior() {
       if (zcard === zoomed && zoomed && target.closest("figcaption a")) return closeZoom(true);
       const trigger = target.closest(".bf [data-fk]");
       if (trigger) return toggleFilter(trigger);
+      // A phone hides the zoom button, so a tap on the figure opens no zoom view there.
       if (
         zcard &&
         zcard !== zoomed &&
         target.closest(".card-body") &&
-        !target.closest("button,a,.lev li,.seg")
+        !target.closest("button,a,.lev li,.seg") &&
+        zcard.querySelector(".zbtn")?.getClientRects().length
       )
         return openZoom(zcard);
       const seg = target.closest<HTMLButtonElement>(".bf .arcv .seg button");
