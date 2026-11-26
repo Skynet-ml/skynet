@@ -149,3 +149,12 @@ export function visibleSettingsTabs(isAdmin: boolean, hostedAvailable = true): S
     hostedAvailable,
   );
 }
+
+/**
+ * Pick the tab a `?settings=` link opens. A `request_secret` link made before
+ * saved secrets had their own tab (SKY-973) still says `connectors`; it opens
+ * the Secrets tab, where the name fills in.
+ */
+export function linkedSettingsTab(tab: string, params: URLSearchParams): string {
+  return tab === "connectors" && params.has("secret") ? "secrets" : tab;
+}

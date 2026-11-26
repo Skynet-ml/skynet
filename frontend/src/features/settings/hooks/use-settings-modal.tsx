@@ -5,6 +5,8 @@ import * as React from "react";
 import { parseOAuthFinish } from "@/shared/lib/oauth-finish";
 import { takeOAuthReturn } from "@/shared/lib/oauth-return";
 
+import { linkedSettingsTab } from "../lib/tabs";
+
 interface SettingsModalContextValue {
   open: boolean;
   setOpen: (open: boolean) => void;
@@ -38,8 +40,9 @@ export function SettingsModalProvider({ children }: { children: React.ReactNode 
 
   React.useEffect(() => {
     const url = new URL(window.location.href);
-    const requestedTab = url.searchParams.get("settings");
-    if (!requestedTab) return;
+    const linkedTab = url.searchParams.get("settings");
+    if (!linkedTab) return;
+    const requestedTab = linkedSettingsTab(linkedTab, url.searchParams);
     // A failed link stays here. A sign-in that a tab must still finish from the
     // URL fragment also stays, and that tab returns to the saved path after it.
     const pending = parseOAuthFinish(url.hash) !== null;

@@ -5002,7 +5002,7 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "app.shell.search.kw.privacy": "פרטיות נתונים התראות מייל אנליטיקה ניקוי מטמון ייצוא הנתונים שלי מחיקת חשבון privacy notifications analytics cache export delete account",
   "app.shell.search.kw.privacy_policy": "מדיניות פרטיות משפטי נתונים privacy policy legal GDPR",
   "app.shell.search.kw.providers": "ספקים מפתחות מפתח API מפתח משלי providers keys BYOK OpenAI Anthropic Gemini Google Groq Mistral Together DeepSeek xAI OpenRouter",
-  "app.shell.search.kw.secrets": "סודות משתני סביבה מפתחות API טוקנים סודות מאגר סודות שמורים secrets environment variables env API keys tokens",
+  "app.shell.search.kw.secrets": "סודות משתני סביבה מפתחות API טוקנים מאגר שמורים secrets environment variables env API keys tokens",
   "app.shell.search.kw.security": "אבטחה אימות דו-שלבי אפליקציית אימות קודי שחזור מפתחות גישה קוד במייל כניסה security 2FA TOTP recovery passkey login",
   "app.shell.search.kw.sessions": "סשנים תיוג תוויות סימון תיוג אוטומטי טייס אוטומטי רובריקה כיול labeling sessions autotag autopilot rubric",
   "app.shell.search.kw.sign_out": "יציאה התנתקות sign out logout",
