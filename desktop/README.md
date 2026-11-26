@@ -81,6 +81,24 @@ reloads at once; a change in `src/main` or `src/preload` relaunches the app,
 which stops and restarts the local stack. Quit an installed Skynet.app first:
 both use the same data folder and ports.
 
+`npm run dev` runs the checkout's `backend/` and `frontend/`, not the bundled
+copy: the API with `uvicorn --reload` and the web app with `next dev`. A saved
+backend or frontend change shows in the app window at once. Run `npm ci` in
+`frontend/` first; `npm run bundle:stack` is still needed once for `uv`.
+Dev mode stops when `backend/` or `frontend/` has a `.env` or `.env.*` file
+other than `.env.example`, because such a file can load into the local stack.
+Some limits:
+
+- The sandbox image builds from the bundled copy. A change in
+  `backend/Dockerfile` or `sandbox-runtime/` needs a new `npm run bundle:stack`.
+- A saved backend file restarts the API and its job worker, which stops the
+  work of a running optimization. Its sandbox containers stop when their
+  `sleep` lifetime ends, or when you quit the app.
+- Do not run another `next dev` in the same `frontend/` at the same time.
+- `alembic upgrade head` runs the checkout's migrations on the shared data
+  folder. A branch migration can leave a database that the installed app does
+  not know. Reset the local data in that case (see below).
+
 ## Where things live
 
 | Path | Contents |
