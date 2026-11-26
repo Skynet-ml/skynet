@@ -1045,15 +1045,16 @@ class BackgroundWorker:
                         budget_gateway.allow_guest_hosts(
                             tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
                         )
-                        # Before the image build, because the setup model names the Debian packages of
-                        # the generated [run] image; a resume reuses the recorded plan (SKY-967).
-                        inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
-                        if inferred_setup is not None and (inferred_setup.command or inferred_setup.apt_packages):
-                            self._record_setup_command(
-                                optimization_id, inferred_setup.command, inferred_setup.apt_packages
-                            )
-                        if isinstance(staged_repository, StagedRepository):
-                            staged_repository = with_apt_image(staged_repository, payload_dict)
+                        # A [run] image from ascent.toml is checked before the paid setup model, so a
+                        # bad image costs nothing. With no [run] image the setup model goes first,
+                        # because it names the packages of the generated [run] image (SKY-967).
+                        setup_first = not (
+                            isinstance(staged_repository, StagedRepository) and "run" in staged_repository.box_sources
+                        )
+                        if setup_first:
+                            self._infer_setup(optimization_id, payload_dict, staged_repository, budget_gateway)
+                            if isinstance(staged_repository, StagedRepository):
+                                staged_repository = with_apt_image(staged_repository, payload_dict)
                         # Before the scorer box, so a bad image stops the run before it pays for
                         # it; a resume keeps the images it pinned (SKY-737).
                         if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
@@ -1091,6 +1092,8 @@ class BackgroundWorker:
                                     registry=user_image_registry,
                                     pinned=pinned_images,
                                 )
+                        if not setup_first:
+                            self._infer_setup(optimization_id, payload_dict, staged_repository, budget_gateway)
                         bind_repo_scorer(
                             payload_dict,
                             staged_repository,
@@ -1835,6 +1838,19 @@ class BackgroundWorker:
 
         self._threads.clear()
         logger.info("Stopped background workers")
+
+    def _infer_setup(self, optimization_id: str, payload: dict[str, Any], staged: Any, gateway: Any) -> None:
+        """Infer the repository setup when the run has none, and store what was inferred (SKY-967).
+
+        Args:
+            optimization_id: The repository run.
+            payload: The run's protected payload, updated in place.
+            staged: The staged repository.
+            gateway: The run's model gateway.
+        """
+        plan = infer_repo_setup(payload, staged, gateway)
+        if plan is not None and (plan.command or plan.apt_packages):
+            self._record_setup_command(optimization_id, plan.command, plan.apt_packages)
 
     def _record_setup_command(
         self, optimization_id: str, command: str | None, apt_packages: tuple[str, ...] = ()

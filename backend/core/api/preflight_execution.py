@@ -630,18 +630,9 @@ def _perform_preflight(
             infer_repo_setup(protected, staged, gateway)
             # The check builds and pays for the generated [run] image as the run does, so it
             # checks setup in the image the run uses (SKY-967).
-            staged = with_apt_image(staged, protected)
-            if staged.box_sources.get("run", ("",))[0] == "apt":
-                staged = prepare_apt_image(
-                    staged,
-                    owner_id=f"preflight-{identity}",
-                    username=user.username,
-                    runtime=gateway.parent_sandbox_runtime(),
-                    builder=image_builder(settings),
-                    store=get_job_store(),
-                    budget=gateway.runtime,
-                    registry=image_registry(settings),
-                )
+            staged = _with_setup_image(
+                staged, protected, owner_id=f"preflight-{identity}", username=user.username, gateway=gateway
+            )
             unchecked = tuple(
                 role
                 for role in SETUP_NOT_CHECKED
@@ -721,6 +712,37 @@ def _perform_preflight(
                 status = "failed"
                 result.setdefault("checks", []).append(_check("runtime", "failed", str(error)))
     return status, result
+
+
+def _with_setup_image(
+    staged: StagedRepository, protected: dict[str, Any], *, owner_id: str, username: str, gateway: ModelGateway
+) -> StagedRepository:
+    """Build or reuse the generated ``[run]`` image with the Debian packages that setup named (SKY-967).
+
+    Args:
+        staged: The staged repository.
+        protected: The protected payload, with the target's packages.
+        owner_id: Identity that names the paid build and check.
+        username: Account that pays and owns the image.
+        gateway: The metered gateway, whose runtime pays for the build.
+
+    Returns:
+        ``staged`` with the ``[run]`` image, or unchanged when setup named no packages,
+        ascent.toml names the ``[run]`` image, or this deployment cannot build it.
+    """
+    staged = with_apt_image(staged, protected)
+    if staged.box_sources.get("run", ("",))[0] != "apt":
+        return staged
+    return prepare_apt_image(
+        staged,
+        owner_id=owner_id,
+        username=username,
+        runtime=gateway.parent_sandbox_runtime(),
+        builder=image_builder(settings),
+        store=get_job_store(),
+        budget=gateway.runtime,
+        registry=image_registry(settings),
+    )
 
 
 @contextmanager
@@ -826,6 +848,9 @@ def judge_scorer(
         if before_scoring is not None:
             before_scoring(protected, staged)
         infer_repo_setup(protected, staged, gateway)
+        # Each version runs the repository setup, so it needs the run's Debian packages; the
+        # run's build is reused by its input hash (SKY-967).
+        staged = _with_setup_image(staged, protected, owner_id=owner_id, username=username, gateway=gateway)
         bind_repo_scorer(protected, staged, gateway, owner_id=owner_id, managed_key=managed_key)
         yield protected, staged, gateway
     finally:

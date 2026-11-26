@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import inspect
 import io
 import itertools
@@ -1065,6 +1066,7 @@ def _run_repository_job(
     staged: Any = None,
     sandbox_runtime: Any = None,
     seed: dict[str, Any] | None = None,
+    target: dict[str, Any] | None = None,
 ) -> tuple[MagicMock, MagicMock, Any]:
     """Run one stored repository job with staging that leaves ``snapshot`` on the payload.
 
@@ -1082,6 +1084,7 @@ def _run_repository_job(
         sandbox_runtime: The parent's sandbox runtime, which also gets a
             budget that runs each paid call at once; ``None`` keeps the mock.
         seed: Extra fields on the stored job row.
+        target: Extra fields on the stored payload's target.
 
     Returns:
         The budget gateway, the publish step and the staged repository.
@@ -1097,6 +1100,7 @@ def _run_repository_job(
     payload = request.model_dump(mode="json", by_alias=True)
     if proposer is not None:
         payload["proposer"] = proposer
+    payload["target"].update(target or {})
     store.engine = MagicMock()
     store.seed_job(
         "repo-hardened",
@@ -1456,6 +1460,208 @@ def test_a_parallel_start_that_pinned_first_gives_its_box_images(
 
     assert store.pin_box_images.call_args.args[1]["run"]["image"] == image
     assert publish.call_args.args[2].box_images == first
+
+
+_APT_BASE = "skynet-default@sha256:" + "d" * 64
+
+
+def _apt_stage(staged: repo_staging.StagedRepository) -> Callable[..., tuple[dict, repo_staging.StagedRepository]]:
+    """Return a staging step that also gives the payload Skynet's default image (SKY-967).
+
+    Args:
+        staged: What staging returns.
+
+    Returns:
+        A stand-in for ``stage_repository``.
+    """
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, repo_staging.StagedRepository]:
+        """Stage the repository the way the real step leaves the payload, with the default image.
+
+        Args:
+            payload: The run's protected payload.
+            **kwargs: Not used.
+
+        Returns:
+            The payload and the staged repository.
+        """
+        payload["target"]["repo"][engine_module.ENVIRONMENT_KEY] = {}
+        payload[REPO_SNAPSHOT_KEY] = {}
+        payload["_budget_gateway_descriptor"] = {"image": _APT_BASE}
+        return payload, staged
+
+    return stage
+
+
+def _count_setup_model(monkeypatch: pytest.MonkeyPatch, packages: tuple[str, ...]) -> list[Path]:
+    """Make the setup model name ``packages`` and record each time it is asked (SKY-967).
+
+    Args:
+        monkeypatch: Restores the setup model after the test.
+        packages: The Debian packages that the model names.
+
+    Returns:
+        The trees the model was asked about, in order.
+    """
+    asked: list[Path] = []
+
+    def infer(archive: Path, *, ask: Any) -> repo_staging.SetupPlan:
+        """Answer as a setup model that names only Debian packages.
+
+        Args:
+            archive: The fetched tree.
+            ask: Not used.
+
+        Returns:
+            A plan with no command and ``packages``.
+        """
+        asked.append(archive)
+        return repo_staging.SetupPlan(None, packages)
+
+    monkeypatch.setattr(repo_staging, "infer_setup_command", infer)
+    return asked
+
+
+@pytest.mark.usefixtures("_non_root_local_images")
+def test_the_setup_model_names_packages_that_the_run_builds_into_its_run_image(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no [run] image, setup goes first, its packages are stored, and the apt image is built and pinned (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    asked = _count_setup_model(monkeypatch, ("gcc",))
+    staged = dataclasses.replace(_box_staged(tmp_path, ("image", "unused")), box_sources={})
+    builder = _LocalBuilder()
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=staged,
+        sandbox_runtime=_ImageRuntime(),
+        patched={
+            "image_builder": lambda settings: builder,
+            "add_run_record": MagicMock(),
+            "infer_repo_setup": repo_staging.infer_repo_setup,
+            "stage_repository": _apt_stage(staged),
+        },
+    )
+
+    job = store.get_job("repo-hardened")
+    assert len(asked) == 1
+    assert job["payload"]["target"][repo_staging.APT_PACKAGES_KEY] == ["gcc"]
+    assert len(builder.requests) == 1
+    assert publish.call_args.args[2].box_sources["run"] == ("apt", repo_staging.apt_dockerfile(_APT_BASE, ("gcc",)))
+    assert job["box_images"]["run"]["source"] == "apt"
+    assert job["box_images"]["run"]["image"] == _BUILT_IMAGE
+    assert publish.call_args.args[2].box_images == job["box_images"]
+
+
+def test_a_resumed_run_reuses_its_packages_and_pinned_apt_image_without_the_setup_model(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume reads its stored packages, asks the setup model nothing, and boots from the pinned image (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    asked = _count_setup_model(monkeypatch, ("make",))
+    pinned = {"run": {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64, "source": "apt", "input_hash": "h"}}
+    staged = dataclasses.replace(_box_staged(tmp_path, ("image", "unused")), box_sources={})
+    runtime, builder = _ImageRuntime(), _LocalBuilder()
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=staged,
+        sandbox_runtime=runtime,
+        seed={"box_images": pinned},
+        target={"setup_command": None, repo_staging.APT_PACKAGES_KEY: ["gcc"]},
+        patched={
+            "image_builder": lambda settings: builder,
+            "add_run_record": MagicMock(),
+            "infer_repo_setup": repo_staging.infer_repo_setup,
+            "stage_repository": _apt_stage(staged),
+        },
+    )
+
+    assert asked == []
+    assert builder.requests == []
+    assert runtime.specs == []
+    assert store.get_job("repo-hardened")["box_images"] == pinned
+    assert publish.call_args.args[2].box_images == pinned
+    assert publish.call_args.args[2].box_sources["run"][0] == "apt"
+
+
+def test_a_bad_run_dockerfile_stops_the_run_before_the_setup_model(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
+) -> None:
+    """A [run] dockerfile that this deployment cannot build fails the run before the paid setup model (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+    """
+    setup = MagicMock(return_value=None)
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile")),
+        sandbox_runtime=_ImageRuntime(),
+        patched={"image_builder": lambda settings: None, "infer_repo_setup": setup},
+    )
+
+    setup.assert_not_called()
+    publish.assert_not_called()
+    assert store.get_job("repo-hardened")["status"] == "failed"
+
+
+@pytest.mark.usefixtures("_non_root_local_images")
+def test_a_run_dockerfile_is_built_and_pinned_before_the_setup_model(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
+) -> None:
+    """With a [run] dockerfile, the setup model runs only after the image is built and pinned (SKY-967).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+    """
+    pinned_at_setup: list[Any] = []
+    setup = MagicMock(
+        side_effect=lambda payload, staged, gateway: pinned_at_setup.append(
+            store.get_job("repo-hardened").get("box_images")
+        )
+    )
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile")),
+        sandbox_runtime=_ImageRuntime(),
+        patched={
+            "image_builder": lambda settings: _LocalBuilder(),
+            "add_run_record": MagicMock(),
+            "infer_repo_setup": setup,
+        },
+    )
+
+    setup.assert_called_once()
+    assert pinned_at_setup[0]["run"]["source"] == "dockerfile"
+    publish.assert_called_once()
 
 
 def test_a_stored_job_with_the_files_proposer_fails_on_an_engine_that_ignores_it(
