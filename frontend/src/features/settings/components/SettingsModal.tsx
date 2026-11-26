@@ -1267,8 +1267,10 @@ export function SettingsModal() {
               <TabsContent value="providers">
                 <ByokKeysSection />
               </TabsContent>
-              <TabsContent value="connectors" className="space-y-6">
+              <TabsContent value="connectors">
                 <ConnectorsTab />
+              </TabsContent>
+              <TabsContent value="secrets">
                 <SavedSecretsSection />
               </TabsContent>
               <TabsContent value="api">

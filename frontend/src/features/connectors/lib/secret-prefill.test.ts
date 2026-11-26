@@ -12,7 +12,7 @@ test("an approved host is an exact host or *.suffix, as the server requires", ()
 });
 
 test("a request_secret link fills in a valid name only", () => {
-  assert.equal(secretNameFromSearch("?settings=connectors&secret=MAPS_KEY"), "MAPS_KEY");
+  assert.equal(secretNameFromSearch("?settings=secrets&secret=MAPS_KEY"), "MAPS_KEY");
   for (const search of ["", "?secret=", "?secret=maps-key", "?secret=1KEY", "?secret=%3Cb%3E"]) {
     assert.equal(secretNameFromSearch(search), null, search);
   }

@@ -454,7 +454,7 @@ def build_remote_mcp(
         """
         user = _user(SCOPE_READ)
         saved = any(view.name == name for view in SavedSecretStore(job_store.engine).list(user.username))
-        url = f"{settings.app_public_url.rstrip('/')}/?settings=connectors&secret={quote(name)}"
+        url = f"{settings.app_public_url.rstrip('/')}/?settings=secrets&secret={quote(name)}"
         return {"name": name, "url": url, "already_saved": saved}
 
     for extend in extensions:

@@ -302,6 +302,9 @@ def test_open_page_returns_navigation() -> None:
     assert client.post("/agent/open-page", json={"tab": "billing"}).json() == {
         "navigate": {"kind": "settings", "tab": "billing"}
     }
+    assert client.post("/agent/open-page", json={"tab": "secrets"}).json() == {
+        "navigate": {"kind": "settings", "tab": "secrets"}
+    }
     assert client.post("/agent/open-page", json={"path": "/optimizations"}).json() == {
         "navigate": {"kind": "route", "path": "/optimizations"}
     }

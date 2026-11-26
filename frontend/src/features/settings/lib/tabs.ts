@@ -14,6 +14,7 @@ import {
   Gauge,
   HardDrive,
   HardDrives,
+  Key,
   Lock,
   Plug,
   Shapes,
@@ -38,6 +39,7 @@ const SETTINGS_TAB_ORDER = [
   "usage",
   "providers",
   "connectors",
+  "secrets",
   "api",
   "admin",
 ] as const;
@@ -114,6 +116,12 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     keywordsKey: "app.shell.search.kw.connectors",
     group: "access",
   },
+  secrets: {
+    icon: Key,
+    labelKey: "settings.tab.secrets",
+    keywordsKey: "app.shell.search.kw.secrets",
+    group: "access",
+  },
   api: {
     icon: Code,
     labelKey: "settings.tab.api",
@@ -140,4 +148,13 @@ export function visibleSettingsTabs(isAdmin: boolean, hostedAvailable = true): S
     isLocalMode(),
     hostedAvailable,
   );
+}
+
+/**
+ * Pick the tab a `?settings=` link opens. A `request_secret` link made before
+ * saved secrets had their own tab (SKY-973) still says `connectors`; it opens
+ * the Secrets tab, where the name fills in.
+ */
+export function linkedSettingsTab(tab: string, params: URLSearchParams): string {
+  return tab === "connectors" && params.has("secret") ? "secrets" : tab;
 }
