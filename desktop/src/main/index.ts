@@ -286,7 +286,7 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
     // into the API and next dev, with other vault keys, providers and cookies
     // than the installed app that shares this data folder.
     const envFiles = [backendDir, frontendDir].flatMap((dir) =>
-      fs.readdirSync(dir).filter((name) => name.startsWith(".env") && name !== ".env.example").map((name) => path.join(dir, name)),
+      fs.readdirSync(dir).filter((name) => name === ".env" || (name.startsWith(".env.") && name !== ".env.example")).map((name) => path.join(dir, name)),
     );
     if (envFiles.length > 0) throw new Error(`Dev mode does not run with ${envFiles.join(", ")}. Run it from a checkout without them.`);
     log(`source mode: ${repoRoot}`);

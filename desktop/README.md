@@ -92,7 +92,8 @@ Some limits:
 - The sandbox image builds from the bundled copy. A change in
   `backend/Dockerfile` or `sandbox-runtime/` needs a new `npm run bundle:stack`.
 - A saved backend file restarts the API and its job worker, which stops the
-  work of a running optimization.
+  work of a running optimization. Its sandbox containers stop when their
+  `sleep` lifetime ends, or when you quit the app.
 - Do not run another `next dev` in the same `frontend/` at the same time.
 - `alembic upgrade head` runs the checkout's migrations on the shared data
   folder. A branch migration can leave a database that the installed app does
