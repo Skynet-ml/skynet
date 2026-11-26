@@ -85,8 +85,8 @@ both use the same data folder and ports.
 copy: the API with `uvicorn --reload` and the web app with `next dev`. A saved
 backend or frontend change shows in the app window at once. Run `npm ci` in
 `frontend/` first; `npm run bundle:stack` is still needed once for `uv`.
-Dev mode stops when the checkout has a `backend/.env` or a `frontend/.env*`
-file other than `.env.example`, because those would load into the local stack.
+Dev mode stops when `backend/` or `frontend/` has a `.env` or `.env.*` file
+other than `.env.example`, because such a file can load into the local stack.
 Some limits:
 
 - The sandbox image builds from the bundled copy. A change in
