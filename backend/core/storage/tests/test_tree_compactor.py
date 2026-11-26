@@ -2268,8 +2268,31 @@ def test_start_tree_compactor_needs_a_bucket(engine, monkeypatch) -> None:
         monkeypatch: Pytest's monkeypatch fixture.
     """
     monkeypatch.setattr(settings, "tree_bucket", None)
+    monkeypatch.setattr(settings, "local_mode", False)
 
     assert start_tree_compactor(engine) is None
+
+
+def test_start_tree_compactor_runs_over_the_local_pack_folder(engine, monkeypatch, tmp_path) -> None:
+    """In local mode with no bucket, the compactor runs over the local pack folder and deletes its files (SKY-977).
+
+    Args:
+        engine: The test engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+        tmp_path: The local state folder.
+    """
+    monkeypatch.setattr(settings, "tree_bucket", None)
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path))
+    LocalObjectStore(tmp_path / "objects").put("packs/w1/x.pack", b"x")
+
+    compactor = start_tree_compactor(engine)
+    try:
+        assert isinstance(compactor._objects, LocalObjectStore)
+        compactor._delete_object("packs/w1/x.pack")
+        assert compactor._objects.list("packs/") == []
+    finally:
+        compactor.stop()
 
 
 def test_start_tree_compactor_deletes_through_the_bucket(engine, monkeypatch) -> None:

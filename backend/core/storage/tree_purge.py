@@ -104,6 +104,7 @@ from .models import (
     TreeObjectModel,
     WorkspaceModel,
 )
+from .object_store import pack_store
 from .shard_map import MAIN, ShardMap, shard_engine
 from .tree_compactor import GRACE_SECONDS, REFERENCED, tree_bucket_client
 
@@ -438,15 +439,30 @@ def _purge_shards(
 def bucket_deleter() -> Callable[[list[str]], None] | None:
     """Return a function that deletes objects from the tree bucket in DeleteObjects batches.
 
+    With no bucket in local mode, the function deletes the files of the local pack store (SKY-977).
+
     Returns:
-        The delete function, or ``None`` when ``SKYNET_TREE_BUCKET`` is not set.
+        The delete function, or ``None`` when this build has no pack store.
 
     Raises:
         RuntimeError: When a bucket is set and boto3 is not installed.
     """
     found = tree_bucket_client()
     if found is None:
-        return None
+        local = pack_store()
+        if local is None:
+            return None
+
+        def delete_files(keys: list[str]) -> None:
+            """Delete the local pack files; a missing file is not an error.
+
+            Args:
+                keys: The object keys.
+            """
+            for key in keys:
+                local.delete(key)
+
+        return delete_files
     bucket, client = found
 
     def delete_objects(keys: list[str]) -> None:

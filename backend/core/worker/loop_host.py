@@ -79,7 +79,7 @@ from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResu
 from ..service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
 from ..storage import get_job_store
 from ..storage.base import ObjectStore
-from ..storage.object_store import S3ObjectStore
+from ..storage.object_store import pack_store
 from ..storage.tree_store import TreeStore
 from .actors import User
 from .engine_loop import EngineLoop, ModelCall, ModelCallBilledError, Prompt
@@ -897,7 +897,9 @@ def run_loop_job(payload: dict[str, Any], artifact_id: str, event_queue: Any, _s
                 data_policy=host.get("data_policy", DEFAULT_DATA_POLICY),
             )
             engine = get_job_store().engine
-            objects = S3ObjectStore()
+            objects = pack_store()
+            if objects is None:
+                raise ValueError("SKYNET_TREE_BUCKET is not set")
         except BaseException as error:
             safe_queue_put(event_queue, failure_event(error, traceback_text=traceback.format_exc()))
             return

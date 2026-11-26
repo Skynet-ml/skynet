@@ -3,7 +3,8 @@
 :class:`LocalObjectStore` keeps each object as a file under one folder. Tests
 and local development use it. :class:`S3ObjectStore` keeps them in the S3
 bucket that ``SKYNET_TREE_BUCKET`` names. It gets its credentials from the
-default boto3 chain; the code holds none.
+default boto3 chain; the code holds none. :func:`pack_store` picks the store of
+this process: the bucket, or in local mode (the Mac app) a folder (SKY-977).
 """
 
 from __future__ import annotations
@@ -103,6 +104,14 @@ class LocalObjectStore:
         )
         return sorted(key for key in keys if key.startswith(prefix))
 
+    def delete(self, key: str) -> None:
+        """Delete one object; a missing key is not an error, as in S3.
+
+        Args:
+            key: The object key.
+        """
+        self._path(key).unlink(missing_ok=True)
+
 
 class S3ObjectStore:
     """Objects in one S3 bucket, S3 Standard class."""
@@ -171,3 +180,17 @@ class S3ObjectStore:
         """
         pages = self._client.get_paginator("list_objects_v2").paginate(Bucket=self._bucket, Prefix=prefix)
         return sorted(item["Key"] for page in pages for item in page.get("Contents", []))
+
+
+def pack_store() -> LocalObjectStore | S3ObjectStore | None:
+    """Return the store of the step log packs and tree objects for this process.
+
+    Returns:
+        The S3 store when ``SKYNET_TREE_BUCKET`` is set; else, in local mode, a folder under
+        ``local_state_dir``, because the Mac app has no bucket; else ``None``.
+    """
+    if settings.tree_bucket:
+        return S3ObjectStore()
+    if settings.local_mode and settings.local_state_dir:
+        return LocalObjectStore(Path(settings.local_state_dir).expanduser() / "objects")
+    return None

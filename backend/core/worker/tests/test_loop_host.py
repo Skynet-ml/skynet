@@ -1806,7 +1806,7 @@ def test_the_loop_job_closes_its_model_client(monkeypatch: pytest.MonkeyPatch, f
     monkeypatch.setattr(loop_host, "LeaseModelClient", _Model)
     monkeypatch.setattr(loop_host, "RemoteSandboxRuntime", lambda *args: object())
     monkeypatch.setattr(loop_host, "get_job_store", lambda: SimpleNamespace(engine=None))
-    monkeypatch.setattr(loop_host, "S3ObjectStore", object)
+    monkeypatch.setattr(loop_host, "pack_store", object)
     monkeypatch.setattr(loop_host, "host_loop_job", host)
     payload = {
         LOOP_HOST_KEY: {"reflection_model": {}},
@@ -1820,6 +1820,47 @@ def test_the_loop_job_closes_its_model_client(monkeypatch: pytest.MonkeyPatch, f
         run_loop_job(payload, "artifact", queue.Queue(), "spawn")
 
     assert closed == [True]
+
+
+def test_the_loop_job_refuses_to_start_with_no_pack_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build with no bucket and no local folder reports the missing bucket and does not run.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+
+    class _Model:
+        """A model client that needs nothing."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            """Take the real client's arguments.
+
+            Args:
+                *args: The real client's positional values.
+                **kwargs: The real client's named values.
+            """
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    ran: list[bool] = []
+    monkeypatch.setattr(loop_host, "LeaseModelClient", _Model)
+    monkeypatch.setattr(loop_host, "RemoteSandboxRuntime", lambda *args: object())
+    monkeypatch.setattr(loop_host, "get_job_store", lambda: SimpleNamespace(engine=None))
+    monkeypatch.setattr(loop_host, "pack_store", lambda: None)
+    monkeypatch.setattr(loop_host, "host_loop_job", lambda *args, **kwargs: ran.append(True))
+    payload = {
+        LOOP_HOST_KEY: {"reflection_model": {}},
+        "_budget_gateway_descriptor": {"url": "http://127.0.0.1:9", "control_token": "control"},
+    }
+    events: queue.Queue = queue.Queue()
+
+    run_loop_job(payload, "artifact", events, "spawn")
+
+    event = events.get_nowait()
+    assert event["type"] == "error"
+    assert event["error"] == "SKYNET_TREE_BUCKET is not set"
+    assert ran == []
 
 
 def test_close_keeps_a_given_http_client_open() -> None:
