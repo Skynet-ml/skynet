@@ -13,9 +13,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
-from ....config import settings
 from ....storage.base import ObjectStore
-from ....storage.object_store import S3ObjectStore
+from ....storage.object_store import pack_store
 from ....storage.step_log_reader import read_step_page
 from ....storage.step_log_store import AGENT_ID_MAX, SEQ_MAX
 from ...auth import AuthenticatedUser, get_authenticated_user
@@ -60,9 +59,9 @@ def _pack_store() -> ObjectStore | None:
     """Return the pack store of this pod, built once.
 
     Returns:
-        The S3 store, or ``None`` when no tree bucket is set and no step body can be read.
+        The pack store, or ``None`` when this build has none and no step body can be read.
     """
-    return S3ObjectStore() if settings.tree_bucket else None
+    return pack_store()
 
 
 def register_replay_routes(router: APIRouter, *, job_store) -> None:
