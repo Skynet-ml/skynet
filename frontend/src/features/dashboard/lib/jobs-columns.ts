@@ -81,8 +81,11 @@ export interface JobsLayout {
   pager: boolean;
 }
 
-/** The table's compact density: smaller header type and tighter padding. */
+/** The table's compact density: smaller header type and tighter padding.
+ *  Header and cell padding are each the same on both sides, so a centered
+ *  label and its centered values share one center line. The checkbox column
+ *  has no padding in either row, so both checkboxes line up. */
 export const JOBS_TABLE_CLASS =
-  "no-copy-underline [&_thead_th]:ps-1 [&_thead_th]:pe-2 [&_thead_th]:py-2 [&_thead_th]:text-[0.6875rem] [&_thead_th_button]:px-1 [&_thead_svg]:size-2.5 [&_tbody_td]:px-1.5";
+  "no-copy-underline [&_thead_th]:px-0.5 [&_thead_th:first-child]:px-0 [&_tbody_td:first-child]:px-0 [&_thead_th]:py-2 [&_thead_th]:text-[0.6875rem] [&_thead_th_button]:px-1 [&_thead_svg]:size-2.5 [&_tbody_td]:px-1.5";
 
 export const JOBS_LAYOUT_KEY = "dashboard-jobs";

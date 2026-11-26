@@ -480,7 +480,7 @@ export function JobsTab({
                           </TableCell>
                           {showCol("optimization_id") && (
                             <TableCell
-                              className="px-2 max-w-[100px]"
+                              className="px-2 max-w-[100px] text-center"
                               data-label={msg(
                                 "auto.features.dashboard.components.jobstab.template.1",
                               )}
@@ -490,7 +490,7 @@ export function JobsTab({
                               actually fire on the button below; without it
                               the flex child claims its content's intrinsic
                               width and overflows past the cell boundary. */}
-                              <div className="flex items-center gap-1.5 min-w-0">
+                              <div className="flex items-center justify-center gap-1.5 min-w-0">
                                 {ACTIVE_STATUSES.has(job.status) && (
                                   <PingDot className="shrink-0" />
                                 )}
@@ -512,13 +512,14 @@ export function JobsTab({
                             </TableCell>
                           )}
                           <TableCell
-                            className="px-2 max-w-[140px] text-sm overflow-hidden @max-[44rem]/table:w-full @max-[44rem]/table:max-w-0"
+                            className="px-2 max-w-[140px] text-sm text-center overflow-hidden @max-[60rem]/table:text-start @max-[44rem]/table:w-full @max-[44rem]/table:max-w-0"
                             title={job.name ?? ""}
                             data-label={msg("auto.features.dashboard.components.jobstab.literal.9")}
                           >
                             {/* In a narrow table the folded values drop under the name
-                            instead of widening the column past the card. */}
-                            <div className="flex min-w-0 items-center gap-2 @max-[32rem]/table:flex-wrap @max-[32rem]/table:gap-y-0.5">
+                            instead of widening the column past the card. Its values
+                            move to the start with the primary header below 60rem. */}
+                            <div className="flex min-w-0 items-center justify-center gap-2 @max-[60rem]/table:justify-start @max-[32rem]/table:flex-wrap @max-[32rem]/table:gap-y-0.5">
                               {job.name ? (
                                 <span
                                   className="truncate text-foreground @max-[32rem]/table:basis-full"
@@ -556,7 +557,7 @@ export function JobsTab({
                           {showSharedColumns && (
                             <>
                               <TableCell
-                                className="px-2 max-w-[120px] text-sm truncate overflow-hidden"
+                                className="px-2 max-w-[120px] text-sm text-center truncate overflow-hidden"
                                 title={job.username ?? ""}
                                 data-label={msg("dashboard.col.owner")}
                                 collapse={columnCollapse("username")}
@@ -576,7 +577,7 @@ export function JobsTab({
                                 )}
                               </TableCell>
                               <TableCell
-                                className="px-2"
+                                className="px-2 text-center"
                                 data-label={msg("dashboard.col.role")}
                                 collapse={columnCollapse("role")}
                               >
@@ -585,14 +586,14 @@ export function JobsTab({
                             </>
                           )}
                           <TableCell
-                            className="px-2 truncate overflow-hidden"
+                            className="px-2 text-center truncate overflow-hidden"
                             data-label={msg("auto.features.dashboard.components.jobstab.literal.3")}
                             collapse={columnCollapse("status")}
                           >
                             <StatusBadge status={job.status} compact />
                           </TableCell>
                           <TableCell
-                            className="px-2 text-xs text-muted-foreground truncate overflow-hidden whitespace-nowrap"
+                            className="px-2 text-center text-xs text-muted-foreground truncate overflow-hidden whitespace-nowrap"
                             title={formatDate(job.created_at)}
                             data-label={msg("auto.features.dashboard.components.jobstab.literal.6")}
                             collapse={columnCollapse("created_at")}
@@ -601,7 +602,7 @@ export function JobsTab({
                           </TableCell>
                           {showCol("elapsed_seconds") && (
                             <TableCell
-                              className="px-2 text-xs tabular-nums truncate overflow-hidden whitespace-nowrap"
+                              className="px-2 text-center text-xs tabular-nums truncate overflow-hidden whitespace-nowrap"
                               data-label={msg(
                                 "auto.features.dashboard.components.jobstab.literal.7",
                               )}
@@ -616,7 +617,7 @@ export function JobsTab({
                             </TableCell>
                           )}
                           <TableCell
-                            className="px-2 truncate overflow-hidden"
+                            className="px-2 text-center truncate overflow-hidden"
                             data-label={msg("auto.features.dashboard.components.jobstab.literal.8")}
                           >
                             {formatScore(job)}

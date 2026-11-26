@@ -102,11 +102,15 @@ function HeaderRow({ columns }: { columns: readonly JobsColumn[] }) {
         <th
           key={c.key}
           data-collapse={c.collapse}
-          className="ps-2 pe-4 py-3 text-center text-[0.75rem]"
+          className={cn(
+            "ps-2 pe-4 py-3 text-center text-[0.75rem]",
+            c.key === "name" && "@max-[60rem]/table:text-start",
+          )}
           style={{ width: c.width, minWidth: c.width, maxWidth: c.width }}
         >
-          {/* The sort button: px-1.5 py-0.5 around a 12px label line, 44px tall on touch. */}
-          <span className="inline-flex items-center py-0.5 any-pointer-coarse:min-h-[44px]">
+          {/* The sort button: px-1 py-0.5 around a 12px label line, 44px tall on touch.
+              Below 60rem the Name label moves to the start, as the primary header does. */}
+          <span className="inline-flex items-center px-1 py-0.5 any-pointer-coarse:min-h-[44px]">
             <TextBone className="leading-[1.5]" width={40} />
           </span>
         </th>
@@ -136,7 +140,7 @@ function BodyRow({ columns, shared }: { columns: readonly JobsColumn[]; shared: 
       <TableCell className="w-12 px-0 text-center">
         <CheckboxBone />
       </TableCell>
-      <TableCell className="px-2 max-w-[100px]">
+      <TableCell className="px-2 max-w-[100px] text-center">
         {/* The run id is a copy button: 44px tall on touch. */}
         <span className="inline-flex items-center any-pointer-coarse:min-h-[44px]">
           <TextBone className="font-mono text-xs" width={70} />
@@ -144,7 +148,7 @@ function BodyRow({ columns, shared }: { columns: readonly JobsColumn[]; shared: 
       </TableCell>
       <TableCell className="px-2 max-w-[140px] text-sm overflow-hidden @max-[44rem]/table:w-full @max-[44rem]/table:max-w-0">
         {/* The name, then the folded columns' values, as in JobsTab's name cell. */}
-        <div className="flex min-w-0 items-center gap-2 @max-[32rem]/table:flex-wrap @max-[32rem]/table:gap-y-0.5">
+        <div className="flex min-w-0 items-center justify-center gap-2 @max-[60rem]/table:justify-start @max-[32rem]/table:flex-wrap @max-[32rem]/table:gap-y-0.5">
           <span className="truncate @max-[32rem]/table:basis-full">
             <TextBone className="" width="80%" />
           </span>
@@ -154,7 +158,7 @@ function BodyRow({ columns, shared }: { columns: readonly JobsColumn[]; shared: 
         </div>
       </TableCell>
       {columns.slice(2).map((c) => (
-        <TableCell key={c.key} collapse={c.collapse} className="px-2">
+        <TableCell key={c.key} collapse={c.collapse} className="px-2 text-center">
           {CELL_BONES[c.key]}
         </TableCell>
       ))}
