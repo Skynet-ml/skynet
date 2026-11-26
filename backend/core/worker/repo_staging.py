@@ -1738,6 +1738,10 @@ for pid in ("self", str(os.getppid())):
     with open(f"/proc/{pid}/maps") as maps:
         for line in maps:
             name = line.rstrip("\n").split(None, 5)[5:]
+            # Docker on Apple silicon maps the host's Rosetta into each amd64 process, but the box cannot see
+            # that path, so the box user cannot change it either (SKY-974). A box that has the path gets checked.
+            if name == ["/run/rosetta/rosetta"] and not os.path.lexists(name[0]):
+                continue
             if name and name[0].startswith("/") and name[0] not in seen:
                 seen.add(name[0])
                 print("file", name[0])

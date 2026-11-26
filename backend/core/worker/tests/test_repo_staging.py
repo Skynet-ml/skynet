@@ -8281,6 +8281,42 @@ def test_the_path_script_skips_a_dangling_optional_program(tmp_path: Path) -> No
     assert done.returncode == 0, done.stderr
 
 
+@pytest.mark.parametrize(
+    ("name", "passes", "listed"), [("rosetta", True, False), ("present", True, True), ("other", False, False)]
+)
+def test_the_path_script_skips_only_a_missing_rosetta_in_the_memory_map(
+    tmp_path: Path, name: str, passes: bool, listed: bool
+) -> None:
+    """The map scan skips Docker's Rosetta only when the box cannot see it, and refuses any other missing file (SKY-974).
+
+    Args:
+        tmp_path: The folder that holds the fake memory map.
+        name: Which file the fake map names: a missing Rosetta, a Rosetta in the box, or another missing file.
+        passes: Whether the script passes.
+        listed: Whether the script lists the Rosetta file for the trust walk.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    rosetta = tmp_path / "rosetta"
+    if name == "present":
+        rosetta.write_text("not an ELF file\n")
+    mapped = tmp_path / "gone" if name == "other" else rosetta
+    maps = tmp_path / "maps"
+    maps.write_text(f"7f0000000000-7f0000001000 r-xp 00000000 00:00 0    {mapped}\n")
+    script = repo_staging._PATH_SCRIPT.replace('"/run/rosetta/rosetta"', repr(str(rosetta))).replace(
+        'open(f"/proc/{pid}/maps")', f'open({str(maps)!r} if pid == "self" else f"/proc/{{pid}}/maps")'
+    )
+    assert script.count(repr(str(rosetta))) == 1
+    assert script.count(repr(str(maps))) == 1
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+    )
+
+    assert (done.returncode == 0) is passes, done.stderr
+    assert (f"file {rosetta}" in done.stdout.split("\n")) is listed
+
+
 def test_the_path_script_refuses_a_sudo_that_is_not_an_elf_file(tmp_path: Path) -> None:
     """The ELF scan stops at a sudo script, whose interpreter the walk would never see (SKY-912).
 
