@@ -8,6 +8,7 @@ import json
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, cast
 
 import dspy
@@ -1670,3 +1671,130 @@ def test_the_router_merges_each_written_file_into_the_draft_files() -> None:
     _merge_wizard_patch(state, {"wizard_state": {"workspace_files": {"a.py": "3"}, "job_name": "y"}})
 
     assert state == {"workspace_files": {"a.py": "3", "b.py": "2"}, "job_name": "y"}
+
+
+def _local_folder(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, Any]:
+    """Make a local folder run in desktop local mode; no host may be asked anything.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        root: The folder the run optimizes.
+
+    Returns:
+        The Metric screen state of the run.
+    """
+
+    def no_host(*_args: Any, **_kwargs: Any) -> Any:
+        """Fail the test on any host call."""
+        raise AssertionError("a local folder run asked a repository host")
+
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(workspace_tools.github, "tree_entries", no_host)
+    monkeypatch.setattr(repo_browser.github, "read_text_file", no_host)
+    monkeypatch.setattr(workspace_tools.repo_hosts, "resolve_commit", no_host)
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "README.md").write_text("# Shop\n", encoding="utf-8")
+    (root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    return {
+        "wizard_screen": "metric",
+        "job_name": "Faster tests",
+        "task_objective": "Make the test suite pass faster",
+        "repo_provider": "local",
+        "repo_path": str(root),
+    }
+
+
+def test_open_repo_picks_the_local_folder_with_no_host_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A local run opens the folder at ``repo_path`` and never asks for a token."""
+    state = _local_folder(monkeypatch, tmp_path)
+
+    def no_token() -> str | None:
+        """Fail the test when the token is asked for."""
+        raise AssertionError("a local folder run asked for a host token")
+
+    browser, reason = open_repo(state, no_token)
+
+    assert (isinstance(browser, repo_browser.LocalFolderBrowser), reason) == (True, "")
+    assert browser.branch == repo_browser.folder_snapshot_id(tmp_path)
+    assert "already read for you" in browser.summary()
+    assert open_repo({**state, "repo_path": ""}, no_token) == (None, "No folder is chosen yet.")
+    assert open_repo({**state, "repo_path": " "}, no_token) == (None, "No folder is chosen yet.")
+    monkeypatch.setattr(settings, "local_mode", False)
+    assert open_repo(state, no_token) == (None, "A local folder can be read only in the desktop app.")
+
+
+@pytest.mark.asyncio
+async def test_the_agent_reads_a_local_folder_and_never_sees_env_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The read tools list and read the folder, and a .env file stays out of both."""
+    state = _local_folder(monkeypatch, tmp_path)
+    tools = _tools(state, _TurnAuthoringFlag())
+
+    tree = await tools[LIST_REPO_TOOL].acall()
+    read = await tools[READ_REPO_TOOL].acall(path="src/app.py")
+    env = await tools[READ_REPO_TOOL].acall(path=".env")
+
+    assert "Local folder" in tree
+    assert "app.py" in tree
+    assert ".env" not in tree
+    assert "SECRET" not in tree
+    assert read == "   1 x = 1"
+    assert "error" in env
+    assert "SECRET" not in str(env)
+
+
+@pytest.mark.asyncio
+async def test_a_local_draft_records_the_folder_snapshot_and_leaves_the_folder_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Draft files after a read pin ``workspace_base`` to the snapshot id, not a commit; the disk keeps its text."""
+    state = _local_folder(monkeypatch, tmp_path)
+    snapshot = repo_browser.folder_snapshot_id(tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _tools(state, turn)
+
+    edited = await tools[EDIT_FILE_TOOL].acall(path="src/app.py", old_text="x = 1", new_text="x = 2")
+
+    assert edited == {"wizard_state": {"workspace_base": snapshot, "workspace_files": {"src/app.py": "x = 2\n"}}}
+    assert turn.wizard_patch["workspace_base"] == snapshot != _HEAD
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    again = _tools({**state, **turn.wizard_patch}, _TurnAuthoringFlag())
+    assert await again[READ_REPO_TOOL].acall(path="src/app.py") == "   1 x = 1"
+
+
+@pytest.mark.asyncio
+async def test_a_local_folder_that_changed_after_the_drafts_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drafts based on an older folder state cannot read the new one, because the run would refuse them."""
+    state = _local_folder(monkeypatch, tmp_path)
+    drafted = {**state, "workspace_base": "b" * 40, "workspace_files": {"src/app.py": "x = 2\n"}}
+
+    result = await _tools(drafted, _TurnAuthoringFlag())[READ_REPO_TOOL].acall(path="README.md")
+
+    assert result == {
+        "error": "The folder changed after the draft files were written, so the run would refuse them. "
+        "Ask the user to discard the changed files in the editor, then read the folder again."
+    }
+    stale_base_no_drafts = {**state, "workspace_base": "b" * 40}
+    assert isinstance(
+        await _tools(stale_base_no_drafts, _TurnAuthoringFlag())[READ_REPO_TOOL].acall(path="README.md"), str
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_rules_file_guard_reads_the_ascent_toml_of_a_local_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no draft ascent.toml, a write is checked against the folder's own file, as for a repository."""
+    state = _local_folder(monkeypatch, tmp_path)
+    (tmp_path / "ascent.toml").write_text(ASCENT_TOML_EXAMPLE, encoding="utf-8")
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(state, turn)[WRITE_FILE_TOOL].acall(path="ascent.toml", text=_NO_RULES_TOML)
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}

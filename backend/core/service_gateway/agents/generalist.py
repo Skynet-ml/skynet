@@ -1057,9 +1057,13 @@ class WizardState(TypedDict, total=False):
     starting_version: str | dict[str, str]
     # The repository the run optimizes, as ``owner/name`` (GitLab adds subgroups).
     repository: str
-    # Host of ``repository``: ``github``, ``gitlab`` or ``bitbucket``. The
-    # user picks it in the repository picker; the agent only reads it.
+    # Host of ``repository``: ``github``, ``gitlab`` or ``bitbucket``, or
+    # ``local`` for a local folder in the desktop app. The user picks it in
+    # the repository picker; the agent only reads it.
     repo_provider: str
+    # The local folder's absolute path when ``repo_provider`` is ``local``
+    # (SKY-995). The user picks it; the agent only reads the folder.
+    repo_path: str
     # The ref the run starts from: the pinned commit, else the branch; empty for the default branch.
     # The agent reads and edits files at this ref, so its drafts match the run's tree.
     repo_branch: str
@@ -1468,7 +1472,7 @@ def validate_wizard_screen(
 # agent can see what is already there: the budget is stored as cents, and the
 # metric screen needs the task and the data its code runs on.
 _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
-    "artifact": frozenset({"task_objective", "github_connected", "repo_provider"}),
+    "artifact": frozenset({"task_objective", "github_connected", "repo_provider", "repo_path"}),
     "source": frozenset({"task_objective", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}),
     "plan": frozenset({"task_objective", "data_mode", "model_configured", "max_cost_cents", "spending_floor_cents"}),
     "optimizer": frozenset({"data_mode"}),
@@ -1487,6 +1491,7 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
             "dataset_columns",
             "ascent_toml",
             "repo_provider",
+            "repo_path",
             "github_connected",
             "run_code",
             "metric_code",
@@ -2751,6 +2756,14 @@ _MODEL_ROLES = (
     "next versions. Prefer the newest generation ``list_models_for_agent`` lists in a family (5.5 over 4.5) "
     "unless the user asks for another model or a lower cost."
 )
+# A local folder has no host, so agents must not offer a branch, a pull request or a host link (SKY-995).
+_LOCAL_FOLDER = (
+    "When ``repo_provider`` is ``local``, the run's source is the local folder at ``repo_path`` on the "
+    "user's computer, not a repository on a host. A local folder has no branch, no pull request and no host "
+    "link: never offer one, and never ask the user to connect a host. You only read the folder; your writes "
+    "are draft files, and the folder stays unchanged. The user applies the run's result to the folder with "
+    "Apply in the app."
+)
 SCREEN_FOCUS: dict[str, str] = {
     "brief": (
         "Brief: get what the run should improve, in the user's words, into ``task_objective``, and any "
@@ -2783,7 +2796,7 @@ SCREEN_FOCUS: dict[str, str] = {
         "GitHub button on this screen; never ask for a token. "
         "To check a candidate repository or answer a question about its code, read it with the GitHub tools "
         "(``search_repositories``, ``search_code``, ``get_file_contents``, ``list_branches`` and the others); "
-        "they only read."
+        "they only read. " + _LOCAL_FOLDER
     ),
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "
@@ -2817,7 +2830,9 @@ SCREEN_FOCUS: dict[str, str] = {
         "repository run the wizard fills its ``column_mapping``. When ascent.toml sends a secret as "
         "``${NAME}`` in a ``[services.<name>]`` entry, call ``request_secret`` for it with its purpose and "
         "host, one secret per call: the user types the value in a secure card, and you get back only "
-        "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted.\n"
+        "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted. "
+        + _LOCAL_FOLDER
+        + "\n"
         + METRIC_GUIDE
     ),
     "check": (

@@ -1,14 +1,25 @@
-"""Tests for the repository browser's opening look (size gate, README + manifest preload)."""
+"""Tests for the repository browser's opening look (size gate, README + manifest preload) and local folders."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ...api.errors import DomainError
+from ...config import settings
 from ..agents import repo_browser
-from ..agents.repo_browser import KEY_FILE_BYTES, RepoBrowser
+from ..agents.repo_browser import (
+    KEY_FILE_BYTES,
+    LOCAL_PROVIDER,
+    LocalFolderBrowser,
+    LocalFolderError,
+    RepoBrowser,
+    folder_entries,
+    folder_snapshot_id,
+    read_folder_text,
+)
 
 
 def _browser(paths: list[str]) -> RepoBrowser:
@@ -177,3 +188,247 @@ def test_read_unmetered_asks_the_host_when_the_tree_is_cut(monkeypatch) -> None:
     assert browser.read_unmetered("missing.toml", 100) is None
     with pytest.raises(DomainError):
         browser.read_unmetered("broken.toml", 100)
+
+
+@pytest.fixture
+def local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the test as the desktop app does.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+
+
+def _folder(root: Path, files: dict[str, str]) -> Path:
+    """Write files under a folder.
+
+    Args:
+        root: The folder.
+        files: Path from the folder root to text.
+
+    Returns:
+        The folder.
+    """
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return root
+
+
+def _paths(entries: list[dict[str, Any]]) -> list[str]:
+    """Return the entry paths, with a slash after a folder.
+
+    Args:
+        entries: Tree entries.
+
+    Returns:
+        The paths.
+    """
+    return [e["path"] + ("/" if e["type"] == "dir" else "") for e in entries]
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_local_folder_gives_the_same_tree_and_file_output_as_a_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The local browser lists, reads and summarizes like the GitHub browser over the same files."""
+    files = {"README.md": "# Shop\n", "pyproject.toml": "[project]\n", "src/app.py": "x = 1\ny = 2\n"}
+    root = _folder(tmp_path, files)
+
+    def fake_read(_token: str, _repo: str, _branch: str, path: str, _max_bytes: int) -> tuple[str, bool]:
+        """Return the same text the folder holds."""
+        return files[path], False
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", fake_read)
+    local = LocalFolderBrowser(root)
+    hosted = RepoBrowser(
+        token="t",
+        repository="acme/shop",
+        branch="main",
+        editable_paths=[],
+        entries=local._entries,
+        truncated=False,
+    )
+
+    assert _paths(local._entries) == ["README.md", "pyproject.toml", "src/", "src/app.py"]
+    assert local.provider == LOCAL_PROVIDER
+    assert local._token is None
+    assert local.read_repo_file("src/app.py") == hosted.read_repo_file("src/app.py") == "   1 x = 1\n   2 y = 2"
+    assert local.list_repo_folder("src") == hosted.list_repo_folder("src")
+    local.preload_key_files()
+    hosted.preload_key_files()
+    assert local.summary().splitlines()[1:] == hosted.summary().splitlines()[1:]
+    assert local.summary().splitlines()[0] == (
+        f"Local folder {root.resolve()}. It has no branch, no pull request and no host link."
+    )
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_the_local_tree_skips_git_env_files_and_what_gitignore_ignores(tmp_path: Path) -> None:
+    """The tree follows .gitignore (nested files, negation, folder-only rules) and never shows .git or .env*."""
+    root = _folder(
+        tmp_path,
+        {
+            ".git/config": "[core]\n",
+            ".env": "SECRET=1\n",
+            ".env.local": "SECRET=2\n",
+            "config/.envrc": "export SECRET=3\n",
+            ".gitignore": "*.log\n!keep.log\nbuild/\n/top.txt\n",
+            "app.log": "",
+            "keep.log": "",
+            "top.txt": "",
+            "build/out.js": "",
+            "src/build": "a file named build stays",
+            "src/top.txt": "",
+            "src/.gitignore": "secret_*.py\n",
+            "src/secret_key.py": "",
+            "src/main.py": "",
+            "other/secret_key.py": "",
+        },
+    )
+
+    entries, truncated = folder_entries(root)
+
+    assert not truncated
+    assert _paths(entries) == [
+        ".gitignore",
+        "config/",
+        "keep.log",
+        "other/",
+        "other/secret_key.py",
+        "src/",
+        "src/.gitignore",
+        "src/build",
+        "src/main.py",
+        "src/top.txt",
+    ]
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_the_local_tree_stops_at_the_entry_cap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A folder past the cap shows a cut tree and says so in the summary."""
+    monkeypatch.setattr(repo_browser, "FOLDER_ENTRIES_MAX", 2)
+    root = _folder(tmp_path, {"a.py": "", "b.py": "", "c.py": ""})
+
+    entries, truncated = folder_entries(root)
+
+    assert (_paths(entries), truncated) == (["a.py", "b.py"], True)
+    assert "The folder has more than 2 entries, so some files are missing above." in (
+        LocalFolderBrowser(root).summary().splitlines()
+    )
+
+
+@pytest.mark.usefixtures("local_mode")
+@pytest.mark.parametrize("path", ["../outside.txt", "src/../../outside.txt", "/etc/passwd", "C:/x.txt", ""])
+def test_a_local_read_refuses_a_path_that_leaves_the_folder(tmp_path: Path, path: str) -> None:
+    """A ``..`` part, an absolute path or an empty path is refused before any disk read."""
+    (tmp_path / "outside.txt").write_text("outside", encoding="utf-8")
+    root = _folder(tmp_path / "repo", {"src/app.py": "x = 1\n"})
+
+    with pytest.raises(LocalFolderError):
+        read_folder_text(root, path, 100)
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_local_folder_never_follows_a_link_out_of_it(tmp_path: Path) -> None:
+    """File and folder links that leave the folder are not in the tree, and a read through them is refused."""
+    outside = _folder(tmp_path / "outside", {"secret.txt": "outside", "inner/x.txt": "outside"})
+    root = _folder(tmp_path / "repo", {"src/app.py": "x = 1\n", "src/inner.py": "y = 1\n"})
+    (root / "leak.txt").symlink_to(outside / "secret.txt")
+    (root / "leakdir").symlink_to(outside / "inner")
+    (root / "srclink").symlink_to(root / "src")
+    (root / "alias.py").symlink_to(root / "src" / "inner.py")
+
+    assert _paths(folder_entries(root)[0]) == ["alias.py", "src/", "src/app.py", "src/inner.py"]
+    for path in ("leak.txt", "leakdir/x.txt"):
+        with pytest.raises(LocalFolderError, match="links out of the folder"):
+            read_folder_text(root, path, 100)
+    assert read_folder_text(root, "alias.py", 100) == ("y = 1\n", False)
+    browser = LocalFolderBrowser(root)
+    assert browser.read_repo_file("leak.txt") == {
+        "error": "No file named 'leak.txt' in the repository. Check the tree for the exact path."
+    }
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_local_folder_never_returns_env_file_content(tmp_path: Path) -> None:
+    """A ``.env*`` file, a file in a ``.env*`` folder, and a link to one are refused."""
+    root = _folder(tmp_path, {".env": "SECRET=1\n", ".envs/prod.txt": "SECRET=2\n", "app.py": ""})
+    (root / "settings.txt").symlink_to(root / ".env")
+
+    assert _paths(folder_entries(root)[0]) == ["app.py"]
+    for path in (".env", "./.env", ".envs/prod.txt", "settings.txt"):
+        with pytest.raises(LocalFolderError, match=r"\.env file"):
+            read_folder_text(root, path, 100)
+    browser = LocalFolderBrowser(root)
+    browser.preload_key_files()
+    assert "SECRET" not in browser.summary()
+    assert "SECRET" not in str(browser.read_repo_file(".env"))
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_local_read_of_a_missing_file_is_not_found_and_a_long_file_is_cut(tmp_path: Path) -> None:
+    """A missing file raises the hosts' ``connectors.not_found``; a read stops at the limit and says so."""
+    root = _folder(tmp_path, {"big.txt": "abcdef"})
+
+    with pytest.raises(DomainError) as missing:
+        read_folder_text(root, "none.txt", 100)
+    assert (missing.value.code, missing.value.status_code) == ("connectors.not_found", 404)
+    assert read_folder_text(root, "big.txt", 4) == ("abcd", True)
+    assert read_folder_text(root, "big.txt", 6) == ("abcdef", False)
+
+
+def test_a_local_folder_is_refused_outside_local_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The server never reads a disk folder; only the desktop app does, and only by an absolute path."""
+    root = _folder(tmp_path, {"app.py": ""})
+    monkeypatch.setattr(settings, "local_mode", False)
+
+    for read in (
+        lambda: folder_entries(root),
+        lambda: LocalFolderBrowser(root),
+        lambda: read_folder_text(root, "app.py", 9),
+    ):
+        with pytest.raises(LocalFolderError, match="only in the desktop app"):
+            read()
+    monkeypatch.setattr(settings, "local_mode", True)
+    with pytest.raises(LocalFolderError, match="absolute"):
+        folder_entries("relative/folder")
+    with pytest.raises(LocalFolderError, match="No folder"):
+        folder_entries(root / "app.py")
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_the_snapshot_id_is_a_commit_shaped_hash_of_the_listed_files(tmp_path: Path) -> None:
+    """The id is 40 hex, stays the same for the same files, and moves with a content or path change only."""
+    root = _folder(tmp_path, {"app.py": "x = 1\n", ".gitignore": "*.log\n"})
+    first = folder_snapshot_id(root)
+
+    assert len(first) == 40
+    assert all(c in "0123456789abcdef" for c in first)
+    assert folder_snapshot_id(root) == first
+    assert LocalFolderBrowser(root).branch == first
+    (root / "debug.log").write_text("ignored", encoding="utf-8")
+    (root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    assert folder_snapshot_id(root) == first
+    (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+    changed = folder_snapshot_id(root)
+    assert changed != first
+    (root / "app.py").rename(root / "main.py")
+    assert folder_snapshot_id(root) not in (first, changed)
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_reading_a_local_folder_leaves_it_unchanged(tmp_path: Path) -> None:
+    """Listing, reading and hashing the folder write nothing to it."""
+    root = _folder(tmp_path, {"README.md": "# Shop\n", "src/app.py": "x = 1\n"})
+    before = {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in root.rglob("*") if p.is_file()}
+
+    browser = LocalFolderBrowser(root)
+    browser.preload_key_files()
+    browser.read_repo_file("src/app.py")
+    browser.list_repo_folder("src")
+    browser.summary()
+
+    assert {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in root.rglob("*") if p.is_file()} == before

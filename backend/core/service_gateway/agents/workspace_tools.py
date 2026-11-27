@@ -36,7 +36,7 @@ from ...models.blackbox import (
     clean_draft_path,
 )
 from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, parse_constraints, rule_file_settings
-from .repo_browser import RepoBrowser, RepoRead
+from .repo_browser import LOCAL_PROVIDER, LocalFolderBrowser, LocalFolderError, RepoBrowser, RepoRead
 
 if TYPE_CHECKING:
     from .generalist import WizardState, _TurnAuthoringFlag
@@ -220,6 +220,36 @@ def has_drafts(state: dict[str, Any]) -> bool:
     return bool(state.get(DRAFT_FILES_FIELD)) or bool(str(state.get("ascent_toml") or "").strip())
 
 
+def open_folder(state: dict[str, Any]) -> tuple[RepoBrowser | None, str]:
+    """Open the local folder a local-folder run optimizes, for the agent's read tools; it needs no host token.
+
+    Args:
+        state: The wizard snapshot with this turn's writes merged in.
+
+    Returns:
+        The browser, or ``None`` with the reason the agent cannot read the folder.
+    """
+    folder = str(state.get("repo_path") or "").strip()
+    if not folder:
+        return None, "No folder is chosen yet."
+    try:
+        browser = LocalFolderBrowser(folder)
+    except LocalFolderError as error:
+        return None, str(error)
+    except OSError as exc:  # an unreadable folder leaves the agent without it, not the turn
+        logger.info("Setup agent cannot open the local folder: %s", type(exc).__name__)
+        return None, "The folder cannot be read."
+    base = str(state.get(DRAFT_BASE_FIELD) or "")
+    if base and has_drafts(state) and base != browser.branch:
+        # A disk folder has no old state to read, and a draft copied from it would undo the newer change.
+        return None, (
+            "The folder changed after the draft files were written, so the run would refuse them. "
+            "Ask the user to discard the changed files in the editor, then read the folder again."
+        )
+    browser.preload_key_files()
+    return browser, ""
+
+
 def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | None) -> tuple[RepoBrowser | None, str]:
     """Open the repository a repository run optimizes, for the agent's read tools.
 
@@ -234,10 +264,12 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
         repository. A failed host read leaves the agent without the
         repository rather than failing the turn.
     """
+    provider = str(state.get("repo_provider") or github.PROVIDER)
+    if provider == LOCAL_PROVIDER:
+        return open_folder(state)
     repository = str(state.get("repository") or "").strip()
     if not repository:
         return None, "No repository is chosen yet."
-    provider = str(state.get("repo_provider") or github.PROVIDER)
     if provider not in repo_hosts.HOSTS:
         return None, "The repository host is not supported."
     host = label(provider)
@@ -764,7 +796,8 @@ def workspace_tools(
         text = str(current.get("ascent_toml") or "")
         if text.strip():
             return text
-        if not str(current.get("repository") or "").strip():
+        source = "repo_path" if current.get("repo_provider") == LOCAL_PROVIDER else "repository"
+        if not str(current.get(source) or "").strip():
             return ""
         if not repo_toml:
             read = await browse(read_repo_toml)

@@ -566,6 +566,26 @@ def test_prompts_offer_no_dspy_targets_or_optimizers() -> None:
     assert "create_github_repository" in SCREEN_FOCUS["artifact"]
 
 
+@pytest.mark.parametrize("screen", ["artifact", "metric"])
+def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(screen: str) -> None:
+    """The repository screens say a local folder has no host parts and its result is applied with Apply."""
+    focus = SCREEN_FOCUS[screen]
+    assert "When ``repo_provider`` is ``local``" in focus
+    assert "A local folder has no branch, no pull request and no host link" in focus
+    assert "never ask the user to connect a host" in focus
+    assert "the folder stays unchanged" in focus
+    assert "with Apply in the app" in focus
+
+
+@pytest.mark.parametrize("screen", ["artifact", "metric"])
+def test_the_repository_screens_show_the_local_folder_path(screen: str) -> None:
+    """The agent sees which folder a local run reads, beside its provider."""
+    state = {"wizard_screen": screen, "repo_provider": "local", "repo_path": "/Users/me/shop"}
+    trimmed = screen_snapshot(cast(WizardState, state))
+    assert (trimmed["repo_provider"], trimmed["repo_path"]) == ("local", "/Users/me/shop")
+    assert "repo_path" not in screen_snapshot(cast(WizardState, {**state, "wizard_screen": "budget"}))
+
+
 def test_screen_prompts_forbid_unconfirmed_claims() -> None:
     """Both prompts tell the agent not to claim writes or screen moves a tool did not confirm."""
     assert "Say only what a tool result confirms." in (GENERALIST_SYSTEM_PROMPT or "")
