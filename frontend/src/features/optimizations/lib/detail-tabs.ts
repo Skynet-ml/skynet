@@ -12,13 +12,24 @@ export const PHONE_DETAIL_TABS: ReadonlySet<string> = new Set([
   "usage",
 ]);
 
+/** Every tab the run page can draw. */
+const DETAIL_TABS: ReadonlySet<string> = new Set([
+  "overview",
+  "best",
+  "code",
+  "logs",
+  "usage",
+  "continuous",
+  "config",
+]);
+
 /** The usage tab replaced these two; old links land on it. */
 const RENAMED_TABS: Record<string, string> = { "lm-activity": "usage", budget: "usage" };
 
-/** The tab a `?tab=` value asks for, before the phone shell narrows it. */
+/** The tab a `?tab=` value asks for, before the phone shell narrows it; an unknown tab opens Overview. */
 export function requestedDetailTab(requested: string | null): string {
-  const tab = requested ?? "overview";
-  return RENAMED_TABS[tab] ?? tab;
+  const tab = RENAMED_TABS[requested ?? ""] ?? requested ?? "overview";
+  return DETAIL_TABS.has(tab) ? tab : "overview";
 }
 
 /** The tab actually shown: a deep link to a desk-only tab lands phones on Overview. */

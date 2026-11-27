@@ -1,9 +1,8 @@
-"""Benchmark tasks for the ``bbserve`` category: black-box mode and user-written code.
+"""Benchmark tasks for the ``blackbox`` category: black-box mode and user-written code.
 
 The three tasks cover picking a black-box engine by capability, validating pasted
 signature/metric code, and interpreting a failed scorer dry-run and refusing to
-submit. The category id and task ids keep their old ``bbserve`` names so new
-results line up with earlier ones. Every task uses only the base fixture; no
+submit. Every task uses only the base fixture; no
 ``setup`` is needed. Oracles solve through ``w.call`` and checks grade the reply,
 the call log and the final state.
 """
@@ -82,8 +81,8 @@ def _oracle_scorer_refuse(w: World) -> str:
 
 TASKS: list[Task] = [
     Task(
-        id="bbserve-pick-engine",
-        category="bbserve",
+        id="blackbox-pick-engine",
+        category="blackbox",
         difficulty="easy",
         prompt=(
             "I'm about to launch a long black-box optimization run and I'm worried it might "
@@ -101,8 +100,8 @@ TASKS: list[Task] = [
         notes="Only GEPA supports checkpoint recovery; a wrong agent picks another engine or invents support.",
     ),
     Task(
-        id="bbserve-validate-pasted-code",
-        category="bbserve",
+        id="blackbox-validate-pasted-code",
+        category="blackbox",
         difficulty="medium",
         prompt=(
             "Before I submit this DSPy run, can you double-check my signature and metric code?\n\n"
@@ -127,8 +126,8 @@ TASKS: list[Task] = [
         notes="Signature is valid; the metric is missing its colon. A wrong agent says both are fine, or submits anyway.",
     ),
     Task(
-        id="bbserve-scorer-dryrun-refuse",
-        category="bbserve",
+        id="blackbox-scorer-dryrun-refuse",
+        category="blackbox",
         difficulty="hard",
         prompt=(
             "Here's the scorer I want for a black-box optimization run:\n\n"

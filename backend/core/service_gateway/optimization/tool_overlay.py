@@ -129,7 +129,7 @@ def _apply_tool_name_overrides(
 ) -> None:
     """Rename re-sourced canonical tools to their GEPA-proposed display names, in place.
 
-    Mirrors the rollout-time rename so the served agent sees the same roster GEPA
+    Mirrors the rollout-time rename so the rebuilt agent sees the same roster GEPA
     optimized. Must run AFTER drift-check + desc/arg overlays (those key on the
     canonical names that the recorded schema hashes use), and BEFORE ``ReActV2``
     is built (it re-keys its tool map by ``tool.name``). Collisions — two
@@ -155,7 +155,7 @@ def _apply_tool_name_overrides(
         owners = claimants[name]
         if len(owners) > 1 or name in live_names:
             logger.warning(
-                "Proposed tool name %r collides on serve; keeping canonical %r.",
+                "Proposed tool name %r collides with another tool; keeping canonical %r.",
                 name,
                 canonical,
             )
@@ -216,10 +216,9 @@ def _assert_tool_set_matches(
 
     ``strict`` additionally requires exact set equality: a recorded tool absent
     from the live roster (removed from the surface) or a live tool the snapshot
-    never recorded (added to the surface) is also drift. The served react
-    surfaces — serve-info materialisation and the live chat driver — use strict
-    mode so a run only serves against the exact tool surface it was optimised
-    against; anything else fails hard rather than silently mis-prompting.
+    never recorded (added to the surface) is also drift, so a program only runs
+    against the exact tool surface it was optimised against; anything else
+    fails hard rather than silently mis-prompting.
 
     Args:
         expected_hashes: ``{tool_name: schema_hash}`` recorded at training time.

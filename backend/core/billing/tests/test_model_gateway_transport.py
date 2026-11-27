@@ -1020,8 +1020,8 @@ def test_model_economy_never_batches_an_own_key_model(gateway: ModelGateway) -> 
     assert "timeout" not in config["extra"]
 
 
-def test_interaction_payload_never_batches_a_managed_economy_model(gateway: ModelGateway) -> None:
-    """Keep a completed-run interaction off batches and still strip the model's economy flag."""
+def test_no_batch_payload_never_batches_a_managed_economy_model(gateway: ModelGateway) -> None:
+    """Keep an ``allow_batch=False`` payload off batches and still strip the model's economy flag."""
     protected = gateway.protect_payload(
         {
             "economy_mode": True,

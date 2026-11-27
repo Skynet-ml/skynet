@@ -15,14 +15,14 @@ harnesses running the same model over the same tools.
   `oracle` that solves it through the same tool API; `bench.validate` proves
   every task is solvable and that doing nothing does not pass.
   The 31 tasks are split over six categories, six tasks each except `cross` (four)
-  and `bbserve` (three):
+  and `blackbox` (three):
 
   | Category | Module | What it covers |
   |---|---|---|
   | `setup` | `run_setup.py` | wizard edits, staging data, column roles, submitting runs and grids |
   | `insight` | `job_insight.py` | read-only questions about runs, failures, grids and regressions |
   | `lifecycle` | `job_lifecycle.py` | rename, cancel, resume, delete, and asking before destructive actions |
-  | `bbserve` | `blackbox.py` | black-box engines, code validation, scorer dry-run |
+  | `blackbox` | `blackbox.py` | black-box engines, code validation, scorer dry-run |
   | `robust` | `account_robustness.py` | wallet, preferences, public search, tool faults, prompt injection |
   | `cross` | `cross_cutting.py` | multi-turn follow-ups, black-box launch, code-authoring card, model catalog |
 
@@ -40,7 +40,7 @@ harnesses running the same model over the same tools.
 | `dspy-reactv2-stable` | the same loop under `StableRosterChatAdapter`: same text tool protocol, tool roster pinned to the first user message. This is what the platform's optimized ReAct agents run |
 | `dspy-react` | stock classic `dspy.ReAct` |
 
-SKY-327 removed `dspy-reactv2-fixed` (`ConversationReAct`): every Skynet agent now runs on Pi. Its results below are history.
+SKY-327 removed `dspy-reactv2-fixed` (`ConversationReAct`): every Skynet agent now runs on Pi.
 | `codex` | `codex exec` with an OpenRouter provider |
 | `opencode` | `opencode run` with a tools-only agent |
 | `pi` | `pi -p`; Pi has no MCP client, so a small extension bridges the JSON API |
@@ -67,49 +67,6 @@ attempts that hit an infrastructure error are retried.
 in the wrong language. `--pin-language` tells `dspy-reactv2` and
 `dspy-reactv2-stable` which language to reply in, so the two can be compared
 without language drift deciding the outcome. `TASKS.md` lists every task with its prompt and checks.
-
-## Results (2026-09-20, fixed loop added 2026-09-21)
-
-`deepseek/deepseek-v4.1-flash` through OpenRouter, 36 tasks, 2 trials, 72
-attempts per harness. The full report is `results/main/REPORT.md`.
-
-| harness | pass | median time | tool calls | list cost / 1k tasks | English prompts answered in Hebrew |
-|---|---|---|---|---|---|
-| dspy-react | 97% | 44s | 2.1 | $5.83 | 0/60 |
-| dspy-reactv2-fixed | 97% | 34s | 3.1 | $3.53 | 0/60 |
-| opencode | 96% | 27s | 2.3 | $6.01 | 11/60 |
-| codex | 94% | 45s | 7.6 | $6.96 | 5/60 |
-| dspy-reactv2 | 92% | 26s | 2.1 | $11.07 | 12/60 |
-| pi | 90% | 21s | 2.4 | $5.46 | 16/60 |
-
-Reading the table:
-
-- **The top three are tied.** With 72 attempts, a pass rate near 95% carries
-  roughly five points of noise either way, so the model matters more than the
-  loop on these tasks.
-- **Language drift is the largest single failure cause.** 13 of the 22 failed
-  attempts are correct answers written in Hebrew to an English prompt, pulled
-  there by Hebrew data in tool results. `dspy.ReAct` never drifted. Production
-  pins the reply language explicitly, which this benchmark does not.
-- **`dspy-reactv2` costs about twice the others** because almost none of its
-  input is served from the prompt cache (about 9k cached of 79k input tokens,
-  against 30k to 120k for the rest).
-- **`dspy-reactv2-fixed` removes both problems.** The old loop rebuilt its
-  first user message on every step (tool roster and format reminder moved
-  behind the history), so the prompt prefix changed right after the system
-  message. The fixed loop sends tools on the provider's native channel and only
-  ever appends messages. Cached input rose from 11% to 84% of all input tokens
-  and list cost fell from $11.07 to $3.53 per 1k tasks, the lowest here. The
-  remaining misses come from OpenRouter switching providers between calls,
-  which every harness shares. With the reply language pinned it never drifted,
-  and its pass rate joined the tied group. Its two failures were one dry-run
-  task where it fixed the scorer and submitted anyway, and one ready run it
-  declined to submit.
-- **Substantive failures differ by harness.** Both DSPy loops submitted a run
-  they were asked only to dry-run. Codex mishandled a one-field preference
-  update in both trials. Pi missed several answer details.
-- **Codex is the slowest and most token-hungry** at about 10 model calls per
-  task against 3 to 4 elsewhere.
 
 ## Limits
 

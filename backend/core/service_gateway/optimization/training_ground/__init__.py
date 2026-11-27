@@ -2,7 +2,7 @@
 
 A reusable package that persists and re-hydrates GEPA-optimized ReAct
 bundles (program state + tool description/name overlays) and exposes the
-registry helpers the runtime needs to serve them against live MCP tools.
+registry helpers the runtime needs to run them against live MCP tools.
 
 Top-level imports are deliberately kept narrow — the runtime only needs the
 registry helpers and the bundle model.

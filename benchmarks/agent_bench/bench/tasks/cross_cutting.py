@@ -189,7 +189,7 @@ TASKS: list[Task] = [
         ],
         oracle=_oracle_blackbox_launch,
         skills=["blackbox", "validate-then-act", "model-resolution"],
-        notes="The positive twin of bbserve-scorer-dryrun-refuse: the scorer is valid, so stopping after the check is wrong.",
+        notes="The positive twin of blackbox-scorer-dryrun-refuse: the scorer is valid, so stopping after the check is wrong.",
     ),
     Task(
         id="cross-open-code-authoring",
