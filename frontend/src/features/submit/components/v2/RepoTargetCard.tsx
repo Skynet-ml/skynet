@@ -351,10 +351,9 @@ export function RepoTargetCard({
           <SourceCard
             selected={shown === "folder"}
             disabled={folderBusy}
-            onSelect={() => {
-              setSource("folder");
-              if (!isLocalRepo(repo)) onChange(withLocalFolder(repo, ""));
-            }}
+            // The draft changes only when the user picks or creates a folder, so
+            // a look at this card keeps the repository and its draft files.
+            onSelect={() => setSource("folder")}
             title={t("submit.v2.repo.source.folder")}
             desc={t("submit.v2.repo.source.folder_desc")}
             icon={
@@ -663,7 +662,12 @@ export function RepoTargetCard({
         // The folder panel's empty state already asks for a folder.
         !(shown === "folder" && issue === "submit.v2.repo.issue.local_path") && (
         <p role="status" className="text-xs text-muted-foreground">
-          {t(issue)}
+          {/* With no folder card on offer, the user can only go back to a repository. */}
+          {t(
+            issue === "submit.v2.repo.issue.local_path" && !offerFolder
+              ? "submit.v2.run_on.blocked.local_folder"
+              : issue,
+          )}
         </p>
       )}
     </div>

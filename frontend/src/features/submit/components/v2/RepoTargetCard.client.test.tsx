@@ -106,6 +106,7 @@ async function mount(
   onChange: (next: RepoDraft) => void = () => {},
   objective = "",
   localFolders = false,
+  issue: string | null = null,
 ) {
   const container = document.createElement("div");
   document.body.append(container);
@@ -117,7 +118,7 @@ async function mount(
         <RepoTargetCard
           repo={draft}
           onChange={onChange}
-          issue={null}
+          issue={issue}
           guided={false}
           seed={{ objective, scorerCode: "", cases: [] }}
           localFolders={localFolders}
@@ -549,4 +550,39 @@ void test("a cancelled folder pick changes nothing", async () => {
       await unmount();
     }
   });
+});
+
+void test("a look at the folder card keeps the git repository and its branch", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled({ ...repo, branch: "dev" }, sent);
+    try {
+      await React.act(async () => sourceCards(container)[2]!.click());
+      assert.equal(sourceCards(container)[2]!.getAttribute("aria-pressed"), "true");
+      assert.ok(container.querySelector("#v2-repo-folder-path"), "no folder panel");
+      await React.act(async () => sourceCards(container)[0]!.click());
+      assert.equal(sourceCards(container)[0]!.getAttribute("aria-pressed"), "true");
+      assert.deepEqual(sent, []);
+    } finally {
+      await unmount();
+    }
+  });
+});
+
+void test("a folder draft without the folder card asks for a repository instead", async () => {
+  const { container, unmount } = await mount(
+    { ...repo, localPath: "" },
+    () => {},
+    "",
+    false,
+    "submit.v2.repo.issue.local_path",
+  );
+  try {
+    assert.equal(sourceCards(container).length, 2);
+    const status = container.querySelector('[role="status"]');
+    assert.ok(status?.textContent?.includes("Choose a repository"), status?.textContent ?? "no status");
+  } finally {
+    await unmount();
+  }
 });
