@@ -461,3 +461,17 @@ def test_a_two_unit_box_is_priced_from_its_shape_weighted_seconds() -> None:
     """Charge a two-unit box's unit-seconds, which are twice its awake seconds."""
     record = _record(vcpu=4, memory_mb=8192, billing_units=2, unit_seconds=3600, running_seconds=1800)
     assert history_usd(_page(record), units=2) == Decimal("0.05")
+
+
+def test_wall_time_ignores_float_noise_of_a_large_clock(database: Engine) -> None:
+    """A long-running host's large monotonic clock must not add a millisecond to the bill.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
+    reservation._dispatched_at = 1e9
+    reservation._stopped_at = 1e9 + 10.2
+    assert reservation._wall_ms() == 10_200 + mosaic_usage._WALL_MARGIN_MS
+    reservation._stopped_at = 1e9 + 10.2004
+    assert reservation._wall_ms() == 10_201 + mosaic_usage._WALL_MARGIN_MS

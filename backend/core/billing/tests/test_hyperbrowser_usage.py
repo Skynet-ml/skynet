@@ -454,3 +454,17 @@ def test_hyperbrowser_usage_adapter_is_found() -> None:
     assert adapter is not None
     assert adapter is hyperbrowser_usage.USAGE
     assert adapter.name == "hyperbrowser"
+
+
+def test_measured_runtime_ignores_float_noise_of_a_large_clock(database: Engine) -> None:
+    """A long-running host's large monotonic clock must not add a millisecond to the bill.
+
+    Args:
+        database: The SQLite ledger.
+    """
+    reservation = HyperbrowserUsageReservation(_runtime(database), CREATE, operation_key="box-one")
+    reservation.sent_at = 1e9
+    reservation.stopped_at = 1e9 + 10.2
+    assert reservation._evidence()["measured_ms"] == 10_200
+    reservation.stopped_at = 1e9 + 10.2004
+    assert reservation._evidence()["measured_ms"] == 10_201

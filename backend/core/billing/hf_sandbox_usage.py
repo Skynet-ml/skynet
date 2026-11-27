@@ -177,7 +177,10 @@ def _job_ms(created_at: Any, finished_at: Any) -> int | None:
         return None
     if span < 0:
         return None
-    return math.ceil(span * 1000)
+    # total_seconds() is a float, so 2.007 s times 1000 reads as 2007.0000000000002.
+    # Rounding to whole microseconds first keeps that noise from billing a
+    # millisecond that did not run (SKY-988).
+    return math.ceil(round(span * 1000, 3))
 
 
 class HfSandboxUsageReservation:
@@ -322,7 +325,10 @@ class HfSandboxUsageReservation:
         """
         if self.sent_at is None or self.stopped_at is None:
             return None
-        return max(0, math.ceil((self.stopped_at - self.sent_at) * 1000))
+        # Monotonic readings are large on a long-running host, so their difference carries
+        # float noise (10.2 s reads as 10.2000000001). Rounding to whole microseconds first
+        # keeps that noise from billing a millisecond that did not run (SKY-988).
+        return max(0, math.ceil(round((self.stopped_at - self.sent_at) * 1000, 3)))
 
     def _evidence(self) -> dict[str, Any]:
         """Return the provider evidence of this box.
