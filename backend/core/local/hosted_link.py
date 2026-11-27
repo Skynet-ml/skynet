@@ -295,6 +295,8 @@ def finish_link(engine: Engine, *, code: str, state: str) -> ConnectorView:
     if response.status_code != 200:
         logger.info("Hosted refused the link code (status %s, %s)", response.status_code, _hosted_code(response))
         raise DomainError("hosted_link.failed", status=400)
+    # A new link may be to another hosted account; its relay copies must not survive.
+    clear_link(engine, payload["u"])
     view = _save_pair(engine, payload["u"], response.json())
     logger.info("Linked the Mac app to a hosted account")
     return view

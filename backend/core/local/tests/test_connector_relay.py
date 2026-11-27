@@ -199,3 +199,53 @@ def test_hugging_face_relay_token_refreshes_from_hosted(vault: ConnectorVault, h
     with pytest.raises(DomainError) as caught:
         hf.current_token(vault, _USER)
     assert caught.value.code == "connectors.hf_expired"
+
+
+def test_token_without_expiry_is_checked_again_after_the_relay_ttl(vault: ConnectorVault, hosted: FakeHosted) -> None:
+    """A hosted disconnect must reach the Mac, also for tokens that never expire.
+
+    Args:
+        vault: Linked local vault.
+        hosted: The fake hosted server.
+    """
+    hosted.connectors["github"] = _hosted_token("gho_forever", None)
+    connector_relay.pull(vault, _USER, "github")
+    secret = vault.resolve(_USER, "github")
+    assert secret is not None
+    assert secret.expires_at is not None
+    assert secret.expires_at <= datetime.now(UTC) + connector_relay.RELAY_TTL
+
+    vault.save(
+        _USER,
+        "github",
+        access_token="gho_forever",
+        auth_method=connector_relay.RELAY_AUTH_METHOD,
+        account_label="dana",
+        expires_at=datetime.now(UTC) + timedelta(seconds=10),
+    )
+    del hosted.connectors["github"]
+
+    with pytest.raises(DomainError) as caught:
+        oauth.current_oauth_token(github.oauth_app(), vault, _USER)
+    assert caught.value.code == "connectors.expired"
+
+
+def test_link_to_another_account_drops_the_old_relay_tokens(vault: ConnectorVault, hosted: FakeHosted) -> None:
+    """Tokens copied from account A must not survive a link to account B.
+
+    Args:
+        vault: Linked local vault.
+        hosted: The fake hosted server.
+    """
+    hosted.connectors["github"] = _hosted_token("gho_account_a")
+    connector_relay.pull(vault, _USER, "github")
+
+    hosted.email = "other@example.test"
+    url = hosted_link.start_link(_USER, device_name="Test Mac")
+    _redirect, code, state = hosted.authorize(url)
+    hosted_link.finish_link(vault.engine, code=code, state=state)
+
+    link = hosted_link.link_status(vault.engine, _USER)
+    assert link is not None
+    assert link.account_label == "other@example.test"
+    assert vault.resolve(_USER, "github") is None

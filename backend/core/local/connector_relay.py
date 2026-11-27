@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 RELAY_AUTH_METHOD = hosted_link.RELAY_AUTH_METHOD
 REFRESH_LEEWAY = timedelta(seconds=60)
+# Some providers (GitHub OAuth Apps, Notion) issue tokens without an expiry, and a
+# hosted disconnect does not reach the Mac. Capping the local copy makes the Mac
+# ask hosted again on a fixed schedule.
+RELAY_TTL = timedelta(minutes=15)
 
 
 def is_relay(secret: ConnectorSecret) -> bool:
@@ -56,7 +60,9 @@ def pull(vault: ConnectorVault, username: str, provider: str) -> str | None:
     if not isinstance(token, str) or not token:
         logger.info("Hosted has no OAuth connection for %s", provider)
         return None
-    expires_at = datetime.fromisoformat(body["expires_at"]) if body.get("expires_at") else None
+    expires_at = datetime.now(UTC) + RELAY_TTL
+    if body.get("expires_at"):
+        expires_at = min(expires_at, datetime.fromisoformat(body["expires_at"]))
     vault.save(
         username,
         provider,

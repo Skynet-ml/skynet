@@ -238,7 +238,7 @@ function ProviderCard({
   const [saving, setSaving] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
   const [removing, setRemoving] = React.useState(false);
-  // Set after the hosted connectors page opened; the next window focus copies the new link.
+  // Set after the hosted connectors page opened; the next window focus tries one copy.
   const [awaitingHosted, setAwaitingHosted] = React.useState(false);
 
   const connected = status?.connected ?? false;
@@ -319,7 +319,10 @@ function ProviderCard({
 
   React.useEffect(() => {
     if (!awaitingHosted || connected) return;
-    const onFocus = () => void handleRelay(false);
+    const onFocus = () => {
+      setAwaitingHosted(false);
+      void handleRelay(false);
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [awaitingHosted, connected, handleRelay]);

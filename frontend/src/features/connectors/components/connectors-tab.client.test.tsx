@@ -184,9 +184,15 @@ void test("the Mac app Connect button copies the hosted link, and opens hosted w
     assert.equal(opened.length, 1);
     assert.match(opened[0]!, /\?settings=connectors$/);
 
-    // Back in the app after connecting on hosted: focus copies the link.
+    // Back in the app without connecting: one focus tries one copy, later focuses send none.
     await React.act(async () => dom.window.dispatchEvent(new dom.window.Event("focus")));
-    await React.act(async () => relays[1]!.resolve({ connected: true }));
+    await React.act(async () => relays[1]!.resolve({ connected: false }));
+    await React.act(async () => dom.window.dispatchEvent(new dom.window.Event("focus")));
+    assert.equal(relays.length, 2);
+
+    // After connecting on hosted, a click copies the link.
+    await React.act(async () => button.click());
+    await React.act(async () => relays[2]!.resolve({ connected: true }));
     await React.act(async () => gets[1]!.resolve(relayList(true)));
     assert.match(container.textContent ?? "", /octo-linked/);
     assert.equal(opened.length, 1);
