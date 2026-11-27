@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Continuar com o Notion",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "O login com {provider} não está configurado nesta implantação",
+  "connectors.relay.connect_on_web": "Conecte {provider} no site do Skynet e depois volte para este app.",
   "connectors.onedrive.blurb": "Importe arquivos do seu OneDrive pessoal ou corporativo",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Continuar com a Microsoft",

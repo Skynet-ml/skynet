@@ -20,10 +20,12 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from ...brand import APP_NAME
+from ...connectors.vault import ConnectorVault
 from ...i18n_en import t_en
-from ...local import hosted_link
+from ...local import connector_relay, hosted_link
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from .connectors import RELAY_PROVIDERS
 from .local_runtime import require_local_mode
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
@@ -168,10 +170,12 @@ def create_local_hosted_link_router(*, job_store: Any) -> APIRouter:
         job_store: Storage backend whose ``engine`` holds ``user_connectors``.
 
     Returns:
-        A FastAPI ``APIRouter`` with start, finish, callback, status, whoami, balance and unlink.
+        A FastAPI ``APIRouter`` with start, finish, callback, status, whoami,
+        balance, connector relay and unlink.
     """
     router = APIRouter()
     engine = job_store.engine
+    vault = ConnectorVault(engine)
 
     @router.post("/local/hosted-link/start", include_in_schema=False, dependencies=_LOCAL_ONLY)
     def start(user: AuthenticatedUserDep, body: HostedLinkStartRequest | None = None) -> dict[str, str]:
@@ -284,6 +288,26 @@ def create_local_hosted_link_router(*, job_store: Any) -> APIRouter:
         """
         result = hosted_link.hosted_get(engine, user.username, "/desktop/v1/balance")
         return {key: result.get(key) for key in ("available_cents", "currency", "low_balance")}
+
+    @router.post("/local/hosted-link/connectors/{provider}", include_in_schema=False, dependencies=_LOCAL_ONLY)
+    def relay_connector(provider: str, user: AuthenticatedUserDep) -> dict[str, bool]:
+        """Copy the hosted OAuth connection of ``provider`` into the local vault.
+
+        Args:
+            provider: Provider slug.
+            user: The signed-in local user.
+
+        Returns:
+            ``{"connected": bool}``; false means the user must connect the
+            provider on hosted first.
+
+        Raises:
+            DomainError: 404 for a provider without OAuth, plus the errors of
+                :func:`hosted_link.hosted_request`.
+        """
+        if provider not in RELAY_PROVIDERS:
+            raise DomainError("connectors.unknown_provider", status=404, provider=provider)
+        return {"connected": connector_relay.pull(vault, user.username, provider) is not None}
 
     @router.post("/local/hosted-link/unlink", include_in_schema=False, dependencies=_LOCAL_ONLY)
     def unlink(user: AuthenticatedUserDep) -> dict[str, bool]:

@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Continuar con Notion",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "El inicio de sesión con {provider} no está configurado en esta instancia",
+  "connectors.relay.connect_on_web": "Conecta {provider} en el sitio web de Skynet y luego vuelve a esta app.",
   "connectors.onedrive.blurb": "Importa archivos de tu OneDrive personal o de trabajo",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Continuar con Microsoft",

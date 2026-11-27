@@ -70,6 +70,7 @@ function list(linked: boolean): { connectors: ConnectorStatus[] } {
         account_label: linked ? "octo-linked" : null,
         auth_method: linked ? "oauth" : null,
         oauth_available: true,
+        relay_available: false,
         picker_available: false,
         connected_at: linked ? "2026-11-07T10:00:00Z" : null,
       },
@@ -94,11 +95,13 @@ function deferred() {
 
 const gets: Array<ReturnType<typeof deferred>> = [];
 const finishes: Array<ReturnType<typeof deferred>> = [];
+const relays: Array<ReturnType<typeof deferred>> = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const path = new URL(String(input), "https://api.example.test").pathname;
   const answer = deferred();
   if (path === "/connectors" && (init?.method ?? "GET") === "GET") gets.push(answer);
   else if (path === "/connectors/github/oauth/finish") finishes.push(answer);
+  else if (path === "/local/hosted-link/connectors/github" && init?.method === "POST") relays.push(answer);
   else throw new Error(`unexpected request ${init?.method ?? "GET"} ${path}`);
   return answer.promise;
 }) as typeof fetch;
@@ -136,6 +139,63 @@ void test("a mount GET that answers after the finish does not hide the new link"
     assert.doesNotMatch(container.textContent ?? "", /octo-linked/);
     await React.act(async () => gets[1]!.resolve(list(true)));
     assert.match(container.textContent ?? "", /octo-linked/);
+  } finally {
+    await React.act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+/** A Mac app list: GitHub has no local OAuth app, and the hosted account can relay it. */
+function relayList(linked: boolean): { connectors: ConnectorStatus[] } {
+  const [github] = list(linked).connectors;
+  return { connectors: [{ ...github!, oauth_available: false, relay_available: !linked }] };
+}
+
+void test("the Mac app Connect button copies the hosted link, and opens hosted when there is none", async () => {
+  const opened: string[] = [];
+  dom.window.open = ((url: string) => {
+    opened.push(url);
+    return null;
+  }) as typeof dom.window.open;
+  gets.length = 0;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await React.act(async () => {
+      root.render(
+        <SettingsModalProvider>
+          <TooltipProvider>
+            <ConnectorsTab />
+          </TooltipProvider>
+        </SettingsModalProvider>,
+      );
+    });
+    await React.act(async () => gets[0]!.resolve(relayList(false)));
+    assert.doesNotMatch(container.textContent ?? "", /isn't set up/);
+    const button = container.querySelector<HTMLButtonElement>(
+      `button[aria-label="${buildActiveCatalog("en")["connectors.github.oauth_button"]}"]`,
+    );
+    assert.ok(button, "the relay Connect button shows");
+
+    // Hosted has no GitHub link yet: the tab opens the hosted connectors page.
+    await React.act(async () => button.click());
+    await React.act(async () => relays[0]!.resolve({ connected: false }));
+    assert.equal(opened.length, 1);
+    assert.match(opened[0]!, /\?settings=connectors$/);
+
+    // Back in the app without connecting: one focus tries one copy, later focuses send none.
+    await React.act(async () => dom.window.dispatchEvent(new dom.window.Event("focus")));
+    await React.act(async () => relays[1]!.resolve({ connected: false }));
+    await React.act(async () => dom.window.dispatchEvent(new dom.window.Event("focus")));
+    assert.equal(relays.length, 2);
+
+    // After connecting on hosted, a click copies the link.
+    await React.act(async () => button.click());
+    await React.act(async () => relays[2]!.resolve({ connected: true }));
+    await React.act(async () => gets[1]!.resolve(relayList(true)));
+    assert.match(container.textContent ?? "", /octo-linked/);
+    assert.equal(opened.length, 1);
   } finally {
     await React.act(async () => root.unmount());
     container.remove();

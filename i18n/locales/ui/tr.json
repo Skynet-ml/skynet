@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Notion ile devam et",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "{provider} ile oturum açma bu dağıtımda yapılandırılmamış.",
+  "connectors.relay.connect_on_web": "{provider} bağlantısını Skynet web sitesinde kurun, ardından bu uygulamaya dönün.",
   "connectors.onedrive.blurb": "Kişisel veya iş OneDrive'ınızdaki dosyaları içe aktarın.",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Microsoft ile devam et",

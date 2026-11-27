@@ -1236,6 +1236,16 @@ export function unlinkLocalHostedLink() {
 }
 
 /**
+ * Copy the linked hosted account's OAuth connection of one provider into the
+ * Mac app. ``connected`` is false when the provider is not connected on hosted.
+ */
+export function connectLocalRelay(provider: ConnectorProvider) {
+  return request<{ connected: boolean }>(`/local/hosted-link/connectors/${provider}`, {
+    method: "POST",
+  });
+}
+
+/**
  * Start linking the Mac app to a hosted account. The returned consent URL
  * redirects back to this API's loopback callback, which finishes the link.
  */
@@ -1848,9 +1858,11 @@ export interface ConnectorStatus {
   connected: boolean;
   status: "connected" | "invalid" | null;
   account_label: string | null;
-  auth_method: "oauth" | "token" | "service_account" | "credentials" | null;
+  auth_method: "oauth" | "oauth_relay" | "token" | "service_account" | "credentials" | null;
   /** Whether the deployment can offer "Continue with <provider>" (OAuth app configured). */
   oauth_available: boolean;
+  /** Whether the Mac app can copy this OAuth link from the linked hosted account. */
+  relay_available: boolean;
   /** Whether the Google Picker can choose the files this OAuth link may read. */
   picker_available: boolean;
   connected_at: string | null;

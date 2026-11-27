@@ -3256,6 +3256,7 @@
   "connectors.category.databases": "מסדי נתונים ומחסני נתונים",
   "connectors.category.traces": "טרייסים והערכות של LLM",
   "connectors.oauth_only_unavailable": "התחברות דרך {provider} לא מוגדרת בפריסה הזו.",
+  "connectors.relay.connect_on_web": "חברו את {provider} באתר של Skynet, ואז חזרו לאפליקציה הזו.",
   "connectors.field.username": "שם משתמש",
   "connectors.field.key": "מפתח API",
   "connectors.field.notion_token": "סוד האינטגרציה הפנימית",

@@ -91,6 +91,11 @@ class ConnectorVault:
         """
         self._engine = engine
 
+    @property
+    def engine(self) -> Engine:
+        """Return the engine the vault reads and writes."""
+        return self._engine
+
     @staticmethod
     def _row(session: Session, username: str, provider: str) -> UserConnectorModel | None:
         """Fetch the user's row for a provider inside ``session``.

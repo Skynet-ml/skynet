@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Notion으로 계속하기",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "{provider} 로그인이 이 배포 환경에서 설정되어 있지 않습니다.",
+  "connectors.relay.connect_on_web": "Skynet 웹사이트에서 {provider}을(를) 연결한 다음 이 앱으로 돌아오세요.",
   "connectors.onedrive.blurb": "개인 또는 회사 OneDrive에서 파일을 가져옵니다.",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Microsoft로 계속하기",
