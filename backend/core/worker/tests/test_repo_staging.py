@@ -55,6 +55,7 @@ from core.connectors.github_publish import HardeningSummary, PublishedChange, Re
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.i18n_keys import I18nKey
+from core.local import folder_tree
 from core.models.blackbox import (
     BLACKBOX_ENGINE_AUTORESEARCH,
     BLACKBOX_ENGINE_META_HARNESS,
@@ -107,7 +108,7 @@ from core.service_gateway.optimization.blackbox.sandbox_contract import UserImag
 from core.service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY, case_split_positions, legacy_case_splits
 from core.storage.models import Base
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
-from core.worker import repo_staging, scoped_relay
+from core.worker import local_folder, repo_staging, scoped_relay
 from core.worker.repo_gate import RepoGateError, check_hidden
 from core.worker.scoped_relay import McpRelay
 
@@ -1567,6 +1568,137 @@ def test_failed_fetch_leaves_nothing_on_disk(monkeypatch: pytest.MonkeyPatch) ->
 
     assert workdirs
     assert not workdirs[0].exists()
+
+
+def _local_payload(folder: Path, **repo: Any) -> dict[str, Any]:
+    """Build a stored payload whose source is a folder on this computer (SKY-990).
+
+    Args:
+        folder: The folder.
+        **repo: Extra source fields.
+
+    Returns:
+        The payload.
+    """
+    source = {"provider": "local", "repository": f"local/{folder.name}", "path": str(folder), "editable_paths": ["."]}
+    return {"target": {"kind": "repo", "repo": {**source, **repo}}}
+
+
+@pytest.fixture
+def local_stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Stage as the desktop local stack, where any host or remote box read fails the test.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+
+    Returns:
+        The local state folder.
+    """
+
+    def never(*_args: Any, **_kwargs: Any) -> Any:
+        """Fail the test: a local folder never reads a host.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("a local folder must not read a host")
+
+    state = tmp_path / "state"
+    monkeypatch.setattr(repo_staging.settings, "local_mode", True)
+    monkeypatch.setattr(repo_staging.settings, "local_state_dir", str(state))
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    for name in ("github_token", "fetch_snapshot", "resolve_commit", "_owner_token"):
+        monkeypatch.setattr(repo_staging, name, never)
+    return state
+
+
+def test_staging_packs_a_local_folder_with_drafts_and_never_writes_it(local_stack: Path, tmp_path: Path) -> None:
+    """An empty folder plus drafts stages with no host read; the folder stays empty and its copy is kept.
+
+    Args:
+        local_stack: The local state folder.
+        tmp_path: Scratch folder.
+    """
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    payload = _local_payload(folder, draft_files={**_FILES, "src/geocode/app.py": "drafted = True\n"})
+
+    staged_payload, staged = repo_staging.stage_repository(payload, username="alice", binding_id="b", engine=None)
+
+    commit = staged_payload["target"]["repo"]["commit"]
+    assert commit == staged.snapshot.commit == folder_tree.folder_source_id(folder)
+    assert staged_payload["target"]["repo"]["editable_paths"] == ["src/geocode"]
+    with tarfile.open(staged.snapshot.archive) as packed:
+        assert packed.extractfile("src/geocode/app.py").read() == b"drafted = True\n"  # type: ignore[union-attr]
+    assert local_folder.kept_snapshot(commit).is_file()
+    assert list(folder.iterdir()) == []
+    staged.cleanup()
+
+
+def test_staging_refuses_a_local_folder_on_a_remote_sandbox(local_stack: Path, tmp_path: Path) -> None:
+    """A local folder never goes to a remote box, and nothing is packed for it.
+
+    Args:
+        local_stack: The local state folder.
+        tmp_path: Scratch folder.
+    """
+    payload = _local_payload(tmp_path)
+    payload["sandbox_provider"] = "vercel"
+
+    with pytest.raises(local_folder.LocalFolderError, match=r"A local folder runs only on this computer\."):
+        repo_staging.stage_repository(payload, username="alice", binding_id="b", engine=None)
+
+    assert not local_stack.exists()
+
+
+def test_staging_checks_a_local_drafts_base_against_the_folder(local_stack: Path, tmp_path: Path) -> None:
+    """Drafts read at the folder's current state stage; drafts read before it changed stop with a code.
+
+    Args:
+        local_stack: The local state folder.
+        tmp_path: Scratch folder.
+    """
+    folder = tmp_path / "app"
+    folder.mkdir()
+    (folder / "main.py").write_text("x = 1\n")
+    drafts = {"main.py": "x = 2\n"}
+    base = folder_tree.folder_source_id(folder)
+
+    _, staged = repo_staging.stage_repository(
+        _local_payload(folder, draft_files=drafts, draft_base=base), username="alice", binding_id="b", engine=None
+    )
+    staged.cleanup()
+    (folder / "main.py").write_text("x = 3\n")
+
+    with pytest.raises(RepoGateError) as refused:
+        repo_staging.stage_repository(
+            _local_payload(folder, draft_files=drafts, draft_base=base), username="alice", binding_id="b", engine=None
+        )
+
+    assert refused.value.code == I18nKey.REPO_GATE_DRAFT_BASE_MOVED
+
+
+def test_a_local_run_publishes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A local folder has no host, so an improved run opens no pull request; Apply takes the version.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args: pytest.fail("a local run must not push"))
+
+    outcome = repo_staging.publish_improvement(
+        _result(0.5, 0.8),
+        _local_payload(tmp_path, commit="c" * 40),
+        _staged(tmp_path),
+        username="ada",
+        engine=None,
+        optimization_id="0123456789abcdef",
+        app_url="https://skynetml.com/",
+    )
+
+    assert outcome is None
 
 
 def test_only_repository_targets_are_staged() -> None:

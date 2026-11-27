@@ -9,7 +9,8 @@ Every version of a repository run is a patch against one pinned commit; the
 run page applies the patches itself and only needs the base tree and files.
 The repository host is read with the run owner's connection, since the commit belongs to
 the run rather than to whoever is viewing it, and anonymously when the owner
-has none, so public repositories still open.
+has none, so public repositories still open. A local folder run reads the
+copy of the folder that staging kept on this computer (SKY-990).
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from ....models import (
     BlackboxRepoTreeEntry,
     BlackboxRepoTreeResponse,
 )
+from ....worker.local_folder import LOCAL_PROVIDER, LocalFolderError, snapshot_file, snapshot_tree, snapshot_zip
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import job_owner
 from ...errors import DomainError
@@ -168,9 +170,30 @@ def _repo_provider(job_data: dict[str, Any]) -> str:
         job_data: The stored job row, already checked by :func:`_repo_target`.
 
     Returns:
-        ``github``, ``gitlab`` or ``bitbucket``.
+        ``github``, ``gitlab``, ``bitbucket``, or ``local`` for a folder on this computer.
     """
-    return repo_hosts.provider_of(job_data["payload"]["target"]["repo"])
+    repo = job_data["payload"]["target"]["repo"]
+    if repo.get("provider") == LOCAL_PROVIDER:
+        return LOCAL_PROVIDER
+    return repo_hosts.provider_of(repo)
+
+
+def _read_local(read: Callable[[], T]) -> T:
+    """Run a read of a local run's kept folder copy.
+
+    Args:
+        read: The read.
+
+    Returns:
+        What ``read`` returns.
+
+    Raises:
+        DomainError: 502 when the kept copy is missing or unreadable.
+    """
+    try:
+        return read()
+    except LocalFolderError as error:
+        raise DomainError("optimization.repo_archive_failed", status=502, reason=str(error)) from None
 
 
 def _owner_token(engine: Any, owner: str | None, provider: str) -> str | None:
@@ -372,12 +395,15 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         key = (owner, provider, repository, commit)
         cached = _trees.get(key)
         if cached is None:
-            tree = _read_as_owner(
-                getattr(job_store, "engine", None),
-                owner,
-                lambda token: repo_hosts.host(provider).tree_entries(token, repository, commit),
-                provider,
-            )
+            if provider == LOCAL_PROVIDER:
+                tree = _read_local(lambda: snapshot_tree(commit))
+            else:
+                tree = _read_as_owner(
+                    getattr(job_store, "engine", None),
+                    owner,
+                    lambda token: repo_hosts.host(provider).tree_entries(token, repository, commit),
+                    provider,
+                )
             entries = sorted(
                 (BlackboxRepoTreeEntry(path=e["path"], type=e["type"], size=e.get("size")) for e in tree["entries"]),
                 key=lambda entry: entry.path,
@@ -426,12 +452,15 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         key = (owner, provider, repository, commit, clean)
         cached = _files.get(key)
         if cached is None:
-            fetched = _read_as_owner(
-                getattr(job_store, "engine", None),
-                owner,
-                lambda token: repo_hosts.host(provider).file_at(token, repository, commit, clean, MAX_FILE_BYTES),
-                provider,
-            )
+            if provider == LOCAL_PROVIDER:
+                fetched = _read_local(lambda: snapshot_file(commit, clean, MAX_FILE_BYTES))
+            else:
+                fetched = _read_as_owner(
+                    getattr(job_store, "engine", None),
+                    owner,
+                    lambda token: repo_hosts.host(provider).file_at(token, repository, commit, clean, MAX_FILE_BYTES),
+                    provider,
+                )
             cached = _file_response(clean, fetched)
             _files.put(key, cached, weight=len(cached.content or ""))
         return cached
@@ -469,19 +498,29 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         if body.patch not in recorded_patches(job_data):
             raise DomainError("optimization.repo_version_unknown", status=404)
         provider = _repo_provider(job_data)
-        token = _owner_token(getattr(job_store, "engine", None), job_owner(job_data) or "", provider)
         workdir = Path(tempfile.mkdtemp(prefix="repo-archive-"))
         try:
-            archive = patched_repo_zip(
-                repository,
-                commit,
-                body.patch,
-                token,
-                workdir,
-                **repo_hosts.git_kwargs(provider),
-                drafts=_run_drafts(job_data),
-                readonly_paths=_run_readonly_paths(job_data),
-            )
+            if provider == LOCAL_PROVIDER:
+                archive = snapshot_zip(
+                    commit,
+                    body.patch,
+                    workdir,
+                    folder=repository.rsplit("/", 1)[-1],
+                    drafts=_run_drafts(job_data),
+                    readonly_paths=_run_readonly_paths(job_data),
+                )
+            else:
+                token = _owner_token(getattr(job_store, "engine", None), job_owner(job_data) or "", provider)
+                archive = patched_repo_zip(
+                    repository,
+                    commit,
+                    body.patch,
+                    token,
+                    workdir,
+                    **repo_hosts.git_kwargs(provider),
+                    drafts=_run_drafts(job_data),
+                    readonly_paths=_run_readonly_paths(job_data),
+                )
         except RepoFetchError as error:
             shutil.rmtree(workdir, ignore_errors=True)
             raise DomainError("optimization.repo_archive_failed", status=502, reason=str(error)) from None

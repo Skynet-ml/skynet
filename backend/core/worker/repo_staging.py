@@ -148,6 +148,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec, UserImage
 from ..service_gateway.optimization.blackbox.sandbox_scorer import RUNNER_SOURCE, ScorerGateway, scorer_gateway
 from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
+from .local_folder import ensure_runs_here, is_local, snapshot_folder
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
 from .scoped_relay import McpRelay
 
@@ -410,7 +411,9 @@ def stage_repository(
         RepoGateError: When the agent's tree still shows a hidden path from ``hidden_repo_paths``,
             or when the draft files were written on another commit than the one the run starts from.
         RepoFetchError: When the repository cannot be read; without a host
-            connection, the message says to connect the host.
+            connection, the message says to connect the host. A local folder
+            raises :class:`~.local_folder.LocalFolderError` when it cannot be
+            packed, or when the run is not on this computer's Docker box.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -429,30 +432,44 @@ def stage_repository(
         vault=ProtectedCredentialVault(engine=engine),
         saved=SavedSecretStore(engine),
     )
-    provider = repo_hosts.provider_of(repo)
-    token = _owner_token(engine, username, provider)
-    try:
-        if provider == repo_hosts.DEFAULT_PROVIDER:
-            commit = repo.get("commit") or resolve_commit(token, repo["repository"], repo.get("branch"))
-        else:
-            commit = repo.get("commit") or repo_hosts.resolve_commit(
-                provider, token, repo["repository"], repo.get("branch")
-            )
-    except RepoFetchError as error:
-        # A spent rate limit says nothing about whether the repository is public.
-        if token is not None or isinstance(error, RepoRateLimitError):
-            raise
-        raise _anonymous_fetch_error(error, provider) from error
-    if moved := check_draft_base(bool(drafts), draft_base, commit, place=sandbox_place(settings.local_mode)):
-        raise RepoGateError(moved)
-    workdir = Path(tempfile.mkdtemp(prefix="app-repo-"))
-    try:
+    local = is_local(repo)
+    # A local source has no host or token, and its commit is known only after packing.
+    provider, token, commit = "", None, ""
+    if local:
+        # A local folder never leaves this computer, so only the local Docker box may run it (SKY-990).
+        ensure_runs_here(result.get("sandbox_provider"))
+    else:
+        provider = repo_hosts.provider_of(repo)
+        token = _owner_token(engine, username, provider)
         try:
-            snapshot = fetch_snapshot(repo["repository"], commit, token, workdir, **repo_hosts.git_kwargs(provider))
+            if provider == repo_hosts.DEFAULT_PROVIDER:
+                commit = repo.get("commit") or resolve_commit(token, repo["repository"], repo.get("branch"))
+            else:
+                commit = repo.get("commit") or repo_hosts.resolve_commit(
+                    provider, token, repo["repository"], repo.get("branch")
+                )
         except RepoFetchError as error:
-            if token is not None:
+            # A spent rate limit says nothing about whether the repository is public.
+            if token is not None or isinstance(error, RepoRateLimitError):
                 raise
             raise _anonymous_fetch_error(error, provider) from error
+        if moved := check_draft_base(bool(drafts), draft_base, commit, place=sandbox_place(settings.local_mode)):
+            raise RepoGateError(moved)
+    workdir = Path(tempfile.mkdtemp(prefix="app-repo-"))
+    try:
+        if local:
+            # The folder's content hash is the commit, so the draft base is checked only after packing.
+            snapshot = snapshot_folder(repo["path"], workdir, repo.get("commit"))
+            commit = snapshot.commit
+            if moved := check_draft_base(bool(drafts), draft_base, commit, place=sandbox_place(settings.local_mode)):
+                raise RepoGateError(moved)
+        else:
+            try:
+                snapshot = fetch_snapshot(repo["repository"], commit, token, workdir, **repo_hosts.git_kwargs(provider))
+            except RepoFetchError as error:
+                if token is not None:
+                    raise
+                raise _anonymous_fetch_error(error, provider) from error
         # The setup draft's files replace the commit's, so every box and the
         # draft's ascent.toml see the tree the user set up.
         try:
@@ -4241,9 +4258,12 @@ def publish_improvement(
     Returns:
         What was recorded under ``details.pull_request`` (or
         ``details.candidate_branches`` for a created repository), or ``None``
-        when the run did not improve an existing repository.
+        when the run did not improve an existing repository or ran on a local folder.
     """
     drop_hidden_edits(result, staged.hidden_paths)
+    # A local folder has no host to push to; Apply on this computer takes the version (SKY-990).
+    if is_local(payload["target"]["repo"]):
+        return None
     if payload["target"]["repo"].get("created_by_skynet"):
         return publish_candidates(
             result, payload, staged, username=username, engine=engine, optimization_id=optimization_id

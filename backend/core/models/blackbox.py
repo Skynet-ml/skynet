@@ -14,8 +14,10 @@ above each class, not in class bodies.
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import (
@@ -32,6 +34,7 @@ from pydantic import (
     model_validator,
 )
 
+from ..config import settings
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
 from .scorer_dependencies import ScorerDependencyLock
@@ -238,6 +241,9 @@ REPO_NAME_PATTERN = r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
 # GitLab nests projects in subgroups (``group/sub/project``); GitHub and Bitbucket use two parts.
 REPO_PATH_PATTERN = r"^[A-Za-z0-9_.-]{1,255}(/[A-Za-z0-9_.-]{1,255}){1,20}$"
 REPO_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
+# A folder on this computer, for the desktop local stack only (SKY-990).
+LOCAL_REPO_PROVIDER = "local"
+LOCAL_FOLDER_ONLY_HERE = "A local folder runs only on this computer."
 # An exact host, or ``*.`` and a suffix of two or more labels: ``*.com``
 # would let a secret go to any host of a top-level domain.
 REPO_SECRET_HOST_PATTERN = re.compile(r"^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$")
@@ -369,8 +375,12 @@ class BlackboxRepoSecret(BaseModel):
 # run: its finished run pushes every version to its own branch and moves
 # ``skynet/best`` to the winner, instead of opening a pull request.
 class BlackboxRepoSource(BaseModel):
-    provider: Literal["github", "gitlab", "bitbucket"] = "github"
+    provider: Literal["github", "gitlab", "bitbucket", "local"] = "github"
     repository: str = Field(pattern=REPO_PATH_PATTERN, max_length=1024)
+    # The absolute folder of a ``local`` source. The server fills
+    # ``repository`` from the folder's name, and the commit is a content hash of
+    # the folder's kept files (SKY-990).
+    path: str | None = Field(default=None, min_length=1, max_length=4096)
     branch: str | None = Field(default=None, min_length=1, max_length=255)
     commit: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
     editable_paths: list[str] = Field(min_length=1, max_length=200)
@@ -396,6 +406,60 @@ class BlackboxRepoSource(BaseModel):
     # with a draft. ``/blackbox/run`` turns a client's ``mcp`` into
     # ``setup_screen``, so only the MCP draft flow stores ``mcp``.
     contract_source: Literal["setup_screen", "mcp", "repository"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _name_local_folder(cls, data: Any) -> Any:
+        """Fill a local source's ``repository`` from its folder's name.
+
+        Args:
+            data: Raw source data before field validation.
+
+        Returns:
+            A copied mapping with ``repository`` set to ``local/<folder name>``
+            for a local source, otherwise the input unchanged.
+        """
+        if not isinstance(data, dict) or data.get("provider") != LOCAL_REPO_PROVIDER:
+            return data
+        raw = data.get("path")
+        name = Path(os.path.normpath(raw)).name if isinstance(raw, str) and raw.strip() else ""
+        name = re.sub(r"[^A-Za-z0-9_.-]", "-", name)[:100].strip(".") or "folder"
+        return {**data, "repository": f"local/{name}"}
+
+    @model_validator(mode="after")
+    def _ensure_local_folder(self, info: ValidationInfo) -> BlackboxRepoSource:
+        """Check a local source's folder, and that only a local source names one.
+
+        A stored run skips the checks that read this computer, so its history
+        still loads after the folder moved or on another deployment.
+
+        Args:
+            info: Validation info; its context marks a stored run's payload.
+
+        Returns:
+            The source, with a normalized folder path.
+
+        Raises:
+            ValueError: When a hosted source names a path, or a local source has
+                no absolute path, names a branch, runs outside local mode, or
+                its path is not an existing folder.
+        """
+        if self.provider != LOCAL_REPO_PROVIDER:
+            if self.path is not None:
+                raise ValueError("Only a local source takes a path.")
+            return self
+        if self.path is None or not Path(self.path).is_absolute():
+            raise ValueError("A local source needs the folder's absolute path.")
+        if self.branch is not None:
+            raise ValueError("A local folder has no branch.")
+        self.path = os.path.normpath(self.path)
+        if (info.context or {}).get(STORED_PAYLOAD_KEY):
+            return self
+        if not settings.local_mode:
+            raise ValueError(LOCAL_FOLDER_ONLY_HERE)
+        if not Path(self.path).is_dir():
+            raise ValueError(f"The folder {self.path} does not exist or is not a folder.")
+        return self
 
     @model_validator(mode="after")
     def _ensure_clean_paths(self) -> BlackboxRepoSource:
@@ -832,13 +896,17 @@ class BlackboxRunRequest(BaseModel):
             The validated request instance.
 
         Raises:
-            ValueError: When a repository run sends a task model; or when an iteration cap is
+            ValueError: When a repository run sends a task model, or a local
+                folder names a provider other than ``docker``; or when an iteration cap is
                 supplied outside a single Meta-Harness, AutoSaddler or
                 ShinkaEvolve run; or when extra optimization models are sent
                 to a single run of another engine.
         """
         if self.target.kind == BLACKBOX_TARGET_REPO:
             self._ensure_repo_run()
+            local = self.target.repo is not None and self.target.repo.provider == LOCAL_REPO_PROVIDER
+            if local and self.sandbox_provider not in (None, "docker"):
+                raise ValueError(LOCAL_FOLDER_ONLY_HERE)
             if self.task_model_settings is not None:
                 raise ValueError("task_model_config does not apply to a repository run.")
         if self.budget.max_iterations is not None and (

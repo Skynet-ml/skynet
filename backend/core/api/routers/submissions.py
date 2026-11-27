@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import exists, update
 from sqlalchemy.orm import Session
 
@@ -78,6 +78,8 @@ from ...models.blackbox import (
     BLACKBOX_MODULE_NAME,
     BLACKBOX_STRATEGY_AUTO,
     BLACKBOX_TARGET_REPO,
+    LOCAL_FOLDER_ONLY_HERE,
+    LOCAL_REPO_PROVIDER,
 )
 from ...models.common import ModelConfig, OptimizationType
 from ...models.unified import METRIC_SIGNATURE, RUN_ENTRY
@@ -840,9 +842,17 @@ def submit_repo_payload(
     Raises:
         DomainError: 400 (not a repository target, or the scorer does not
             load), 402 (no balance), 409 (quota or a failed setup check).
+        HTTPException: 400 when a local folder would run outside this
+            computer's Docker box.
     """
     if payload.target.kind != BLACKBOX_TARGET_REPO or payload.target.repo is None:
         raise DomainError("submission.validation_failed", status=400)
+    # The request checks only a provider it names; this also covers the
+    # default, before the setup check stages the folder (SKY-990).
+    if payload.target.repo.provider == LOCAL_REPO_PROVIDER and (
+        not settings.local_mode or (payload.sandbox_provider or default_provider(settings)) != "docker"
+    ):
+        raise HTTPException(status_code=400, detail=LOCAL_FOLDER_ONLY_HERE)
     payload.username = current_user.username
     # The job column holds the chat only after the ownership check, so the
     # stored payload and the replay keys never carry an unchecked id.

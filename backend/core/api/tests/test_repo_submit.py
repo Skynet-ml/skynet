@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from ...config import settings
 from ...constants import OPTIMIZATION_TYPE_BLACKBOX
 from ...i18n import t_locale
 from ...models.blackbox import BLACKBOX_MODULE_NAME
@@ -167,6 +169,49 @@ def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJob
 
     assert resp.status_code == 422
     assert "Every run optimizes a repository" in resp.text
+    assert store._jobs == {}
+
+
+def _local_body(folder: Path, **overrides: Any) -> dict:
+    """Build a run body whose source is a folder on this computer.
+
+    Args:
+        folder: The folder.
+        **overrides: Top-level keys to replace.
+
+    Returns:
+        The request body.
+    """
+    body = repo_payload(**overrides)
+    body["target"]["repo"] = {"provider": "local", "path": str(folder), "editable_paths": ["."]}
+    return body
+
+
+@pytest.mark.parametrize(("provider", "status"), [("vercel", 422), (None, 400)], ids=["named", "default"])
+def test_a_local_folder_is_refused_on_a_remote_sandbox(
+    client_and_store: tuple[Any, _FakeJobStore],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider: str | None,
+    status: int,
+) -> None:
+    """A local folder never goes to a remote box, whether the run names it or the default picks it (SKY-990).
+
+    Args:
+        client_and_store: The API client and its job store.
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: The folder the run names.
+        provider: The sandbox provider the run names.
+        status: The request check refuses a named one (422); the route refuses the default (400).
+    """
+    client, store = client_and_store
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(_sub_mod, "default_provider", lambda _settings: "vercel")
+
+    resp = client.post("/blackbox/run", json=_local_body(tmp_path, sandbox_provider=provider))
+
+    assert resp.status_code == status
+    assert "A local folder runs only on this computer." in resp.text
     assert store._jobs == {}
 
 

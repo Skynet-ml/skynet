@@ -321,6 +321,83 @@ def test_repository_must_be_owner_slash_name(repository: str) -> None:
         BlackboxRepoSource(repository=repository, editable_paths=["src"])
 
 
+def _local_source(path: str, **fields: Any) -> dict[str, Any]:
+    """Build a local folder source.
+
+    Args:
+        path: The folder path.
+        **fields: Extra source fields.
+
+    Returns:
+        The source data.
+    """
+    return {"provider": "local", "path": path, "editable_paths": ["."], **fields}
+
+
+def test_a_local_source_names_itself_after_its_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """The server fills ``repository`` from the folder name and normalizes the path (SKY-990)."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", True)
+    folder = tmp_path / "my app!"
+    folder.mkdir()
+
+    source = BlackboxRepoSource.model_validate(_local_source(f"{folder}/./", repository="evil/other"))
+
+    assert source.repository == "local/my-app-"
+    assert source.path == str(folder)
+
+
+@pytest.mark.parametrize(
+    ("fields", "local_mode", "message"),
+    [
+        ({"path": "relative/app"}, True, "absolute path"),
+        ({"branch": "main"}, True, "no branch"),
+        ({"path": "/no/such/folder/here"}, True, "does not exist"),
+        ({}, False, "A local folder runs only on this computer."),
+    ],
+    ids=["relative-path", "branch", "missing-folder", "hosted-deployment"],
+)
+def test_a_local_source_is_refused_when_it_cannot_run_here(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, fields: dict[str, Any], local_mode: bool, message: str
+) -> None:
+    """A local source needs local mode and an existing absolute folder, and has no branch."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", local_mode)
+
+    with pytest.raises(ValidationError, match=message):
+        BlackboxRepoSource.model_validate({**_local_source(str(tmp_path)), **fields})
+
+
+def test_a_stored_local_run_loads_after_its_folder_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """History still loads on another deployment or after the folder moved."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", False)
+
+    source = BlackboxRepoSource.model_validate(
+        _local_source("/gone/app"), context=blackbox_models.STORED_PAYLOAD_CONTEXT
+    )
+
+    assert source.repository == "local/app"
+
+
+def test_only_a_local_source_takes_a_path() -> None:
+    """A hosted repository never reads a folder on this computer."""
+    with pytest.raises(ValidationError, match="Only a local source takes a path"):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], path="/tmp")
+
+
+@pytest.mark.parametrize(("provider", "allowed"), [(None, True), ("docker", True), ("vercel", False)])
+def test_a_local_run_refuses_a_remote_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, provider: str | None, allowed: bool
+) -> None:
+    """A local folder never leaves this computer, so only the local Docker box runs it."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", True)
+    request = _repo_request(target={"kind": "repo", "repo": _local_source(str(tmp_path))}, sandbox_provider=provider)
+
+    if allowed:
+        assert BlackboxRunRequest.model_validate(request).target.repo.provider == "local"  # type: ignore[union-attr]
+    else:
+        with pytest.raises(ValidationError, match=r"A local folder runs only on this computer\."):
+            BlackboxRunRequest.model_validate(request)
+
+
 def test_repo_run_needs_a_python_scorer() -> None:
     """A remote endpoint never sees the checkout, so a repository run is scored by Python code."""
     with pytest.raises(ValidationError, match="scored by Python code"):
