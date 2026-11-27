@@ -3256,6 +3256,7 @@
   "connectors.category.databases": "Databases & warehouses",
   "connectors.category.traces": "LLM traces & evals",
   "connectors.oauth_only_unavailable": "Sign-in with {provider} isn't set up on this deployment.",
+  "connectors.relay.connect_on_web": "Connect {provider} on the Skynet website, then come back to this app.",
   "connectors.field.username": "Username",
   "connectors.field.key": "API key",
   "connectors.field.notion_token": "Internal integration secret",

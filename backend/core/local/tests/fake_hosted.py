@@ -4,8 +4,8 @@ It follows the SKY-124 addendum contract (section 2.3) and the error codes
 and refresh rules of the hosted server in PR #782 (head ``88d1234b``): the
 link code with PKCE S256, the token pair with ``skyl_`` prefixes, refresh
 rotation with reuse detection (a 30 s grace retry, then the whole link is
-revoked and the owner gets a notice), revoke, ``whoami`` and ``balance``, and
-the RFC 9457 error bodies with a ``code``. It is a copy of those rules, not
+revoked and the owner gets a notice), revoke, ``whoami``, ``balance``, the
+connector relay of SKY-986, and the RFC 9457 error bodies with a ``code``. It is a copy of those rules, not
 the real hosted routes.
 """
 
@@ -73,6 +73,8 @@ class FakeHosted:
     revoke_bodies: list[dict[str, Any]] = field(default_factory=list)
     refresh_timeouts: list[dict[str, float | None]] = field(default_factory=list)
     echo_bodies: list[dict[str, Any]] = field(default_factory=list)
+    # Provider slug -> the body of GET /desktop/v1/connectors/{provider}.
+    connectors: dict[str, dict[str, Any]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def transport(self) -> httpx.MockTransport:
@@ -303,6 +305,14 @@ class FakeHosted:
                 return denied
             self.echo_bodies.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
+        if request.method == "GET" and path.startswith("/desktop/v1/connectors/"):
+            denied = self._bearer(request)
+            if denied is not None:
+                return denied
+            body = self.connectors.get(path.removeprefix("/desktop/v1/connectors/"))
+            if body is None:
+                return self._problem(404, "connectors.not_connected")
+            return httpx.Response(200, json=body)
         if request.method == "DELETE" and path.startswith("/desktop/v1/echo/"):
             return self._bearer(request) or httpx.Response(204)
         return httpx.Response(404, json={"code": "not_found"})

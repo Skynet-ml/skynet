@@ -23,6 +23,7 @@ from cryptography.fernet import InvalidToken
 
 from ..api.errors import DomainError
 from ..config import settings
+from ..local import connector_relay
 from .transport import label
 from .vault import vault_cipher
 
@@ -266,6 +267,13 @@ def current_oauth_token(app: OAuthApp, vault: ConnectorVault, username: str) -> 
     secret = vault.resolve(username, app.provider)
     if secret is None:
         raise DomainError("connectors.not_connected", status=409, provider=label(app.provider))
+    if connector_relay.is_relay(secret):
+        # The Mac app holds no refresh token; hosted refreshes and hands over a fresh copy.
+        token = connector_relay.current_token(vault, username, app.provider, secret)
+        if token is None:
+            vault.mark_invalid(username, app.provider)
+            raise DomainError("connectors.expired", status=409, provider=label(app.provider))
+        return token
     if secret.expires_at is None or secret.expires_at - REFRESH_LEEWAY > datetime.now(UTC):
         return secret.access_token
     if not secret.refresh_token:

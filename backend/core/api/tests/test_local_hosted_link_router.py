@@ -20,8 +20,9 @@ from sqlalchemy.pool import StaticPool
 from ...brand import APP_NAME
 from ...config import settings
 from ...connectors import oauth
+from ...connectors.vault import ConnectorVault
 from ...i18n_en import t_en
-from ...local import hosted_link
+from ...local import connector_relay, hosted_link
 from ...local.tests.fake_hosted import API_ORIGIN, APP_ORIGIN, FakeHosted
 from ...storage.models import UserConnectorModel
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -124,6 +125,7 @@ def test_routes_are_hidden_outside_local_mode(client: TestClient, monkeypatch: p
     assert client.post("/local/hosted-link/finish", json={"code": "c", "state": "s"}).status_code == 404
     assert client.get("/local/hosted-link/status").status_code == 404
     assert client.post("/local/hosted-link/unlink").status_code == 404
+    assert client.post("/local/hosted-link/connectors/github").status_code == 404
 
 
 def test_link_status_whoami_balance_unlink(client: TestClient, hosted: FakeHosted) -> None:
@@ -365,3 +367,54 @@ def test_start_falls_back_to_the_host_name_then_mac(
 
     monkeypatch.setattr(local_hosted_link.platform, "node", lambda: "")
     assert _consent_device_name(client) == "Mac"
+
+
+def test_connector_relay_copies_the_hosted_oauth_token(client: TestClient, engine: Engine, hosted: FakeHosted) -> None:
+    """Connect copies hosted's OAuth token into the local vault and never returns it.
+
+    Args:
+        client: The test client.
+        engine: Local database.
+        hosted: The fake hosted server.
+    """
+    _link(client, hosted)
+    hosted.connectors["github"] = {"provider": "github", "access_token": "gho_relay", "account_label": "dana"}
+
+    response = client.post("/local/hosted-link/connectors/github")
+
+    assert response.json() == {"connected": True}
+    assert "gho_relay" not in response.text
+    secret = ConnectorVault(engine).resolve(_USER, "github")
+    assert secret is not None
+    assert (secret.access_token, secret.auth_method) == ("gho_relay", connector_relay.RELAY_AUTH_METHOD)
+
+
+def test_connector_relay_without_hosted_connection(client: TestClient, engine: Engine, hosted: FakeHosted) -> None:
+    """When hosted has no OAuth connection, the answer says so and nothing is stored.
+
+    Args:
+        client: The test client.
+        engine: Local database.
+        hosted: The fake hosted server.
+    """
+    _link(client, hosted)
+
+    response = client.post("/local/hosted-link/connectors/github")
+
+    assert response.json() == {"connected": False}
+    assert ConnectorVault(engine).resolve(_USER, "github") is None
+
+
+def test_connector_relay_rejects_bad_provider_and_unlinked_mac(client: TestClient, hosted: FakeHosted) -> None:
+    """A provider without OAuth is 404; a Mac with no link is 409 ``not_linked``.
+
+    Args:
+        client: The test client.
+        hosted: The fake hosted server.
+    """
+    unknown = client.post("/local/hosted-link/connectors/webhook")
+    unlinked = client.post("/local/hosted-link/connectors/github")
+
+    assert (unknown.status_code, unknown.json()["code"]) == (404, "connectors.unknown_provider")
+    assert (unlinked.status_code, unlinked.json()["code"]) == (409, "hosted_link.not_linked")
+    assert hosted.calls == []

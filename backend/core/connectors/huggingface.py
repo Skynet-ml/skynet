@@ -34,6 +34,7 @@ from cryptography.fernet import InvalidToken
 
 from ..api.errors import DomainError
 from ..config import settings
+from ..local import connector_relay
 from .vault import ConnectorVault, vault_cipher
 
 PROVIDER = "huggingface"
@@ -308,6 +309,13 @@ def current_token(vault: ConnectorVault, username: str) -> str | None:
     secret = vault.resolve(username, PROVIDER)
     if secret is None:
         return None
+    if connector_relay.is_relay(secret):
+        # The Mac app holds no refresh token; hosted refreshes and hands over a fresh copy.
+        token = connector_relay.current_token(vault, username, PROVIDER, secret)
+        if token is None:
+            vault.mark_invalid(username, PROVIDER)
+            raise DomainError("connectors.hf_expired", status=409)
+        return token
     if secret.expires_at is None or secret.expires_at - REFRESH_LEEWAY > datetime.now(UTC):
         return secret.access_token
     if not secret.refresh_token:

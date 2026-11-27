@@ -22,8 +22,15 @@ import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
 import { Label } from "@/shared/ui/primitives/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
-import { finishOAuth, type ConnectorProvider, type ConnectorStatus } from "@/shared/lib/api";
+import {
+  connectLocalRelay,
+  finishOAuth,
+  getConnectors,
+  type ConnectorProvider,
+  type ConnectorStatus,
+} from "@/shared/lib/api";
 import { parseOAuthFinish } from "@/shared/lib/oauth-finish";
+import { hostedAppUrl } from "@/shared/lib/share-link";
 import { forgetOAuthReturn, takeOAuthReturn } from "@/shared/lib/oauth-return";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
@@ -231,8 +238,11 @@ function ProviderCard({
   const [saving, setSaving] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
   const [removing, setRemoving] = React.useState(false);
+  // Set after the hosted connectors page opened; the next window focus tries one copy.
+  const [awaitingHosted, setAwaitingHosted] = React.useState(false);
 
   const connected = status?.connected ?? false;
+  const relay = !status?.oauth_available && (status?.relay_available ?? false);
   const oauthMode = formMode === "oauth";
   const fields = oauthMode ? (meta.oauthFields ?? []) : meta.fields;
   const complete = fields.every((f) => !f.required || (values[f.key] ?? "").trim());
@@ -276,6 +286,50 @@ function ProviderCard({
       setStarting(false);
     }
   };
+
+  // The Mac app has no OAuth apps; it copies the link the user made on the hosted account (SKY-986).
+  const handleRelay = React.useCallback(
+    async (openHosted: boolean) => {
+      setStarting(true);
+      try {
+        const { connected: copied } = await connectLocalRelay(meta.id);
+        if (copied) {
+          setAwaitingHosted(false);
+          toast.success(meta.toastConnected, TOAST_OPTIONS);
+          // The copy is saved; a failed refresh only leaves the card stale until the next list load.
+          await getConnectors().then(
+            ({ connectors }) => onChange(connectors),
+            () => undefined,
+          );
+          return;
+        }
+        if (!openHosted) return;
+        const url = hostedAppUrl("/?settings=connectors");
+        if (!url) {
+          toast.error(msg("connectors.toast.failed"), TOAST_OPTIONS);
+          return;
+        }
+        window.open(url, "_blank", "noopener,noreferrer");
+        setAwaitingHosted(true);
+        toast.info(formatMsg("connectors.relay.connect_on_web", { provider: meta.name }), TOAST_OPTIONS);
+      } catch (err) {
+        toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS);
+      } finally {
+        setStarting(false);
+      }
+    },
+    [meta, onChange],
+  );
+
+  React.useEffect(() => {
+    if (!awaitingHosted || connected) return;
+    const onFocus = () => {
+      setAwaitingHosted(false);
+      void handleRelay(false);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [awaitingHosted, connected, handleRelay]);
 
   const handleSave = async () => {
     if (!complete || saving || starting) return;
@@ -357,6 +411,30 @@ function ProviderCard({
               <TooltipContent>{meta.oauthButton}</TooltipContent>
             </Tooltip>
           )}
+          {!connected && !formOpen && meta.oauthButton && relay && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => void handleRelay(true)}
+                  disabled={starting}
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label={meta.oauthButton}
+                >
+                  {starting ? (
+                    <CircleNotch
+                      className="animate-spin motion-reduce:animate-none"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <SignIn className="size-4" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{meta.oauthButton}</TooltipContent>
+            </Tooltip>
+          )}
           {!connected && !formOpen && meta.fields.length > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -373,7 +451,7 @@ function ProviderCard({
               <TooltipContent>{msg("settings.keys.add")}</TooltipContent>
             </Tooltip>
           )}
-          {!connected && meta.fields.length === 0 && status && !status.oauth_available && (
+          {!connected && meta.fields.length === 0 && status && !status.oauth_available && !relay && (
             <span className="text-xs text-muted-foreground">
               {formatMsg("connectors.oauth_only_unavailable", { provider: meta.name })}
             </span>

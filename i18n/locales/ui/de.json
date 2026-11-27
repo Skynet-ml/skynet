@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Mit Notion fortfahren",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "Die Anmeldung mit {provider} ist für diese Bereitstellung nicht eingerichtet",
+  "connectors.relay.connect_on_web": "Verbinde {provider} auf der Skynet-Website und kehre dann zu dieser App zurück.",
   "connectors.onedrive.blurb": "Dateien aus Ihrem privaten oder geschäftlichen OneDrive importieren",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Mit Microsoft fortfahren",

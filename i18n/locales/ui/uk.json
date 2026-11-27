@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Продовжити з Notion",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "Вхід через {provider} не налаштовано для цього розгортання.",
+  "connectors.relay.connect_on_web": "Підключіть {provider} на сайті Skynet, потім поверніться до цього застосунку.",
   "connectors.onedrive.blurb": "Імпортуйте файли з вашого особистого або робочого OneDrive.",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Продовжити з Microsoft",

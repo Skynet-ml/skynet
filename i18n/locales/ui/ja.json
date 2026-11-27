@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Notion で続ける",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "この環境では {provider} でのサインインが設定されていません。",
+  "connectors.relay.connect_on_web": "Skynet のウェブサイトで {provider} を接続してから、このアプリに戻ってください。",
   "connectors.onedrive.blurb": "個人用または職場用の OneDrive からファイルをインポートします。",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Microsoft で続ける",

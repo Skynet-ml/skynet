@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "用 Notion 繼續",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "呢個部署仲未設定用 {provider} 登入",
+  "connectors.relay.connect_on_web": "喺 Skynet 網站連接 {provider}，然後返嚟呢個 app。",
   "connectors.onedrive.blurb": "從你個人或者公司嘅 OneDrive 入面匯入檔案",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "用 Microsoft 繼續",
