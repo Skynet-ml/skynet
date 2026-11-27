@@ -278,8 +278,8 @@ def _find_snapshot_specs(
 def _snapshot_tool(*, name: str, desc: str, args: dict[str, Any]) -> dspy.Tool:
     """Construct a ``dspy.Tool`` carrying a snapshot spec's schema.
 
-    The callable body is a placeholder: the roster is read for its schema, and
-    nothing calls it.
+    The callable body is a placeholder that returns ``None`` when a node calls
+    it. Nothing rebinds it to a live MCP callable.
 
     Args:
         name: Tool name.
@@ -291,7 +291,7 @@ def _snapshot_tool(*, name: str, desc: str, args: dict[str, Any]) -> dspy.Tool:
     """
 
     def _noop(**_kwargs: Any) -> None:
-        """Placeholder body; the roster is read for its schema only."""
+        """Return ``None``; a snapshot carries no live MCP callable."""
 
     _noop.__name__ = name
     _noop.__doc__ = desc
