@@ -185,6 +185,21 @@ def compact_tree(entries: list[dict[str, Any]], editable_paths: list[str]) -> st
     return "\n".join(_render(_build_nodes(entries), max_depth=TREE_DEPTH, line_budget=TREE_LINE_BUDGET, marks=marks))
 
 
+LOCAL_PROVIDER = "local"
+
+
+def _source_noun(provider: str | None) -> str:
+    """Name the kind of source the agent reads, for its tool texts.
+
+    Args:
+        provider: The run's ``repo_provider``.
+
+    Returns:
+        ``"folder"`` for a local folder, else ``"repository"``.
+    """
+    return "folder" if provider == LOCAL_PROVIDER else "repository"
+
+
 class RepoBrowser:
     """The repository a black-box job optimizes, browsable by the agent's tools.
 
@@ -346,7 +361,10 @@ class RepoBrowser:
         def run() -> RepoRead:
             """Fetch the whole file."""
             if path not in self._files:
-                return {"error": f"No file named {path!r} in the repository. Check the tree for the exact path."}
+                return {
+                    "error": f"No file named {path!r} in the {_source_noun(self.provider)}. "
+                    "Check the tree for the exact path."
+                }
             text, truncated = self._read_text(path, limit)
             if truncated:
                 return {"error": f"{path} is larger than {limit} bytes, so it cannot be edited here."}
@@ -403,7 +421,8 @@ class RepoBrowser:
             The folder's tree, ``{"note": ...}`` when it is empty, or
             ``{"error": ...}`` when it does not exist.
         """
-        clean = path.strip().strip("/")
+        # A space can be part of a file name, and git keeps it, so only the slashes go.
+        clean = path.strip("/")
 
         def run() -> RepoRead:
             """Render the folder."""
@@ -411,7 +430,7 @@ class RepoBrowser:
             for part in [p for p in clean.split("/") if p]:
                 node = node.get(part) if isinstance(node, dict) else None
             if not isinstance(node, dict):
-                return {"error": f"No folder named {clean!r} in the repository."}
+                return {"error": f"No folder named {clean!r} in the {_source_noun(self.provider)}."}
             marks = {p.strip("/") for p in self.editable_paths}
             lines = _render(node, max_depth=FOLDER_DEPTH, line_budget=TREE_LINE_BUDGET, marks=marks, base=clean)
             return "\n".join(lines) if lines else {"note": "The folder is empty."}
@@ -433,12 +452,16 @@ class RepoBrowser:
             The file's text with line numbers, or ``{"error": ...}`` when it
             does not exist.
         """
-        clean = path.strip().strip("/")
+        # A space can be part of a file name, and git keeps it, so only the slashes go.
+        clean = path.strip("/")
 
         def run() -> RepoRead:
             """Fetch the file."""
             if clean not in self._files:
-                return {"error": f"No file named {clean!r} in the repository. Check the tree for the exact path."}
+                return {
+                    "error": f"No file named {clean!r} in the {_source_noun(self.provider)}. "
+                    "Check the tree for the exact path."
+                }
             text, truncated = self._read_text(clean, FILE_BYTES)
             lines = text.splitlines()
             cut = truncated or len(lines) > FILE_LINES
@@ -450,7 +473,6 @@ class RepoBrowser:
         return self._tool(run)
 
 
-LOCAL_PROVIDER = "local"
 # A folder past this many entries shows a cut tree, like a host's truncated listing.
 FOLDER_ENTRIES_MAX = 20_000
 # Git's own data is never part of the source.
@@ -603,7 +625,7 @@ def _folder_file(base: Path, path: str) -> Path:
         LocalFolderError: For an absolute path, a ``..`` part, a ``.env*`` file, or a link out of the folder.
         DomainError: ``connectors.not_found`` when no file is there.
     """
-    clean = path.strip().replace("\\", "/")
+    clean = path.replace("\\", "/")
     if not clean or clean.startswith("/") or PureWindowsPath(clean).drive:
         raise LocalFolderError(f"{path!r} is not a path inside the folder.")
     parts = PurePosixPath(clean).parts

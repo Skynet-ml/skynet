@@ -1798,3 +1798,29 @@ async def test_the_rules_file_guard_reads_the_ascent_toml_of_a_local_folder(
     assert list(result) == ["error"]
     assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
     assert turn.wizard_patch == {}
+
+
+def test_the_tool_texts_say_folder_for_a_local_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A local run's tools describe a folder; a git run's tools still describe a repository."""
+    local = _tools(_local_folder(monkeypatch, tmp_path), _TurnAuthoringFlag())
+    git = _tools(_REPO_METRIC, _TurnAuthoringFlag())
+
+    for name in (LIST_REPO_TOOL, READ_REPO_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL):
+        assert "repository" not in local[name].desc
+        assert "folder" in local[name].desc or "folder" in json.dumps(local[name].arg_desc)
+        assert "repository" in git[name].desc
+    assert local[READ_REPO_TOOL].arg_desc["path"] == "File path inside the folder, exactly as the tree shows it."
+
+
+@pytest.mark.asyncio
+async def test_the_read_tools_keep_a_space_that_is_part_of_a_folder_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The list tool strips only slashes, so a folder named with a trailing space opens."""
+    state = _local_folder(monkeypatch, tmp_path)
+    (tmp_path / "docs ").mkdir()
+    (tmp_path / "docs " / "intro.md").write_text("hi\n", encoding="utf-8")
+    tools = _tools(state, _TurnAuthoringFlag())
+
+    assert "intro.md" in await tools[LIST_REPO_TOOL].acall(path="/docs /")
+    assert await tools[READ_REPO_TOOL].acall(path="docs /intro.md") == "   1 hi"

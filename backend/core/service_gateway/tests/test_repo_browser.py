@@ -348,7 +348,7 @@ def test_a_local_folder_never_follows_a_link_out_of_it(tmp_path: Path) -> None:
     assert read_folder_text(root, "alias.py", 100) == ("y = 1\n", False)
     browser = LocalFolderBrowser(root)
     assert browser.read_repo_file("leak.txt") == {
-        "error": "No file named 'leak.txt' in the repository. Check the tree for the exact path."
+        "error": "No file named 'leak.txt' in the folder. Check the tree for the exact path."
     }
 
 
@@ -432,3 +432,29 @@ def test_reading_a_local_folder_leaves_it_unchanged(tmp_path: Path) -> None:
     browser.summary()
 
     assert {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in root.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_space_in_a_path_is_part_of_the_name(tmp_path: Path) -> None:
+    """The read tools strip only the slashes, so a name with a trailing space is read, and a padded path is not."""
+    root = _folder(tmp_path, {"notes ": "spaced\n", "notes": "plain\n", "dir /a.py": "x = 1\n"})
+    browser = LocalFolderBrowser(root)
+
+    assert browser.read_repo_file("notes ") == "   1 spaced"
+    assert browser.read_repo_file("/notes/") == "   1 plain"
+    assert browser.read_repo_file(" notes") == {
+        "error": "No file named ' notes' in the folder. Check the tree for the exact path."
+    }
+    assert isinstance(browser.list_repo_folder("dir "), str)
+    assert browser.list_repo_folder("dir") == {"error": "No folder named 'dir' in the folder."}
+    assert read_folder_text(root, "notes ", 100) == ("spaced\n", False)
+
+
+def test_a_git_source_names_itself_a_repository_and_a_local_one_a_folder() -> None:
+    """The agent's error texts say "repository" for a host and "folder" for a local folder."""
+    assert repo_browser._source_noun("github") == "repository"
+    assert repo_browser._source_noun(None) == "repository"
+    assert repo_browser._source_noun(LOCAL_PROVIDER) == "folder"
+    assert _browser([]).read_repo_file("a.py") == {
+        "error": "No file named 'a.py' in the repository. Check the tree for the exact path."
+    }

@@ -36,7 +36,14 @@ from ...models.blackbox import (
     clean_draft_path,
 )
 from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, parse_constraints, rule_file_settings
-from .repo_browser import LOCAL_PROVIDER, LocalFolderBrowser, LocalFolderError, RepoBrowser, RepoRead
+from .repo_browser import (
+    LOCAL_PROVIDER,
+    LocalFolderBrowser,
+    LocalFolderError,
+    RepoBrowser,
+    RepoRead,
+    _source_noun,
+)
 
 if TYPE_CHECKING:
     from .generalist import WizardState, _TurnAuthoringFlag
@@ -601,6 +608,7 @@ def workspace_tools(
     opened: list[tuple[RepoBrowser | None, str]] = []
     # Pi may run tool calls at the same time; one lock keeps one repository open and the read count exact.
     lock = asyncio.Lock()
+    noun = _source_noun(state.get("repo_provider"))
     # The repository's ascent.toml, read once a turn for the rules-file guard.
     repo_toml: list[str] = []
 
@@ -633,7 +641,8 @@ def workspace_tools(
             The tree text, ``{"note": ...}`` for an empty folder, or ``{"error": ...}``
             for a missing folder, the read limit, or a repository that cannot open.
         """
-        clean = path.strip().strip("/")
+        # A space can be part of a folder name, and git keeps it, so only the slashes go.
+        clean = path.strip("/")
         if not clean:
             return await browse(RepoBrowser.overview)
         return await browse(lambda browser: browser.list_repo_folder(clean))
@@ -667,7 +676,7 @@ def workspace_tools(
         except ValueError as error:
             return str(error)
         if clean in UNWRITABLE_PATHS:
-            return f"{clean} cannot be written in a repository run. Write the metric in metric.py."
+            return f"{clean} cannot be written in a {noun} run. Write the metric in metric.py."
         return clean, WORKSPACE_FILES.get(clean)
 
     def drafts() -> dict[str, str]:
@@ -805,7 +814,7 @@ def workspace_tools(
                 reason = read.get("error", "")
                 # A repository that cannot open stays closed for the turn, so a retry cannot work.
                 advice = read.get("advice", "Ask the user.")
-                return {"error": f"ascent.toml cannot be checked against the repository's file: {reason} {advice}"}
+                return {"error": f"ascent.toml cannot be checked against the {noun}'s file: {reason} {advice}"}
             # A refusal leaves the draft empty, so a retry must not ask the host for the file again.
             repo_toml.append(read)
         return repo_toml[0]
@@ -878,32 +887,32 @@ def workspace_tools(
             return {"error": refusal}
         return save(clean, field, edited)
 
-    file_arg = "metric.py, or the path of any file of the repository, relative to its root, for example ascent.toml."
+    file_arg = f"metric.py, or the path of any file of the {noun}, relative to its root, for example ascent.toml."
     return [
         dspy.Tool(
             list_repo_folder,
             name=LIST_REPO_TOOL,
             desc=(
-                'List one folder of the run\'s repository two levels deep. Use "" for the root: it also '
+                f'List one folder of the run\'s {noun} two levels deep. Use "" for the root: it also '
                 "returns the README and the build manifest. Reads count toward the turn's read limit."
             ),
-            arg_desc={"path": 'Folder path inside the repository; "" for the root.'},
+            arg_desc={"path": f'Folder path inside the {noun}; "" for the root.'},
         ),
         dspy.Tool(
             read_repo_file,
             name=READ_REPO_TOOL,
             desc=(
-                "Read one file of the run's repository, with line numbers. Long files come back cut. Reads "
+                f"Read one file of the run's {noun}, with line numbers. Long files come back cut. Reads "
                 "count toward the turn's read limit."
             ),
-            arg_desc={"path": "File path inside the repository, exactly as the tree shows it."},
+            arg_desc={"path": f"File path inside the {noun}, exactly as the tree shows it."},
         ),
         dspy.Tool(
             write_workspace_file,
             name=WRITE_FILE_TOOL,
             desc=(
-                "Write one file whole: metric.py, or any file of the run's repository, such as ascent.toml. "
-                "It goes into the editor at once, and the run uses it in place of the repository's file. For "
+                f"Write one file whole: metric.py, or any file of the run's {noun}, such as ascent.toml. "
+                f"It goes into the editor at once, and the run uses it in place of the {noun}'s file. For "
                 "ascent.toml the result has ascent_toml_diagnostics: the parser's errors, then its warnings, "
                 "each with its level, line, section, key and message. It holds at most 20; "
                 "ascent_toml_diagnostics_omitted counts the rest. Fix every error in one write; a warning "
@@ -915,9 +924,9 @@ def workspace_tools(
             edit_workspace_file,
             name=EDIT_FILE_TOOL,
             desc=(
-                "Change part of one file: metric.py, or any file of the run's repository. Replace old_text, "
+                f"Change part of one file: metric.py, or any file of the run's {noun}. Replace old_text, "
                 "which must be in the file exactly once, with new_text. A file you did not write yet starts "
-                "from the repository's text. It goes into the editor at once, like write_workspace_file."
+                f"from the {noun}'s text. It goes into the editor at once, like write_workspace_file."
             ),
             arg_desc={
                 "path": file_arg,

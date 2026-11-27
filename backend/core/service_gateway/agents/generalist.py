@@ -1239,15 +1239,17 @@ def _name_set(state: WizardState) -> bool:
 
 
 def _task_ready(state: WizardState) -> bool:
-    """Return True when the Task step has an objective and a repository.
+    """Return True when the Task step has an objective and a source: a repository, or a local folder.
 
-    Every run optimizes a repository, and its checkout is the starting
-    version, so no starting version is needed.
+    The run's checkout (or the folder) is the starting version, so no
+    starting version is needed. A local folder run (SKY-995) has
+    ``repo_path`` and no ``repository``.
     """
     objective = state.get("task_objective") or ""
     if not (isinstance(objective, str) and objective.strip()):
         return False
-    return bool(str(state.get("repository") or "").strip())
+    source = "repo_path" if state.get("repo_provider") == "local" else "repository"
+    return bool(str(state.get(source) or "").strip())
 
 
 def _dataset_ready(state: WizardState) -> bool:
@@ -1709,6 +1711,8 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     if screen == "brief" and not str(state.get("task_objective") or "").strip():
         return ["task_objective is empty"]
     if screen == "artifact" and not _task_ready(state):
+        if state.get("repo_provider") == "local":
+            return ["repo_path must name the local folder; the user picks it in the app"]
         return ["repository must be set as owner/name"]
     if screen == "source" and not _inputs_ready(state):
         return ["data_mode must be set, and pairs need a dataset attached"]

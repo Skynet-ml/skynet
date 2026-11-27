@@ -566,6 +566,22 @@ def test_prompts_offer_no_dspy_targets_or_optimizers() -> None:
     assert "create_github_repository" in SCREEN_FOCUS["artifact"]
 
 
+def test_a_local_folder_run_completes_the_task_step_with_its_folder_alone() -> None:
+    """A local run needs ``repo_path``, not ``repository``; a git run still needs ``repository``."""
+    local = cast(
+        WizardState,
+        {"job_name": "Bot", "task_objective": "Fix flaky tests", "wizard_screen": "artifact", "repo_provider": "local"},
+    )
+    assert _screen_problems("artifact", local) == ["repo_path must name the local folder; the user picks it in the app"]
+    assert _screen_problems("artifact", cast(WizardState, {**local, "repo_path": "  "})) != []
+    chosen = cast(WizardState, {**local, "repo_path": "/Users/me/shop"})
+    assert _screen_problems("artifact", chosen) == []
+    assert validate_wizard_patch_order({"data_mode": "single"}, chosen) is None
+    assert validate_wizard_patch_order({"data_mode": "single"}, local) is not None
+    git = cast(WizardState, {**chosen, "repo_provider": "github"})
+    assert _screen_problems("artifact", git) == ["repository must be set as owner/name"]
+
+
 @pytest.mark.parametrize("screen", ["artifact", "metric"])
 def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(screen: str) -> None:
     """The repository screens say a local folder has no host parts and its result is applied with Apply."""
