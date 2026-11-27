@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
 from core.billing import sbx_usage
@@ -24,7 +24,7 @@ from core.billing.sbx_usage import (
 from core.config import settings
 from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import sbx
-from core.storage.models import Base, BillingCustomerModel
+from core.storage.models import Base, BillingCustomerModel, ExecutionUsageEvidenceModel
 
 REQUEST = {"cpus": 2, "memory_mib": 4096, "lifetime_ms": 120_000}
 BODY = {"resources": {"cpus": 2, "memoryMib": 4096}, "features": {"timeouts": {"timeout": "120s"}}}
@@ -310,3 +310,27 @@ def test_request_without_a_lifetime_is_not_reserved(database: Engine) -> None:
     """Refuse a request with no lifetime as unpriced, before any ledger write."""
     with pytest.raises(UnpricedOperationError):
         SbxUsageReservation(_runtime(database), {"cpus": 2, "memory_mib": 4096}, operation_key="box")
+
+
+def test_measured_runtime_ignores_float_noise_of_a_large_clock(database: Engine) -> None:
+    """A long-running host's large monotonic clock must not add a millisecond to the evidence.
+
+    Args:
+        database: The SQLite ledger.
+    """
+    runtime = _runtime(database)
+    clock = Clock()
+    reservation = SbxUsageReservation(runtime, REQUEST, operation_key="box", clock=clock)
+    clock.now = 1e9
+    reservation.start_clock()
+    reservation.confirm_created("uid-1", BODY)
+    clock.now = 1e9 + 10.2
+    reservation.stop_clock()
+    reservation.settle()
+    with Session(database) as session:
+        row = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(
+                ExecutionUsageEvidenceModel.evidence_key == f"sbx-stop:{reservation.operation.id}"
+            )
+        ).one()
+    assert row.evidence["measured_ms"] == 10_200
