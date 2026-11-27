@@ -637,7 +637,10 @@ class KernelEnvironment(SandboxEnvironment):
         """
         if self._created_at is None:
             return None
-        measured = math.ceil((self._clock.monotonic() - self._created_at) * 1000)
+        # Monotonic readings are large on a long-running host, so their difference carries
+        # float noise (10.2 s reads as 10.2000000001). Rounding to whole microseconds first
+        # keeps that noise from billing a millisecond that did not run (SKY-989).
+        measured = math.ceil(round((self._clock.monotonic() - self._created_at) * 1000, 3))
         if self._funded_until is not None and self._idle_timeout is not None:
             # The quote's own integer lifetime, because float clock subtraction
             # can put the cap one millisecond above the reservation.
