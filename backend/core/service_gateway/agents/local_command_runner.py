@@ -9,6 +9,12 @@ machine, under a ``sandbox-exec`` profile like the one of
 :mod:`core.billing.host_agent`: writes only in the chat's workspace, no
 network, no reads in the home folder outside the workspace and the Python
 install, and a clean environment without the backend's keys.
+
+A setup session gives the runner a started
+:class:`~.local_egress_proxy.LocalEgressProxy`. Its commands may then connect
+to the proxy's loopback port, and to nothing else, and their environment gets
+the proxy, its CA file and the session's secrets, with a placeholder for each
+secret that has hosts. The chat's commands keep no network.
 """
 
 from __future__ import annotations
@@ -24,6 +30,10 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .local_egress_proxy import LocalEgressProxy
 
 DEFAULT_YIELD_MS = 10_000
 MAX_YIELD_MS = 30_000
@@ -307,12 +317,16 @@ def _python_root(path: str, home: str, workspace: str) -> str:
     return path
 
 
-def seatbelt_profile() -> str:
-    """Return the ``sandbox-exec`` profile of a chat command.
+def seatbelt_profile(proxy_port: int | None = None) -> str:
+    """Return the ``sandbox-exec`` profile of a chat or setup command.
 
     Later rules win, so each allow opens a hole in the denies above it. The
     command may read the system and the Python install, and read and write
     only its workspace in the hidden folders.
+
+    Args:
+        proxy_port: The setup session's egress proxy port, the only place the
+            command may connect to; None keeps all network closed.
 
     Returns:
         The profile; ``WORKSPACE``, ``HOME_DIR``, ``TEMP_DIR``, ``PYTHON``
@@ -323,6 +337,7 @@ def seatbelt_profile() -> str:
             "(version 1)",
             "(allow default)",
             "(deny network*)",
+            *([f'(allow network-outbound (remote tcp "localhost:{int(proxy_port)}"))'] if proxy_port else []),
             "(deny file-write*)",
             '(deny file-read-data file-read-xattr (subpath (param "HOME_DIR")) (subpath (param "TEMP_DIR")))',
             '(allow file-write* (subpath "/dev"))',
@@ -341,24 +356,39 @@ def seatbelt_profile() -> str:
 class LocalCommandRunner(SessionTable):
     """Run one chat's commands on this Mac, inside its workspace."""
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, egress: LocalEgressProxy | None = None) -> None:
         """Make the workspace folder.
 
         Args:
             workspace: The chat's folder; attached files go to ``attachments/`` in it.
+            egress: A started egress proxy for a setup session; None keeps the network closed.
         """
         super().__init__()
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / ".tmp").mkdir(exist_ok=True)
         self.workspace = workspace.resolve()
+        self.egress = egress
+        self._egress_env: dict[str, str] = {}
+        if egress is not None:
+            if egress.port is None:
+                raise ValueError("Start the egress proxy before the runner uses it.")
+            # A command can read its workspace, and the proxy's keys must stay out of its reach.
+            if egress.state_dir.resolve().is_relative_to(self.workspace):
+                raise ValueError("The egress proxy's state folder must be outside the workspace.")
+            ca_bundle = self.workspace / ".skynet" / "egress-ca.pem"
+            egress.write_ca_bundle(ca_bundle)
+            self._egress_env = egress.command_env(ca_bundle)
 
     def command_env(self) -> dict[str, str]:
         """Return the clean environment of a command, without the backend's keys.
 
         Returns:
-            The environment; the backend's Python comes first on ``PATH``.
+            The environment; the backend's Python comes first on ``PATH``. In a
+            setup session it also has the proxy, CA and secret variables.
         """
         return {
+            # A secret named like a core variable must not replace it, so these come last.
+            **self._egress_env,
             "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
             "HOME": str(self.workspace),
             "TMPDIR": str(self.workspace / ".tmp"),
@@ -386,7 +416,8 @@ class LocalCommandRunner(SessionTable):
             "VENV": _python_root(_real(sys.prefix), home, workspace),
         }
         defines = [item for key, value in params.items() for item in ("-D", f"{key}={value}")]
-        return [str(SANDBOX_EXEC), "-p", seatbelt_profile(), *defines, _SHELL, "-c", cmd]
+        profile = seatbelt_profile(self.egress.port if self.egress is not None else None)
+        return [str(SANDBOX_EXEC), "-p", profile, *defines, _SHELL, "-c", cmd]
 
     def _workdir(self, workdir: str | None) -> Path | None:
         """Resolve a working directory inside the workspace.

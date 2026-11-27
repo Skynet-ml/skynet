@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -21,6 +22,7 @@ from core.service_gateway.agents.local_command_runner import (
     format_result,
     seatbelt_profile,
 )
+from core.service_gateway.agents.local_egress_proxy import LocalEgressProxy, SetupSecret
 
 on_mac = pytest.mark.skipif(
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(), reason="needs macOS sandbox-exec"
@@ -88,6 +90,41 @@ def test_seatbelt_profile_denies_network_and_writes_outside_workspace() -> None:
     assert "(deny network*)" in profile
     assert "(deny file-write*)" in profile
     assert '(param "WORKSPACE")' in profile
+
+
+def test_setup_profile_opens_only_the_proxy_port() -> None:
+    """Check that a setup profile allows one loopback port, and the chat profile stays closed."""
+    profile = seatbelt_profile(51234)
+    assert "(deny network*)" in profile
+    assert '(allow network-outbound (remote tcp "localhost:51234"))' in profile
+    assert profile.count("allow network") == 1
+    assert "allow network" not in seatbelt_profile()
+
+
+def test_setup_env_has_placeholders_and_core_vars_win(tmp_path: Path) -> None:
+    """Check that a setup command gets placeholders, plain values and the proxy, and no secret replaces PATH."""
+    secrets = [
+        SetupSecret("API_KEY", "real-value-0123456789", ("api.example.com",)),
+        SetupSecret("PLAIN", "plain-value"),
+        SetupSecret("PATH", "evil"),
+    ]
+    with LocalEgressProxy(secrets, tmp_path / "state") as egress:
+        runner = LocalCommandRunner(tmp_path / "ws", egress=egress)
+        env = runner.command_env()
+        assert env["API_KEY"] == "skynet-secret-API_KEY"
+        assert env["PLAIN"] == "plain-value"
+        assert "real-value-0123456789" not in "".join(env.values())
+        assert env["PATH"] != "evil"
+        assert env["HTTPS_PROXY"] == f"http://127.0.0.1:{egress.port}"
+        assert Path(env["SSL_CERT_FILE"]).read_bytes().endswith(egress.ca_pem)
+        assert f"localhost:{egress.port}" in runner._argv("true")[2]
+        runner.close()
+
+
+def test_proxy_state_inside_the_workspace_is_refused(tmp_path: Path) -> None:
+    """Check that the proxy's keys cannot sit where the command can read them."""
+    with LocalEgressProxy([], tmp_path / "ws" / "state") as egress, pytest.raises(ValueError):
+        LocalCommandRunner(tmp_path / "ws", egress=egress)
 
 
 def test_workdir_must_stay_in_workspace(tmp_path: Path) -> None:
@@ -210,3 +247,22 @@ def test_close_ends_a_background_child(tmp_path: Path) -> None:
             break
         time.sleep(0.05)
     assert subprocess.run(["pgrep", "-f", marker], capture_output=True, check=False).returncode != 0
+
+
+@on_mac
+def test_setup_command_reaches_only_the_proxy(tmp_path: Path) -> None:
+    """Check that a setup command cannot connect to a public IP or another loopback port, but reaches the proxy."""
+    other = socket.create_server(("127.0.0.1", 0))
+    with LocalEgressProxy([], tmp_path / "state") as egress:
+        runner = LocalCommandRunner(tmp_path / "ws", egress=egress)
+        direct = runner.exec_command("/usr/bin/curl -s -m 3 --noproxy '*' http://1.1.1.1 > /dev/null; echo net=$?")
+        assert "net=" in direct
+        assert "net=0" not in direct
+        port = other.getsockname()[1]
+        side = runner.exec_command(f"/usr/bin/nc -z -w 2 127.0.0.1 {port}; echo side=$?")
+        assert "side=0" not in side
+        # The proxy answers, and refuses the loopback target.
+        via = runner.exec_command("/usr/bin/curl -s -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:9/")
+        assert "code=403" in via
+        runner.close()
+    other.close()
