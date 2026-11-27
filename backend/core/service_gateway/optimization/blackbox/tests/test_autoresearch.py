@@ -484,6 +484,170 @@ def test_the_climb_view_gets_events_only_for_full_sweeps(
     ]
 
 
+def test_a_round_that_only_probes_gets_one_full_sweep_of_its_last_probed_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A probe's score is one case, not a version mean, so the engine sweeps the round's last probed version.
+
+    Before the fix, a run whose agent probed one case at a time sent no candidate event, and the climb view
+    had no score over time.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(example_ids=["0"]), _evaluate(example_ids=["1"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, stop_at_score=6.0)
+
+    candidates = [data for kind, data in events if kind == PROGRESS_CANDIDATE]
+    assert [(data["candidate_id"], data["score"]) for data in candidates] == [("0", 5.0), ("1", 6.0)]
+    # Each round spends two probe units and one sweep of two cases.
+    assert result.total_evals == 8
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+
+
+def test_the_end_of_round_sweep_scores_the_text_of_the_last_probe_not_an_earlier_one(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The agent can rewrite a file between probes, and only the last probed text is its latest version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    rewrite = _bash("printf %s seed{x}yyy > work/c{n}.txt")
+    model = _Researcher([_WRITE, _evaluate(example_ids=["0"]), rewrite, _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, stop_at_score=None, max_evals=4)
+
+    # The first probe scores "seedx" (5) and the last probe scores "seedxyyy" (8); only the last gets the sweep.
+    assert [(data["candidate_id"], data["score"]) for kind, data in events if kind == PROGRESS_CANDIDATE] == [
+        ("0", 8.0)
+    ]
+    assert result.total_evals == 4
+    assert (result.best_candidate, result.best_score) == ("seedxyyy", 8.0)
+
+
+def test_a_round_with_a_full_sweep_of_a_new_version_gets_no_extra_sweep(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The agent's own full sweep already scores the round's version, so a later probe spends nothing more.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(), _evaluate(file="work/seed.txt", example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events)
+
+    assert [data["candidate_id"] for kind, data in events if kind == PROGRESS_CANDIDATE] == ["0", "1"]
+    assert result.total_evals == 6
+
+
+def test_a_round_skips_the_sweep_when_the_budget_cannot_pay_for_it_and_keeps_probing(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A sweep that the budget cannot pay for must not end the run while probes still fit.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, stop_at_score=None, max_evals=5)
+
+    # Round 1 spends one probe and one sweep of two cases; rounds 2 and 3 have budget for one probe each.
+    assert [data["candidate_id"] for kind, data in events if kind == PROGRESS_CANDIDATE] == ["0"]
+    assert result.total_evals == 5
+    assert result.metadata["rounds"] == 3
+
+
+def test_a_full_sweep_of_an_old_version_does_not_stop_the_sweep_of_a_new_probed_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Only a full sweep of a version that had none counts, so a round that sweeps the seed again still gets one.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(file="work/seed.txt"), _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, stop_at_score=None, max_evals=8)
+
+    candidates = [(data["candidate_id"], data["score"]) for kind, data in events if kind == PROGRESS_CANDIDATE]
+    # Round 1's seed sweep is new, so its probe gets no sweep; round 2 sweeps the seed again and its probe gets one.
+    assert candidates == [("0", 4.0), ("0", 4.0), ("1", 6.0)]
+    assert result.total_evals == 8
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+
+
+def test_a_full_sweep_with_a_crashed_case_is_not_swept_again_after_a_probe(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A crashed case keeps a sweep out of the leaderboard, but the round still scored its version in full.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Crash on case ``b``, else score the candidate by its length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            No score on case ``b``, else the length, and no side information.
+        """
+        return (None, {}) if case["id"] == "b" else _score(loop, candidate, case)
+
+    model = _Researcher([_WRITE, _evaluate(), _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, score=score, stop_at_score=None, max_evals=9)
+
+    rounds = result.metadata["rounds"]
+    assert len([data for kind, data in events if kind == PROGRESS_CANDIDATE]) == rounds
+    # Each round spends one sweep of two cases and one probe unit, and no second sweep.
+    assert result.total_evals == 3 * rounds
+
+
 def test_a_refused_sweep_answers_the_marker_and_a_round_with_no_evaluation_ends_the_run(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -1739,6 +1903,7 @@ def test_the_worker_brief_names_the_evaluate_tool_and_not_eval_sh(tmp_path: Path
     assert "eval.sh" not in brief
     assert "The `evaluate` tool with only a `file` is a **full evaluation**" in brief
     assert "The `evaluate` tool with a `file` and `example_ids` is a **probe**" in brief
+    assert "the engine gives one to the text of the round's last probe" in brief
     assert "Only `work/` and `notebook.md` carry over" in brief
     assert "is the only memory" not in brief
     assert (
