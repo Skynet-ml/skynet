@@ -33,7 +33,7 @@ const {
   writeWorkspaceFile,
 } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
-const { agentRepoFields, isLocalRepo, repoIssue, sandboxCatalogForRepo } = await import("./wizard-v2.ts");
+const { agentRepoFields, isLocalRepo, repoIssue, sandboxCatalogForRepo, withLocalFolder } = await import("./wizard-v2.ts");
 
 // A repository run whose interview found it needs data, so every step shows.
 function filledState() {
@@ -444,8 +444,35 @@ test("a local folder source needs a path and the editable paths, not a repositor
   assert.equal(repoIssue(localRepo("   ")), "submit.v2.repo.issue.local_path");
   assert.equal(repoIssue(localRepo("/Users/me/Documents/Skynet/app")), null);
   assert.equal(repoIssue({ ...localRepo("/Users/me/app"), editablePaths: [" "] }), "submit.v2.repo.issue.paths");
-  // A stale repository name or an odd commit from an earlier git pick does not block a folder.
-  assert.equal(repoIssue({ ...localRepo("/Users/me/app"), repository: "not a repo", commit: "zz" }), null);
+});
+
+test("a folder pick drops the old git repository, host, branch, commit and Skynet flag", () => {
+  const git = {
+    ...emptyRepoDraft(),
+    provider: "gitlab" as const,
+    repository: "acme/bot",
+    branch: "dev",
+    commit: "a".repeat(40),
+    createdBySkynet: true,
+    editablePaths: ["src"],
+    setupCommand: "make",
+    secrets: [{ name: "API_KEY", value: "", allowedHosts: "" }],
+  };
+  const folder = withLocalFolder(git, "/Users/me/app");
+  assert.equal("provider" in folder, false);
+  assert.equal(folder.repository, "");
+  assert.equal(folder.branch, "");
+  assert.equal(folder.commit, "");
+  assert.equal(folder.createdBySkynet, false);
+  assert.equal(folder.localPath, "/Users/me/app");
+  // The paths, setup command and secrets work the same as for a git source.
+  assert.deepEqual(folder.editablePaths, ["src"]);
+  assert.equal(folder.setupCommand, "make");
+  assert.deepEqual(folder.secrets, git.secrets);
+  assert.equal(repoIssue(folder), null);
+  // The agent and the metric step see no repository, so no repository file is read.
+  assert.equal(agentRepoFields(folder).repository, undefined);
+  assert.equal(isLocalRepo(withLocalFolder(git, "")), true);
 });
 
 test("the agent sees a local folder as provider local with its path, and a git source as before", () => {

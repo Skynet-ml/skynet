@@ -667,3 +667,13 @@ test("a local folder run sends provider local with its path, and runs in the loc
   });
   assert.equal(request.sandbox_provider, "docker");
 });
+
+test("a setup with only a chosen folder is worth keeping (SKY-993)", async () => {
+  const { setupWorthKeeping } = await import("./session-state.ts");
+  const state = initialWizardV2State();
+  assert.equal(setupWorthKeeping(state), false);
+  state.task.repo = { ...state.task.repo, localPath: "  " };
+  assert.equal(setupWorthKeeping(state), false);
+  state.task.repo = { ...state.task.repo, localPath: "/Users/me/app" };
+  assert.equal(setupWorthKeeping(state), true);
+});

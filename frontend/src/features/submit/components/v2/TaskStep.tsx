@@ -30,7 +30,7 @@ import { WizardScreen } from "./WizardScreen";
 export function TaskStep({ page }: { page: number }) {
   const { state, guided, patchTask } = useWizardV2();
   // A folder on this computer can only run here, never on the web (SKY-993).
-  const runsHere = (useWizardV2ShellOptional()?.runSource ?? "local") === "local";
+  const runsHere = (useWizardV2ShellOptional()?.runOn ?? "local") === "local";
   const task = state.task;
   const t = (key: string) => v2Msg(key, guided);
 

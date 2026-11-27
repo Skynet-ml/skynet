@@ -8709,7 +8709,7 @@ export const UI_MESSAGES: Record<MessageKey, string> = {
   "submit.v2.repo.secrets_label": "סודות",
   "submit.v2.repo.source.existing": "שימוש במאגר קיים",
   "submit.v2.repo.source.existing_desc": "בחירת מאגר מ-GitHub, ‏GitLab או Bitbucket.",
-  "submit.v2.repo.source.folder": "בחירת תיקייה",
+  "submit.v2.repo.source.folder": "תיקייה במחשב",
   "submit.v2.repo.source.folder_desc": "שימוש בתיקייה ב-Mac הזה. ההרצה עובדת על עותק ולא משנה את התיקייה.",
   "submit.v2.repo.source.new": "יצירת מאגר חדש",
   "submit.v2.repo.source.new_desc": "Skynet יוצר אותו ב-GitHub, ב-GitLab או ב-Bitbucket ומוסיף את המשימה שלך.",

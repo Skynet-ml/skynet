@@ -65,6 +65,24 @@ export function isLocalRepo(repo: RepoDraft): boolean {
   return repo.localPath !== undefined;
 }
 
+/**
+ * Make the draft a local folder source and drop every git field.
+ *
+ * Hardening, the metric step's file list and the run read the git fields, so
+ * an old repository must not stay behind a folder (SKY-993).
+ *
+ * Args:
+ *   repo: The current draft; its paths, setup command and secrets stay.
+ *   path: The absolute folder path, or "" before the user picks one.
+ *
+ * Returns:
+ *   The draft with the folder and no repository, host, branch or commit.
+ */
+export function withLocalFolder(repo: RepoDraft, path: string): RepoDraft {
+  const { provider: _provider, ...rest } = repo;
+  return { ...rest, repository: "", branch: "", commit: "", createdBySkynet: false, localPath: path };
+}
+
 /** The sandbox provider id of the local Docker box, the only box a local folder may run in. */
 export const LOCAL_SANDBOX_PROVIDER = "docker";
 

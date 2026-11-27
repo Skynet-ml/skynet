@@ -2,7 +2,7 @@
 
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
-import { GitBranch } from "@/shared/ui/icons";
+import { FolderOpen, GitBranch } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import {
   Dialog,
@@ -55,7 +55,15 @@ export function SetupDraftDialog({
           >
             {name}
           </DialogDescription>
-          {repo?.repository && (
+          {repo?.localPath?.trim() ? (
+            <p
+              dir="ltr"
+              className="flex min-w-0 items-center gap-1.5 self-start font-mono text-xs text-[var(--text-2)]"
+            >
+              <FolderOpen className="size-3.5 shrink-0" aria-hidden />
+              <span className="truncate">{repo.localPath.trim()}</span>
+            </p>
+          ) : repo?.repository && (
             <p
               dir="ltr"
               className="flex min-w-0 items-center gap-1.5 self-start font-mono text-xs text-[var(--text-2)]"

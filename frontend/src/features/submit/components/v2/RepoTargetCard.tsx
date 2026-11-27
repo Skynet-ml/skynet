@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { toast } from "react-toastify";
 
@@ -44,7 +44,7 @@ import type { UnifiedCase } from "@/shared/types/unified-run";
 import { rememberOAuthReturn } from "@/shared/lib/oauth-return";
 import { userErrorMessage } from "@/shared/lib/user-error";
 
-import { isLocalRepo, type RepoDraft } from "../../lib/wizard-v2";
+import { isLocalRepo, withLocalFolder, type RepoDraft } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { HostMark, RepoPicker } from "./RepoPicker";
 import { InfoTip, RepoSecretsField } from "./RepoSecretsField";
@@ -144,6 +144,11 @@ export function RepoTargetCard({
   const [isPrivate, setIsPrivate] = useState(true);
   const [creating, setCreating] = useState(false);
   const patch = (next: Partial<RepoDraft>) => onChange({ ...repo, ...next });
+  // The folder dialogs resolve later; by then the draft can hold other edits.
+  const latestRepo = useRef(repo);
+  useEffect(() => {
+    latestRepo.current = repo;
+  }, [repo]);
   /** The draft without a local folder, for a git source. */
   const gitRepo = (): RepoDraft => {
     const { localPath: _localPath, ...rest } = repo;
@@ -154,7 +159,7 @@ export function RepoTargetCard({
     setFolderBusy(true);
     try {
       const path = await window.skynetDesktop?.pickFolder?.();
-      if (path) patch({ localPath: path, createdBySkynet: false });
+      if (path) onChange(withLocalFolder(latestRepo.current, path));
     } catch {
       toast.error(t("submit.v2.repo.folder.pick_failed"));
     } finally {
@@ -169,7 +174,7 @@ export function RepoTargetCard({
     try {
       const path = await window.skynetDesktop?.createFolder?.(wanted);
       if (!path) throw new Error("folder refused");
-      patch({ localPath: path, createdBySkynet: false });
+      onChange(withLocalFolder(latestRepo.current, path));
       setFolderName("");
     } catch {
       toast.error(t("submit.v2.repo.folder.create_failed"));
@@ -309,6 +314,7 @@ export function RepoTargetCard({
       >
         <SourceCard
           selected={shown === "existing"}
+          disabled={folderBusy}
           onSelect={() => {
             if (isLocalRepo(repo)) onChange(gitRepo());
             setSource("existing");
@@ -325,6 +331,7 @@ export function RepoTargetCard({
         />
         <SourceCard
           selected={shown === "new"}
+          disabled={folderBusy}
           onSelect={() => {
             if (isLocalRepo(repo)) onChange(gitRepo());
             setSource("new");
@@ -343,9 +350,10 @@ export function RepoTargetCard({
         {offerFolder && (
           <SourceCard
             selected={shown === "folder"}
+            disabled={folderBusy}
             onSelect={() => {
               setSource("folder");
-              if (!isLocalRepo(repo)) patch({ localPath: "", createdBySkynet: false });
+              if (!isLocalRepo(repo)) onChange(withLocalFolder(repo, ""));
             }}
             title={t("submit.v2.repo.source.folder")}
             desc={t("submit.v2.repo.source.folder_desc")}
@@ -371,18 +379,21 @@ export function RepoTargetCard({
             <span className="text-sm font-medium text-foreground">
               {t("submit.v2.repo.folder.label")}
             </span>
-            {repo.localPath?.trim() ? (
-              <p dir="ltr" className="break-all text-start font-mono text-sm text-foreground">
-                {repo.localPath}
-              </p>
-            ) : (
-              <p className="text-xs text-muted-foreground">{t("submit.v2.repo.folder.none")}</p>
-            )}
+            <div id="v2-repo-folder-path" aria-live="polite">
+              {repo.localPath?.trim() ? (
+                <p dir="ltr" className="break-all text-start font-mono text-sm text-foreground">
+                  {repo.localPath}
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">{t("submit.v2.repo.folder.none")}</p>
+              )}
+            </div>
             <Button
               type="button"
               variant="outline"
               onClick={() => void pickFolder()}
               disabled={folderBusy}
+              aria-describedby="v2-repo-folder-path"
               className="min-h-11 w-full gap-2"
             >
               <FolderOpen className="size-4" aria-hidden="true" />
@@ -647,7 +658,10 @@ export function RepoTargetCard({
 
       {/* Gilad asked to drop the repository hint (SKY-401); the picker already
           says what to type, and the key still blocks Continue. */}
-      {issue && issue !== "submit.v2.repo.issue.repository" && (
+      {issue &&
+        issue !== "submit.v2.repo.issue.repository" &&
+        // The folder panel's empty state already asks for a folder.
+        !(shown === "folder" && issue === "submit.v2.repo.issue.local_path") && (
         <p role="status" className="text-xs text-muted-foreground">
           {t(issue)}
         </p>
@@ -667,23 +681,27 @@ function SourceCard({
   title,
   desc,
   icon,
+  disabled = false,
 }: {
   selected: boolean;
   onSelect: () => void;
   title: string;
   desc: string;
   icon: ReactNode;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       aria-pressed={selected}
       onClick={onSelect}
+      disabled={disabled}
       className={cn(
         "group relative isolate flex min-h-20 flex-1 cursor-pointer items-center gap-4 overflow-hidden rounded-xl border bg-card px-5 py-4 text-start outline-none",
         "transition-[transform,border-color,box-shadow,background-color] duration-300 ease-out motion-reduce:transition-none",
         "hover:-translate-y-0.5 hover:shadow-[0_10px_30px_-12px] hover:shadow-primary/40 active:translate-y-0 active:scale-[0.99] motion-reduce:hover:translate-y-0",
         "focus-visible:ring-[3px] focus-visible:ring-ring/50",
+        "disabled:pointer-events-none disabled:opacity-60",
         selected
           ? "border-primary bg-primary/5 shadow-[0_0_0_1px] shadow-primary/40"
           : "border-border hover:border-primary/50",
