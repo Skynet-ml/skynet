@@ -121,6 +121,7 @@ def test_list_is_empty_and_reports_oauth_unavailable(vault_key: str) -> None:
         "account_label": None,
         "auth_method": None,
         "oauth_available": False,
+        "relay_available": False,
         "picker_available": False,
         "connected_at": None,
     }

@@ -27,6 +27,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ...billing.service import StripeBillingService
+from ...connectors import huggingface as hf
+from ...connectors import oauth as generic_oauth
+from ...connectors import registry
+from ...connectors.transport import label
+from ...connectors.vault import STATUS_CONNECTED, ConnectorVault
 from ...notifications.email_render import EmailContent, absolute_url, render_email_html
 from ...storage.models import DesktopLinkCodeModel, DesktopLinkModel, DesktopTokenModel, UserModel
 from ..auth import AuthenticatedUser, get_authenticated_user, hash_api_token
@@ -47,6 +52,7 @@ from ..desktop_auth import (
 from ..email_sender import email_configured, send_email
 from ..errors import DomainError
 from ..rate_limit import RateLimiter, shared_redis_client
+from .connectors import RELAY_PROVIDERS
 
 logger = logging.getLogger(__name__)
 # Width of ``users.image_url``; a longer picture URL is dropped, not rejected.
@@ -69,6 +75,7 @@ APP_REDIRECT = "skynet://link/callback"
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 IdentityDep = Annotated[DesktopPrincipal, Depends(get_desktop_principal("identity"))]
 BalanceDep = Annotated[DesktopPrincipal, Depends(get_desktop_principal("balance:read"))]
+ConnectorsDep = Annotated[DesktopPrincipal, Depends(get_desktop_principal("connectors"))]
 
 
 # Consent-page request; sent with the browser session JWT.
@@ -141,6 +148,15 @@ class DesktopLinkInfo(BaseModel):
     scopes: list[str]
     created_at: datetime
     last_used_at: datetime | None
+
+
+# A hosted OAuth access token copied to the Mac app (SKY-986). Never the refresh token.
+class DesktopConnector(BaseModel):
+    provider: str
+    access_token: str
+    expires_at: datetime | None = None
+    account_label: str | None = None
+    scopes: str | None = None
 
 
 def _canonical_scopes(raw: str) -> str:
@@ -457,10 +473,11 @@ def create_desktop_link_router(*, job_store) -> APIRouter:
 
     Returns:
         A FastAPI ``APIRouter`` with the link, token, revoke, whoami,
-        balance and Linked Macs routes.
+        balance, connector relay and Linked Macs routes.
     """
     router = APIRouter()
     billing = StripeBillingService(engine=job_store.engine)
+    vault = ConnectorVault(job_store.engine)
 
     def exchange_code(body: CodeGrantRequest, request: Request, tasks: BackgroundTasks) -> LinkTokenResponse:
         """Exchange a link code and PKCE verifier for a new link and token pair.
@@ -739,6 +756,55 @@ def create_desktop_link_router(*, job_store) -> APIRouter:
         """
         available = billing.spendable_cents(principal.username)
         return DesktopBalance(available_cents=available, low_balance=available < LOW_BALANCE_CENTS)
+
+    @router.get(
+        "/desktop/v1/connectors/{provider}",
+        response_model=DesktopConnector,
+        summary="OAuth access token of one connector, for the Mac app",
+    )
+    def relay_connector(provider: str, principal: ConnectorsDep) -> DesktopConnector:
+        """Return a fresh access token of the account's OAuth connector.
+
+        Hosted refreshes a stale token first and keeps the refresh token.
+
+        Args:
+            provider: Provider slug.
+            principal: Desktop principal with the ``connectors`` scope.
+
+        Returns:
+            The access token, its expiry, the account label and the scopes.
+
+        Raises:
+            DomainError: 404 ``unknown_provider`` for a provider without OAuth;
+                404 ``not_connected`` when the account has no live OAuth link.
+        """
+        if provider not in RELAY_PROVIDERS:
+            raise DomainError("connectors.unknown_provider", status=404, provider=provider)
+        username = principal.username
+        view = vault.get(username, provider)
+        if view is None or view.auth_method != "oauth" or view.status != STATUS_CONNECTED:
+            raise DomainError("connectors.not_connected", status=404, provider=label(provider))
+        try:
+            if provider == hf.PROVIDER:
+                token = hf.current_token(vault, username)
+            else:
+                token = generic_oauth.current_oauth_token(registry.get_provider(provider).oauth_app(), vault, username)
+        except DomainError as exc:
+            if exc.status_code != 409:
+                raise
+            # A lapsed grant means "connect again on hosted" for the Mac app, not a conflict.
+            raise DomainError("connectors.not_connected", status=404, provider=label(provider)) from exc
+        secret = vault.resolve(username, provider)
+        if token is None or secret is None:
+            raise DomainError("connectors.not_connected", status=404, provider=label(provider))
+        logger.info("Relayed the %s OAuth token to desktop link %s", provider, principal.link_id)
+        return DesktopConnector(
+            provider=provider,
+            access_token=token,
+            expires_at=secret.expires_at,
+            account_label=view.account_label,
+            scopes=view.scopes,
+        )
 
     @router.get(
         "/settings/desktop-links",

@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "ادامه با Notion",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "ورود با {provider} در این استقرار تنظیم نشده است.",
+  "connectors.relay.connect_on_web": "{provider} را در وب‌سایت Skynet وصل کنید، سپس به این برنامه برگردید.",
   "connectors.onedrive.blurb": "وارد کردن فایل‌ها از OneDrive شخصی یا کاری شما.",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "ادامه با Microsoft",

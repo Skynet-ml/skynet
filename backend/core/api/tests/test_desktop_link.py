@@ -16,14 +16,18 @@ from typing import Annotated, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ...config import settings
+from ...connectors.vault import ConnectorVault
 from ...registry.core import ServiceRegistry
 from ...storage.models import (
     Base,
@@ -1306,3 +1310,90 @@ def test_token_prefixes_are_distinct() -> None:
     assert access.startswith("skyl_at_")
     assert refresh.startswith("skyl_rt_")
     assert len(access) == len("skyl_at_") + 43
+
+
+@pytest.fixture
+def connector_vault(harness: Any, monkeypatch: pytest.MonkeyPatch) -> ConnectorVault:
+    """Return a vault on the harness engine, with a fresh encryption key.
+
+    Args:
+        harness: The app harness.
+        monkeypatch: Pytest fixture used to set the vault key.
+
+    Returns:
+        The vault.
+    """
+    monkeypatch.setattr(settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
+    _, engine, _ = harness
+    return ConnectorVault(engine)
+
+
+def test_connector_relay_returns_the_access_token_only(harness: Any, connector_vault: ConnectorVault) -> None:
+    """The Mac gets the OAuth access token, its label and scopes, never the refresh token (SKY-986)."""
+    client, _, _ = harness
+    expires_at = datetime.now(UTC) + timedelta(hours=1)
+    connector_vault.save(
+        "alice@example.test",
+        "github",
+        access_token="gho_hosted",
+        auth_method="oauth",
+        account_label="alice",
+        refresh_token="ghr_secret",
+        expires_at=expires_at,
+        scopes="repo",
+    )
+    pair = _link(client)
+
+    response = client.get("/desktop/v1/connectors/github", headers=_bearer(pair["access_token"]))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["provider"], body["access_token"], body["account_label"], body["scopes"]) == (
+        "github",
+        "gho_hosted",
+        "alice",
+        "repo",
+    )
+    assert abs(datetime.fromisoformat(body["expires_at"]).replace(tzinfo=UTC) - expires_at) < timedelta(seconds=1)
+    assert "ghr_secret" not in response.text
+
+
+def test_connector_relay_refuses_what_it_cannot_relay(harness: Any, connector_vault: ConnectorVault) -> None:
+    """No link, a pasted token, a lapsed grant and a non-OAuth provider all answer 404."""
+    client, _, _ = harness
+    connector_vault.save(
+        "alice@example.test", "gitlab", access_token="glpat_pasted", auth_method="token", account_label=None
+    )
+    connector_vault.save(
+        "alice@example.test",
+        "bitbucket",
+        access_token="bb_old",
+        auth_method="oauth",
+        account_label=None,
+        expires_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    headers = _bearer(_link(client)["access_token"])
+
+    for provider, code in (
+        ("github", "connectors.not_connected"),
+        ("gitlab", "connectors.not_connected"),
+        ("bitbucket", "connectors.not_connected"),
+        ("webhook", "connectors.unknown_provider"),
+    ):
+        response = client.get(f"/desktop/v1/connectors/{provider}", headers=headers)
+        assert (response.status_code, _code(response)) == (404, code), provider
+        assert "glpat_pasted" not in response.text
+        assert "bb_old" not in response.text
+
+
+def test_connector_relay_needs_the_connectors_scope(harness: Any, connector_vault: ConnectorVault) -> None:
+    """A link without the ``connectors`` scope cannot read connector tokens."""
+    client, _, _ = harness
+    connector_vault.save(
+        "alice@example.test", "github", access_token="gho_hosted", auth_method="oauth", account_label=None
+    )
+    pair = _link(client, scope="identity")
+
+    response = client.get("/desktop/v1/connectors/github", headers=_bearer(pair["access_token"]))
+
+    assert (response.status_code, _code(response)) == (403, "desktop.scope_missing")

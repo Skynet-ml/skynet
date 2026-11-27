@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "Notion के साथ जारी रखें",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "{provider} से साइन-इन इस डिप्लॉयमेंट पर सेट अप नहीं है.",
+  "connectors.relay.connect_on_web": "Skynet वेबसाइट पर {provider} कनेक्ट करें, फिर इस ऐप पर वापस आएं.",
   "connectors.onedrive.blurb": "अपने पर्सनल या वर्क OneDrive से फ़ाइलें इंपोर्ट करें.",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "Microsoft के साथ जारी रखें",

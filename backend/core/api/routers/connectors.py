@@ -34,6 +34,7 @@ from ...connectors.github_create_repo import CreatedRepository, RepoCreateError,
 from ...connectors.pruning import browse_importable
 from ...connectors.transport import label
 from ...connectors.vault import ConnectorSecret, ConnectorVault
+from ...local import connector_relay, hosted_link
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..dataset_access import ShareRole
@@ -52,6 +53,8 @@ GITHUB_CASES_MAX_ITEMS = 10_000
 GITHUB_CASES_MAX_BYTES = 5 * 1024 * 1024
 # GitLab paths may hold subgroups, so they can be longer than GitHub's ``owner/name``.
 REPO_PATH_MAX = 1024
+# Providers whose hosted OAuth link the Mac app can copy (SKY-986).
+RELAY_PROVIDERS = registry.OAUTH_PROVIDERS | {hf.PROVIDER}
 OtherRepoHost = Literal["gitlab", "bitbucket"]
 
 # Some providers resolve a folder's web link with its own API call (OneDrive),
@@ -72,6 +75,9 @@ class ConnectorStatus(BaseModel):
         default=False, description="Whether the Google Picker can choose the files this OAuth link may read."
     )
     connected_at: str | None = None
+    relay_available: bool = Field(
+        default=False, description="Whether the Mac app can copy this OAuth link from the linked hosted account."
+    )
 
 
 class ConnectorListResponse(BaseModel):
@@ -296,13 +302,14 @@ def connector_secret(vault: ConnectorVault, username: str, provider: str) -> Con
     secret = vault.resolve(username, provider)
     if secret is None:
         raise DomainError("connectors.not_connected", status=409, provider=label(provider))
-    if secret.auth_method == "oauth":
+    if secret.auth_method == "oauth" or connector_relay.is_relay(secret):
         token = generic_oauth.current_oauth_token(module.oauth_app(), vault, username)
+        # Provider code branches on "oauth"; a relayed token is the same kind of grant.
         secret = ConnectorSecret(
             access_token=token,
             refresh_token=secret.refresh_token,
             expires_at=secret.expires_at,
-            auth_method=secret.auth_method,
+            auth_method="oauth",
             account_label=secret.account_label,
         )
     return secret
@@ -332,6 +339,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
             The list envelope; one entry per supported provider.
         """
         entries: list[ConnectorStatus] = []
+        linked = settings.local_mode and hosted_link.link_status(job_store.engine, username) is not None
         for provider, available in [(hf.PROVIDER, hf.oauth_available())] + [
             (name, registry.oauth_available(name)) for name in registry.PROVIDERS
         ]:
@@ -346,6 +354,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
                     oauth_available=available,
                     picker_available=registry.picker_available(provider),
                     connected_at=view.connected_at.isoformat() if view else None,
+                    relay_available=linked and not available and provider in RELAY_PROVIDERS,
                 )
             )
         return ConnectorListResponse(connectors=entries)

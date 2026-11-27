@@ -508,6 +508,7 @@
   "connectors.notion.oauth_button": "المتابعة باستخدام Notion",
   "connectors.notion.name": "Notion",
   "connectors.oauth_only_unavailable": "تسجيل الدخول باستخدام {provider} غير مُفعَّل على هذا النشر",
+  "connectors.relay.connect_on_web": "اربط {provider} على موقع Skynet، ثم عُد إلى هذا التطبيق.",
   "connectors.onedrive.blurb": "استيراد ملفات من OneDrive الشخصي أو الخاص بالعمل",
   "connectors.onedrive.name": "OneDrive",
   "connectors.onedrive.oauth_button": "المتابعة باستخدام Microsoft",

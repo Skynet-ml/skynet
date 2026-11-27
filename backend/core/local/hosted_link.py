@@ -480,7 +480,9 @@ def _send(method: str, path: str, token: str, body: Any = None) -> httpx.Respons
         raise DomainError("hosted_link.unreachable", status=503) from exc
 
 
-def hosted_request(engine: Engine, username: str, method: str, path: str, body: Any = None) -> Any:
+def hosted_request(
+    engine: Engine, username: str, method: str, path: str, body: Any = None, *, absent_code: str | None = None
+) -> Any:
     """Call a hosted ``/desktop/v1`` route with the linked account.
 
     A 401 ``desktop.token_expired`` or ``auth.invalid_token`` refreshes once
@@ -493,9 +495,12 @@ def hosted_request(engine: Engine, username: str, method: str, path: str, body: 
         method: The HTTP verb.
         path: The hosted path, such as ``/desktop/v1/whoami``.
         body: The JSON body, or ``None`` for none.
+        absent_code: A hosted 404 error code that means "nothing there"; that
+            answer returns ``None`` instead of raising.
 
     Returns:
-        The JSON body, or ``None`` for an empty 2xx answer.
+        The JSON body, or ``None`` for an empty 2xx answer or an
+        ``absent_code`` 404.
 
     Raises:
         DomainError: 409 when not linked, 401 when the link is revoked (local
@@ -510,6 +515,8 @@ def hosted_request(engine: Engine, username: str, method: str, path: str, body: 
     if 200 <= response.status_code < 300:
         return response.json() if response.content else None
     hosted_code = _hosted_code(response)
+    if absent_code is not None and response.status_code == 404 and hosted_code == absent_code:
+        return None
     # Only reached after a refresh, so a fresh token that hosted does not know means a dead link.
     if response.status_code == 401 and (hosted_code in _GONE_CODES or hosted_code == "auth.invalid_token"):
         raise _gone(engine, username)
@@ -517,21 +524,22 @@ def hosted_request(engine: Engine, username: str, method: str, path: str, body: 
     raise DomainError("hosted_link.failed", status=502)
 
 
-def hosted_get(engine: Engine, username: str, path: str) -> dict[str, Any]:
+def hosted_get(engine: Engine, username: str, path: str, *, absent_code: str | None = None) -> dict[str, Any]:
     """Call a hosted ``/desktop/v1`` read route that answers a JSON object.
 
     Args:
         engine: Local database.
         username: The local user.
         path: The hosted path, such as ``/desktop/v1/whoami``.
+        absent_code: See :func:`hosted_request`.
 
     Returns:
-        The JSON body, or ``{}`` when it is not an object.
+        The JSON body, or ``{}`` when it is not an object or is absent.
 
     Raises:
         DomainError: The errors of :func:`hosted_request`.
     """
-    body = hosted_request(engine, username, "GET", path)
+    body = hosted_request(engine, username, "GET", path, absent_code=absent_code)
     return body if isinstance(body, dict) else {}
 
 
