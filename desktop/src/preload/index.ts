@@ -19,6 +19,14 @@ if (window.location.protocol === "file:") {
     },
   });
 } else {
+  // Only the local web app gets the folder actions. The main process also
+  // checks the sender's exact origin (with its port) on every call.
+  if (window.location.protocol === "http:" && window.location.hostname === "127.0.0.1") {
+    contextBridge.exposeInMainWorld("skynetDesktop", {
+      pickFolder: (): Promise<string | null> => ipcRenderer.invoke("folders:pick"),
+      createFolder: (name: string): Promise<string | null> => ipcRenderer.invoke("folders:create", name),
+    });
+  }
   // The web app marks its dark theme with a "dark" class on <html>. The main
   // process picks the Dock icon and the window background from it.
   let sent: string | null = null;
