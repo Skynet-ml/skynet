@@ -204,6 +204,23 @@ def test_reserve_then_settle_charges_the_measured_runtime(database: Engine) -> N
     assert evidence["source"] == "https://blaxel.ai/pricing"
 
 
+def test_measured_runtime_ignores_float_noise_of_a_large_clock(database: Engine) -> None:
+    """A long-running host's large monotonic clock must not add a millisecond to the bill.
+
+    Args:
+        database: The SQLite ledger.
+    """
+    reservation = BlaxelUsageReservation(_runtime(database), CREATE, operation_key="box-one")
+    reservation.sent(NAME)
+    reservation.confirm_created(_box())
+    reservation.stopped()
+    reservation.sent_at = 1e9
+    reservation.stopped_at = 1e9 + 10.2
+    assert reservation._evidence()["measured_ms"] == 10_200
+    reservation.stopped_at = 1e9 + 10.2004
+    assert reservation._evidence()["measured_ms"] == 10_201
+
+
 def test_settle_clamps_to_the_hold_and_warns(database: Engine, caplog: pytest.LogCaptureFixture) -> None:
     """Settle an over-run at the funded time, log a warning and flag the evidence.
 
