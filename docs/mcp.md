@@ -218,7 +218,7 @@ calls the route as the connected account:
 Some agent routes are not tools:
 
 - Routes that start paid work without the cost review: `/optimize`, clone,
-  retry, resume, restart and `/serve/*`. Use the `repo_draft_*` flow.
+  retry, resume and restart. Use the `repo_draft_*` flow.
 - Billing routes that change data (`POST`, `PUT`, `PATCH` and `DELETE` on
   `/billing/*`). The MCP server never adds funds or changes billing. Billing
   read routes, such as the wallet, are tools.

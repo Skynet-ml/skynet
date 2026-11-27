@@ -114,7 +114,7 @@ def verification_fingerprint(
     Args:
         session: Database session used to resolve current account credential revisions.
         username: Authenticated owner, never a client-supplied identity.
-        workflow: Request family, such as Anything or an interaction.
+        workflow: Request family, such as Anything.
         scope: Evaluation or complete execution readiness.
         payload: Canonical public request before runtime-only injection.
 
@@ -193,7 +193,6 @@ def preflight_document(row: WizardPreflightModel) -> dict[str, Any]:
         **({"dependency_result": row.result["dependency_result"]} if "dependency_result" in row.result else {}),
         **({"scorer_result": row.result["scorer_result"]} if "scorer_result" in row.result else {}),
         **({"workflow_result": row.result["workflow_result"]} if "workflow_result" in row.result else {}),
-        **({"interaction_result": row.result["interaction_result"]} if "interaction_result" in row.result else {}),
         **({"judge_result": row.result["judge_result"]} if "judge_result" in row.result else {}),
         **({"terminal": row.result["terminal"]} if isinstance(row.result.get("terminal"), dict) else {}),
         **({"environment": row.result["environment"]} if isinstance(row.result.get("environment"), dict) else {}),

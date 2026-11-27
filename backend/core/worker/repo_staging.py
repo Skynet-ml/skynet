@@ -3706,7 +3706,7 @@ def _scored_candidate(candidate: Any, hidden_paths: tuple[str, ...]) -> Any:
 def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> None:
     """Replace every version a finished result records with the change the scorer scored.
 
-    Serving, download and publishing all read these fields, so a version's
+    Download and publishing both read these fields, so a version's
     edit to a hidden path, ``ascent.toml`` included, never leaves the run
     (SKY-353, E62).
 

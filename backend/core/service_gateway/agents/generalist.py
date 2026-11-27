@@ -599,7 +599,7 @@ def approval_key(call_id: str, owner: str | None) -> str:
     Binding the key to the stream's owner means a confirm from any other
     account derives a different key and can never resolve the call, on the
     in-process path and the cross-replica table alike. Owner-less callers
-    (the react-serve relay) keep the bare id.
+    keep the bare id.
 
     Args:
         call_id: The short id surfaced to the browser in ``pending_approval``.
@@ -693,8 +693,7 @@ class _ApprovalGatedTool:
                 this turn (the name and wizard fields written so far).
             needs_approval: Policy deciding whether a call must pause for
                 confirmation. Defaults to the wizard-tool classifier
-                :func:`_needs_approval`; the react-serve driver injects a
-                gate-everything-but-yolo policy for arbitrary MCP rosters.
+                :func:`_needs_approval`.
             approval_owner: Username of the stream's caller. When set, pending
                 approvals are keyed to it so only that account can confirm.
         """
@@ -816,8 +815,8 @@ class _ApprovalGatedTool:
                 )
                 return problem
             pending_key = approval_key(call_id, self._approval_owner)
-            # An injected policy (react-serve gates by its own rules) must not
-            # be able to wave a protected settings action through.
+            # An injected policy must not be able to wave a protected
+            # settings action through.
             gated = self._tool_name in _ALWAYS_CONFIRM_TOOLS or self._needs_approval(self._tool_name, self._trust_mode)
             denied = False
             # A chat rule is the user's own choice, so it also skips the auto-review.
@@ -1139,13 +1138,6 @@ _ALWAYS_TOOLS = frozenset(
         # Read-only wallet: one balance, plan, and recent ledger —
         # lets the agent answer "how much money do I have left / what did I spend?".
         "get_wallet_for_agent",
-        "serve_info_serve",
-        # UI-trigger tool — calling it renders an inline inference-input
-        # card in the chat. The card fetches the field schema via
-        # /serve/{id}/info and runs the actual inference via /serve/{id};
-        # the agent NEVER calls serve_program directly because it cannot
-        # know the user's inputs.
-        "request_user_inference",
         "discover_models_models_discover_post",
         "rename_job_optimizations",
         "toggle_pin_job_optimizations",
@@ -2549,15 +2541,6 @@ Capabilities worth knowing about:
   language, like
   "show me sentiment runs that scored above 0.8") before reaching for
   the wizard.
-* Live inference: when the user wants to try the trained program on a
-  fresh input ("how would this run classify X?"), call
-  ``request_user_inference`` with the ``optimization_id``. That renders
-  an inline form in the chat — the user types the input values and
-  the frontend runs the inference itself. Do NOT try to call any
-  inference tool directly; you cannot know the user's inputs, and
-  guessing them would waste an LLM call. After ``request_user_inference``
-  returns, stop and wait for the next user message — the form result
-  arrives as a follow-up turn.
 * Starting a run: you never submit a run, and you have no submit
   tool. When the user asks to run / start / submit / launch, find the
   blank wizard fields in the wizard_state snapshot and patch them, or

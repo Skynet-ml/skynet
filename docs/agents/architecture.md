@@ -81,7 +81,7 @@ Reference facts for coding agents. The always-on rules are in `AGENTS.md`.
 │       ├── features/             Product feature slices
 │       │   ├── submit/           Submit wizard, drafts, substeps,
 │       │   │                    preflight, budget UI, and workflow canvas
-│       │   ├── optimizations/    Results, logs, compare, export, and serve UI
+│       │   ├── optimizations/    Results, logs, compare, and export UI
 │       │   ├── dashboard/        Job list, analytics, and bulk actions
 │       │   ├── datasets/         Dataset library and editor
 │       │   ├── tagger/           Assisted tagging sessions

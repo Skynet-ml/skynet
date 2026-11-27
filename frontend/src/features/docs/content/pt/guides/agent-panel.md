@@ -22,7 +22,7 @@ Enquanto o agente trabalha, o campo de mensagem continua disponível:
 - Uma mensagem marcada como **Não confirmado** pode já ter chegado ao agente. Você pode editá-la ou excluí-la a qualquer momento. Outras mensagens na fila podem continuar antes dela.
 - **Parar** termina o turno atual e coloca a fila em pausa. As instruções por ler regressam à lista. Nada começa automaticamente. **Esc** no campo faz o mesmo, exceto com um menu aberto ou durante a composição com IME. Esc fecha primeiro uma sugestão ou um menu deste campo.
 - Com a fila em pausa e sem um turno ativo, **Orientar** envia essa mensagem. Depois a fila continua pela ordem definida. O fim normal de um turno também inicia a mensagem seguinte.
-- Com sessão iniciada, **Enter** orienta o assistente de documentação quando este anuncia um limite de passo seguro. A mensagem é lida no próximo passo do modelo já previsto. **Tab** coloca sempre na fila. Antes do aviso, sem sessão e na conversa protegida dos programas disponibilizados, Enter e Tab colocam mensagens na fila. O assistente de documentação pausa as restantes após atingir um limite de pedidos.
+- Com sessão iniciada, **Enter** orienta o assistente de documentação quando este anuncia um limite de passo seguro. A mensagem é lida no próximo passo do modelo já previsto. **Tab** coloca sempre na fila. Antes do aviso e sem sessão, Enter e Tab colocam mensagens na fila. O assistente de documentação pausa as restantes após atingir um limite de pedidos.
 
 ## O que o agente pode fazer
 

@@ -1,11 +1,7 @@
 """Tool-schema overlay, drift detection, and fresh-program assembly.
 
-Shared by both the training-ground runtime (``registry.py``, which
-re-exports every symbol here for back-compat) and the ``/serve`` path in
-``core/api``. Pulling these helpers out of ``training_ground/registry.py``
-lets the API re-source a persisted ReAct program without importing the
-training-ground package — the serve path only needs the overlay + drift
-machinery, not the bundle loader.
+Used by the training-ground runtime (``registry.py``, which re-exports
+every symbol here for back-compat).
 """
 
 from __future__ import annotations
@@ -268,6 +264,6 @@ __all__ = [
     "snapshot_tool_schema_hashes",
 ]
 
-# ``_apply_tool_name_overrides`` is shared with the /serve helper but kept
-# underscore-prefixed (internal overlay machinery, like
-# ``_apply_bundle_tool_overrides``) and intentionally absent from ``__all__``.
+# ``_apply_tool_name_overrides`` is kept underscore-prefixed (internal overlay
+# machinery, like ``_apply_bundle_tool_overrides``) and intentionally absent
+# from ``__all__``.

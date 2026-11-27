@@ -348,8 +348,8 @@ def _imported_overview(overview: dict[str, Any], optimization_type: str, usernam
             DSPy run. 422 ``sync.invalid_bundle`` when ``is_private`` is not a
             boolean, or when ``model_settings`` is not a valid model config. The
             public dashboard casts ``is_private`` to boolean in SQL, so one bad
-            row would fail that page for every user; serve and chat rebuild the
-            model from ``model_settings`` and would answer 500.
+            row would fail that page for every user; chat rebuilds the model
+            from ``model_settings`` and would answer 500.
     """
     if overview.get(PAYLOAD_OVERVIEW_PAYLOAD_KIND) == "unified_v1":
         raise RunSyncError("sync.unsupported_run_type", 409, optimization_type="unified_v1")

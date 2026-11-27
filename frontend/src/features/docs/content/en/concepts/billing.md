@@ -108,10 +108,6 @@ Your repository code and your scorer run in a sandbox. Skynet meters sandbox com
 
 Sandbox compute is part of the run's spending limit, also when the model calls use your own key. Sandbox use in setup checks is paid from your balance, unless setup counts in the limit.
 
-## Serving
-
-Each call to the serve endpoint of a finished run is billed on its own. The caller pays from the caller's balance. You can set `max_cost_cents` in the request to record the most you accept for one call. Your balance bounds the call. Read [Results](/docs/guides/results).
-
 ## Plans
 
 There are two plans: Free and Pro. Pro raises some limits, such as concurrent runs and storage. If a Pro renewal fails, the account keeps Pro limits for 7 days. After that, it uses the Free limits until the payment succeeds. See [Limits](/docs/limits).

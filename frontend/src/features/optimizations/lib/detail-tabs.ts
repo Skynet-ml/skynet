@@ -6,7 +6,6 @@
 /** Phones get the view-first subset; Data, Code and Config are desk work. */
 export const PHONE_DETAIL_TABS: ReadonlySet<string> = new Set([
   "overview",
-  "playground",
   "best",
   "artifact",
   "logs",

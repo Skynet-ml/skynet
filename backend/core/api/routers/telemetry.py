@@ -89,35 +89,6 @@ FROM lifted l
 JOIN first_weeks f ON f.username = l.username
 GROUP BY l.week
 """,
-    # run_completed carries no optimization_id, so "has a qualifying run" is
-    # judged per owner: the served program's owner must have lifted some run
-    # before the week ended.
-    "metric_lifted_in_use_weekly": f"""
-CREATE OR REPLACE VIEW metric_lifted_in_use_weekly AS
-WITH program_days AS (
-    SELECT
-        j.username,
-        date_trunc('week', e.received_at AT TIME ZONE 'UTC')::date AS week,
-        count(DISTINCT (e.received_at AT TIME ZONE 'UTC')::date) AS days
-    FROM telemetry_events e
-    JOIN jobs j ON j.optimization_id = e.properties ->> 'optimization_id'
-    JOIN users u ON u.email = j.username AND NOT u.is_internal
-    WHERE e.event_name = 'serve_inference'
-    AND e.properties ->> 'channel' IN ('api_token', 'share_link')
-    GROUP BY j.optimization_id, j.username, 2
-)
-SELECT d.week, count(DISTINCT d.username) AS users_in_use
-FROM program_days d
-WHERE d.days >= 2
-AND EXISTS (
-    SELECT 1 FROM telemetry_events r
-    WHERE r.event_name = 'run_completed'
-    AND r.username = d.username
-    AND r.received_at < ((d.week + 7)::timestamp AT TIME ZONE 'UTC')
-    AND {_QUALIFYING_RUN.format(p="r.properties")}
-)
-GROUP BY d.week
-""",
 }
 
 
@@ -244,24 +215,16 @@ class NorthStarLiftedUsersWeek(BaseModel):
     returning_lifted: int
 
 
-class NorthStarInUseWeek(BaseModel):
-    """Owners whose lifted program was served externally on 2+ days in one week."""
-
-    week: date
-    users_in_use: int
-
-
 class NorthStarMetricsResponse(BaseModel):
     """The north-star series for the trailing ``weeks`` UTC weeks, newest first.
 
     Every series holds exactly ``weeks`` rows, one per week (zero-filled), so
-    the three line up row for row.
+    the two line up row for row.
     """
 
     weeks: int
     first_lifts: list[NorthStarFirstLiftsWeek]
     lifted_users: list[NorthStarLiftedUsersWeek]
-    lifted_in_use: list[NorthStarInUseWeek]
 
 
 def _week_start(day: date) -> date:
@@ -292,7 +255,7 @@ def ensure_metric_views(conn: Connection) -> None:
 
 
 def read_north_star(conn: Connection, *, weeks: int, today: date) -> NorthStarMetricsResponse:
-    """Read the three metric views for the trailing ``weeks`` weeks.
+    """Read the two metric views for the trailing ``weeks`` weeks.
 
     Off Postgres (the SQLite test stores) the views cannot exist, so every week
     reads as zero.
@@ -309,7 +272,6 @@ def read_north_star(conn: Connection, *, weeks: int, today: date) -> NorthStarMe
     days = [newest - timedelta(weeks=offset) for offset in range(weeks)]
     first: dict[date, tuple[int, int]] = {}
     lifted: dict[date, tuple[int, int]] = {}
-    in_use: dict[date, int] = {}
     if conn.dialect.name == "postgresql":
         ensure_metric_views(conn)
         start = {"start": days[-1]}
@@ -323,10 +285,6 @@ def read_north_star(conn: Connection, *, weeks: int, today: date) -> NorthStarMe
             start,
         ):
             lifted[week] = (int(new), int(returning))
-        for week, users in conn.execute(
-            text("SELECT week, users_in_use FROM metric_lifted_in_use_weekly WHERE week >= :start"), start
-        ):
-            in_use[week] = int(users)
     return NorthStarMetricsResponse(
         weeks=weeks,
         first_lifts=[
@@ -341,7 +299,6 @@ def read_north_star(conn: Connection, *, weeks: int, today: date) -> NorthStarMe
             )
             for day in days
         ],
-        lifted_in_use=[NorthStarInUseWeek(week=day, users_in_use=in_use.get(day, 0)) for day in days],
     )
 
 
@@ -558,7 +515,7 @@ def create_telemetry_router(*, job_store) -> APIRouter:
     @router.get(
         "/telemetry/metrics/north-star",
         response_model=NorthStarMetricsResponse,
-        summary="Admin: First Lifts per week, new/returning lifted users, lifted programs in use",
+        summary="Admin: First Lifts per week and new/returning lifted users",
     )
     def get_north_star(
         current_user: AuthenticatedUserDep,

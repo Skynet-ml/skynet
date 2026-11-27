@@ -22,7 +22,7 @@ Pendant le travail de l’agent, le champ de saisie reste disponible :
 - Un message marqué **Non confirmé** est peut-être déjà parvenu à l'agent. Vous pouvez le modifier ou le supprimer à tout moment. Les autres messages en file peuvent continuer avant lui.
 - **Arrêter** interrompt le tour et met la file en pause. Les instructions non lues reviennent dans la liste. Rien ne démarre automatiquement. **Échap** dans le champ fait de même, sauf si un menu est ouvert ou pendant une composition IME. Échap ferme d’abord une suggestion ou un menu de ce champ.
 - Quand la file est en pause et sans tour actif, **Orienter** envoie ce message. La file continue ensuite dans l’ordre. Une fin normale de tour lance aussi le message suivant.
-- Une fois connecté, **Entrée** dirige l'assistant de documentation quand il annonce une limite d'étape sûre. Il lit le message à la prochaine étape du modèle déjà prévue. **Tab** place toujours le message dans la file. Avant l'annonce, sans connexion et dans le chat protégé des programmes déployés, Entrée et Tab placent les messages dans la file. L'assistant de documentation met les messages restants en pause après une limite de requêtes.
+- Une fois connecté, **Entrée** dirige l'assistant de documentation quand il annonce une limite d'étape sûre. Il lit le message à la prochaine étape du modèle déjà prévue. **Tab** place toujours le message dans la file. Avant l'annonce et sans connexion, Entrée et Tab placent les messages dans la file. L'assistant de documentation met les messages restants en pause après une limite de requêtes.
 
 ## Ce que l'agent peut faire
 

@@ -49,7 +49,6 @@ Authorization: Bearer skyd_...
 | `GET /optimizations`                            | اجراهای شما را فهرست می‌کند.                                |
 | `GET /optimizations/{optimization_id}`          | یک اجرا را برمی‌گرداند: وضعیت، پیشرفت، لاگ‌ها و نتیجه.      |
 | `POST /optimizations/{optimization_id}/cancel`  | یک اجرا را متوقف می‌کند.                                    |
-| `POST /serve/{optimization_id}`                 | بهترین نسخه را روی یک ورودی جدید اجرا می‌کند.               |
 | `GET /health`                                   | نشان می‌دهد سرویس در دسترس است یا نه.                       |
 
 ## شروع یک اجرا
@@ -164,8 +163,6 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-برای اجرای بهترین نسخه روی یک ورودی جدید، `POST /serve/{optimization_id}` را همراه با سرآیند `Idempotency-Key` بفرستید. مخزن باید یک فایل `serve.py` با `def serve(input)` داشته باشد. برای درخواست، پاسخ و معنی هر امتیاز، [نتیجه‌ها](/docs/guides/results) را بخوانید.
 
 ## محدودیت‌ها
 

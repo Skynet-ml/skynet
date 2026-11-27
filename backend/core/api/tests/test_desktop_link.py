@@ -675,7 +675,6 @@ _REVIEWED_SENSITIVE_OPEN = frozenset(
         "/optimizations/{optimization_id}/visibility",
         "/share/{token}",
         "/share/{token}/claim",
-        "/share/{token}/serve",
         "/tagging-sessions/share/{token}/claim",
         "/tagging-sessions/{session_id}/sharing",
         "/tagging-sessions/{session_id}/sharing/members",

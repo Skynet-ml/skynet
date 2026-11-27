@@ -1,4 +1,4 @@
-実行ページには、実行の進捗と結果が表示されます。このガイドでは、実行ページのタブ、スコア、最良のバージョンをエクスポートまたは提供する方法を説明します。
+実行ページには、実行の進捗と結果が表示されます。このガイドでは、実行ページのタブ、スコア、最良のバージョンをエクスポートする方法を説明します。
 
 ## 実行ページのタブ
 
@@ -7,7 +7,6 @@
 | タブ                 | 表示される条件                                               | 内容                                                                     |
 | -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | **概要**             | 常に                                                         | 進捗、スコア、スコアの履歴                                               |
-| **使用状況**         | リポジトリに `serve.py` ファイルがある、成功した実行         | 最良のバージョンを呼び出すフォームと、連携コード                         |
 | **成果物**           | 結果がある実行                                               | リポジトリのバージョンと、最良のバージョン                               |
 | **データ**           | ケースがある、完了した実行                                   | 学習・検証・テストのセットへのデータの分割                               |
 | **コード**           | 実行に表示するコードがあるとき                               | スコアラー                                                               |
@@ -52,60 +51,6 @@ Skynet は検証ケースでバージョンを選びます。最終スコアは�
 ### 新しいリポジトリのブランチ
 
 Skynet が実行のために GitHub 上にリポジトリを作成した場合、各候補をそれぞれのブランチ `skynet/candidate-<version id>` にプッシュします。`skynet/best` ブランチは常に最も良いバージョンを指します。より良いバージョンが現れると、このブランチは移動します。
-
-## 最良のバージョンを提供する
-
-最良のバージョンを、自分のコードから呼び出せます。リポジトリのルートには、`serve(input)` を定義する `serve.py` ファイルが必要です。
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input` は、リクエストの入力フィールドの dict です。
-- 戻り値は JSON にシリアライズできる必要があります。dict は `outputs` になります。それ以外の値は `{"output": value}` になります。
-- `serve.py` は、ヘルパーモジュール `openascent` の `llm` でモデルを呼び出せます。実行のシークレットは受け取りません。
-
-Skynet は、実行と同じ保護されたサンドボックスで最良のバージョンを実行します。**使用状況** タブには 2 つの部分があります。
-
-- フォーム。入力フィールドを入力し、**実行** を選択すると結果が得られます。
-- cURL、Python、JavaScript、Go の **連携コード**。
-
-最良のバージョンを呼び出すには、**設定 → API** で API トークンを作成します。次に、リクエストを送信します。`Idempotency-Key` ヘッダーは必須です。
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-`message` は、実行の入力フィールドに置き換えてください。**使用状況** タブの **連携コード** には、実際の URL とフィールド名が入力されています。
-
-レスポンスには、`outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged`、`budget` が含まれます。
-
-> [!TIP]
-> 各呼び出しは個別に、呼び出し元の残高から請求されます。`max_cost_cents` は省略可能です。この 1 回の呼び出しで許容する最大額をセント単位で記録します。呼び出しの上限は残高で決まります。同じ `Idempotency-Key` を再度送信しても、Skynet はその呼び出しを再度請求しません。
-
-認証とその他のエンドポイントについては、[API](/docs/api) をお読みください。
 
 ## 結果を共有する
 

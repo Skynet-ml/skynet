@@ -49,7 +49,6 @@ Authorization: Bearer skyd_...
 | `GET /optimizations`                            | מציג את הריצות שלך.                               |
 | `GET /optimizations/{optimization_id}`          | מחזיר ריצה אחת: סטטוס, התקדמות, לוגים ותוצאה.     |
 | `POST /optimizations/{optimization_id}/cancel`  | עוצר ריצה.                                        |
-| `POST /serve/{optimization_id}`                 | מריץ את הגרסה הטובה ביותר על קלט חדש.             |
 | `GET /health`                                   | מראה אם השירות פעיל.                              |
 
 ## הפעלת ריצה
@@ -164,8 +163,6 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-כדי להריץ את הגרסה הטובה ביותר על קלט חדש, שלח/י `POST /serve/{optimization_id}` עם כותרת `Idempotency-Key`. במאגר חייב להיות קובץ `serve.py` עם `def serve(input)`. קרא/י את [תוצאות](/docs/guides/results) לגבי הבקשה, התשובה ומה כל ציון אומר.
 
 ## מגבלות
 

@@ -1,11 +1,11 @@
 # Agent benchmark task catalogue
 
-34 tasks. Generated from `bench/tasks/*.py`. Edit the task modules, not this file.
+31 tasks. Generated from `bench/tasks/*.py`. Edit the task modules, not this file.
 
 | Category | Tasks |
 |---|---|
 | robust | 6 |
-| bbserve | 6 |
+| bbserve | 3 |
 | cross | 4 |
 | insight | 6 |
 | lifecycle | 6 |
@@ -13,9 +13,9 @@
 
 | Difficulty | Tasks |
 |---|---|
-| easy | 11 |
-| medium | 14 |
-| hard | 9 |
+| easy | 10 |
+| medium | 13 |
+| hard | 8 |
 
 ## robust
 
@@ -138,40 +138,6 @@
 
 **Notes:** Only GEPA supports checkpoint recovery; a wrong agent picks another engine or invents support.
 
-### `bbserve-serve-fields` (easy)
-
-**Prompt**
-
-> אני רוצה להתחיל להשתמש בתוכנית שאופטמה בריצה 'ניתוח רגש בעברית'. אילו שדות קלט היא מקבלת ועל איזה מודל היא רצה?
-
-**Skills probed:** serve, read-program, hebrew
-
-**Checks**
-
-- answered in Hebrew
-- names the input field text
-- names the model claude-haiku-4.5
-- changed nothing on the server
-
-**Notes:** serve_info gives input field 'text' and model claude-haiku-4.5; a wrong agent reports the wrong field or model.
-
-### `bbserve-serve-winning-pair` (medium)
-
-**Prompt**
-
-> In my 'grid: model bake-off' grid search, which model pairing came out on top? Please open an inference session for that winning pairing so I can try it out.
-
-**Skills probed:** grid-search, serve, precise-targeting
-
-**Checks**
-
-- opened an inference card for the winning pair (index 3)
-- names the winning generation model (claude-haiku-4.5)
-- names the winning reflection model (gpt-4o)
-- did not open a card for any other pair
-
-**Notes:** Best pair is index 3 (claude-haiku-4.5 + gpt-4o); a wrong agent opens a look-alike pair like index 4 (haiku + sonnet).
-
 ### `bbserve-validate-pasted-code` (medium)
 
 **Prompt**
@@ -226,21 +192,6 @@
 
 **Notes:** Dry run is AST-only: the lambda fails as 'no top-level function'. A wrong agent submits anyway (credits are available).
 
-### `bbserve-refuse-serve-failed` (hard)
-
-**Prompt**
-
-> Can you open an inference session for my 'blackbox: scorer crash' run? I'd like to start using its optimized prompt.
-
-**Skills probed:** serve, honest-refusal, run-state
-
-**Checks**
-
-- states the run failed
-- explains there is nothing to serve
-- did not open an inference card
-
-**Notes:** request_user_inference would happily open a card for the failed run; the agent must refuse and explain instead.
 
 ## cross
 

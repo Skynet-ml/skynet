@@ -62,7 +62,6 @@ _SYNC_ROUTE_PREFIXES: tuple[str, ...] = (
     "/optimize",
     "/optimizers",
     "/sandbox-providers",
-    "/serve",
     "/settings/user-preferences",
     "/share",
     "/shared-with-me",

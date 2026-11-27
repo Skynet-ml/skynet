@@ -5,7 +5,7 @@ harnesses running the same model over the same tools.
 
 ## How it works
 
-* `tools.json` holds the 49 tool schemas the production generalist agent can
+* `tools.json` holds the 45 tool schemas the production generalist agent can
   reach, dumped from the real FastMCP mount. Every harness sees exactly these.
 * `bench/handlers/` implements those tools over an in-memory "world"
   (`bench/fixtures.py` is the starting state). Nothing touches the real backend,
@@ -14,14 +14,15 @@ harnesses running the same model over the same tools.
   the final world state, the tool-call log and the reply. Each task carries an
   `oracle` that solves it through the same tool API; `bench.validate` proves
   every task is solvable and that doing nothing does not pass.
-  The 34 tasks are split over six categories, six tasks each except `cross` (four):
+  The 31 tasks are split over six categories, six tasks each except `cross` (four)
+  and `bbserve` (three):
 
   | Category | Module | What it covers |
   |---|---|---|
   | `setup` | `run_setup.py` | wizard edits, staging data, column roles, submitting runs and grids |
   | `insight` | `job_insight.py` | read-only questions about runs, failures, grids and regressions |
   | `lifecycle` | `job_lifecycle.py` | rename, cancel, resume, delete, and asking before destructive actions |
-  | `bbserve` | `blackbox_serving.py` | black-box engines, code validation, serving a finished program |
+  | `bbserve` | `blackbox.py` | black-box engines, code validation, scorer dry-run |
   | `robust` | `account_robustness.py` | wallet, preferences, public search, tool faults, prompt injection |
   | `cross` | `cross_cutting.py` | multi-turn follow-ups, black-box launch, code-authoring card, model catalog |
 
@@ -36,7 +37,7 @@ harnesses running the same model over the same tools.
 | name | what runs |
 |---|---|
 | `dspy-reactv2` | the project's `RetryingReActV2` on DSPy's stock text prompt layout |
-| `dspy-reactv2-stable` | the same loop under `StableRosterChatAdapter`: same text tool protocol, tool roster pinned to the first user message. This is what the platform's served and optimized ReAct agents run |
+| `dspy-reactv2-stable` | the same loop under `StableRosterChatAdapter`: same text tool protocol, tool roster pinned to the first user message. This is what the platform's optimized ReAct agents run |
 | `dspy-react` | stock classic `dspy.ReAct` |
 
 SKY-327 removed `dspy-reactv2-fixed` (`ConversationReAct`): every Skynet agent now runs on Pi. Its results below are history.

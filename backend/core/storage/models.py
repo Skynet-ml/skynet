@@ -831,7 +831,7 @@ class WalletLedgerModel(Base):
     # alike. None on grants/runs/adjustments and on top-ups predating this column.
     stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # The job a ``run`` row charged, so cost per run is a sum over this table.
-    # None on interactive debits (serve, agent chat), non-run rows, and rows
+    # None on interactive debits (agent chat), non-run rows, and rows
     # written before run attribution landed.
     optimization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # Cents of a ``run`` row's charge drawn from the grant; the paid part

@@ -1,4 +1,4 @@
-La página de la ejecución muestra el progreso y los resultados de una ejecución. Esta guía explica las pestañas de la página de la ejecución, las puntuaciones y cómo exportar o servir la mejor versión.
+La página de la ejecución muestra el progreso y los resultados de una ejecución. Esta guía explica las pestañas de la página de la ejecución, las puntuaciones y cómo exportar la mejor versión.
 
 ## Pestañas de la página de la ejecución
 
@@ -7,7 +7,6 @@ La página de la ejecución solo muestra las pestañas que se aplican a la ejecu
 | Pestaña                  | Cuándo aparece                                                   | Qué contiene                                                                         |
 | ------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | **Resumen**              | Siempre                                                          | El progreso, las puntuaciones y el historial de puntuaciones                         |
-| **Uso**                  | Una ejecución correcta cuyo repositorio tiene un archivo `serve.py` | Un formulario para llamar a la mejor versión, y código de integración             |
 | **Artefacto**            | Una ejecución con resultado                                      | Las versiones de tu repositorio, con la mejor versión                                |
 | **Datos**                | Una ejecución terminada con casos                                | La división de los datos en los conjuntos de entrenamiento, validación y prueba      |
 | **Código**               | Cuando la ejecución tiene código que mostrar                     | El evaluador                                                                         |
@@ -52,60 +51,6 @@ Puedes comparar una versión con otra. La pestaña también muestra los **Coment
 ### Ramas en un repositorio nuevo
 
 Cuando Skynet crea el repositorio para la ejecución en GitHub, sube cada candidato a su propia rama, `skynet/candidate-<version id>`. La rama `skynet/best` siempre apunta a la mejor versión. Se mueve cuando aparece una versión mejor.
-
-## Servir la mejor versión
-
-Puedes llamar a la mejor versión desde tu propio código. El repositorio debe tener en su raíz un archivo `serve.py` que defina `serve(input)`:
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input` es el dict de campos de entrada de la solicitud.
-- El valor devuelto debe poder serializarse a JSON. Un dict se convierte en `outputs`. Cualquier otro valor se convierte en `{"output": value}`.
-- `serve.py` puede llamar a un modelo con `llm` del módulo auxiliar `openascent`. No recibe los secretos de la ejecución.
-
-Skynet ejecuta la mejor versión en el mismo sandbox protegido que la ejecución. La pestaña **Uso** tiene dos partes:
-
-- Un formulario. Introduce los campos de entrada y selecciona **Ejecutar** para obtener un resultado.
-- **Código de integración** en cURL, Python, JavaScript y Go.
-
-Para llamar a la mejor versión, crea un token de API en **Ajustes → API**. Después envía una solicitud. La cabecera `Idempotency-Key` es obligatoria:
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-Sustituye `message` por los campos de entrada de tu ejecución. El **Código de integración** de la pestaña **Uso** rellena por ti la URL real y los nombres de los campos.
-
-La respuesta contiene `outputs`, los `input_fields`, los `output_fields`, el `model_used`, `cents_charged` y `budget`.
-
-> [!TIP]
-> Cada llamada se cobra por separado, del saldo de quien llama. `max_cost_cents` es opcional. Registra lo máximo que aceptas por esta llamada, en centavos. Tu saldo limita la llamada. Si envías otra vez la misma `Idempotency-Key`, Skynet no vuelve a cobrar la llamada.
-
-Lee [API](/docs/api) para conocer la autenticación y los demás endpoints.
 
 ## Compartir los resultados
 

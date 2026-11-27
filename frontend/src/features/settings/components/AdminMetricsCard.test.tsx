@@ -31,7 +31,6 @@ function seeded(overrides: Partial<NorthStarMetricsResponse> = {}): NorthStarMet
       first_lifts: 7 - (i % 3),
     })),
     lifted_users: weeks.map((week, i) => ({ week, new_lifted: 3 + i, returning_lifted: 2 })),
-    lifted_in_use: weeks.map((week, i) => ({ week, users_in_use: 11 + i })),
     ...overrides,
   };
 }
@@ -44,7 +43,7 @@ function bodyRows(html: string): number[] {
 }
 
 void describe("AdminMetricsView", () => {
-  void it("lines up two labelled headlines and splits signup and activity weeks", () => {
+  void it("shows a labelled headline and splits signup and activity weeks", () => {
     const html = renderToStaticMarkup(
       <TooltipProvider>
         <AdminMetricsView state={{ kind: "ready", data: seeded() }} />
@@ -57,8 +56,6 @@ void describe("AdminMetricsView", () => {
     );
     assert.match(activated, />7<\/p>/);
     assert.match(activated, /20/);
-    const inUse = html.split('data-testid="admin-metrics-in-use"')[1] ?? "";
-    assert.match(inUse, />11<\/p>/);
     assert.deepEqual(bodyRows(html), [8, 8]);
     assert.equal(html.includes("<h3"), false);
     assert.match(html, /role="heading"/);

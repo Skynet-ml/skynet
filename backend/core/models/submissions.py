@@ -9,8 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .common import ModelConfig, OptimizationStatus, OptimizationType
 from .results import ModelTokenUsage
-from .serve import WorkflowNodeTrace
 from .workflow import WorkflowSpec, workflow_tool_users
+
+
+class WorkflowNodeTrace(BaseModel):
+    """One node's execution record from a workflow inference or dry run."""
+
+    node_id: str
+    kind: str
+    name: str
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    outputs: dict[str, Any] | None = None
+    elapsed_ms: float = 0.0
+    error: str | None = None
 
 
 # Where a react run sources its tool roster: a live MCP endpoint or a snapshot

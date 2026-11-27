@@ -13,8 +13,6 @@ Owner/editor-gated management endpoints plus the access-gated public surface:
 * ``GET    /share/{token}`` — **access-gated** composite read of one
   optimization (viewer+ for an invited member or an ``anyone`` link); requires
   a signed-in caller.
-* ``POST   /share/{token}/serve`` — one viewer-accessible inference through a
-  fresh budget funded by the signed-in caller.
 
 Two sharing modes coexist per :mod:`core.api.sharing_access`: the active link's
 ``general_access`` (``restricted`` vs ``anyone``) and ``general_role`` (the
@@ -32,7 +30,7 @@ import secrets
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -45,15 +43,11 @@ from ...constants import (
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_USERNAME,
 )
-from ...i18n_keys import I18nKey
 from ...models import (
     BlackboxRunResponse,
     JobLogEntry,
     OptimizationStatus,
     OptimizationStatusResponse,
-    ServeInfoResponse,
-    ServeRequest,
-    ServeResponse,
 )
 from ...notifications import (
     notify_ownership_transfer,
@@ -90,13 +84,11 @@ from ..sharing_access import (
     get_link_by_token,
     list_grants,
     resolve_share_access,
-    role_rank,
 )
 from ._helpers import (
     get_job_no_payload,
     job_owner,
 )
-from .serve import ServeInferenceEvent, _repo_run, _repo_serve_call, repo_serve_info, require_serving_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +96,6 @@ _USER_FACING_OPTIMIZATION_TYPES = frozenset({OPTIMIZATION_TYPE_BLACKBOX})
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
-_INFER_ROLES: frozenset[ShareRole] = frozenset({ShareRole.viewer, ShareRole.editor, ShareRole.owner})
 _GENERAL_ACCESS_VALUES = (GENERAL_ACCESS_RESTRICTED, GENERAL_ACCESS_ANYONE)
 _LINK_ROLE_VALUES = tuple(sorted(LINK_ROLES))
 # Cap for the username-autocomplete result set (contract: at most 10).
@@ -301,31 +292,12 @@ def _build_status_response(job_store, optimization_id: str, job_data: dict[str, 
     )
 
 
-def _serve_info(job_data: dict[str, Any], optimization_id: str) -> ServeInfoResponse | None:
-    """Describe a shared repository run for the share page's inference panel.
-
-    Args:
-        job_data: Raw job row.
-        optimization_id: Optimization whose served version is described.
-
-    Returns:
-        A :class:`ServeInfoResponse`, or ``None`` when the run is not a
-        finished repository run with a pinned commit.
-    """
-    try:
-        if _repo_run(job_data) is None:
-            return None
-    except DomainError:
-        return None
-    return repo_serve_info(job_data, optimization_id, None)
-
-
 def create_share_router(*, job_store) -> APIRouter:
     """Build the Google-Drive-style optimization sharing router.
 
     Args:
         job_store: Job-store whose ORM engine backs the share tables and whose
-            job rows feed the public composite read and inference path.
+            job rows feed the public composite read.
 
     Returns:
         A FastAPI ``APIRouter`` with the owner/editor-gated management routes,
@@ -725,7 +697,7 @@ def create_share_router(*, job_store) -> APIRouter:
         one owner, so ownership is reassigned outright — the previous owner is
         demoted to an ``editor`` grant (keeping edit/run access), and the new
         owner's member grant is dropped (the owner is never also a grantee). The
-        serving key is baked into the optimization's stored ``model_config``, so
+        model key is baked into the optimization's stored ``model_config``, so
         it is unchanged: transfer moves control, not billing. The new owner must
         already be a member (Drive: you can only transfer to someone you shared
         with).
@@ -828,8 +800,6 @@ def create_share_router(*, job_store) -> APIRouter:
         """Return the access-gated composite view of a shared optimization.
 
         Requires a signed-in caller; the floor is ``viewer`` (real owner shown).
-        ``serve_info`` (the field schema behind the inference panel) is available
-        to every viewer because each call spends a fresh caller-owned budget.
         Secrets (API keys, base URLs) are stripped from the payload.
 
         Args:
@@ -837,7 +807,7 @@ def create_share_router(*, job_store) -> APIRouter:
             current_user: Authenticated caller.
 
         Returns:
-            ``{optimization_id, role, owner, status, payload, serve_info}``.
+            ``{optimization_id, role, owner, status, payload}``.
 
         Raises:
             DomainError: 404 when the token is unknown/revoked, the caller has
@@ -856,15 +826,10 @@ def create_share_router(*, job_store) -> APIRouter:
             raise DomainError("share.not_found", status=404) from None
 
         owner = job_owner(job_data)
-        can_serve = role_rank(role) >= role_rank(ShareRole.viewer)
 
         status = _build_status_response(job_store, optimization_id, job_data)
         raw_payload = job_data.get("payload")
         payload = _scrub_payload(raw_payload) if isinstance(raw_payload, dict) else {}
-        serve_info = None
-        if can_serve and owner is not None:
-            info = _serve_info(job_data, optimization_id)
-            serve_info = info.model_dump(mode="json") if info is not None else None
 
         return {
             "optimization_id": optimization_id,
@@ -872,7 +837,6 @@ def create_share_router(*, job_store) -> APIRouter:
             "owner": owner,
             "status": status.model_dump(mode="json"),
             "payload": payload,
-            "serve_info": serve_info,
         }
 
     @router.get(
@@ -886,9 +850,7 @@ def create_share_router(*, job_store) -> APIRouter:
         optimization id and gated on the Explore-corpus ``is_private`` flag rather
         than a share token: a public, successful user optimization grants every caller the
         ``viewer`` tier (read + clone) — the owner is shown for attribution,
-        secrets (API keys, base URLs) are stripped from the payload, and inference
-        is disabled (``serve_info`` is ``null``, so no caller can spend the
-        owner's key). Internal tagger jobs, non-successful jobs, and private
+        secrets (API keys, base URLs) are stripped from the payload. Internal tagger jobs, non-successful jobs, and private
         optimizations 404, exactly as if they were unlisted.
         This backs the Explore "public" tab so that a *listed* run is also
         *openable* and *forkable* — public discoverability and view access stay in
@@ -898,7 +860,7 @@ def create_share_router(*, job_store) -> APIRouter:
             optimization_id: The optimization to read.
 
         Returns:
-            ``{optimization_id, role, owner, status, payload, serve_info}`` —
+            ``{optimization_id, role, owner, status, payload}`` —
             the same shape as the share composite.
 
         Raises:
@@ -925,13 +887,11 @@ def create_share_router(*, job_store) -> APIRouter:
             "optimization_id": optimization_id,
             # ``viewer`` (not the anonymous ``view`` floor): a public run grants
             # read + clone to every signed-in user — the point of the showcase is
-            # to fork others' work. Inference stays editor+ (``serve_info`` is
-            # null below), so a viewer still can't spend the owner's key.
+            # to fork others' work.
             "role": ShareRole.viewer.value,
             "owner": job_owner(job_data),
             "status": status.model_dump(mode="json"),
             "payload": payload,
-            "serve_info": None,
         }
 
     @router.post(
@@ -1005,80 +965,5 @@ def create_share_router(*, job_store) -> APIRouter:
                     existing.role = link.general_role
                     session.commit()
         return ClaimShareResponse(optimization_id=optimization_id, role=str(role))
-
-    @router.post(
-        "/share/{token}/serve",
-        response_model=ServeResponse,
-        summary="Run one inference on a shared optimization (viewer+ only)",
-    )
-    def serve_shared_optimization(
-        token: str,
-        req: ServeRequest,
-        current_user: AuthenticatedUserDep,
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    ) -> ServeResponse:
-        """Run one shared inference using a fresh caller-owned request budget.
-
-        Every signed-in viewer funds their own sandbox and model route. A shared
-        caller never spends the run owner's wallet or BYOK model connection.
-
-        Args:
-            token: The public share token from the URL.
-            req: Inference request carrying the inputs.
-            current_user: Authenticated caller.
-            idempotency_key: Transport replay identity.
-
-        Returns:
-            A :class:`ServeResponse` with the predicted outputs and resolved
-            model identifier.
-
-        Raises:
-            DomainError: 404 when the token is unknown/revoked; 400 without a
-                replay key; 409 when the run is not serveable or its owner did
-                not turn serving on; 410 for a DSPy program run; 502 when the
-                sandbox call fails.
-        """
-        with Session(job_store.engine) as session:
-            role = resolve_share_access(session, token, current_user)
-            if role is None:
-                raise DomainError("share.not_found", status=404)
-            if role not in _INFER_ROLES:
-                raise DomainError("share.inference_forbidden", status=403)
-            link = get_link_by_token(session, token)
-            optimization_id = link.optimization_id
-        # Tracking starts once the link resolves: an unknown token names no
-        # program to credit.
-        with ServeInferenceEvent(
-            job_store,
-            username=current_user.username,
-            optimization_id=optimization_id,
-            channel="share_link",
-            route="serve",
-        ):
-            key = (idempotency_key or "").strip()
-            if not key:
-                raise DomainError("budget.idempotency_required", status=400)
-
-            try:
-                job_data = job_store.get_job(optimization_id)
-            except KeyError:
-                raise DomainError("share.not_found", status=404) from None
-            owner = job_owner(job_data)
-            if owner is None:
-                raise DomainError("share.not_found", status=404)
-            if _repo_run(job_data) is None:
-                raise DomainError(I18nKey.OPTIMIZATION_DSPY_RUN_RETIRED, status=410)
-            require_serving_enabled(job_data)
-            return ServeResponse.model_validate(
-                _repo_serve_call(
-                    job_store=job_store,
-                    job_data=job_data,
-                    optimization_id=optimization_id,
-                    req=req,
-                    current_user=current_user,
-                    idempotency_key=key,
-                    kind="shared_serve",
-                )
-            )
 
     return router

@@ -22,8 +22,6 @@ from core.service_gateway.agents.generalist import (
 _HIDDEN_FROM_GENERALIST = {
     # Every run optimizes a repository, and the wizard's own Run button submits it (SKY-316).
     "submit_unified_run_optimize_post",
-    # The chat's inference card runs this itself; the agent cannot know the user's inputs.
-    "serve_program_serve",
     # Needs a black-box run ordinal the agent has no listing for, and returns a full transcript.
     "get_agent_run_optimizations",
     # Folder organizing and the per-run cost breakdown are their own feature;

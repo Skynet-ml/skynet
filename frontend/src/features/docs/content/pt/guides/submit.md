@@ -92,8 +92,6 @@ O assistente não deixa você continuar se o limite ou o seu saldo estiver abaix
 
 Escreva `scorer.py`. Ele define `score(repo_path, case, output=None)` e retorna uma pontuação com feedback. O avaliador lê `output`, o que a entrada `[run]` retornou para o caso. Ele não roda na pasta da versão e não importa código do repositório. O assistente pode escrevê-lo para você. Leia [Métricas e avaliadores](/docs/concepts/scorers).
 
-O repositório pode ter um arquivo `serve.py` com `def serve(input)`. O Skynet o usa para servir a melhor versão depois da execução. Leia [Ler os resultados](/docs/guides/results).
-
 ### Segredos
 
 Adicione segredos, como chaves de API de que o seu código precisa. O seu código e o seu avaliador não recebem os segredos da execução como variáveis de ambiente. Um segredo chega a um papel só por uma tabela `[services.<name>]` que o papel lista em `[run] services` ou `[metric] services`, ou por um servidor do arquivo `mcp` do papel. Escreva o segredo nos `headers` da tabela como `${NAME}`. O agente de programação não pode vê-los. O Skynet oculta os valores deles nos registos.

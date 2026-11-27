@@ -24,7 +24,6 @@ export type ActivityWeekRow = {
   week: string;
   first_improved: number;
   improved_again: number;
-  in_use: number;
 };
 
 /** One row per signup week, newest first. */
@@ -38,18 +37,12 @@ export function signupWeekRows(data: NorthStarMetricsResponse): SignupWeekRow[] 
   }));
 }
 
-/**
- * One row per activity week, newest first. The backend zero-fills both series
- * to the same weeks, but the join goes by week so a shorter series never
- * shifts numbers into the wrong row.
- */
+/** One row per activity week, newest first. */
 export function activityWeekRows(data: NorthStarMetricsResponse): ActivityWeekRow[] {
-  const inUse = new Map(data.lifted_in_use.map((row) => [row.week, row.users_in_use]));
   return data.lifted_users.slice(0, METRIC_WEEKS).map((row) => ({
     id: row.week,
     week: row.week,
     first_improved: row.new_lifted,
     improved_again: row.returning_lifted,
-    in_use: inUse.get(row.week) ?? 0,
   }));
 }

@@ -99,7 +99,7 @@ function MeasuredOverviewBone({
 }
 
 // Tab panels that sit 16px under the tab bar (TabsContent mt-4); Data and Logs carry their own.
-const SPACED_PANELS = new Set(["playground", "best", "code", "artifact", "usage", "config"]);
+const SPACED_PANELS = new Set(["best", "code", "artifact", "usage", "config"]);
 
 // A deep link to another tab (`?tab=data`): that tab's own loading skeleton
 // where it has one, else a block the height that panel last rendered at this

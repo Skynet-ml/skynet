@@ -49,7 +49,6 @@ Authorization: Bearer skyd_...
 | `GET /optimizations`                            | تسرد عمليات التشغيل الخاصة بك.                             |
 | `GET /optimizations/{optimization_id}`          | تُرجع تشغيلًا واحدًا: الحالة والتقدّم والسجلات والنتيجة.     |
 | `POST /optimizations/{optimization_id}/cancel`  | توقف تشغيلًا.                                              |
-| `POST /serve/{optimization_id}`                 | تشغّل أفضل نسخة على إدخال جديد.                            |
 | `GET /health`                                   | توضّح إن كانت الخدمة تعمل.                                 |
 
 ## بدء تشغيل
@@ -164,8 +163,6 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-لتشغيل أفضل نسخة على إدخال جديد، أرسل `POST /serve/{optimization_id}` مع الترويسة `Idempotency-Key`. يجب أن يحتوي المستودع على ملف `serve.py` فيه `def serve(input)`. اقرأ [النتائج](/docs/guides/results) لتعرف الطلب والاستجابة ومعنى كل درجة.
 
 ## الحدود
 

@@ -108,10 +108,6 @@ Le code de votre dépôt et votre évaluateur s'exécutent dans une sandbox. Sky
 
 Le calcul en sandbox fait partie du plafond de dépenses de l'exécution, y compris quand les appels de modèle utilisent votre propre clé. L'utilisation de la sandbox pendant les vérifications de configuration est payée par votre solde, sauf si la configuration compte dans le plafond.
 
-## Service (serving)
-
-Chaque appel au point de terminaison serve d'une exécution terminée est facturé séparément. L'appelant paie avec son propre solde. Vous pouvez définir `max_cost_cents` dans la requête pour indiquer le maximum que vous acceptez pour un appel. Votre solde borne l'appel. Lisez [Résultats](/docs/guides/results).
-
 ## Offres
 
 Il existe deux offres : Free et Pro. Pro relève certaines limites, comme le nombre d'exécutions simultanées et le stockage. Si un renouvellement Pro échoue, le compte conserve les limites Pro pendant 7 jours. Ensuite, il applique les limites Free jusqu'à ce que le paiement aboutisse. Voir [Limites](/docs/limits).

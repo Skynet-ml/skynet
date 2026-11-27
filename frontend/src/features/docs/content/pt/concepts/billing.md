@@ -108,10 +108,6 @@ O código do seu repositório e o seu avaliador rodam em uma sandbox. O Skynet m
 
 A computação da sandbox faz parte do limite de gastos da execução, mesmo quando as chamadas de modelo usam a sua própria chave. O uso da sandbox nas verificações de configuração é pago pelo seu saldo, a menos que a configuração conte no limite.
 
-## Serviço
-
-Cada chamada ao endpoint de serviço de uma execução concluída é cobrada separadamente. Quem chama paga com o próprio saldo. Você pode definir `max_cost_cents` na requisição para registrar o máximo que aceita por uma chamada. O seu saldo limita a chamada. Leia [Resultados](/docs/guides/results).
-
 ## Planos
 
 Há dois planos: Free e Pro. O Pro aumenta alguns limites, como execuções simultâneas e armazenamento. Se a renovação do Pro falhar, a conta mantém os limites do Pro por 7 dias. Depois disso, ela usa os limites do Free até o pagamento ser concluído. Veja [Limites](/docs/limits).

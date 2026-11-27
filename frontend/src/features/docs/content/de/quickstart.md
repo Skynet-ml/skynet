@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` enthält die Eingabespalten eines Falls. `case["expected"]` enthält die Ausgabespalte, mit ihrem Spaltennamen als Schlüssel. Das Repository hat eine Datei `serve.py` mit `def serve(input)`. Der `[run]`-Eintrag ruft sie auf, und `output` ist ihr Rückgabewert. Der Scorer läuft in einer separaten Sandbox-Box mit nur Ihren Metrikdateien und ohne Code der Version, daher kann er `serve.py` nicht importieren. Skynet stellt mit derselben Funktion nach dem Durchlauf die beste Version bereit.
+`case["input"]` enthält die Eingabespalten eines Falls. `case["expected"]` enthält die Ausgabespalte, mit ihrem Spaltennamen als Schlüssel. Das Repository hat eine Datei `serve.py` mit `def serve(input)`. Der `[run]`-Eintrag ruft sie auf, und `output` ist ihr Rückgabewert. Der Scorer läuft in einer separaten Sandbox-Box mit nur Ihren Metrikdateien und ohne Code der Version, daher kann er `serve.py` nicht importieren.
 
 Führen Sie dann die Prüfung aus. Die Prüfung führt Ihr Setup, den `[run]`-Eintrag und Ihren Scorer in der Sandbox auf der Ausgangsversion aus. Sie können den Durchlauf erst starten, wenn die Prüfung bestanden ist.
 

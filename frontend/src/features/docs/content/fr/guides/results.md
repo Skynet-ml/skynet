@@ -1,4 +1,4 @@
-La page d'une exécution affiche sa progression et ses résultats. Ce guide présente les onglets de la page d'exécution, les scores, et la manière d'exporter ou de servir la meilleure version.
+La page d'une exécution affiche sa progression et ses résultats. Ce guide présente les onglets de la page d'exécution, les scores, et la manière d'exporter la meilleure version.
 
 ## Onglets de la page d'exécution
 
@@ -7,7 +7,6 @@ La page d'exécution n'affiche que les onglets qui s'appliquent à l'exécution.
 | Onglet                     | Quand il s'affiche                                                   | Ce qu'il contient                                                                 |
 | -------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
 | **Aperçu**                 | Toujours                                                             | La progression, les scores et l'historique des scores                             |
-| **Utilisation**            | Une exécution réussie dont le dépôt contient un fichier `serve.py`   | Un formulaire pour appeler la meilleure version, et du code d'intégration         |
 | **Artefact**               | Une exécution avec un résultat                                       | Les versions de votre dépôt, avec la meilleure version                            |
 | **Données**                | Une exécution terminée avec des cas                                  | Les données réparties en ensembles d'entraînement, de validation et de test       |
 | **Code**                   | Quand l'exécution a du code à afficher                               | L'évaluateur                                                                      |
@@ -52,60 +51,6 @@ Vous pouvez comparer une version avec une autre. L'onglet affiche aussi le **Ret
 ### Branches dans un nouveau dépôt
 
 Quand Skynet a créé le dépôt pour l'exécution sur GitHub, il pousse chaque candidat sur sa propre branche, `skynet/candidate-<version id>`. La branche `skynet/best` pointe toujours vers la meilleure version. Elle avance quand une meilleure version apparaît.
-
-## Servir la meilleure version
-
-Vous pouvez appeler la meilleure version depuis votre propre code. Le dépôt doit contenir à sa racine un fichier `serve.py` qui définit `serve(input)` :
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input` est le dict des champs d'entrée de la requête.
-- La valeur de retour doit être sérialisable en JSON. Un dict devient `outputs`. Toute autre valeur devient `{"output": value}`.
-- `serve.py` peut appeler un modèle avec `llm` du module d'aide `openascent`. Il ne reçoit pas les secrets de l'exécution.
-
-Skynet exécute la meilleure version dans la même sandbox protégée que l'exécution. L'onglet **Utilisation** comporte deux parties :
-
-- Un formulaire. Saisissez les champs d'entrée et sélectionnez **Exécuter** pour obtenir un résultat.
-- Du **Code d'intégration** en cURL, Python, JavaScript et Go.
-
-Pour appeler la meilleure version, créez un jeton d'API dans **Paramètres → API**. Puis envoyez une requête. L'en-tête `Idempotency-Key` est obligatoire :
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-Remplacez `message` par les champs d'entrée de votre exécution. Le **Code d'intégration** de l'onglet **Utilisation** renseigne pour vous l'URL réelle et les noms des champs.
-
-La réponse contient `outputs`, les `input_fields`, les `output_fields`, le `model_used`, `cents_charged` et `budget`.
-
-> [!TIP]
-> Chaque appel est facturé séparément, sur le solde de l'appelant. `max_cost_cents` est facultatif. Il indique le maximum que vous acceptez pour cet appel, en centimes. Votre solde borne l'appel. Si vous renvoyez la même `Idempotency-Key`, Skynet ne facture pas l'appel une seconde fois.
-
-Lisez [API](/docs/api) pour l'authentification et les autres points de terminaison.
 
 ## Partager les résultats
 

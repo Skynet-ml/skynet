@@ -92,8 +92,6 @@ El asistente no te deja continuar si el límite o tu saldo es inferior al import
 
 Escribe `scorer.py`. Define `score(repo_path, case, output=None)` y devuelve una puntuación con comentarios. El evaluador lee `output`, lo que la entrada `[run]` devolvió para el caso. No se ejecuta en la carpeta de la versión ni importa código del repositorio. El asistente de IA puede escribirlo por ti. Lee [Métricas y evaluadores](/docs/concepts/scorers).
 
-El repositorio puede tener un archivo `serve.py` con `def serve(input)`. Skynet lo usa para servir la mejor versión después de la ejecución. Lee [Leer los resultados](/docs/guides/results).
-
 ### Secretos
 
 Añade secretos, como las claves de API que necesita tu código. Tu código y tu evaluador no reciben los secretos de la ejecución como variables de entorno. Un secreto llega a un rol solo a través de una tabla `[services.<name>]` que el rol incluye en `[run] services` o `[metric] services`, o a través de un servidor del archivo `mcp` del rol. Escribe el secreto en los `headers` de la tabla como `${NAME}`. El agente de código no puede verlos. Skynet oculta sus valores en los registros.

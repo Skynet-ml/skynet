@@ -1,4 +1,4 @@
-The run page shows the progress and the results of a run. This guide explains the tabs on the run page, the scores, and how to export or serve the best version.
+The run page shows the progress and the results of a run. This guide explains the tabs on the run page, the scores, and how to export the best version.
 
 ## Tabs on the run page
 
@@ -7,7 +7,6 @@ The run page shows only the tabs that apply to the run. Some tabs depend on the 
 | Tab                | When it shows                                              | What it contains                                                                 |
 | ------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | **Overview**       | Always                                                     | Progress, scores and the score history                                           |
-| **Usage**          | A successful run whose repository has a `serve.py` file    | A form to call the best version, and integration code                            |
 | **Artifact**       | A run with a result                                        | The versions of your repository, with the best version                           |
 | **Data**           | A finished run with cases                                  | The data split into train, validation and test sets                              |
 | **Code**           | When the run has code to show                              | The scorer                                                                       |
@@ -52,60 +51,6 @@ You can compare a version with another version. The tab also shows the **Scorer 
 ### Branches in a new repository
 
 When Skynet created the repository for the run on GitHub, it pushes each candidate to its own branch, `skynet/candidate-<version id>`. The `skynet/best` branch always points at the best version. It moves when a better version appears.
-
-## Serve the best version
-
-You can call the best version from your own code. The repository must have a `serve.py` file at its root that defines `serve(input)`:
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input` is the dict of input fields from the request.
-- The return value must be JSON-serializable. A dict becomes `outputs`. Any other value becomes `{"output": value}`.
-- `serve.py` can call a model with `llm` from the `openascent` helper module. It does not get the run's secrets.
-
-Skynet runs the best version in the same protected sandbox as the run. The **Usage** tab has two parts:
-
-- A form. Enter the input fields and select **Run** to get a result.
-- **Integration code** in cURL, Python, JavaScript and Go.
-
-To call the best version, create an API token in **Settings → API**. Then send a request. The `Idempotency-Key` header is required:
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-Replace `message` with the input fields of your run. The **Integration code** on the **Usage** tab fills in the real URL and field names for you.
-
-The response contains `outputs`, the `input_fields`, the `output_fields`, the `model_used`, `cents_charged` and `budget`.
-
-> [!TIP]
-> Each call is billed on its own, from the balance of the caller. `max_cost_cents` is optional. It records the most you accept for this one call, in cents. Your balance bounds the call. If you send the same `Idempotency-Key` again, Skynet does not charge the call again.
-
-Read [API](/docs/api) for authentication and the other endpoints.
 
 ## Share the results
 

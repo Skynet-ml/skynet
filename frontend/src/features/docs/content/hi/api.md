@@ -49,7 +49,6 @@ Authorization: Bearer skyd_...
 | `GET /optimizations`                            | आपके रन की सूची देता है।                                       |
 | `GET /optimizations/{optimization_id}`          | एक रन लौटाता है: स्थिति, प्रगति, लॉग और परिणाम।                  |
 | `POST /optimizations/{optimization_id}/cancel`  | रन को रोकता है।                                               |
-| `POST /serve/{optimization_id}`                 | सबसे अच्छे संस्करण को किसी नए इनपुट पर चलाता है।                  |
 | `GET /health`                                   | बताता है कि सेवा चालू है या नहीं।                                |
 
 ## रन शुरू करें
@@ -164,8 +163,6 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-सबसे अच्छे संस्करण को किसी नए इनपुट पर चलाने के लिए `Idempotency-Key` हेडर के साथ `POST /serve/{optimization_id}` भेजें। रिपॉज़िटरी में `def serve(input)` वाली एक `serve.py` फ़ाइल होनी चाहिए। अनुरोध, रिस्पॉन्स और हर स्कोर का मतलब जानने के लिए [परिणाम](/docs/guides/results) पढ़ें।
 
 ## सीमाएँ
 

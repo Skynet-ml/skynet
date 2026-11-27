@@ -11,8 +11,6 @@ import type {
   QueueStatusResponse,
   RepositoryFileResponse,
   RepositoryTreeResponse,
-  ServeInfoResponse,
-  ServeResponse,
 } from "@/shared/types/api";
 import type { DataMode, OptimizerCatalogResponse } from "@/shared/types/unified-run";
 import { formatMsg, msg } from "@/shared/lib/messages";
@@ -742,17 +740,11 @@ interface NorthStarLiftedUsersWeek {
   returning_lifted: number;
 }
 
-interface NorthStarInUseWeek {
-  week: string;
-  users_in_use: number;
-}
-
 /** Every series holds exactly `weeks` rows, newest first, zero-filled. */
 export interface NorthStarMetricsResponse {
   weeks: number;
   first_lifts: NorthStarFirstLiftsWeek[];
   lifted_users: NorthStarLiftedUsersWeek[];
-  lifted_in_use: NorthStarInUseWeek[];
 }
 
 /** Admin-only; non-admins get a 403. */
@@ -769,8 +761,6 @@ export interface AdminDashboardTotals {
   runs_failed: number;
   revenue_cents: number;
   usage_cents: number;
-  serve_calls: number;
-  serve_errors: number;
 }
 
 export interface AdminDashboardDay {
@@ -790,14 +780,6 @@ export interface AdminFailureReason {
   count: number;
 }
 
-export interface AdminTopProgram {
-  optimization_id: string;
-  name: string | null;
-  owner: string | null;
-  calls: number;
-  errors: number;
-}
-
 interface AdminEventCount {
   name: string;
   count: number;
@@ -810,7 +792,6 @@ export interface AdminDashboardResponse {
   totals: AdminDashboardTotals;
   daily: AdminDashboardDay[];
   failure_reasons: AdminFailureReason[];
-  top_programs: AdminTopProgram[];
   top_events: AdminEventCount[];
 }
 
@@ -2658,9 +2639,7 @@ export interface UserSearchResponse {
  *
  * `role` is the caller's effective access (`viewer`/`editor`/`owner`); the read
  * is login-gated, so the floor is `viewer` (real owner shown). Cloning is
- * viewer+; serving/chat is editor+ (it spends the owner's key). `serve_info`
- * (the field schema behind the inference panel) is only populated for editor+;
- * it is `null` for viewers.
+ * viewer+.
  */
 export interface SharedOptimizationData {
   optimization_id: string;
@@ -2668,7 +2647,6 @@ export interface SharedOptimizationData {
   owner: string | null;
   status: OptimizationStatusResponse;
   payload: Record<string, unknown>;
-  serve_info: ServeInfoResponse | null;
 }
 
 /** Fetch the current sharing config (general access + members) for an optimization. */
@@ -2737,7 +2715,7 @@ export function removeShareMember(optimizationId: string, username: string) {
 /**
  * Transfer ownership to an existing member (owner-only). Single-owner model:
  * the new owner must already be a member, the previous owner is demoted to an
- * editor, and the new owner's member grant is dropped. The serving key stays
+ * editor, and the new owner's member grant is dropped. The model key stays
  * with the optimization, so this moves control, not billing. Returns the
  * refreshed sharing state (`owner` is now the new owner).
  */
@@ -3916,36 +3894,6 @@ export async function claimSharedFolder(token: string) {
   );
   invalidateFolders();
   return result;
-}
-
-export function getServeInfo(optimizationId: string, source?: ApiSource) {
-  return request<ServeInfoResponse>(`/serve/${optimizationId}/info`, undefined, source);
-}
-
-/** Turn serving on or off for a finished repository run (owner only). */
-export function setServingEnabled(optimizationId: string, enabled: boolean, source?: ApiSource) {
-  return request<{ optimization_id: string; serving_enabled: boolean }>(
-    `/serve/${optimizationId}/enabled`,
-    { method: "PUT", body: JSON.stringify({ enabled }) },
-    source,
-  );
-}
-
-export function serveProgram(
-  optimizationId: string,
-  inputs: Record<string, unknown>,
-  idempotencyKey: string,
-  source?: ApiSource,
-) {
-  return request<ServeResponse>(
-    `/serve/${optimizationId}`,
-    {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({ inputs }),
-    },
-    source,
-  );
 }
 
 /** Deliver a message into the running turn opened with `steerKey`; resolves

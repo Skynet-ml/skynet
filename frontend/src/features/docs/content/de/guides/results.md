@@ -1,4 +1,4 @@
-Die Seite des Durchlaufs zeigt den Fortschritt und die Ergebnisse eines Durchlaufs. Diese Anleitung erklärt die Tabs der Durchlaufseite, die Scores und wie Sie die beste Version exportieren oder bereitstellen.
+Die Seite des Durchlaufs zeigt den Fortschritt und die Ergebnisse eines Durchlaufs. Diese Anleitung erklärt die Tabs der Durchlaufseite, die Scores und wie Sie die beste Version exportieren.
 
 ## Tabs der Durchlaufseite
 
@@ -7,7 +7,6 @@ Die Seite des Durchlaufs zeigt nur die Tabs, die für den Durchlauf gelten. Eini
 | Tab                     | Wann er erscheint                                                  | Was er enthält                                                                  |
 | ----------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | **Übersicht**           | Immer                                                              | Fortschritt, Scores und der Score-Verlauf                                       |
-| **Nutzung**             | Ein erfolgreicher Durchlauf, dessen Repository eine Datei `serve.py` hat | Ein Formular zum Aufrufen der besten Version und Integrationscode         |
 | **Artefakt**            | Ein Durchlauf mit Ergebnis                                         | Die Versionen Ihres Repositorys, mit der besten Version                         |
 | **Daten**               | Ein abgeschlossener Durchlauf mit Fällen                           | Die Aufteilung der Daten in Trainings-, Validierungs- und Testmenge             |
 | **Code**                | Wenn der Durchlauf Code zum Anzeigen hat                           | Der Scorer                                                                      |
@@ -52,60 +51,6 @@ Sie können eine Version mit einer anderen Version vergleichen. Der Tab zeigt au
 ### Branches in einem neuen Repository
 
 Hat Skynet das Repository für den Durchlauf auf GitHub erstellt, pusht es jeden Kandidaten auf einen eigenen Branch, `skynet/candidate-<version id>`. Der Branch `skynet/best` zeigt immer auf die beste Version. Er bewegt sich, wenn eine bessere Version erscheint.
-
-## Die beste Version bereitstellen
-
-Sie können die beste Version aus Ihrem eigenen Code aufrufen. Das Repository muss im Stammverzeichnis eine Datei `serve.py` haben, die `serve(input)` definiert:
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input` ist das Dict der Eingabefelder aus der Anfrage.
-- Der Rückgabewert muss in JSON serialisierbar sein. Ein Dict wird zu `outputs`. Jeder andere Wert wird zu `{"output": value}`.
-- `serve.py` kann mit `llm` aus dem Hilfsmodul `openascent` ein Modell aufrufen. Es bekommt die Secrets des Laufs nicht.
-
-Skynet führt die beste Version in derselben geschützten Sandbox aus wie den Durchlauf. Der Tab **Nutzung** hat zwei Teile:
-
-- Ein Formular. Geben Sie die Eingabefelder ein und wählen Sie **Ausführen**, um ein Ergebnis zu erhalten.
-- **Integrationscode** in cURL, Python, JavaScript und Go.
-
-Um die beste Version aufzurufen, erstellen Sie unter **Einstellungen → API** ein API-Token. Senden Sie dann eine Anfrage. Der Header `Idempotency-Key` ist erforderlich:
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-Ersetzen Sie `message` durch die Eingabefelder Ihres Durchlaufs. Der **Integrationscode** im Tab **Nutzung** setzt die echte URL und die Feldnamen für Sie ein.
-
-Die Antwort enthält `outputs`, die `input_fields`, die `output_fields`, das `model_used`, `cents_charged` und `budget`.
-
-> [!TIP]
-> Jeder Aufruf wird einzeln abgerechnet, vom Guthaben des Aufrufers. `max_cost_cents` ist optional. Es hält fest, wie viel Sie für diesen einen Aufruf höchstens akzeptieren, in Cent. Ihr Guthaben begrenzt den Aufruf. Senden Sie denselben `Idempotency-Key` erneut, berechnet Skynet den Aufruf nicht noch einmal.
-
-Authentifizierung und die anderen Endpunkte beschreibt [API](/docs/api).
 
 ## Die Ergebnisse teilen
 

@@ -92,8 +92,6 @@ GitHub에서는 Skynet이 각 후보를 별도 브랜치에 푸시합니다. `sk
 
 `scorer.py`를 작성합니다. 이 파일은 `score(repo_path, case, output=None)`를 정의하고 점수와 피드백을 반환합니다. 채점기는 `output`, 즉 `[run]` 엔트리가 그 케이스에 반환한 값을 읽습니다. 채점기는 버전 폴더에서 실행되지 않으며 저장소의 코드를 가져오지 않습니다. 어시스턴트가 대신 작성할 수 있습니다. [지표와 채점기](/docs/concepts/scorers)를 읽어 보세요.
 
-리포지토리에는 `def serve(input)`이 있는 `serve.py` 파일을 둘 수 있습니다. Skynet은 실행 후 이 파일로 최고 버전을 서빙합니다. [결과 읽기](/docs/guides/results)를 읽어 보세요.
-
 ### 시크릿
 
 코드에 필요한 API 키 같은 시크릿을 추가합니다. 코드와 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 역할이 `[run] services` 또는 `[metric] services`에 나열한 `[services.<name>]` 테이블이나 역할의 `mcp` 파일에 있는 서버를 통해서만 그 역할에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 코딩 에이전트는 시크릿을 볼 수 없습니다. Skynet은 로그에서 그 값을 숨깁니다.

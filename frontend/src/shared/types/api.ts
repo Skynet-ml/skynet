@@ -1,4 +1,4 @@
-import type { ExecutionBudget, JobExecutionBudget } from "./execution-budget";
+import type { JobExecutionBudget } from "./execution-budget";
 import type { ApiSource } from "@/shared/lib/api-route";
 
 export type JobStatus =
@@ -724,31 +724,6 @@ export interface OptimizationPayloadResponse {
   optimization_id: string;
   optimization_type: OptimizationType;
   payload: Record<string, unknown>;
-}
-
-export interface ServeInfoResponse {
-  optimization_id: string;
-  endpoint_url?: string | null;
-  module_name: string;
-  optimizer_name: string;
-  model_name: string;
-  input_fields: string[];
-  output_fields: string[];
-  instructions?: string | null;
-  /** Example input values (from a demo or the dataset) to prefill usage snippets. */
-  sample_inputs?: Record<string, string>;
-  /** Whether the run's owner turned serving on; serve calls refuse while it is off. */
-  serving_enabled?: boolean;
-}
-
-export interface ServeResponse {
-  optimization_id: string;
-  outputs: Record<string, unknown>;
-  input_fields: string[];
-  output_fields: string[];
-  model_used: string;
-  cents_charged?: string | null;
-  budget?: ExecutionBudget | null;
 }
 
 export interface CatalogModel {

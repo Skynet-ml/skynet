@@ -7,7 +7,6 @@ import type {
   AdminDashboardDay,
   AdminDashboardTotals,
   AdminFailureReason,
-  AdminTopProgram,
 } from "@/shared/lib/api";
 
 /** Window lengths, in days, the range control offers. */
@@ -82,27 +81,5 @@ export function failureRows(reasons: AdminFailureReason[]): FailureRow[] {
     error: reason.error_class ?? "",
     count: reason.count,
     share: total === 0 ? 0 : Math.round((reason.count / total) * 100),
-  }));
-}
-
-export interface ProgramRow {
-  [key: string]: string | number | null;
-  id: string;
-  name: string;
-  owner: string;
-  calls: number;
-  errors: number;
-  error_rate: number;
-}
-
-/** Served programs with an error rate, 0-100. */
-export function programRows(programs: AdminTopProgram[]): ProgramRow[] {
-  return programs.map((program) => ({
-    id: program.optimization_id,
-    name: program.name ?? program.optimization_id.slice(0, 8),
-    owner: program.owner ?? "",
-    calls: program.calls,
-    errors: program.errors,
-    error_rate: program.calls === 0 ? 0 : Math.round((program.errors / program.calls) * 100),
   }));
 }

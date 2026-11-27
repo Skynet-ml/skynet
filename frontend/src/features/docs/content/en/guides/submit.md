@@ -92,8 +92,6 @@ The wizard does not let you continue if the limit or your balance is below the a
 
 Write `scorer.py`. It defines `score(repo_path, case, output=None)` and returns a score with feedback. It reads `output`, what the `[run]` entry returned for the case. The scorer does not run in the version folder and does not import code from the repository. The assistant can write it for you. Read [Metrics and scorers](/docs/concepts/scorers).
 
-The repository can have a `serve.py` file with `def serve(input)`. Skynet uses it to serve the best version after the run. Read [Read the results](/docs/guides/results).
-
 ### Secrets
 
 Add secrets, such as API keys that your code needs. Your code and your scorer get no run secrets as environment variables. A secret reaches a role only through a `[services.<name>]` table that the role lists in `[run] services` or `[metric] services`, or through a server in the role's `mcp` file. Write the secret in the table's `headers` as `${NAME}`. The coding agent cannot see them. Skynet hides their values in the logs.

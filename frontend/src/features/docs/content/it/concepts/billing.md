@@ -108,10 +108,6 @@ Il codice del tuo repository e il tuo scorer girano in una sandbox. Skynet misur
 
 Il calcolo della sandbox fa parte del limite di spesa dell'esecuzione, anche quando le chiamate ai modelli usano la tua chiave. L'uso della sandbox nei controlli di configurazione è pagato dal tuo saldo, a meno che la configurazione conti nel limite.
 
-## Serving
-
-Ogni chiamata all'endpoint di serving di un'esecuzione terminata viene fatturata a parte. Chi chiama paga con il proprio saldo. Puoi impostare `max_cost_cents` nella richiesta per registrare il massimo che accetti per una chiamata. Il tuo saldo limita la chiamata. Leggi [Risultati](/docs/guides/results).
-
 ## Piani
 
 Ci sono due piani: Free e Pro. Pro alza alcuni limiti, come le esecuzioni contemporanee e lo spazio di archiviazione. Se il rinnovo di Pro non va a buon fine, l'account mantiene i limiti Pro per 7 giorni. Dopo, usa i limiti Free finché il pagamento non va a buon fine. Vedi [Limiti](/docs/limits).
