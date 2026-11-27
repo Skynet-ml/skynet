@@ -1729,3 +1729,19 @@ async def test_protected_box_settles_on_a_real_ledger(tmp_path: Path, monkeypatc
     assert service.get_operation(operation.id, "alice").actual_cents == Decimal("0.80000160")
     assert runtime._pinned == {}
     engine.dispose()
+
+
+@pytest.mark.parametrize(("elapsed", "expected_ms"), [(10.2, 10_200), (10.2004, 10_201)])
+async def test_measured_time_ignores_float_noise_of_a_large_clock(elapsed: float, expected_ms: int) -> None:
+    """Keep a long-running host's large monotonic clock from adding a millisecond to the bill.
+
+    Args:
+        elapsed: The seconds between the create and the stop readings.
+        expected_ms: The measured milliseconds the usage must record.
+    """
+    clock = FakeClock()
+    clock.now = 1e9
+    env, usages = _protected(clock=clock)
+    async with env:
+        clock.now += elapsed
+    assert usages[0].measured_ms == expected_ms

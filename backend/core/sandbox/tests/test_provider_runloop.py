@@ -1568,3 +1568,25 @@ async def test_an_unsized_protected_devbox_is_not_started(fake_sdk: FakeCloud) -
     with pytest.raises(SandboxSpecError, match="explicit size"):
         RunloopEnvironment(spec, budget="budget")
     assert fake_sdk.calls == []
+
+
+@pytest.mark.parametrize(("elapsed", "expected_ms"), [(10.2, 10_200), (10.2004, 10_201)])
+async def test_measured_time_ignores_float_noise_of_a_large_clock(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, elapsed: float, expected_ms: int
+) -> None:
+    """Keep a long-running host's large monotonic clock from adding a millisecond to the bill.
+
+    Args:
+        fake_sdk: The fake Runloop cloud.
+        monkeypatch: Replaces the provider's clock only, so asyncio keeps the real one.
+        elapsed: The seconds between the create and the stop readings.
+        expected_ms: The measured milliseconds the reservation must record.
+    """
+    clock = SimpleNamespace(now=1e9)
+    monkeypatch.setattr(runloop, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    env = _protected()
+    await env.start()
+    clock.now += elapsed
+    await env.stop()
+    (reservation,) = FakeReservation.made
+    assert reservation.measured_ms == expected_ms

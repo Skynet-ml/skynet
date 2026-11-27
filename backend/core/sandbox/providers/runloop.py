@@ -817,7 +817,10 @@ class RunloopEnvironment(SandboxEnvironment):
             if usage.devbox_id is None:
                 await asyncio.to_thread(usage.bind, box_id)
             if stopped_at is not None and self._create_sent_at is not None:
-                usage.record_stop(math.ceil((stopped_at - self._create_sent_at) * 1000))
+                # Monotonic readings are large on a long-running host, so their difference carries
+                # float noise (10.2 s reads as 10.2000000001). Rounding to whole microseconds first
+                # keeps that noise from billing a millisecond that did not run (SKY-989).
+                usage.record_stop(math.ceil(round((stopped_at - self._create_sent_at) * 1000, 3)))
             # Ask even after an unconfirmed shutdown: a final report still
             # settles the box at what it used.
             try:
