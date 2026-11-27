@@ -358,7 +358,10 @@ class MosaicUsageReservation:
         """
         if self._dispatched_at is None or self._stopped_at is None:
             return None
-        return math.ceil((self._stopped_at - self._dispatched_at) * 1000) + _WALL_MARGIN_MS
+        # Monotonic readings are large on a long-running host, so their difference carries
+        # float noise (10.2 s reads as 10.2000000001). Rounding to whole microseconds first
+        # keeps that noise from billing a millisecond that did not run (SKY-988).
+        return math.ceil(round((self._stopped_at - self._dispatched_at) * 1000, 3)) + _WALL_MARGIN_MS
 
     def pending(self) -> None:
         """Retain the hold when the box's create, destroy or usage is uncertain."""

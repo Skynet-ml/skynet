@@ -274,7 +274,10 @@ class SbxUsageReservation:
             ceiling_ms = snapshot["maximum_billable_ms"]
             measured = self.stopped_at is not None
             if self.stopped_at is not None:
-                runtime_ms = math.ceil((self.stopped_at - self.started_at) * 1000)
+                # Monotonic readings are large on a long-running host, so their difference carries
+                # float noise (10.2 s reads as 10.2000000001). Rounding to whole microseconds first
+                # keeps that noise from billing a millisecond that did not run (SKY-988).
+                runtime_ms = math.ceil(round((self.stopped_at - self.started_at) * 1000, 3))
             else:
                 runtime_ms = ceiling_ms
             billed_ms = min(max(runtime_ms, 0), ceiling_ms)

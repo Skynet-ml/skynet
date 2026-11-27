@@ -286,7 +286,10 @@ class HyperbrowserUsageReservation:
         """
         measured = None
         if self.sent_at is not None and self.stopped_at is not None:
-            measured = max(0, math.ceil((self.stopped_at - self.sent_at) * 1000))
+            # Monotonic readings are large on a long-running host, so their difference carries
+            # float noise (10.2 s reads as 10.2000000001). Rounding to whole microseconds first
+            # keeps that noise from billing a millisecond that did not run (SKY-988).
+            measured = max(0, math.ceil(round((self.stopped_at - self.sent_at) * 1000, 3)))
         return {
             "provider": "hyperbrowser",
             "sandbox_id": self.sandbox_id,

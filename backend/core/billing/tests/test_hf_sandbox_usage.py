@@ -421,3 +421,23 @@ def test_hf_sandbox_usage_adapter_is_found() -> None:
     assert adapter is not None
     assert adapter is hf_sandbox_usage.USAGE
     assert adapter.name == "hf_sandbox"
+
+
+def test_measured_wall_time_ignores_float_noise_of_a_large_clock(database: Engine) -> None:
+    """A long-running host's large monotonic clock must not add a millisecond to the bill.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    reservation, _clock = _reservation(database)
+    reservation.sent_at = 1e9
+    reservation.stopped_at = 1e9 + 10.2
+    assert reservation._measured_ms() == 10_200
+    reservation.stopped_at = 1e9 + 10.2004
+    assert reservation._measured_ms() == 10_201
+
+
+def test_job_time_ignores_float_noise_of_the_seconds_conversion() -> None:
+    """A whole-millisecond job span bills exactly that span."""
+    assert hf_sandbox_usage._job_ms(START, START + timedelta(milliseconds=2007)) == 2007
+    assert hf_sandbox_usage._job_ms(START, START + timedelta(microseconds=2_007_001)) == 2008
