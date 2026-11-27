@@ -57,7 +57,7 @@ if (!process.env.JITI_ALIAS) {
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { createRoot } = await import("react-dom/client");
   const { JSDOM } = await import("jsdom");
-  const { emptyRepoDraft } = await import("../lib/wizard-v2");
+  const { emptyRepoDraft, withLocalFolder } = await import("../lib/wizard-v2");
   const { msg } = await import("@/shared/lib/messages");
   const { buildActiveCatalog } = await import("@/shared/lib/messages.server");
   const { setClientLocale } = await import("@/shared/lib/runtime-locale");
@@ -93,6 +93,25 @@ if (!process.env.JITI_ALIAS) {
       const target = hardeningTarget({ ...emptyRepoDraft(), repository: "acme/new", createdBySkynet: true });
       assert.equal(target?.repo?.created_by_skynet, true);
       assert.equal(target?.setup_command, null);
+    });
+
+    void it("sends a folder source as the run submit's local target, with no git fields", () => {
+      const repo = withLocalFolder(
+        { ...emptyRepoDraft(), repository: "acme/widgets", branch: "main", editablePaths: [" src/ ", ""] },
+        " /Users/me/widgets ",
+      );
+      const target = hardeningTarget({ ...repo, setupCommand: " make " });
+      assert.deepEqual(target, {
+        kind: "repo",
+        repo: { provider: "local", path: "/Users/me/widgets", editable_paths: ["src/"] },
+        setup_command: "make",
+      });
+    });
+
+    void it("refuses a folder source without a folder, so no job starts", () => {
+      assert.throws(() => hardeningTarget(withLocalFolder(emptyRepoDraft(), " ")), {
+        message: "submit.v2.repo.issue.local_path",
+      });
     });
 
     void it("sends no target for a setup without a repository", () => {
