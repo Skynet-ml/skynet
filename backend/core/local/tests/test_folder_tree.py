@@ -10,7 +10,7 @@ import pytest
 from core.local import folder_tree
 from core.local.folder_tree import FolderTreeError
 
-# The setup agent's draft base for this folder (SKY-995 ``folder_snapshot_id``) is the same id.
+# SKY-995 imports this id: its setup agent's draft base for this folder must be the same id.
 SHARED_VECTOR_ID = "3f69ae325c7b8edd80580f2c9b10e6c286fff1fc"
 
 
