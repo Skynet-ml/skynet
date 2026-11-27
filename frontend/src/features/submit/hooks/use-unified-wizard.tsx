@@ -110,10 +110,13 @@ import { canEnterStep, canMoveForward } from "../lib/wizard-steps";
 import { createStepViewTracker } from "../lib/wizard-telemetry";
 import {
   WIZARD_V2_STEPS,
+  agentRepoFields,
   defaultModels,
   deleteWorkspaceFile,
   initialWizardV2State,
+  isLocalRepo,
   presetEngine,
+  sandboxCatalogForRepo,
   withRepository,
   withTaskPatch,
   type InputsSlice,
@@ -432,7 +435,15 @@ export function WizardV2Provider({
   const [runOn, setRunOn] = useState<ApiSource>(() => (webPicked() ? "hosted" : "local"));
   const runSource: ApiSource = hostedChoice && runOn === "hosted" ? "hosted" : "local";
   const modelCatalog = useModelCatalog(runSource);
-  const sandboxProviders = useSandboxProviders(runSource);
+  const serverSandboxes = useSandboxProviders(runSource);
+  // A local folder hides the remote boxes, so the picker and the request keep only the local one.
+  const sandboxProviders: SandboxProviders = useMemo(
+    () =>
+      serverSandboxes.catalog
+        ? { status: "ready", catalog: sandboxCatalogForRepo(serverSandboxes.catalog, state.task.repo) }
+        : serverSandboxes,
+    [serverSandboxes, state.task.repo],
+  );
   // Names and ids only. A repository run sends the saved secrets its
   // ascent.toml names, so a secret saved once serves every run (SKY-641).
   const [savedSecrets, setSavedSecrets] = useState<SavedSecret[]>([]);
@@ -695,7 +706,9 @@ export function WizardV2Provider({
   const exposedCatalog = optimizerCatalog && optimizerCatalog.data_mode === mode ? optimizerCatalog : null;
   const hostedBlock =
     runOn === "hosted"
-      ? hostedRunBlock({
+      ? isLocalRepo(state.task.repo)
+        ? "submit.v2.run_on.blocked.local_folder"
+        : hostedRunBlock({
           request: repoRequest,
           linked: hostedChoice,
           catalog:
@@ -1041,7 +1054,8 @@ export function WizardV2Provider({
             patchTask({ background: shared.task_background });
           break;
         case "repository": {
-          if (typeof shared.repository !== "string" || !shared.repository) break;
+          // The user picked a folder; the agent cannot swap it for a repository.
+          if (typeof shared.repository !== "string" || !shared.repository || isLocalRepo(repo)) break;
           repo = withRepository(repo, shared.repository);
           patchTask({ repo });
           break;
@@ -1159,10 +1173,7 @@ export function WizardV2Provider({
       is_private: meta.isPrivate,
       task_objective: task.objective || undefined,
       task_background: task.background || undefined,
-      repository: task.repo.repository.trim() || undefined,
-      repo_provider: task.repo.provider ?? "github",
-      // The agent reads the tree the run starts from: the pinned commit, else the branch.
-      repo_branch: task.repo.commit.trim() || task.repo.branch.trim() || undefined,
+      ...agentRepoFields(task.repo),
       github_connected: githubConnected,
       data_mode: inputs.mode ?? undefined,
       staged_dataset_id: inputs.stagedDatasetId ?? undefined,

@@ -1,11 +1,20 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { toast } from "react-toastify";
 
 import { cn } from "@/shared/lib/utils";
-import { CheckCircle, CircleNotch, FolderOpen, Globe, Lock, Plus } from "@/shared/ui/icons";
+import {
+  CheckCircle,
+  CircleNotch,
+  Desktop,
+  FolderOpen,
+  FolderPlus,
+  Globe,
+  Lock,
+  Plus,
+} from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
 import { Label } from "@/shared/ui/primitives/label";
@@ -30,11 +39,12 @@ import {
   type RepoHost,
 } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { UnifiedCase } from "@/shared/types/unified-run";
 import { rememberOAuthReturn } from "@/shared/lib/oauth-return";
 import { userErrorMessage } from "@/shared/lib/user-error";
 
-import type { RepoDraft } from "../../lib/wizard-v2";
+import { isLocalRepo, withLocalFolder, type RepoDraft } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { HostMark, RepoPicker } from "./RepoPicker";
 import { InfoTip, RepoSecretsField } from "./RepoSecretsField";
@@ -52,6 +62,24 @@ const NEW_HOST_KEY = "skynet.submit.repo-new-host.v1";
  * placeholder, and Hebrew in the code font looks broken, so it keeps the UI font (SKY-633).
  */
 const monoWhenSet = (value: string) => (value ? "font-mono" : "");
+
+// The desktop app's folder bridge (SKY-992). It is missing in a browser and in
+// older desktop builds, so every call goes through optional chaining.
+declare global {
+  interface Window {
+    skynetDesktop?: {
+      /** Open the native folder picker; null when the user cancels. */
+      pickFolder?: () => Promise<string | null>;
+      /** Make ~/Documents/Skynet/<name>; null when the name is refused or taken. */
+      createFolder?: (name: string) => Promise<string | null>;
+    };
+  }
+}
+
+/** Whether this page can offer a folder on this computer as the run source. */
+function desktopFolderBridge(): boolean {
+  return isLocalMode() && typeof window.skynetDesktop?.pickFolder === "function";
+}
 
 /** What a new repository's first commit holds: the task, the scorer and the cases. */
 export interface RepoSeed {
@@ -72,6 +100,7 @@ export function RepoTargetCard({
   issue,
   guided,
   seed,
+  localFolders = false,
 }: {
   repo: RepoDraft;
   onChange: (repo: RepoDraft) => void;
@@ -79,6 +108,8 @@ export function RepoTargetCard({
   issue: string | null;
   guided: boolean;
   seed: RepoSeed;
+  /** The run starts on this computer, so a local folder can be its source (SKY-993). */
+  localFolders?: boolean;
 }) {
   const t = (key: string) => v2Msg(key, guided);
   const { byProvider, loading } = useConnectors();
@@ -88,9 +119,18 @@ export function RepoTargetCard({
   };
   // Nothing is preselected: the user (or the agent, through the draft) picks the
   // source and then the host. A draft that already names one opens on it.
-  const [source, setSource] = useState<"existing" | "new" | null>(
-    repo.repository || repo.provider ? "existing" : null,
+  const [source, setSource] = useState<"existing" | "new" | "folder" | null>(
+    isLocalRepo(repo) ? "folder" : repo.repository || repo.provider ? "existing" : null,
   );
+  // The bridge exists only in the browser, so the first render matches the server's.
+  const [hasBridge, setHasBridge] = useState(false);
+  useEffect(() => setHasBridge(desktopFolderBridge()), []);
+  const offerFolder = localFolders && hasBridge;
+  // A folder source stays in the draft when the run moves to the web, so the
+  // run-place block can say why; the card shows no folder panel then.
+  const shown = source === "folder" && !offerFolder ? null : source;
+  const [folderName, setFolderName] = useState("");
+  const [folderBusy, setFolderBusy] = useState(false);
   const [hostPicked, setHostPicked] = useState<RepoHost | null>(
     repo.provider ?? (repo.repository ? "github" : null),
   );
@@ -104,6 +144,44 @@ export function RepoTargetCard({
   const [isPrivate, setIsPrivate] = useState(true);
   const [creating, setCreating] = useState(false);
   const patch = (next: Partial<RepoDraft>) => onChange({ ...repo, ...next });
+  // The folder dialogs resolve later; by then the draft can hold other edits.
+  const latestRepo = useRef(repo);
+  useEffect(() => {
+    latestRepo.current = repo;
+  }, [repo]);
+  /** The draft without a local folder, for a git source. */
+  const gitRepo = (): RepoDraft => {
+    const { localPath: _localPath, ...rest } = repo;
+    return rest;
+  };
+
+  const pickFolder = async () => {
+    setFolderBusy(true);
+    try {
+      const path = await window.skynetDesktop?.pickFolder?.();
+      if (path) onChange(withLocalFolder(latestRepo.current, path));
+    } catch {
+      toast.error(t("submit.v2.repo.folder.pick_failed"));
+    } finally {
+      setFolderBusy(false);
+    }
+  };
+
+  const createFolder = async () => {
+    const wanted = folderName.trim();
+    if (!wanted) return;
+    setFolderBusy(true);
+    try {
+      const path = await window.skynetDesktop?.createFolder?.(wanted);
+      if (!path) throw new Error("folder refused");
+      onChange(withLocalFolder(latestRepo.current, path));
+      setFolderName("");
+    } catch {
+      toast.error(t("submit.v2.repo.folder.create_failed"));
+    } finally {
+      setFolderBusy(false);
+    }
+  };
 
   // The draft keeps no host for "Create new", so a sign-in started there saves
   // the pick and the card reopens on it after the redirect.
@@ -232,11 +310,13 @@ export function RepoTargetCard({
         role="group"
         aria-label={t("submit.v2.repo.repository_label")}
         className="flex flex-col gap-3 transition-[flex-grow] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
-        style={{ flexGrow: source ? 0 : 1 }}
+        style={{ flexGrow: shown ? 0 : 1 }}
       >
         <SourceCard
-          selected={source === "existing"}
+          selected={shown === "existing"}
+          disabled={folderBusy}
           onSelect={() => {
+            if (isLocalRepo(repo)) onChange(gitRepo());
             setSource("existing");
             setHostPicked(repo.provider ?? (repo.repository ? "github" : null));
           }}
@@ -250,8 +330,10 @@ export function RepoTargetCard({
           }
         />
         <SourceCard
-          selected={source === "new"}
+          selected={shown === "new"}
+          disabled={folderBusy}
           onSelect={() => {
+            if (isLocalRepo(repo)) onChange(gitRepo());
             setSource("new");
             // The user picks the host next; picking the card starts no sign-in.
             setHostPicked(null);
@@ -265,11 +347,100 @@ export function RepoTargetCard({
             />
           }
         />
+        {offerFolder && (
+          <SourceCard
+            selected={shown === "folder"}
+            disabled={folderBusy}
+            // The draft changes only when the user picks or creates a folder, so
+            // a look at this card keeps the repository and its draft files.
+            onSelect={() => setSource("folder")}
+            title={t("submit.v2.repo.source.folder")}
+            desc={t("submit.v2.repo.source.folder_desc")}
+            icon={
+              <Desktop
+                className="size-5 transition-transform duration-300 ease-out group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
+                aria-hidden="true"
+              />
+            }
+          />
+        )}
       </div>
 
-      {source && (
+      {shown === "folder" && (
         <motion.div
-          key={source}
+          key="folder"
+          initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
+          className="flex flex-col gap-5"
+        >
+          <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
+            <span className="text-sm font-medium text-foreground">
+              {t("submit.v2.repo.folder.label")}
+            </span>
+            <div id="v2-repo-folder-path" aria-live="polite">
+              {repo.localPath?.trim() ? (
+                <p dir="ltr" className="break-all text-start font-mono text-sm text-foreground">
+                  {repo.localPath}
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">{t("submit.v2.repo.folder.none")}</p>
+              )}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void pickFolder()}
+              disabled={folderBusy}
+              aria-describedby="v2-repo-folder-path"
+              className="min-h-11 w-full gap-2"
+            >
+              <FolderOpen className="size-4" aria-hidden="true" />
+              {t("submit.v2.repo.folder.choose")}
+            </Button>
+          </div>
+          {typeof window.skynetDesktop?.createFolder === "function" && (
+            <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
+              <span className="text-sm font-medium text-foreground">
+                {t("submit.v2.repo.folder.new")}
+              </span>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="v2-repo-folder-name">
+                  {t("submit.v2.repo.folder.new_name_label")}
+                </Label>
+                <Input
+                  id="v2-repo-folder-name"
+                  value={folderName}
+                  onChange={(e) => setFolderName(e.target.value)}
+                  placeholder="my-project"
+                  autoComplete="off"
+                  spellCheck={false}
+                  dir="ltr"
+                  className={`${TOUCH_FIELD} ${monoWhenSet(folderName)}`}
+                />
+              </div>
+              <Button
+                type="button"
+                onClick={() => void createFolder()}
+                disabled={folderBusy || !folderName.trim()}
+                className="min-h-11 w-full gap-2"
+              >
+                <FolderPlus className="size-4" aria-hidden="true" />
+                {t("submit.v2.repo.folder.create")}
+              </Button>
+            </div>
+          )}
+          <RepoSecretsField
+            secrets={repo.secrets ?? []}
+            onChange={(secrets) => patch({ secrets })}
+            t={t}
+          />
+        </motion.div>
+      )}
+
+      {shown && shown !== "folder" && (
+        <motion.div
+          key={shown}
           initial={reduceMotion ? false : { opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
@@ -486,9 +657,17 @@ export function RepoTargetCard({
 
       {/* Gilad asked to drop the repository hint (SKY-401); the picker already
           says what to type, and the key still blocks Continue. */}
-      {issue && issue !== "submit.v2.repo.issue.repository" && (
+      {issue &&
+        issue !== "submit.v2.repo.issue.repository" &&
+        // The folder panel's empty state already asks for a folder.
+        !(shown === "folder" && issue === "submit.v2.repo.issue.local_path") && (
         <p role="status" className="text-xs text-muted-foreground">
-          {t(issue)}
+          {/* With no folder card on offer, the user can only go back to a repository. */}
+          {t(
+            issue === "submit.v2.repo.issue.local_path" && !offerFolder
+              ? "submit.v2.run_on.blocked.local_folder"
+              : issue,
+          )}
         </p>
       )}
     </div>
@@ -506,23 +685,27 @@ function SourceCard({
   title,
   desc,
   icon,
+  disabled = false,
 }: {
   selected: boolean;
   onSelect: () => void;
   title: string;
   desc: string;
   icon: ReactNode;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       aria-pressed={selected}
       onClick={onSelect}
+      disabled={disabled}
       className={cn(
         "group relative isolate flex min-h-20 flex-1 cursor-pointer items-center gap-4 overflow-hidden rounded-xl border bg-card px-5 py-4 text-start outline-none",
         "transition-[transform,border-color,box-shadow,background-color] duration-300 ease-out motion-reduce:transition-none",
         "hover:-translate-y-0.5 hover:shadow-[0_10px_30px_-12px] hover:shadow-primary/40 active:translate-y-0 active:scale-[0.99] motion-reduce:hover:translate-y-0",
         "focus-visible:ring-[3px] focus-visible:ring-ring/50",
+        "disabled:pointer-events-none disabled:opacity-60",
         selected
           ? "border-primary bg-primary/5 shadow-[0_0_0_1px] shadow-primary/40"
           : "border-border hover:border-primary/50",

@@ -5,6 +5,7 @@ import {
   Coins,
   Cpu,
   Desktop,
+  FolderOpen,
   GitBranch,
   Gauge,
   Globe,
@@ -37,7 +38,7 @@ import { useWizardV2ShellOptional } from "../../hooks/use-unified-wizard";
 import { economyEligible } from "../../lib/model-config";
 import { aggregateTokenSource, runModels, storedMetricModel } from "../../lib/run-floor";
 import { scorerCallsModel } from "../../lib/scorer-dependencies";
-import type { WizardV2State } from "../../lib/wizard-v2";
+import { isLocalRepo, type WizardV2State } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { optimizerLabel } from "./OptimizerPicker";
 
@@ -174,19 +175,30 @@ export function RunOverview({
                     <span dir="auto">{meta.name}</span>
                   </Row>
                 )}
-                <Row
-                  icon={<GitBranch className={ICON} aria-hidden />}
-                  label={t("submit.v2.repo.repository_label")}
-                >
-                  <span className="break-all font-mono" dir="ltr">
-                    {task.repo.repository}
-                    {task.repo.commit.trim()
-                      ? ` @ ${task.repo.commit.trim().slice(0, 7)}`
-                      : task.repo.branch.trim()
-                        ? ` @ ${task.repo.branch.trim()}`
-                        : ""}
-                  </span>
-                </Row>
+                {isLocalRepo(task.repo) ? (
+                  <Row
+                    icon={<FolderOpen className={ICON} aria-hidden />}
+                    label={t("submit.v2.repo.folder.label")}
+                  >
+                    <span className="break-all font-mono" dir="ltr">
+                      {task.repo.localPath?.trim()}
+                    </span>
+                  </Row>
+                ) : (
+                  <Row
+                    icon={<GitBranch className={ICON} aria-hidden />}
+                    label={t("submit.v2.repo.repository_label")}
+                  >
+                    <span className="break-all font-mono" dir="ltr">
+                      {task.repo.repository}
+                      {task.repo.commit.trim()
+                        ? ` @ ${task.repo.commit.trim().slice(0, 7)}`
+                        : task.repo.branch.trim()
+                          ? ` @ ${task.repo.branch.trim()}`
+                          : ""}
+                    </span>
+                  </Row>
+                )}
                 <Row
                   icon={<Target className={ICON} aria-hidden />}
                   label={msg("submit.v2.stage.optimizer" as MessageKey)}

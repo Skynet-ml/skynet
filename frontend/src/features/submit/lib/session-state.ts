@@ -186,6 +186,7 @@ export function setupWorthKeeping(state: WizardV2State): boolean {
     state.furthestStep !== "task" ||
     Boolean(state.task.objective.trim() || state.task.background.trim() || state.meta.name.trim()) ||
     Boolean(state.task.repo.repository.trim()) ||
+    Boolean(state.task.repo.localPath?.trim()) ||
     state.inputs.cases.length > 0 ||
     state.inputs.stagedDatasetId !== null
   );

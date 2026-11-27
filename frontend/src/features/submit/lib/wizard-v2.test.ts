@@ -33,6 +33,7 @@ const {
   writeWorkspaceFile,
 } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
+const { agentRepoFields, isLocalRepo, repoIssue, sandboxCatalogForRepo, withLocalFolder } = await import("./wizard-v2.ts");
 
 // A repository run whose interview found it needs data, so every step shows.
 function filledState() {
@@ -431,4 +432,88 @@ test("only AutoResearch and Meta-Harness offer the contract file's proposer (SKY
   // The server refuses [proposer] entry for every other engine, so the picker keeps its old item.
   assert.equal(fileProposerCommand(proposer, command, "auto"), null);
   assert.equal(fileProposerCommand(proposer, command, "autosaddler"), null);
+});
+
+// SKY-993: a folder on this computer as the run source.
+const localRepo = (path: string) => ({ ...emptyRepoDraft(), localPath: path, editablePaths: ["src"] });
+
+test("a local folder source needs a path and the editable paths, not a repository or commit", () => {
+  assert.equal(isLocalRepo(emptyRepoDraft()), false);
+  assert.equal(isLocalRepo(localRepo("")), true);
+  assert.equal(repoIssue(localRepo("")), "submit.v2.repo.issue.local_path");
+  assert.equal(repoIssue(localRepo("   ")), "submit.v2.repo.issue.local_path");
+  assert.equal(repoIssue(localRepo("/Users/me/Documents/Skynet/app")), null);
+  assert.equal(repoIssue({ ...localRepo("/Users/me/app"), editablePaths: [" "] }), "submit.v2.repo.issue.paths");
+});
+
+test("a folder pick drops the old git repository, host, branch, commit and Skynet flag", () => {
+  const git = {
+    ...emptyRepoDraft(),
+    provider: "gitlab" as const,
+    repository: "acme/bot",
+    branch: "dev",
+    commit: "a".repeat(40),
+    createdBySkynet: true,
+    editablePaths: ["src"],
+    setupCommand: "make",
+    secrets: [{ name: "API_KEY", value: "", allowedHosts: "" }],
+  };
+  const folder = withLocalFolder(git, "/Users/me/app");
+  assert.equal("provider" in folder, false);
+  assert.equal(folder.repository, "");
+  assert.equal(folder.branch, "");
+  assert.equal(folder.commit, "");
+  assert.equal(folder.createdBySkynet, false);
+  assert.equal(folder.localPath, "/Users/me/app");
+  // The paths, setup command and secrets work the same as for a git source.
+  assert.deepEqual(folder.editablePaths, ["src"]);
+  assert.equal(folder.setupCommand, "make");
+  assert.deepEqual(folder.secrets, git.secrets);
+  assert.equal(repoIssue(folder), null);
+  // The agent and the metric step see no repository, so no repository file is read.
+  assert.equal(agentRepoFields(folder).repository, undefined);
+  assert.equal(isLocalRepo(withLocalFolder(git, "")), true);
+});
+
+test("the agent sees a local folder as provider local with its path, and a git source as before", () => {
+  assert.deepEqual(agentRepoFields(localRepo("/Users/me/app")), {
+    repository: undefined,
+    repo_provider: "local",
+    repo_branch: undefined,
+    repo_path: "/Users/me/app",
+  });
+  assert.equal(agentRepoFields(localRepo("  ")).repo_path, undefined);
+  const git = agentRepoFields({ ...emptyRepoDraft(), provider: "gitlab", repository: "acme/bot", branch: "dev" });
+  assert.equal(git.repository, "acme/bot");
+  assert.equal(git.repo_provider, "gitlab");
+  assert.equal(git.repo_branch, "dev");
+  assert.equal(git.repo_path, undefined);
+});
+
+test("a local folder runs only in the local Docker box", () => {
+  const catalog = {
+    providers: [
+      { id: "vercel", label: "Vercel" },
+      { id: "docker", label: "Docker" },
+    ],
+    default_provider: "vercel",
+  };
+  assert.deepEqual(sandboxCatalogForRepo(catalog, localRepo("/Users/me/app")), {
+    providers: [{ id: "docker", label: "Docker" }],
+    default_provider: "docker",
+  });
+  assert.deepEqual(sandboxCatalogForRepo(catalog, emptyRepoDraft()), catalog);
+});
+
+test("withTaskPatch drops the draft files when the local folder changes, and keeps them for the same folder", () => {
+  const state = initialWizardV2State();
+  const files = { "src/app.py": "x = 1\n" };
+  const base = {
+    ...state,
+    task: { ...state.task, repo: localRepo("/Users/me/a") },
+    workspace: { ...state.workspace, files },
+  };
+  assert.deepEqual(withTaskPatch(base, { repo: { ...localRepo("/Users/me/a"), setupCommand: "make" } }).workspace.files, files);
+  assert.deepEqual(withTaskPatch(base, { repo: localRepo("/Users/me/b") }).workspace.files, {});
+  assert.deepEqual(withTaskPatch(base, { repo: { ...emptyRepoDraft(), repository: "acme/bot" } }).workspace.files, {});
 });

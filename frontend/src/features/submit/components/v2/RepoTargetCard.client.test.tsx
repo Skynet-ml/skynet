@@ -105,6 +105,8 @@ async function mount(
   draft: RepoDraft,
   onChange: (next: RepoDraft) => void = () => {},
   objective = "",
+  localFolders = false,
+  issue: string | null = null,
 ) {
   const container = document.createElement("div");
   document.body.append(container);
@@ -116,9 +118,10 @@ async function mount(
         <RepoTargetCard
           repo={draft}
           onChange={onChange}
-          issue={null}
+          issue={issue}
           guided={false}
           seed={{ objective, scorerCode: "", cases: [] }}
+          localFolders={localFolders}
         />
       </TooltipProvider>,
     );
@@ -361,6 +364,224 @@ void test("after a pick both source cards stay and there is no back button", asy
       cards().map((c) => c.getAttribute("aria-pressed")),
       ["true", "false"],
     );
+  } finally {
+    await unmount();
+  }
+});
+
+// SKY-993: the "Pick a folder" source in the desktop app.
+type Bridge = {
+  pickFolder?: () => Promise<string | null>;
+  createFolder?: (name: string) => Promise<string | null>;
+};
+const win = dom.window as unknown as { __APP_ENV__?: unknown; skynetDesktop?: Bridge };
+
+/** Run the body as the desktop app with this folder bridge, then restore the browser. */
+async function asDesktop(bridge: Bridge | undefined, localMode: boolean, body: () => Promise<void>) {
+  win.__APP_ENV__ = localMode ? { localMode: true } : undefined;
+  win.skynetDesktop = bridge;
+  try {
+    await body();
+  } finally {
+    delete win.__APP_ENV__;
+    delete win.skynetDesktop;
+  }
+}
+
+/** The card with its draft kept in state, as the wizard keeps it. */
+function Controlled({ start, sent }: { start: RepoDraft; sent: RepoDraft[] }) {
+  const [draft, setDraft] = React.useState(start);
+  return (
+    <TooltipProvider>
+      <RepoTargetCard
+        repo={draft}
+        onChange={(next) => {
+          sent.push(next);
+          setDraft(next);
+        }}
+        issue={null}
+        guided={false}
+        seed={{ objective: "", scorerCode: "", cases: [] }}
+        localFolders
+      />
+    </TooltipProvider>
+  );
+}
+
+async function mountControlled(start: RepoDraft, sent: RepoDraft[]) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await React.act(async () => root.render(<Controlled start={start} sent={sent} />));
+  return {
+    container,
+    unmount: async () => {
+      await React.act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+const sourceCards = (container: HTMLElement) => [
+  ...container.querySelectorAll<HTMLButtonElement>("button[aria-pressed]"),
+];
+const buttonWithText = (container: HTMLElement, text: string) =>
+  [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    b.textContent?.includes(text),
+  );
+
+void test("the folder source shows only in the desktop app, for a run on this computer", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  for (const [hasBridge, localMode, localFolders, expected] of [
+    [false, false, true, 2],
+    [true, false, true, 2],
+    [false, true, true, 2],
+    [true, true, false, 2],
+    [true, true, true, 3],
+  ] as const) {
+    await asDesktop(hasBridge ? bridge : undefined, localMode, async () => {
+      const { container, unmount } = await mount(repo, () => {}, "", localFolders);
+      try {
+        assert.equal(
+          sourceCards(container).length,
+          expected,
+          `bridge=${hasBridge} localMode=${localMode} localFolders=${localFolders}`,
+        );
+      } finally {
+        await unmount();
+      }
+    });
+  }
+});
+
+void test("Choose folder sets the picked path, drops the git fields and shows the path", async () => {
+  const picks: string[] = [];
+  const calls: string[] = [];
+  const linkedFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    return linkedFetch(input);
+  }) as typeof fetch;
+  const bridge: Bridge = {
+    pickFolder: async () => {
+      picks.push("pick");
+      return "/Users/me/app";
+    },
+  };
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled(
+      { ...repo, branch: "dev", commit: "a".repeat(40), createdBySkynet: true },
+      sent,
+    );
+    try {
+      await React.act(async () => sourceCards(container)[2]!.click());
+      const choose = container.querySelector<HTMLButtonElement>(
+        'button[aria-describedby="v2-repo-folder-path"]',
+      );
+      assert.ok(choose, "no Choose folder button");
+      calls.length = 0;
+      await React.act(async () => choose.click());
+      assert.deepEqual(picks, ["pick"]);
+      const last = sent.at(-1)!;
+      assert.equal(last.localPath, "/Users/me/app");
+      assert.equal("provider" in last, false);
+      assert.equal(last.repository, "");
+      assert.equal(last.branch, "");
+      assert.equal(last.commit, "");
+      assert.equal(last.createdBySkynet, false);
+      const path = container.querySelector("#v2-repo-folder-path");
+      assert.equal(path?.getAttribute("aria-live"), "polite");
+      assert.ok(path?.textContent?.includes("/Users/me/app"));
+      // A folder source reads no branch, commit or file list from a repository host.
+      assert.deepEqual(
+        calls.filter((url) => !url.endsWith("/connectors")),
+        [],
+      );
+    } finally {
+      await unmount();
+      globalThis.fetch = linkedFetch;
+    }
+  });
+});
+
+void test("New folder calls createFolder with the typed name and uses its path", async () => {
+  const names: string[] = [];
+  const bridge: Bridge = {
+    pickFolder: async () => null,
+    createFolder: async (name) => {
+      names.push(name);
+      return `/Users/me/Documents/Skynet/${name}`;
+    },
+  };
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled({ ...repo, repository: "" }, sent);
+    try {
+      await React.act(async () => sourceCards(container)[2]!.click());
+      const input = container.querySelector<HTMLInputElement>("#v2-repo-folder-name");
+      assert.ok(input, "no field #v2-repo-folder-name");
+      await React.act(async () => type(input, " my-app "));
+      await React.act(async () => buttonWithText(container, "Create folder")!.click());
+      assert.deepEqual(names, ["my-app"]);
+      assert.equal(sent.at(-1)!.localPath, "/Users/me/Documents/Skynet/my-app");
+      assert.equal(input.value, "");
+    } finally {
+      await unmount();
+    }
+  });
+});
+
+void test("a cancelled folder pick changes nothing", async () => {
+  const bridge: Bridge = { pickFolder: async () => null, createFolder: async () => null };
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled({ ...repo, localPath: "/Users/me/old" }, sent);
+    try {
+      // A folder draft opens on the folder source.
+      assert.equal(sourceCards(container)[2]!.getAttribute("aria-pressed"), "true");
+      const choose = container.querySelector<HTMLButtonElement>(
+        'button[aria-describedby="v2-repo-folder-path"]',
+      )!;
+      await React.act(async () => choose.click());
+      assert.deepEqual(sent, []);
+      assert.ok(container.querySelector("#v2-repo-folder-path")?.textContent?.includes("/Users/me/old"));
+    } finally {
+      await unmount();
+    }
+  });
+});
+
+void test("a look at the folder card keeps the git repository and its branch", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled({ ...repo, branch: "dev" }, sent);
+    try {
+      await React.act(async () => sourceCards(container)[2]!.click());
+      assert.equal(sourceCards(container)[2]!.getAttribute("aria-pressed"), "true");
+      assert.ok(container.querySelector("#v2-repo-folder-path"), "no folder panel");
+      await React.act(async () => sourceCards(container)[0]!.click());
+      assert.equal(sourceCards(container)[0]!.getAttribute("aria-pressed"), "true");
+      assert.deepEqual(sent, []);
+    } finally {
+      await unmount();
+    }
+  });
+});
+
+void test("a folder draft without the folder card asks for a repository instead", async () => {
+  const { container, unmount } = await mount(
+    { ...repo, localPath: "" },
+    () => {},
+    "",
+    false,
+    "submit.v2.repo.issue.local_path",
+  );
+  try {
+    assert.equal(sourceCards(container).length, 2);
+    const status = container.querySelector('[role="status"]');
+    assert.ok(status?.textContent?.includes("Choose a repository"), status?.textContent ?? "no status");
   } finally {
     await unmount();
   }
