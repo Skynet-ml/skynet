@@ -295,9 +295,10 @@ def finish_link(engine: Engine, *, code: str, state: str) -> ConnectorView:
     if response.status_code != 200:
         logger.info("Hosted refused the link code (status %s, %s)", response.status_code, _hosted_code(response))
         raise DomainError("hosted_link.failed", status=400)
-    # A new link may be to another hosted account; its relay copies must not survive.
-    clear_link(engine, payload["u"])
     view = _save_pair(engine, payload["u"], response.json())
+    # The new link may be to another hosted account; the old account's copies must not
+    # survive. Delete them only after the new pair is saved, so a bad answer keeps the old link.
+    _clear_relay_copies(engine, payload["u"])
     logger.info("Linked the Mac app to a hosted account")
     return view
 
@@ -313,6 +314,21 @@ def link_status(engine: Engine, username: str) -> ConnectorView | None:
         The view, or ``None`` when not linked.
     """
     return ConnectorVault(engine).get(username, PROVIDER)
+
+
+def _clear_relay_copies(engine: Engine, username: str) -> None:
+    """Delete every connector that came through the relay, and keep the link.
+
+    Args:
+        engine: Local database.
+        username: The local user.
+    """
+    with Session(engine) as session:
+        session.query(UserConnectorModel).filter(
+            UserConnectorModel.username == username,
+            UserConnectorModel.auth_method == RELAY_AUTH_METHOD,
+        ).delete(synchronize_session=False)
+        session.commit()
 
 
 def clear_link(engine: Engine, username: str) -> None:

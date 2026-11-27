@@ -33,6 +33,7 @@ from sqlalchemy.pool import StaticPool
 from ...config import settings
 from ...connectors import huggingface as hf
 from ...connectors.vault import ConnectorVault
+from ...local import hosted_link
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ...storage.models import Base, UserConnectorModel
 from ...storage.remote import RemoteDBJobStore
@@ -125,6 +126,38 @@ def test_list_is_empty_and_reports_oauth_unavailable(vault_key: str) -> None:
         "picker_available": False,
         "connected_at": None,
     }
+
+
+def test_relay_is_offered_only_on_a_linked_mac_without_oauth(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Mac app shows the relay Connect button once it is linked to a hosted account (SKY-986).
+
+    Args:
+        vault_key: Fixture that configures the vault key.
+        monkeypatch: Pytest fixture used to set local mode and the link state.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "github_oauth_client_id", None)
+    client, _ = _make_client()
+
+    def relay(body: dict[str, Any]) -> dict[str, bool]:
+        """Map each provider to its ``relay_available`` flag.
+
+        Args:
+            body: The list response.
+
+        Returns:
+            Provider slug to flag.
+        """
+        return {entry["provider"]: entry["relay_available"] for entry in body["connectors"]}
+
+    monkeypatch.setattr(hosted_link, "link_status", lambda _engine, _username: None)
+    unlinked = relay(client.get("/connectors").json())
+    monkeypatch.setattr(hosted_link, "link_status", lambda _engine, _username: object())
+    linked = relay(client.get("/connectors").json())
+
+    assert not any(unlinked.values())
+    assert linked["github"] is True
+    assert linked["huggingface"] is True
 
 
 def test_save_token_verifies_and_stores_ciphertext(vault_key: str) -> None:

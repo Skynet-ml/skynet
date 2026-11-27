@@ -295,8 +295,12 @@ function ProviderCard({
         const { connected: copied } = await connectLocalRelay(meta.id);
         if (copied) {
           setAwaitingHosted(false);
-          onChange((await getConnectors()).connectors);
           toast.success(meta.toastConnected, TOAST_OPTIONS);
+          // The copy is saved; a failed refresh only leaves the card stale until the next list load.
+          await getConnectors().then(
+            ({ connectors }) => onChange(connectors),
+            () => undefined,
+          );
           return;
         }
         if (!openHosted) return;

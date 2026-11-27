@@ -249,3 +249,27 @@ def test_link_to_another_account_drops_the_old_relay_tokens(vault: ConnectorVaul
     assert link is not None
     assert link.account_label == "other@example.test"
     assert vault.resolve(_USER, "github") is None
+
+
+def test_a_failed_relink_keeps_the_old_link_and_its_tokens(
+    vault: ConnectorVault, hosted: FakeHosted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad hosted token answer must not unlink a Mac that was linked before.
+
+    Args:
+        vault: Linked local vault.
+        hosted: The fake hosted server.
+        monkeypatch: Pytest fixture used to break the hosted token answer.
+    """
+    hosted.connectors["github"] = _hosted_token("gho_account_a")
+    connector_relay.pull(vault, _USER, "github")
+    url = hosted_link.start_link(_USER, device_name="Test Mac")
+    _redirect, code, state = hosted.authorize(url)
+    monkeypatch.setattr(hosted, "_pair", lambda: {"access_token": "not-a-pair"})
+
+    with pytest.raises(DomainError) as caught:
+        hosted_link.finish_link(vault.engine, code=code, state=state)
+
+    assert caught.value.code == "hosted_link.failed"
+    assert hosted_link.link_status(vault.engine, _USER) is not None
+    assert oauth.current_oauth_token(github.oauth_app(), vault, _USER) == "gho_account_a"
