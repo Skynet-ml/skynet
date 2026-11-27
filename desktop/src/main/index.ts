@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, screen, shell, type IpcMainInvokeEvent } from "electron";
 import { APP_SCHEME, appUrlFromArgv, appWindowUrl, HOSTED_APP_ORIGINS, hostedAppOrigin, parseLinkCallback, webDocsUrl } from "./app-url";
+import { createFolderIn, isAppPageSender } from "./folders";
 import { HostedLinkClient, type LinkCheck, watchLink } from "./hosted-link";
 import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
@@ -778,6 +779,29 @@ ipcMain.on("theme:changed", (event, value: unknown) => {
   applyTheme();
 });
 ipcMain.handle("onboarding:open-docker", () => shell.openExternal("https://www.docker.com/products/docker-desktop/"));
+
+/** True when a folder call comes from the local web app page in the app window. */
+function fromAppPage(event: IpcMainInvokeEvent): boolean {
+  const frame = event.senderFrame;
+  return isAppPageSender(
+    {
+      fromAppWindow: win !== null && event.sender === win.webContents,
+      fromMainFrame: frame !== null && frame === event.sender.mainFrame,
+      frameUrl: frame?.url,
+    },
+    frontendUrl,
+  );
+}
+
+ipcMain.handle("folders:pick", async (event) => {
+  if (!win || !fromAppPage(event)) return null;
+  const result = await dialog.showOpenDialog(win, { properties: ["openDirectory", "createDirectory"] });
+  return result.canceled ? null : (result.filePaths[0] ?? null);
+});
+ipcMain.handle("folders:create", (event, name: unknown) => {
+  if (!fromAppPage(event)) return null;
+  return createFolderIn(path.join(app.getPath("documents"), "Skynet"), name);
+});
 
 /**
  * Make this app the handler of skynet:// URLs. macOS takes the scheme from
