@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import dataclasses
 import hashlib
 import io
@@ -1677,6 +1678,43 @@ def test_staging_checks_a_local_drafts_base_against_the_folder(local_stack: Path
         )
 
     assert refused.value.code == I18nKey.REPO_GATE_DRAFT_BASE_MOVED
+
+
+def test_a_later_hardening_pass_stages_the_pinned_local_commit(local_stack: Path, tmp_path: Path) -> None:
+    """A pass after ``_pin_commit`` stages the kept pack of the first pass, even after the folder changed.
+
+    Args:
+        local_stack: The local state folder.
+        tmp_path: Scratch folder.
+    """
+    folder = tmp_path / "app"
+    for name, text in {**_FILES, "src/geocode/app.py": "x = 1\n"}.items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(text)
+    # A hardening pass sends only the job's stored target, with no sandbox_provider.
+    target = _local_payload(folder)["target"]
+
+    first_payload, first = repo_staging.stage_repository(
+        {"target": copy.deepcopy(target)}, username="alice", binding_id="b", engine=None
+    )
+    first.cleanup()
+    target["repo"]["commit"] = first_payload["target"]["repo"]["commit"]
+    (folder / "src" / "geocode" / "app.py").write_text("changed = True\n")
+
+    later_payload, later = repo_staging.stage_repository(
+        {"target": copy.deepcopy(target)}, username="alice", binding_id="b", engine=None, started=True
+    )
+
+    assert later_payload["target"]["repo"]["commit"] == target["repo"]["commit"]
+    with tarfile.open(later.snapshot.archive) as packed:
+        assert packed.extractfile("src/geocode/app.py").read() == b"x = 1\n"  # type: ignore[union-attr]
+    later.cleanup()
+
+    local_folder.kept_snapshot(target["repo"]["commit"]).unlink()
+    with pytest.raises(local_folder.LocalFolderError, match="The folder changed after the run was set up"):
+        repo_staging.stage_repository(
+            {"target": copy.deepcopy(target)}, username="alice", binding_id="b", engine=None, started=True
+        )
 
 
 def test_a_local_run_publishes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

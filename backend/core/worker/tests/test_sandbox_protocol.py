@@ -47,6 +47,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     21: {"blackbox": "3e02206ab3dc54ab"},
     # The same request; every box gets the ASCENT_MODEL* and ASCENT_TASK names (SKY-776).
     22: {"blackbox": "3e02206ab3dc54ab"},
+    # target.repo.provider "local" and target.repo.path: a folder on this computer (SKY-990).
+    23: {"blackbox": "e87133d61d8c74a2"},
 }
 
 
