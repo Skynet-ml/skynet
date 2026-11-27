@@ -312,11 +312,16 @@ def test_request_without_a_lifetime_is_not_reserved(database: Engine) -> None:
         SbxUsageReservation(_runtime(database), {"cpus": 2, "memory_mib": 4096}, operation_key="box")
 
 
-def test_measured_runtime_ignores_float_noise_of_a_large_clock(database: Engine) -> None:
+@pytest.mark.parametrize(("elapsed", "expected_ms"), [(10.2, 10_200), (10.2004, 10_201)])
+def test_measured_runtime_ignores_float_noise_of_a_large_clock(
+    database: Engine, elapsed: float, expected_ms: int
+) -> None:
     """A long-running host's large monotonic clock must not add a millisecond to the evidence.
 
     Args:
         database: The SQLite ledger.
+        elapsed: The seconds between the start and stop readings.
+        expected_ms: The measured milliseconds the evidence must record.
     """
     runtime = _runtime(database)
     clock = Clock()
@@ -324,7 +329,7 @@ def test_measured_runtime_ignores_float_noise_of_a_large_clock(database: Engine)
     clock.now = 1e9
     reservation.start_clock()
     reservation.confirm_created("uid-1", BODY)
-    clock.now = 1e9 + 10.2
+    clock.now = 1e9 + elapsed
     reservation.stop_clock()
     reservation.settle()
     with Session(database) as session:
@@ -333,4 +338,4 @@ def test_measured_runtime_ignores_float_noise_of_a_large_clock(database: Engine)
                 ExecutionUsageEvidenceModel.evidence_key == f"sbx-stop:{reservation.operation.id}"
             )
         ).one()
-    assert row.evidence["measured_ms"] == 10_200
+    assert row.evidence["measured_ms"] == expected_ms
