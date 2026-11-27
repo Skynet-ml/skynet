@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import datetime
+import gzip
 import socket
 import ssl
 import threading
@@ -12,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -111,7 +113,8 @@ def _answer_for(request: bytes) -> bytes:
     """Build the fake host's response to one request.
 
     ``/echo`` returns the request, ``/gzip-echo`` returns it marked as gzip, and
-    ``/chunked-echo`` returns it in chunks that split the real value.
+    ``/chunked-echo`` returns it in chunks that split the real value. ``/dup-gzip-echo``
+    and ``/dup-te-echo`` return it gzipped, behind a repeated encoding header that ends in a plain one.
 
     Args:
         request: The request the host got.
@@ -120,6 +123,14 @@ def _answer_for(request: bytes) -> bytes:
         The response bytes.
     """
     path = request.split(b" ")[1:2]
+    if path == [b"/dup-gzip-echo"]:
+        body = gzip.compress(request)
+        head = b"Content-Encoding: gzip\r\nContent-Encoding: identity\r\nContent-Length: %d\r\n" % len(body)
+        return b"HTTP/1.1 200 OK\r\n" + head + b"\r\n" + body
+    if path == [b"/dup-te-echo"]:
+        body = gzip.compress(request)
+        head = b"Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n"
+        return b"HTTP/1.1 200 OK\r\n" + head + b"\r\n%x\r\n%s\r\n0\r\n\r\n" % (len(body), body)
     if path == [b"/gzip-echo"]:
         return b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % len(request) + request
     if path == [b"/chunked-echo"]:
@@ -514,6 +525,72 @@ def test_encoded_or_chunked_echo_of_the_real_value_is_cut(proxy: LocalEgressProx
     assert VALUE.encode() not in response
     assert VALUE[5:].encode() not in response
     assert _calls(proxy, 1)[-1]["status"] == "failed"
+
+
+def _gunzip_body(response: bytes) -> bytes:
+    """Return what a client could gunzip from a response body, chunked or not.
+
+    Args:
+        response: The response bytes the client got.
+
+    Returns:
+        The decompressed data, or empty bytes when there is none.
+    """
+    head, _, body = response.partition(b"\r\n\r\n")
+    if b"transfer-encoding: chunked" in head.lower():
+        data = b""
+        with contextlib.suppress(ValueError):
+            while body:
+                size, _, body = body.partition(b"\r\n")
+                data, body = data + body[: int(size, 16)], body[int(size, 16) + 2 :]
+        body = data
+    with contextlib.suppress(zlib.error):
+        return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(body)
+    return b""
+
+
+@pytest.mark.parametrize("path", ["/dup-gzip-echo", "/dup-te-echo"])
+def test_repeated_encoding_headers_cannot_hide_an_echo(proxy: LocalEgressProxy, path: str) -> None:
+    """Check that a repeated encoding header that ends in a plain one cannot pass a gzipped echo to the client."""
+    response = _via_proxy(proxy, APPROVED, _get(path, header=placeholder("API_KEY")), trust=proxy.ca_pem)
+    assert VALUE.encode() not in _gunzip_body(response)
+    record = _calls(proxy, 1)[-1]
+    assert record["status"] == "failed"
+    assert VALUE not in record["reason"]
+
+
+def test_stop_keeps_tls_on_a_socket_that_sends_during_shutdown(
+    proxy: LocalEgressProxy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a send that races stop() goes out encrypted or fails, never in plain text."""
+    raw_client, raw_server = socket.socketpair()
+    server = proxy._leaf_context(APPROVED).wrap_socket(raw_server, server_side=True, do_handshake_on_connect=False)
+    handshake = threading.Thread(target=server.do_handshake)
+    handshake.start()
+    client = ssl.create_default_context(cadata=proxy.ca_pem.decode()).wrap_socket(raw_client, server_hostname=APPROVED)
+    handshake.join()
+    proxy._track(client)
+    real_shutdown = socket.socket.shutdown
+
+    def racing_shutdown(sock: socket.socket, how: int) -> None:
+        """Send from the TLS socket in the middle of its shutdown, as a request thread could.
+
+        Args:
+            sock: The socket to shut down.
+            how: The shutdown mode.
+        """
+        if sock is client:
+            with contextlib.suppress(OSError):
+                client.sendall(b"Authorization: Bearer RACE-SECRET")
+        real_shutdown(sock, how)
+
+    monkeypatch.setattr(socket.socket, "shutdown", racing_shutdown)
+    proxy.stop()
+    monkeypatch.setattr(socket.socket, "shutdown", real_shutdown)
+    server.settimeout(5)
+    assert b"RACE-SECRET" not in socket.socket.recv(server, 65_536)
+    client.close()
+    server.close()
 
 
 def test_chunked_response_without_a_value_is_relayed(proxy: LocalEgressProxy) -> None:

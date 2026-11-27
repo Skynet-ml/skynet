@@ -101,6 +101,7 @@ _HOP_HEADERS = frozenset(
 _INSPECT_DROP = _HOP_HEADERS | {b"accept-encoding", b"range", b"if-range"}
 # A second copy of these could make the upstream read a request the proxy did not check.
 _SINGLE_HEADERS = (b"host", b"content-length", b"transfer-encoding")
+_RESPONSE_SINGLE_HEADERS = (b"content-encoding", b"content-length", b"transfer-encoding")
 _HOST_HEADER = re.compile(rb"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::([0-9]{1,5}))?")
 _PROXY_USER = "skynet"
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
@@ -481,8 +482,10 @@ class LocalEgressProxy:
             with contextlib.suppress(OSError):
                 listener.close()
         for client in clients:
+            # SSLSocket.shutdown drops its TLS object first, so a racing sendall
+            # would go out in plain text; the OS-level call keeps TLS and fails it.
             with contextlib.suppress(OSError):
-                client.shutdown(socket.SHUT_RDWR)
+                socket.socket.shutdown(client, socket.SHUT_RDWR)
         if self._state is not None:
             shutil.rmtree(self._state, ignore_errors=True)
             self._state = None
@@ -1070,6 +1073,9 @@ class LocalEgressProxy:
             tls.sendall(head)
         fields = [line.partition(b":") for line in head.removesuffix(b"\r\n\r\n").split(b"\r\n")[1:]]
         values = {name.strip().lower(): value.strip().lower() for name, _, value in fields}
+        names = [name.strip().lower() for name, _, _ in fields]
+        if guard and any(names.count(single) > 1 for single in _RESPONSE_SINGLE_HEADERS):
+            raise _CutError("the response repeated a framing header, so the proxy could not check it")
         if guard and values.get(b"content-encoding", b"identity") not in (b"", b"identity"):
             raise _CutError("the response was encoded, so the proxy could not check it for secret values")
         framing = values.get(b"transfer-encoding", b"")
