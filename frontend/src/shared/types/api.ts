@@ -407,9 +407,24 @@ interface BlackboxRepoSource {
   environment?: { outcome?: { target?: number | null }; proposer_entry?: string[] } | null;
 }
 
+/**
+ * A folder on this computer, optimized as a whole (desktop local mode only). The run
+ * packs a copy of the folder and never writes the folder itself.
+ */
+interface BlackboxLocalRepoSource {
+  provider: "local";
+  /** The folder's absolute path. */
+  path: string;
+  editable_paths: string[];
+  secrets?: BlackboxRepoSecret[];
+  /** Setup draft files by folder path; the server writes them over the copy before the run. */
+  draft_files?: Record<string, string>;
+  environment?: BlackboxRepoSource["environment"];
+}
+
 export interface BlackboxTarget {
   kind: "text" | "agent" | "repo";
-  repo?: BlackboxRepoSource | null;
+  repo?: BlackboxRepoSource | BlackboxLocalRepoSource | null;
   harness?: BlackboxHarness;
   model?: string | null;
   timeout_seconds?: number;

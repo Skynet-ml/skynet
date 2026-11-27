@@ -11,7 +11,7 @@ import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig 
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
 import { runModels, scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
-import { parseAllowedHosts, type WizardV2State } from "./wizard-v2";
+import { isLocalRepo, LOCAL_SANDBOX_PROVIDER, parseAllowedHosts, type WizardV2State } from "./wizard-v2";
 
 export interface RepoRunOptions {
   username: string;
@@ -327,6 +327,22 @@ export function repoRunRequest(
   const { stop_at_score: _retired, ...budget } = optimizer.budget as typeof optimizer.budget & {
     stop_at_score?: unknown;
   };
+  const local = isLocalRepo(repo);
+  // What a folder and a repository source send the same way.
+  const shared = {
+    // ascent.toml and every file the setup changed; metric.py goes as the scorer.
+    ...(Object.keys(draftFiles).length > 0 && { draft_files: draftFiles }),
+    ...(secrets.length + fromAccount.length > 0 && {
+      secrets: [
+        ...secrets.map((secret) => ({
+          name: secret.name.trim(),
+          value: secret.value,
+          allowed_hosts: parseAllowedHosts(secret.allowedHosts),
+        })),
+        ...fromAccount,
+      ],
+    }),
+  };
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -347,35 +363,29 @@ export function repoRunRequest(
         expected_field: inputs.expectedField,
       }),
     budget,
-    ...(optimizer.sandboxProvider && { sandbox_provider: optimizer.sandboxProvider }),
+    // A local folder never leaves this computer, so it runs only in the local box.
+    ...(local
+      ? { sandbox_provider: LOCAL_SANDBOX_PROVIDER }
+      : optimizer.sandboxProvider && { sandbox_provider: optimizer.sandboxProvider }),
     // Auto composes the repository engines on the server; a named engine runs alone.
     strategy: auto ? { mode: "auto" } : { mode: "single", engine },
     proposer: optimizer.proposer,
     target: {
       kind: "repo",
-      repo: {
-        provider: repo.provider ?? "github",
-        repository: repo.repository.trim(),
-        branch: repo.branch.trim() || null,
-        commit: repo.commit.trim() || null,
-        editable_paths: editablePaths,
-        ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
-        // ascent.toml and every repository file the setup changed; metric.py goes as the scorer.
-        ...(Object.keys(draftFiles).length > 0 && { draft_files: draftFiles }),
-        // The run refuses drafts read at another commit than the one it starts from.
-        ...(Object.keys(draftFiles).length > 0 &&
-          workspace.filesBase && { draft_base: workspace.filesBase }),
-        ...(secrets.length + fromAccount.length > 0 && {
-          secrets: [
-            ...secrets.map((secret) => ({
-              name: secret.name.trim(),
-              value: secret.value,
-              allowed_hosts: parseAllowedHosts(secret.allowedHosts),
-            })),
-            ...fromAccount,
-          ],
-        }),
-      },
+      repo: local
+        ? { provider: "local", path: (repo.localPath ?? "").trim(), editable_paths: editablePaths, ...shared }
+        : {
+            provider: repo.provider ?? "github",
+            repository: repo.repository.trim(),
+            branch: repo.branch.trim() || null,
+            commit: repo.commit.trim() || null,
+            editable_paths: editablePaths,
+            ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
+            ...shared,
+            // The run refuses drafts read at another commit than the one it starts from.
+            ...(Object.keys(draftFiles).length > 0 &&
+              workspace.filesBase && { draft_base: workspace.filesBase }),
+          },
       setup_command: repo.setupCommand.trim() || null,
     },
     // The server takes a task model only for agent targets; the wizard keeps

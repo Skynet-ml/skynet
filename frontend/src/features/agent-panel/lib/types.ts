@@ -32,8 +32,10 @@ export interface WizardState {
   task_background?: string;
   /** The repository a repository run optimizes, as `owner/name`. */
   repository?: string;
-  /** The host of `repository`; the user picks it, the agent only reads it. */
-  repo_provider?: "github" | "gitlab" | "bitbucket";
+  /** The host of `repository`, or `local` for a folder on this computer; the user picks it, the agent only reads it. */
+  repo_provider?: "github" | "gitlab" | "bitbucket" | "local";
+  /** The absolute path of the folder a `local` run uses; the user picks it, the agent only reads it. */
+  repo_path?: string;
   /** The ref the run starts from: its pinned commit, else its branch; unset for the default branch. */
   repo_branch?: string;
   /** The agent created `repository` on GitHub, so the run request marks it `created_by_skynet`. */

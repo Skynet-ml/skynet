@@ -646,3 +646,24 @@ test("the LiteLLM to BYOK map is the exact reverse of the billing bridge", () =>
   );
   assert.deepEqual({ ...LITELLM_TO_BYOK_PROVIDER }, reverse);
 });
+
+test("a local folder run sends provider local with its path, and runs in the local Docker box (SKY-993)", () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo, localPath: " /Users/me/Documents/Skynet/app ", secrets: [] };
+  state.optimizer.sandboxProvider = "vercel";
+  state.workspace.files = { "src/app.py": "x = 2\n" };
+  state.workspace.filesBase = "c".repeat(40);
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.deepEqual(request.target, {
+    kind: "repo",
+    repo: {
+      provider: "local",
+      path: "/Users/me/Documents/Skynet/app",
+      editable_paths: ["src"],
+      draft_files: { "src/app.py": "x = 2\n" },
+    },
+    setup_command: "npm ci",
+  });
+  assert.equal(request.sandbox_provider, "docker");
+});

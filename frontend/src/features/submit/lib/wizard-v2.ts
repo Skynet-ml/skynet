@@ -22,7 +22,7 @@ import {
   type UnifiedCase,
 } from "@/shared/types/unified-run";
 import type { TokenSourceMode } from "@/features/billing";
-import type { RepoHost } from "@/shared/lib/api";
+import type { RepoHost, SandboxProviderCatalog } from "@/shared/lib/api";
 import type { RunFloor } from "./run-floor";
 
 export type WizardStepId = "task" | "inputs" | "optimizer" | "metric";
@@ -52,7 +52,21 @@ export interface RepoDraft {
   createdBySkynet?: boolean;
   /** Environment variables the repository needs, each with the hosts it may go to. */
   secrets?: RepoSecretDraft[];
+  /**
+   * The absolute path of a folder on this computer that the run uses in place
+   * of a repository (desktop app only). Set, even empty, it makes the draft a
+   * local source; `provider`, `repository`, `branch` and `commit` are then unused.
+   */
+  localPath?: string;
 }
+
+/** Whether the draft runs on a folder of this computer, not on a hosted repository. */
+export function isLocalRepo(repo: RepoDraft): boolean {
+  return repo.localPath !== undefined;
+}
+
+/** The sandbox provider id of the local Docker box, the only box a local folder may run in. */
+export const LOCAL_SANDBOX_PROVIDER = "docker";
 
 /**
  * One secret of a repository run (SKY-381 E52). `allowedHosts` is the text the
@@ -285,6 +299,11 @@ function secretIssue(secret: RepoSecretDraft): string | null {
  * browser and hardening need only the repository fields.
  */
 export function repoIssue(repo: RepoDraft): string | null {
+  if (isLocalRepo(repo)) {
+    if (!repo.localPath?.trim()) return "submit.v2.repo.issue.local_path";
+    if (!repo.editablePaths.some((path) => path.trim())) return "submit.v2.repo.issue.paths";
+    return null;
+  }
   if (!isRepoPath(repo.repository.trim(), repo.provider)) return "submit.v2.repo.issue.repository";
   if (repo.commit.trim() && !COMMIT_SHA.test(repo.commit.trim()))
     return "submit.v2.repo.issue.commit";
@@ -311,8 +330,10 @@ export function withRepository(repo: RepoDraft, repository: string): RepoDraft {
   return { ...repo, repository, branch: "", commit: "", ...(repo.createdBySkynet ? { createdBySkynet: false } : {}) };
 }
 
-/** Whether two drafts name the same repository on the same provider. */
+/** Whether two drafts name the same repository on the same provider, or the same folder. */
 function sameRepository(before: RepoDraft, after: RepoDraft): boolean {
+  if (isLocalRepo(before) || isLocalRepo(after))
+    return isLocalRepo(before) && isLocalRepo(after) && before.localPath?.trim() === after.localPath?.trim();
   return (
     before.repository.trim() === after.repository.trim() &&
     (before.provider ?? "github") === (after.provider ?? "github")
@@ -352,6 +373,61 @@ export function withTaskPatch(state: WizardV2State, patch: Partial<TaskSlice>): 
   )
     return { ...state, task };
   return { ...state, task, workspace: { ...state.workspace, files: {}, filesBase: undefined } };
+}
+
+/**
+ * The repository fields of the state the setup agent reads, so the agent
+ * knows which repository, or which folder, the run uses.
+ *
+ * Args:
+ *   repo: The wizard's repository draft.
+ *
+ * Returns:
+ *   `repository`, `repo_provider`, `repo_branch` and `repo_path`; a field the
+ *   draft does not set is undefined.
+ */
+export function agentRepoFields(repo: RepoDraft): {
+  repository: string | undefined;
+  repo_provider: RepoHost | "local";
+  repo_branch: string | undefined;
+  repo_path: string | undefined;
+} {
+  if (isLocalRepo(repo))
+    return {
+      repository: undefined,
+      repo_provider: "local",
+      repo_branch: undefined,
+      repo_path: repo.localPath?.trim() || undefined,
+    };
+  return {
+    repository: repo.repository.trim() || undefined,
+    repo_provider: repo.provider ?? "github",
+    // The agent reads the tree the run starts from: the pinned commit, else the branch.
+    repo_branch: repo.commit.trim() || repo.branch.trim() || undefined,
+    repo_path: undefined,
+  };
+}
+
+/**
+ * The sandbox providers a run of this draft may use. A local folder never
+ * leaves this computer, so it keeps only the local Docker box.
+ *
+ * Args:
+ *   catalog: The provider list of the run's server.
+ *   repo: The wizard's repository draft.
+ *
+ * Returns:
+ *   The list unchanged for a hosted repository, else only the local box.
+ */
+export function sandboxCatalogForRepo(
+  catalog: SandboxProviderCatalog,
+  repo: RepoDraft,
+): SandboxProviderCatalog {
+  if (!isLocalRepo(repo)) return catalog;
+  return {
+    providers: catalog.providers.filter((provider) => provider.id === LOCAL_SANDBOX_PROVIDER),
+    default_provider: LOCAL_SANDBOX_PROVIDER,
+  };
 }
 
 /** Whether the models a repository run needs are set. */

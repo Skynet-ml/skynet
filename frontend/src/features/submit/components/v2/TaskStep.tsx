@@ -13,7 +13,7 @@ import {
 } from "@/features/agent-panel";
 import { takeLandingGoal } from "@/features/landing";
 
-import { useWizardV2 } from "../../hooks/use-unified-wizard";
+import { useWizardV2, useWizardV2ShellOptional } from "../../hooks/use-unified-wizard";
 import { taskIssue } from "../../lib/wizard-v2";
 import { AuthoringShell } from "../steps/AuthoringShell";
 import { v2Msg } from "./ArtifactConfirmCard";
@@ -29,6 +29,8 @@ import { WizardScreen } from "./WizardScreen";
  */
 export function TaskStep({ page }: { page: number }) {
   const { state, guided, patchTask } = useWizardV2();
+  // A folder on this computer can only run here, never on the web (SKY-993).
+  const runsHere = (useWizardV2ShellOptional()?.runSource ?? "local") === "local";
   const task = state.task;
   const t = (key: string) => v2Msg(key, guided);
 
@@ -84,6 +86,7 @@ export function TaskStep({ page }: { page: number }) {
           onChange={(repo) => patchTask({ repo })}
           issue={taskIssue(task)}
           guided={guided}
+          localFolders={runsHere}
           seed={{
             objective: task.objective,
             scorerCode: state.workspace.metricCode,
