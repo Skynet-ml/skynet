@@ -28,6 +28,7 @@ from ...brand import APP_NAME
 from ...connectors import github, repo_hosts
 from ...connectors.github_repo import RepoRateLimitError, rate_limit_message
 from ...connectors.transport import label
+from ...local.folder_tree import FolderTreeError
 from ...models.blackbox import (
     DRAFT_FILE_BYTES,
     DRAFT_FILES_MAX,
@@ -39,7 +40,6 @@ from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, pa
 from .repo_browser import (
     LOCAL_PROVIDER,
     LocalFolderBrowser,
-    LocalFolderError,
     RepoBrowser,
     RepoRead,
     _source_noun,
@@ -241,7 +241,7 @@ def open_folder(state: dict[str, Any]) -> tuple[RepoBrowser | None, str]:
         return None, "No folder is chosen yet."
     try:
         browser = LocalFolderBrowser(folder)
-    except LocalFolderError as error:
+    except FolderTreeError as error:
         return None, str(error)
     except OSError as exc:  # an unreadable folder leaves the agent without it, not the turn
         logger.info("Setup agent cannot open the local folder: %s", type(exc).__name__)

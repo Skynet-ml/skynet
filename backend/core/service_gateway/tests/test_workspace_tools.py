@@ -19,6 +19,7 @@ from core.api.errors import DomainError
 from core.api.routers.generalist_agent import _merge_wizard_patch
 from core.config import settings
 from core.connectors.github_repo import RepoRateLimitError
+from core.local.folder_tree import folder_source_id
 from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
 from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents import pi_react, repo_browser, workspace_tools
@@ -1716,7 +1717,7 @@ def test_open_repo_picks_the_local_folder_with_no_host_token(monkeypatch: pytest
     browser, reason = open_repo(state, no_token)
 
     assert (isinstance(browser, repo_browser.LocalFolderBrowser), reason) == (True, "")
-    assert browser.branch == repo_browser.folder_snapshot_id(tmp_path)
+    assert browser.branch == folder_source_id(tmp_path)
     assert "already read for you" in browser.summary()
     assert open_repo({**state, "repo_path": ""}, no_token) == (None, "No folder is chosen yet.")
     assert open_repo({**state, "repo_path": " "}, no_token) == (None, "No folder is chosen yet.")
@@ -1751,7 +1752,7 @@ async def test_a_local_draft_records_the_folder_snapshot_and_leaves_the_folder_u
 ) -> None:
     """Draft files after a read pin ``workspace_base`` to the snapshot id, not a commit; the disk keeps its text."""
     state = _local_folder(monkeypatch, tmp_path)
-    snapshot = repo_browser.folder_snapshot_id(tmp_path)
+    snapshot = folder_source_id(tmp_path)
     turn = _TurnAuthoringFlag()
     tools = _tools(state, turn)
 

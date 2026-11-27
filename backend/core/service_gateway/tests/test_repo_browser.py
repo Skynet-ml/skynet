@@ -9,6 +9,8 @@ import pytest
 
 from ...api.errors import DomainError
 from ...config import settings
+from ...local.folder_tree import folder_entries, folder_source_id
+from ...local.tests.test_folder_tree import SHARED_VECTOR_ID
 from ..agents import repo_browser
 from ..agents.repo_browser import (
     KEY_FILE_BYTES,
@@ -16,8 +18,6 @@ from ..agents.repo_browser import (
     LocalFolderBrowser,
     LocalFolderError,
     RepoBrowser,
-    folder_entries,
-    folder_snapshot_id,
     read_folder_text,
 )
 
@@ -312,7 +312,7 @@ def test_the_local_tree_stops_at_the_entry_cap(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(repo_browser, "FOLDER_ENTRIES_MAX", 2)
     root = _folder(tmp_path, {"a.py": "", "b.py": "", "c.py": ""})
 
-    entries, truncated = folder_entries(root)
+    entries, truncated = folder_entries(root, 2)
 
     assert (_paths(entries), truncated) == (["a.py", "b.py"], True)
     assert "The folder has more than 2 entries, so some files are missing above." in (
@@ -332,8 +332,8 @@ def test_a_local_read_refuses_a_path_that_leaves_the_folder(tmp_path: Path, path
 
 
 @pytest.mark.usefixtures("local_mode")
-def test_a_local_folder_never_follows_a_link_out_of_it(tmp_path: Path) -> None:
-    """File and folder links that leave the folder are not in the tree, and a read through them is refused."""
+def test_a_local_folder_never_follows_a_link(tmp_path: Path) -> None:
+    """No link is in the tree, and a read through any link is refused, as the run never copies one."""
     outside = _folder(tmp_path / "outside", {"secret.txt": "outside", "inner/x.txt": "outside"})
     root = _folder(tmp_path / "repo", {"src/app.py": "x = 1\n", "src/inner.py": "y = 1\n"})
     (root / "leak.txt").symlink_to(outside / "secret.txt")
@@ -341,11 +341,10 @@ def test_a_local_folder_never_follows_a_link_out_of_it(tmp_path: Path) -> None:
     (root / "srclink").symlink_to(root / "src")
     (root / "alias.py").symlink_to(root / "src" / "inner.py")
 
-    assert _paths(folder_entries(root)[0]) == ["alias.py", "src/", "src/app.py", "src/inner.py"]
-    for path in ("leak.txt", "leakdir/x.txt"):
-        with pytest.raises(LocalFolderError, match="links out of the folder"):
+    assert _paths(folder_entries(root)[0]) == ["src/", "src/app.py", "src/inner.py"]
+    for path in ("leak.txt", "leakdir/x.txt", "srclink/app.py", "alias.py"):
+        with pytest.raises(LocalFolderError, match="goes through a link"):
             read_folder_text(root, path, 100)
-    assert read_folder_text(root, "alias.py", 100) == ("y = 1\n", False)
     browser = LocalFolderBrowser(root)
     assert browser.read_repo_file("leak.txt") == {
         "error": "No file named 'leak.txt' in the folder. Check the tree for the exact path."
@@ -355,13 +354,17 @@ def test_a_local_folder_never_follows_a_link_out_of_it(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("local_mode")
 def test_a_local_folder_never_returns_env_file_content(tmp_path: Path) -> None:
     """A ``.env*`` file, a file in a ``.env*`` folder, and a link to one are refused."""
-    root = _folder(tmp_path, {".env": "SECRET=1\n", ".envs/prod.txt": "SECRET=2\n", "app.py": ""})
+    root = _folder(
+        tmp_path, {".env": "SECRET=1\n", ".Env.local": "SECRET=3\n", ".envs/prod.txt": "SECRET=2\n", "app.py": ""}
+    )
     (root / "settings.txt").symlink_to(root / ".env")
 
     assert _paths(folder_entries(root)[0]) == ["app.py"]
-    for path in (".env", "./.env", ".envs/prod.txt", "settings.txt"):
+    for path in (".env", "./.env", ".Env.local", ".envs/prod.txt"):
         with pytest.raises(LocalFolderError, match=r"\.env file"):
             read_folder_text(root, path, 100)
+    with pytest.raises(LocalFolderError, match="goes through a link"):
+        read_folder_text(root, "settings.txt", 100)
     browser = LocalFolderBrowser(root)
     browser.preload_key_files()
     assert "SECRET" not in browser.summary()
@@ -386,7 +389,6 @@ def test_a_local_folder_is_refused_outside_local_mode(monkeypatch: pytest.Monkey
     monkeypatch.setattr(settings, "local_mode", False)
 
     for read in (
-        lambda: folder_entries(root),
         lambda: LocalFolderBrowser(root),
         lambda: read_folder_text(root, "app.py", 9),
     ):
@@ -394,29 +396,41 @@ def test_a_local_folder_is_refused_outside_local_mode(monkeypatch: pytest.Monkey
             read()
     monkeypatch.setattr(settings, "local_mode", True)
     with pytest.raises(LocalFolderError, match="absolute"):
-        folder_entries("relative/folder")
+        LocalFolderBrowser("relative/folder")
     with pytest.raises(LocalFolderError, match="No folder"):
-        folder_entries(root / "app.py")
+        LocalFolderBrowser(root / "app.py")
 
 
 @pytest.mark.usefixtures("local_mode")
-def test_the_snapshot_id_is_a_commit_shaped_hash_of_the_listed_files(tmp_path: Path) -> None:
-    """The id is 40 hex, stays the same for the same files, and moves with a content or path change only."""
-    root = _folder(tmp_path, {"app.py": "x = 1\n", ".gitignore": "*.log\n"})
-    first = folder_snapshot_id(root)
+def test_the_browser_branch_is_the_run_source_id(tmp_path: Path) -> None:
+    """The draft base equals the id the run pins as its commit, for the shared SKY-990 folder too."""
+    root = _folder(
+        tmp_path,
+        {
+            "src/main.py": "x = 1\n",
+            "README.md": "hi\n",
+            ".env": "KEY=1\n",
+            ".git/HEAD": "ref\n",
+            ".gitignore": "*.log\n",
+            "a.log": "1\n",
+            "a-b.txt": "1\n",
+        },
+    )
 
-    assert len(first) == 40
-    assert all(c in "0123456789abcdef" for c in first)
-    assert folder_snapshot_id(root) == first
-    assert LocalFolderBrowser(root).branch == first
-    (root / "debug.log").write_text("ignored", encoding="utf-8")
-    (root / ".env").write_text("SECRET=1\n", encoding="utf-8")
-    assert folder_snapshot_id(root) == first
-    (root / "app.py").write_text("x = 2\n", encoding="utf-8")
-    changed = folder_snapshot_id(root)
-    assert changed != first
-    (root / "app.py").rename(root / "main.py")
-    assert folder_snapshot_id(root) not in (first, changed)
+    assert LocalFolderBrowser(root).branch == folder_source_id(root) == SHARED_VECTOR_ID
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_cut_listing_still_pins_the_full_source_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A folder past the entry cap hashes all of its files, so the base still equals the run's id."""
+    root = _folder(tmp_path, {"a.py": "", "b.py": "", "c.py": ""})
+    full = folder_source_id(root)
+    monkeypatch.setattr(repo_browser, "FOLDER_ENTRIES_MAX", 2)
+
+    browser = LocalFolderBrowser(root)
+
+    assert browser._truncated
+    assert browser.branch == full
 
 
 @pytest.mark.usefixtures("local_mode")
