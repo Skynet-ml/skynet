@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -115,7 +116,7 @@ def test_setup_env_has_placeholders_and_core_vars_win(tmp_path: Path) -> None:
         assert env["PLAIN"] == "plain-value"
         assert "real-value-0123456789" not in "".join(env.values())
         assert env["PATH"] != "evil"
-        assert env["HTTPS_PROXY"] == f"http://127.0.0.1:{egress.port}"
+        assert env["HTTPS_PROXY"] == egress.proxy_url
         assert Path(env["SSL_CERT_FILE"]).read_bytes().endswith(egress.ca_pem)
         assert f"localhost:{egress.port}" in runner._argv("true")[2]
         runner.close()
@@ -264,5 +265,27 @@ def test_setup_command_reaches_only_the_proxy(tmp_path: Path) -> None:
         # The proxy answers, and refuses the loopback target.
         via = runner.exec_command("/usr/bin/curl -s -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:9/")
         assert "code=403" in via
+        # Without the session credentials from the env URL, the proxy refuses the command.
+        bare = f"/usr/bin/curl -s -o /dev/null -w 'code=%{{http_code}}' -x http://127.0.0.1:{egress.port} http://127.0.0.1:9/"
+        assert "code=407" in runner.exec_command(bare)
         runner.close()
     other.close()
+
+
+@on_mac
+def test_setup_python_and_node_send_the_proxy_credentials(tmp_path: Path) -> None:
+    """Check that Python and Node in a setup command reach the proxy with the env credentials."""
+    with LocalEgressProxy([], tmp_path / "state") as egress:
+        runner = LocalCommandRunner(tmp_path / "ws", egress=egress)
+        python = (
+            "python3 -c 'import urllib.request, urllib.error\n"
+            'try: urllib.request.urlopen("http://127.0.0.1:8099/", timeout=10)\n'
+            'except urllib.error.HTTPError as e: print("py=%d" % e.code)\''
+        )
+        assert "py=403" in runner.exec_command(python)
+        node = shutil.which("node")
+        if node is not None:
+            script = "fetch('https://127.0.0.1:8099/').catch(() => console.log('node done'))"
+            assert "node done" in runner.exec_command(f'{node} -e "{script}"')
+            assert [call["code"] for call in egress.calls][-1] == 403
+        runner.close()

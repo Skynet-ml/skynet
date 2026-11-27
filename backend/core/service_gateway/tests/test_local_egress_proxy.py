@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import datetime
 import socket
 import ssl
 import threading
 import time
-from collections.abc import Iterator
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import requests
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -27,7 +33,7 @@ SECRET = SetupSecret("API_KEY", VALUE, (APPROVED,))
 
 
 def _cert(
-    subject: str, issuer_key, issuer: x509.Name | None, key, *, ca: bool, sans: list[str] = ()
+    subject: str, issuer_key, issuer: x509.Name | None, key, *, ca: bool, sans: Sequence[str] = ()
 ) -> x509.Certificate:
     """Make a test certificate.
 
@@ -101,6 +107,29 @@ def _read_request(conn: ssl.SSLSocket) -> bytes:
     return head + b"\r\n\r\n" + body
 
 
+def _answer_for(request: bytes) -> bytes:
+    """Build the fake host's response to one request.
+
+    ``/echo`` returns the request, ``/gzip-echo`` returns it marked as gzip, and
+    ``/chunked-echo`` returns it in chunks that split the real value.
+
+    Args:
+        request: The request the host got.
+
+    Returns:
+        The response bytes.
+    """
+    path = request.split(b" ")[1:2]
+    if path == [b"/gzip-echo"]:
+        return b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % len(request) + request
+    if path == [b"/chunked-echo"]:
+        cut = request.find(VALUE.encode()) + 5 if VALUE.encode() in request else len(request) // 2
+        chunks = b"".join(b"%x\r\n%s\r\n" % (len(part), part) for part in (request[:cut], request[cut:]) if part)
+        return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + chunks + b"0\r\n\r\n"
+    body = request if path == [b"/echo"] else b"fine"
+    return b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+
+
 @pytest.fixture
 def upstream(tmp_path: Path) -> Iterator[Upstream]:
     """Run a fake TLS host for the approved and the other host; ``/echo`` returns the request."""
@@ -129,8 +158,7 @@ def upstream(tmp_path: Path) -> Iterator[Upstream]:
                     conn.settimeout(5)
                     request = _read_request(conn)
                     state.requests.append(request)
-                    body = request if request.split(b" ")[1:2] == [b"/echo"] else b"fine"
-                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+                    conn.sendall(_answer_for(request))
             except (OSError, IndexError):
                 continue
 
@@ -183,14 +211,9 @@ def _via_proxy(egress: LocalEgressProxy, host: str, request: bytes, *, trust: by
     Returns:
         All response bytes, or the proxy's answer to the ``CONNECT``.
     """
-    sock = socket.create_connection(("127.0.0.1", egress.port), timeout=10)
-    sock.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
-    answer = sock.recv(4096)
-    if not answer.startswith(b"HTTP/1.1 200"):
-        sock.close()
-        return answer
-    context = ssl.create_default_context(cadata=trust.decode())
-    with context.wrap_socket(sock, server_hostname=host) as tls:
+    with _open_tls(egress, host, trust=trust) as tls:
+        if isinstance(tls, bytes):
+            return tls
         tls.sendall(request)
         data = b""
         while True:
@@ -202,6 +225,42 @@ def _via_proxy(egress: LocalEgressProxy, host: str, request: bytes, *, trust: by
                 break
             data += chunk
     return data
+
+
+def _auth(egress: LocalEgressProxy) -> str:
+    """Return the session's ``Proxy-Authorization`` header line.
+
+    Args:
+        egress: The running proxy.
+
+    Returns:
+        The header line with its line break.
+    """
+    return f"Proxy-Authorization: Basic {egress._proxy_auth.decode()}\r\n"
+
+
+@contextlib.contextmanager
+def _open_tls(egress: LocalEgressProxy, host: str, *, trust: bytes) -> Iterator[ssl.SSLSocket | bytes]:
+    """Open a ``CONNECT`` tunnel with the session credentials and start TLS in it.
+
+    Args:
+        egress: The running proxy.
+        host: The target host.
+        trust: The CA the client trusts.
+
+    Yields:
+        The client TLS socket, or the proxy's answer when it refused the ``CONNECT``.
+    """
+    sock = socket.create_connection(("127.0.0.1", egress.port), timeout=10)
+    sock.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n{_auth(egress)}\r\n".encode())
+    answer = sock.recv(4096)
+    if not answer.startswith(b"HTTP/1.1 200"):
+        sock.close()
+        yield answer
+        return
+    context = ssl.create_default_context(cadata=trust.decode())
+    with context.wrap_socket(sock, server_hostname=host) as tls:
+        yield tls
 
 
 def _calls(egress: LocalEgressProxy, count: int) -> list[dict]:
@@ -266,7 +325,10 @@ def test_placeholder_in_the_url_is_refused(proxy: LocalEgressProxy, upstream: Up
 
 @pytest.mark.parametrize("chunked", [False, True])
 def test_placeholder_in_the_body_is_refused(proxy: LocalEgressProxy, upstream: Upstream, chunked: bool) -> None:
-    """Check that a placeholder in a plain or chunked body fails the request before the body goes out."""
+    """Check that a placeholder in a plain or chunked body fails the request.
+
+    The host may get the body bytes before the placeholder, but never the placeholder or the value.
+    """
     body = ("x" * 70_000 + placeholder("API_KEY") + "y" * 10).encode()
     if chunked:
         # The placeholder spans two chunks, so the scan must join them.
@@ -301,7 +363,7 @@ def test_unapproved_placeholder_on_an_approved_host_stays(proxy: LocalEgressProx
 def test_private_targets_are_refused(proxy: LocalEgressProxy, target: str) -> None:
     """Check that loopback, link-local and private targets get 403 and no tunnel."""
     sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
-    sock.sendall(f"CONNECT {target}:443 HTTP/1.1\r\n\r\n".encode())
+    sock.sendall(f"CONNECT {target}:443 HTTP/1.1\r\n{_auth(proxy)}\r\n".encode())
     answer = sock.recv(4096)
     sock.close()
     assert answer.startswith(b"HTTP/1.1 403")
@@ -311,7 +373,7 @@ def test_private_targets_are_refused(proxy: LocalEgressProxy, target: str) -> No
 def test_plain_http_to_loopback_is_refused(proxy: LocalEgressProxy) -> None:
     """Check that a plain http:// request to a private host is refused too."""
     sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
-    sock.sendall(b"GET http://127.0.0.1:8000/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    sock.sendall(f"GET http://127.0.0.1:8000/ HTTP/1.1\r\nHost: 127.0.0.1\r\n{_auth(proxy)}\r\n".encode())
     answer = sock.recv(4096)
     sock.close()
     assert answer.startswith(b"HTTP/1.1 403")
@@ -338,7 +400,8 @@ def test_command_env_has_placeholders_and_plain_values(proxy: LocalEgressProxy, 
     assert env["API_KEY"] == "skynet-secret-API_KEY"
     assert env["PLAIN_TOKEN"] == "plain-value"
     assert VALUE not in "".join(env.values())
-    assert env["HTTPS_PROXY"] == f"http://127.0.0.1:{proxy.port}"
+    assert env["HTTPS_PROXY"] == proxy.proxy_url
+    assert env["NODE_USE_ENV_PROXY"] == "1"
     for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "PIP_CERT"):
         assert env[key] == str(tmp_path / "ca.pem")
 
@@ -358,6 +421,7 @@ def test_ca_key_never_on_disk_and_state_deleted_on_stop(tmp_path: Path) -> None:
     assert state is not None
     assert state.is_relative_to(tmp_path / "state")
     egress._leaf_context(APPROVED)
+    assert egress._ca_key is not None
     ca_key = egress._ca_key.private_bytes(
         serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
     )
@@ -369,7 +433,7 @@ def test_ca_key_never_on_disk_and_state_deleted_on_stop(tmp_path: Path) -> None:
         assert b"PRIVATE KEY" not in data or path.name == "leaf-key.pem"
     constraints = x509.load_pem_x509_certificate(egress.ca_pem).extensions.get_extension_for_class(x509.NameConstraints)
     assert constraints.critical
-    assert [name.value for name in constraints.value.permitted_subtrees] == [APPROVED]
+    assert [name.value for name in constraints.value.permitted_subtrees or []] == [APPROVED]
     egress.stop()
     assert not state.exists()
     assert egress._ca_key is None
@@ -388,3 +452,190 @@ def test_bad_secrets_are_refused(secrets: list[SetupSecret], tmp_path: Path) -> 
     """Check that bad names, repeated names and values that cannot go in a header are refused."""
     with pytest.raises(ValueError):
         LocalEgressProxy(secrets, tmp_path)
+
+
+def _with_key(head: str) -> bytes:
+    """Add the API_KEY placeholder header and the blank line to a request head.
+
+    Args:
+        head: The request line and headers, each line with its line break.
+
+    Returns:
+        The request bytes.
+    """
+    return f"{head}Authorization: Bearer {placeholder('API_KEY')}\r\n\r\n".encode()
+
+
+@pytest.mark.parametrize(
+    "request_head",
+    [
+        f"GET / HTTP/1.1\r\nHost: {OTHER}\r\n",
+        f"GET https://{OTHER}/ HTTP/1.1\r\nHost: {APPROVED}\r\n",
+        f"GET {OTHER}:443 HTTP/1.1\r\nHost: {APPROVED}\r\n",
+        f"GET / HTTP/1.1\r\nHost: {APPROVED}\r\nHost: {OTHER}\r\n",
+        f"GET / HTTP/1.1\r\nHost: {APPROVED}:8443\r\n",
+        "GET / HTTP/1.1\r\n",
+    ],
+)
+def test_request_for_another_host_in_the_tunnel_is_refused(
+    proxy: LocalEgressProxy, upstream: Upstream, request_head: str
+) -> None:
+    """Check that a Host header or target that does not name the CONNECT host gets 400 before any swap."""
+    response = _via_proxy(proxy, APPROVED, _with_key(request_head), trust=proxy.ca_pem)
+    assert response.startswith(b"HTTP/1.1 400")
+    assert upstream.requests == []
+    assert _calls(proxy, 1)[-1]["status"] == "refused"
+
+
+@pytest.mark.parametrize("host_header", [f"{APPROVED}:443", "API.Example.com."])
+def test_host_header_with_the_connect_port_or_case_is_accepted(
+    proxy: LocalEgressProxy, upstream: Upstream, host_header: str
+) -> None:
+    """Check that the Host header may name the CONNECT port, and may differ in case or a trailing dot."""
+    response = _via_proxy(proxy, APPROVED, _with_key(f"GET / HTTP/1.1\r\nHost: {host_header}\r\n"), trust=proxy.ca_pem)
+    assert response.startswith(b"HTTP/1.1 200")
+    assert f"Authorization: Bearer {VALUE}".encode() in upstream.requests[-1]
+
+
+def test_encoding_and_range_headers_are_not_forwarded(proxy: LocalEgressProxy, upstream: Upstream) -> None:
+    """Check that the host gets ``Accept-Encoding: identity`` and no range, so the echo scan sees plain bytes."""
+    head = f"GET / HTTP/1.1\r\nHost: {APPROVED}\r\nAccept-Encoding: gzip, br\r\nRange: bytes=3-\r\nIf-Range: x\r\n"
+    _via_proxy(proxy, APPROVED, _with_key(head), trust=proxy.ca_pem)
+    sent = upstream.requests[-1].lower()
+    assert b"accept-encoding: identity\r\n" in sent
+    assert b"gzip" not in sent
+    assert b"range:" not in sent
+
+
+@pytest.mark.parametrize("path", ["/gzip-echo", "/chunked-echo"])
+def test_encoded_or_chunked_echo_of_the_real_value_is_cut(proxy: LocalEgressProxy, path: str) -> None:
+    """Check that an encoded echo is cut, and a chunked echo is scanned after the chunks are joined."""
+    response = _via_proxy(proxy, APPROVED, _get(path, header=placeholder("API_KEY")), trust=proxy.ca_pem)
+    assert VALUE.encode() not in response
+    assert VALUE[5:].encode() not in response
+    assert _calls(proxy, 1)[-1]["status"] == "failed"
+
+
+def test_chunked_response_without_a_value_is_relayed(proxy: LocalEgressProxy) -> None:
+    """Check that a chunked response with no swapped value reaches the client whole, in chunks."""
+    request = f"GET /chunked-echo HTTP/1.1\r\nHost: {APPROVED}\r\nX: {placeholder('WILD')}\r\n\r\n".encode()
+    response = _via_proxy(proxy, APPROVED, request, trust=proxy.ca_pem)
+    head, _, body = response.partition(b"\r\n\r\n")
+    assert b"Transfer-Encoding: chunked" in head
+    data = b""
+    while body:
+        size, _, body = body.partition(b"\r\n")
+        data, body = data + body[: int(size, 16)], body[int(size, 16) + 2 :]
+    assert placeholder("WILD").encode() in data
+    assert data.endswith(b"Connection: close\r\n\r\n")
+
+
+@pytest.mark.parametrize(
+    ("framing", "reason"),
+    [
+        ("Transfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n0\r\n\r\n", b"chunk extensions are not allowed"),
+        ("Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n", b"trailers are not allowed"),
+        ("Content-Length: 5\r\nContent-Length: 5\r\n\r\nhello", b"more than one content-length header"),
+        ("Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", b"more than one transfer"),
+    ],
+)
+def test_ambiguous_body_framing_is_refused(
+    proxy: LocalEgressProxy, upstream: Upstream, framing: str, reason: bytes
+) -> None:
+    """Check that chunk extensions, trailers and repeated framing headers get 400."""
+    request = f"POST / HTTP/1.1\r\nHost: {APPROVED}\r\n{framing}".encode()
+    response = _via_proxy(proxy, APPROVED, request, trust=proxy.ca_pem)
+    assert response.startswith(b"HTTP/1.1 400")
+    assert reason in response
+    assert all(b"ext=1" not in sent and b"X-Trailer" not in sent for sent in upstream.requests)
+
+
+@pytest.mark.parametrize("auth", ["", "Proxy-Authorization: Basic d3Jvbmc6d3Jvbmc=\r\n"])
+def test_connect_without_the_session_credentials_is_refused(proxy: LocalEgressProxy, auth: str) -> None:
+    """Check that a ``CONNECT`` with no or wrong credentials gets 407 and opens no tunnel."""
+    sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+    sock.sendall(f"CONNECT {APPROVED}:443 HTTP/1.1\r\nHost: {APPROVED}:443\r\n{auth}\r\n".encode())
+    answer = sock.recv(4096)
+    sock.close()
+    assert answer.startswith(b"HTTP/1.1 407")
+    assert b'Proxy-Authenticate: Basic realm="skynet"' in answer
+    assert _calls(proxy, 1)[-1]["status"] == "refused"
+
+
+def test_plain_http_without_the_session_credentials_is_refused(proxy: LocalEgressProxy) -> None:
+    """Check that a plain ``http://`` request with no credentials gets 407."""
+    sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+    sock.sendall(f"GET http://{APPROVED}/ HTTP/1.1\r\nHost: {APPROVED}\r\n\r\n".encode())
+    answer = sock.recv(4096)
+    sock.close()
+    assert answer.startswith(b"HTTP/1.1 407")
+
+
+def test_proxy_url_holds_the_session_credentials(proxy: LocalEgressProxy) -> None:
+    """Check that the env URL carries the credentials that the proxy checks, and each session has its own."""
+    url = urllib.parse.urlsplit(proxy.proxy_url)
+    assert (url.hostname, url.port) == ("127.0.0.1", proxy.port)
+    assert base64.b64encode(f"{url.username}:{url.password}".encode()) == proxy._proxy_auth
+    assert len(url.password or "") >= 32
+    other = LocalEgressProxy([SECRET], proxy.state_dir).start()
+    try:
+        assert other.proxy_url != proxy.proxy_url
+    finally:
+        other.stop()
+
+
+@pytest.mark.parametrize("client", ["urllib", "requests"])
+def test_python_clients_send_the_credentials_from_the_env_url(proxy: LocalEgressProxy, client: str) -> None:
+    """Check that urllib (pip's base) and requests send the env URL's credentials, so they get 403, not 407."""
+    target = "http://127.0.0.1:9/"
+    if client == "urllib":
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy.proxy_url}))
+        with pytest.raises(urllib.error.HTTPError) as error:
+            opener.open(target, timeout=10)
+        code = error.value.code
+    else:
+        code = requests.get(target, proxies={"http": proxy.proxy_url}, timeout=10).status_code
+    assert code == 403
+
+
+def test_proxy_listens_on_ipv4_and_ipv6_loopback(proxy: LocalEgressProxy) -> None:
+    """Check that the proxy holds the port on both loopback addresses the sandbox rule allows."""
+    families = {listener.family for listener in proxy._listeners}
+    assert socket.AF_INET in families
+    if socket.has_ipv6:
+        assert socket.AF_INET6 in families
+        with socket.create_connection(("::1", proxy.port), timeout=10) as sock:
+            sock.sendall(f"CONNECT {APPROVED}:443 HTTP/1.1\r\n\r\n".encode())
+            assert sock.recv(4096).startswith(b"HTTP/1.1 407")
+
+
+def test_stop_closes_an_open_inspected_connection(proxy: LocalEgressProxy) -> None:
+    """Check that stop() ends a client TLS connection that waits for its request."""
+    with _open_tls(proxy, APPROVED, trust=proxy.ca_pem) as tls:
+        assert isinstance(tls, ssl.SSLSocket)
+        started = time.monotonic()
+        proxy.stop()
+        try:
+            data = tls.recv(4096)
+        except (ssl.SSLError, OSError):
+            data = b""
+        assert data == b""
+        assert time.monotonic() - started < 5
+
+
+def test_no_swap_after_stop(proxy: LocalEgressProxy, upstream: Upstream) -> None:
+    """Check that a request that ends after stop() never sends the real value."""
+    with _open_tls(proxy, APPROVED, trust=proxy.ca_pem) as tls:
+        assert isinstance(tls, ssl.SSLSocket)
+        request = _get("/echo", header=placeholder("API_KEY"))
+        tls.sendall(request[:-2])
+        time.sleep(0.2)
+        proxy.stop()
+        time.sleep(1)
+        with contextlib.suppress(ssl.SSLError, OSError):
+            tls.sendall(request[-2:])
+            tls.recv(4096)
+    time.sleep(0.5)
+    assert all(VALUE.encode() not in sent for sent in upstream.requests)
+    with pytest.raises(OSError):
+        proxy._leaf_context(OTHER)

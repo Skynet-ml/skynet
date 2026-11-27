@@ -33,8 +33,11 @@ path, a header or a value.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime
+import errno
+import io
 import ipaddress
 import itertools
 import json
@@ -49,7 +52,9 @@ import time
 from collections import deque
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from hmac import compare_digest
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import BinaryIO
 from urllib.parse import urlsplit
 
@@ -92,9 +97,16 @@ _CA_DAYS = 2
 _HOP_HEADERS = frozenset(
     {b"connection", b"keep-alive", b"proxy-connection", b"proxy-authorization", b"expect", b"upgrade", b"te"}
 )
+# An encoded or partial response could carry a swapped value past the echo guard.
+_INSPECT_DROP = _HOP_HEADERS | {b"accept-encoding", b"range", b"if-range"}
+# A second copy of these could make the upstream read a request the proxy did not check.
+_SINGLE_HEADERS = (b"host", b"content-length", b"transfer-encoding")
+_HOST_HEADER = re.compile(rb"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::([0-9]{1,5}))?")
+_PROXY_USER = "skynet"
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 _CONTINUE = b"HTTP/1.1 100 Continue\r\n\r\n"
-_PHRASES = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
+_PHRASES = {400: "Bad Request", 403: "Forbidden", 407: "Proxy Authentication Required", 502: "Bad Gateway"}
+_PROXY_CHALLENGE = 'Proxy-Authenticate: Basic realm="skynet"\r\n'
 
 
 @dataclass(frozen=True)
@@ -135,7 +147,7 @@ class _RefusalError(Exception):
 
 
 class _CutError(Exception):
-    """A response that held a real secret value, so the proxy stopped it."""
+    """A response that could give a real secret value to the command, so the proxy stopped it."""
 
 
 def _answer(code: int, reason: str) -> bytes:
@@ -151,7 +163,7 @@ def _answer(code: int, reason: str) -> bytes:
     body = f"Skynet egress proxy: {reason}\n".encode()
     head = (
         f"HTTP/1.1 {code} {_PHRASES.get(code, 'Error')}\r\nContent-Type: text/plain; charset=utf-8\r\n"
-        f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+        f"{_PROXY_CHALLENGE if code == 407 else ''}Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
     )
     return head.encode() + body
 
@@ -231,20 +243,15 @@ def _body_pieces(reader: BinaryIO, *, chunked: bool, length: int) -> Iterator[tu
         return
     while True:
         line = reader.readline(1024)
-        size_text = line.split(b";", 1)[0].strip()
-        if not line.endswith(b"\r\n") or not _CHUNK_SIZE.fullmatch(size_text):
-            raise _RefusalError(400, "bad chunked body")
-        size = int(size_text, 16)
+        # Chunk extensions and trailers are not scanned, so they are refused.
+        if not line.endswith(b"\r\n") or not _CHUNK_SIZE.fullmatch(line[:-2]):
+            raise _RefusalError(400, "bad chunked body; chunk extensions are not allowed")
+        size = int(line[:-2], 16)
         if size == 0:
-            trailers = line
-            while True:
-                trailer = reader.readline(_HEAD_LIMIT)
-                if not trailer.endswith(b"\r\n") or len(trailers) > _HEAD_LIMIT:
-                    raise _RefusalError(400, "bad chunked body")
-                trailers += trailer
-                if trailer == b"\r\n":
-                    yield trailers, b""
-                    return
+            if reader.readline(3) != b"\r\n":
+                raise _RefusalError(400, "bad chunked body; trailers are not allowed")
+            yield line + b"\r\n", b""
+            return
         yield line, b""
         while size:
             data = reader.read(min(size, 65_536))
@@ -256,6 +263,56 @@ def _body_pieces(reader: BinaryIO, *, chunked: bool, length: int) -> Iterator[tu
         if end != b"\r\n":
             raise _RefusalError(400, "bad chunked body")
         yield end, b""
+
+
+def _response_pieces(reader: io.BufferedReader, *, chunked: bool, length: int | None) -> Iterator[bytes]:
+    """Read a response body and yield its decoded data.
+
+    Args:
+        reader: The buffered upstream stream after the head.
+        chunked: Whether the body uses chunked transfer coding.
+        length: The ``Content-Length``, or None to read until the upstream closes.
+
+    Yields:
+        The body data; chunk framing and trailers are dropped.
+
+    Raises:
+        _CutError: For a malformed chunked body.
+    """
+    if not chunked:
+        left = length
+        while left is None or left > 0:
+            try:
+                data = reader.read1(65_536 if left is None else min(left, 65_536))
+            except ssl.SSLEOFError:
+                return
+            if not data:
+                return
+            if left is not None:
+                left -= len(data)
+            yield data
+        return
+    while True:
+        line = reader.readline(1024)
+        size_text = line[:-2].split(b";", 1)[0].strip()
+        if not line.endswith(b"\r\n") or not _CHUNK_SIZE.fullmatch(size_text):
+            raise _CutError("the chunked response was malformed")
+        size = int(size_text, 16)
+        if size == 0:
+            seen = 0
+            while (trailer := reader.readline(_HEAD_LIMIT)) != b"\r\n":
+                seen += len(trailer)
+                if not trailer.endswith(b"\r\n") or seen > _HEAD_LIMIT:
+                    raise _CutError("the chunked response was malformed")
+            return
+        while size:
+            data = reader.read(min(size, 65_536))
+            if not data:
+                raise _CutError("the chunked response ended early")
+            size -= len(data)
+            yield data
+        if reader.read(2) != b"\r\n":
+            raise _CutError("the chunked response was malformed")
 
 
 class _PlaceholderScan:
@@ -330,9 +387,13 @@ class LocalEgressProxy:
         self.state_dir = state_dir
         self._state: Path | None = None
         self._ca_key: ec.EllipticCurvePrivateKey | None = None
-        self._listener: socket.socket | None = None
+        self._listeners: list[socket.socket] = []
         self._clients: set[socket.socket] = set()
+        self._stopped = False
+        self._token = ""
+        self._proxy_auth = b""
         self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(MAX_CLIENTS)
         self._seq = itertools.count(1)
         self._leaf_contexts: dict[str, ssl.SSLContext] = {}
         self._upstream_context = ssl.create_default_context(cafile=certifi.where())
@@ -349,11 +410,11 @@ class LocalEgressProxy:
         """
         return self.start()
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, *_exc: object) -> None:
         """Stop the proxy and delete its keys.
 
         Args:
-            exc: The exception details, if any.
+            _exc: The exception details, which it ignores.
         """
         self.stop()
 
@@ -367,20 +428,58 @@ class LocalEgressProxy:
         # mkdtemp makes the folder readable by this user only.
         self._state = Path(tempfile.mkdtemp(prefix="egress-", dir=self.state_dir))
         self._make_ca()
-        self._listener = socket.create_server(("127.0.0.1", 0), backlog=128)
-        self.port = self._listener.getsockname()[1]
-        threading.Thread(target=self._serve, args=(self._listener,), daemon=True).start()
+        self._token = token_urlsafe(32)
+        self._proxy_auth = base64.b64encode(f"{_PROXY_USER}:{self._token}".encode())
+        self._listeners = self._bind()
+        self.port = self._listeners[0].getsockname()[1]
+        for listener in self._listeners:
+            threading.Thread(target=self._serve, args=(listener,), daemon=True).start()
         return self
+
+    @property
+    def proxy_url(self) -> str:
+        """Return the proxy URL with its session credentials, for the command environment."""
+        return f"http://{_PROXY_USER}:{self._token}@127.0.0.1:{self.port}"
+
+    def _bind(self) -> list[socket.socket]:
+        """Listen on one free port on both 127.0.0.1 and ``[::1]``.
+
+        The sandbox rule ``localhost:PORT`` lets the command reach both
+        addresses, so the proxy holds both and no other process can take ``[::1]``.
+
+        Returns:
+            The listeners; the first is the IPv4 one.
+
+        Raises:
+            OSError: When no port is free on both addresses.
+        """
+        for _ in range(20):
+            ipv4 = socket.create_server(("127.0.0.1", 0), backlog=128)
+            try:
+                ipv6 = socket.create_server(("::1", ipv4.getsockname()[1]), family=socket.AF_INET6, backlog=128)
+            except OSError as error:
+                if error.errno == errno.EADDRINUSE:
+                    ipv4.close()
+                    continue
+                # A Mac without IPv6 loopback has no [::1] for any process to bind.
+                if error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL):
+                    logger.warning("The egress proxy listens on IPv4 only: [::1] is not available (%s).", error)
+                    return [ipv4]
+                ipv4.close()
+                raise
+            return [ipv4, ipv6]
+        raise OSError(errno.EADDRINUSE, "no loopback port was free on both IPv4 and IPv6")
 
     def stop(self) -> None:
         """Stop listening, end the open connections and delete the session's keys."""
-        listener, self._listener = self._listener, None
-        if listener is not None:
-            with contextlib.suppress(OSError):
-                listener.close()
         with self._lock:
+            self._stopped = True
+            listeners, self._listeners = self._listeners, []
             clients = list(self._clients)
             self._leaf_contexts.clear()
+        for listener in listeners:
+            with contextlib.suppress(OSError):
+                listener.close()
         for client in clients:
             with contextlib.suppress(OSError):
                 client.shutdown(socket.SHUT_RDWR)
@@ -409,12 +508,14 @@ class LocalEgressProxy:
         Returns:
             The variables; a hosted secret has its placeholder, never its value.
         """
-        url = f"http://127.0.0.1:{self.port}"
+        url = self.proxy_url
         env = dict(self._plain)
         env.update({name: placeholder(name) for name in self._hosted})
         for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
             env[key] = url
         env["NO_PROXY"] = env["no_proxy"] = ""
+        # Node's fetch ignores the proxy variables without this (Node 22.21 and later read it).
+        env["NODE_USE_ENV_PROXY"] = "1"
         for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT", "NODE_EXTRA_CA_CERTS"):
             env[key] = str(ca_bundle)
         env["GIT_SSL_CAINFO"] = str(ca_bundle)
@@ -432,8 +533,13 @@ class LocalEgressProxy:
         return {name: secret for name, secret in self._hosted.items() if host_allowed(host, secret.allowed_hosts)}
 
     def _make_ca(self) -> None:
-        """Make the session CA in memory and the leaf key file in the state folder."""
-        assert self._state is not None
+        """Make the session CA in memory and the leaf key file in the state folder.
+
+        Raises:
+            OSError: When the proxy has no state folder.
+        """
+        if self._state is None:
+            raise OSError(errno.ENOENT, "the egress proxy has no state folder")
         now = datetime.datetime.now(datetime.UTC)
         self._ca_key = ec.generate_private_key(ec.SECP256R1())
         self._ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Skynet setup session CA")])
@@ -489,13 +595,16 @@ class LocalEgressProxy:
 
         Returns:
             The context, made once for each host.
+
+        Raises:
+            OSError: When the proxy stopped and its keys are gone.
         """
         with self._lock:
+            if self._stopped or self._state is None or self._ca_key is None:
+                raise OSError(errno.ECONNABORTED, "the proxy stopped")
             context = self._leaf_contexts.get(host)
             if context is not None:
                 return context
-            assert self._state is not None
-            assert self._ca_key is not None
             try:
                 san: x509.GeneralName = x509.IPAddress(ipaddress.ip_address(host))
             except ValueError:
@@ -546,7 +655,7 @@ class LocalEgressProxy:
         Args:
             listener: The bound loopback listener.
         """
-        slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        slots = self._slots
         while True:
             try:
                 client, _ = listener.accept()
@@ -568,14 +677,51 @@ class LocalEgressProxy:
             client: The accepted connection.
             slots: The semaphore that caps concurrent clients.
         """
-        with self._lock:
-            self._clients.add(client)
         try:
+            self._track(client)
             self._handle(client)
+        except OSError:
+            client.close()
         finally:
-            with self._lock:
-                self._clients.discard(client)
+            self._untrack(client)
             slots.release()
+
+    def _track(self, sock: socket.socket) -> None:
+        """Keep an open socket so that :meth:`stop` can shut it down.
+
+        Args:
+            sock: A client, client TLS or upstream socket.
+
+        Raises:
+            OSError: When the proxy stopped.
+        """
+        with self._lock:
+            if self._stopped:
+                raise OSError(errno.ECONNABORTED, "the proxy stopped")
+            self._clients.add(sock)
+
+    def _untrack(self, sock: socket.socket) -> None:
+        """Forget a socket that closes.
+
+        Args:
+            sock: A socket from :meth:`_track`.
+        """
+        with self._lock:
+            self._clients.discard(sock)
+
+    def _check_auth(self, headers: list[tuple[bytes, bytes]]) -> None:
+        """Check the session credentials, so only this session's commands can use the proxy.
+
+        Args:
+            headers: The request headers.
+
+        Raises:
+            _RefusalError: With 407 when the credentials are missing or wrong.
+        """
+        given = [value for name, value in headers if name.lower() == b"proxy-authorization"]
+        scheme, _, credentials = given[0].partition(b" ") if len(given) == 1 else (b"", b"", b"")
+        if scheme.lower() != b"basic" or not compare_digest(credentials.strip(), self._proxy_auth):
+            raise _RefusalError(407, "the proxy needs the session credentials")
 
     def _record(self, call: dict) -> None:
         """Keep and log one request's record.
@@ -657,6 +803,7 @@ class LocalEgressProxy:
         target = parse_connect(head)
         sent_target = _split_connect(head)
         call.update(host=sent_target[0] if sent_target else None, port=target[1] if target else None)
+        self._check_auth(_parse_head(head)[1])
         if target is None:
             raise _RefusalError(400, "bad CONNECT target")
         host, port = target
@@ -666,12 +813,16 @@ class LocalEgressProxy:
             raise _RefusalError(400, "the client sent data before the tunnel opened")
         upstream = self._checked_upstream(host, port)
         with upstream:
-            client.sendall(_ESTABLISHED)
-            call.update(status="ok", code=200, reason=None)
-            if approved:
-                self._inspect(client, upstream, host, approved, call)
-            else:
-                self._tunnel(client, upstream, rest, call)
+            self._track(upstream)
+            try:
+                client.sendall(_ESTABLISHED)
+                call.update(status="ok", code=200, reason=None)
+                if approved:
+                    self._inspect(client, upstream, target, approved, call)
+                else:
+                    self._tunnel(client, upstream, rest, call)
+            finally:
+                self._untrack(upstream)
 
     def _plain_http(self, client: socket.socket, head: bytes, rest: bytes, call: dict) -> None:
         """Forward a plain ``http://`` request without any swap.
@@ -686,6 +837,7 @@ class LocalEgressProxy:
             _RefusalError: For a bad request or a private host.
         """
         (method, target, _), headers = _parse_head(head)
+        self._check_auth(headers)
         try:
             url = urlsplit(target.decode("ascii"))
             host, port = (url.hostname or "").rstrip(".").lower(), url.port or 80
@@ -699,8 +851,13 @@ class LocalEgressProxy:
         lines = [b" ".join([method, path.encode(), b"HTTP/1.1"])]
         lines += [name + b": " + value for name, value in headers if name.lower() not in _HOP_HEADERS]
         with upstream:
-            call.update(status="ok", code=None, reason=None)
-            self._tunnel(client, upstream, b"\r\n".join([*lines, b"Connection: close"]) + b"\r\n\r\n" + rest, call)
+            self._track(upstream)
+            try:
+                call.update(status="ok", code=None, reason=None)
+                first = b"\r\n".join([*lines, b"Connection: close"]) + b"\r\n\r\n" + rest
+                self._tunnel(client, upstream, first, call)
+            finally:
+                self._untrack(upstream)
 
     def _tunnel(self, client: socket.socket, upstream: socket.socket, first: bytes, call: dict) -> None:
         """Copy bytes both ways, unchanged, until either side closes or both go idle.
@@ -724,36 +881,45 @@ class LocalEgressProxy:
         call.update(bytes_sent=len(first) + sum(sent), bytes_received=sum(received))
 
     def _inspect(
-        self, client: socket.socket, upstream: socket.socket, host: str, approved: dict[str, SetupSecret], call: dict
+        self,
+        client: socket.socket,
+        upstream: socket.socket,
+        target: tuple[str, int],
+        approved: dict[str, SetupSecret],
+        call: dict,
     ) -> None:
         """End TLS for an approved host, and send one request on with its header placeholders swapped.
 
         Args:
             client: The client connection after the ``200`` answer.
             upstream: The TCP connection to the host's checked address.
-            host: The approved host.
+            target: The ``CONNECT`` host and port.
             approved: The secrets that may go to the host.
             call: The request's record, updated in place.
         """
         call.update(status="failed", code=None, reason="the client TLS handshake failed")
-        with self._leaf_context(host).wrap_socket(client, server_side=True) as tls:
-            tls.settimeout(_IO_SECONDS)
-            reader = tls.makefile("rb")
+        with self._leaf_context(target[0]).wrap_socket(client, server_side=True) as tls:
+            self._track(tls)
             try:
-                self._forward(reader, tls, upstream, host, approved, call)
-            except _RefusalError as refusal:
-                call.update(status="refused", code=refusal.code, reason=refusal.reason)
-                with contextlib.suppress(OSError):
-                    tls.sendall(_answer(refusal.code, refusal.reason))
-            except _CutError as cut:
-                call.update(status="failed", reason=f"the response held the value of secret {cut}, so it was cut")
+                tls.settimeout(_IO_SECONDS)
+                reader = tls.makefile("rb")
+                try:
+                    self._forward(reader, tls, upstream, target, approved, call)
+                except _RefusalError as refusal:
+                    call.update(status="refused", code=refusal.code, reason=refusal.reason)
+                    with contextlib.suppress(OSError):
+                        tls.sendall(_answer(refusal.code, refusal.reason))
+                except _CutError as cut:
+                    call.update(status="failed", reason=str(cut))
+            finally:
+                self._untrack(tls)
 
     def _forward(
         self,
         reader: BinaryIO,
         tls: ssl.SSLSocket,
         upstream: socket.socket,
-        host: str,
+        target: tuple[str, int],
         approved: dict[str, SetupSecret],
         call: dict,
     ) -> None:
@@ -763,26 +929,42 @@ class LocalEgressProxy:
             reader: The buffered client stream.
             tls: The client TLS connection.
             upstream: The TCP connection to the host's checked address.
-            host: The approved host.
+            target: The ``CONNECT`` host and port.
             approved: The secrets that may go to the host.
             call: The request's record, updated in place.
 
         Raises:
-            _RefusalError: For a malformed request, or a placeholder of an approved
-                secret outside the headers.
-            _CutError: When the response holds a swapped value.
+            _RefusalError: For a malformed request, a request for another host,
+                or a placeholder of an approved secret outside the headers.
+            _CutError: When the response could hold a swapped value.
+            OSError: When the proxy stopped.
         """
+        host, port = target
         call.update(reason="the client sent no request")
         head = _read_tls_head(reader)
         if head is None:
             return
-        (method, target, _), headers = _parse_head(head)
+        (method, path, _), headers = _parse_head(head)
         call["method"] = method.decode("latin-1")
+        # An absolute or authority target could send the request, and the value, to another host.
+        if not (path.startswith(b"/") or (path == b"*" and method == b"OPTIONS")):
+            raise _RefusalError(400, "the request target must be a path")
+        lower = [(name.lower(), value) for name, value in headers]
+        for single in _SINGLE_HEADERS:
+            if sum(name == single for name, _ in lower) > 1:
+                raise _RefusalError(400, f"the request has more than one {single.decode()} header")
+        values = dict(lower)
+        host_match = _HOST_HEADER.fullmatch(values.get(b"host", b""))
+        if (
+            host_match is None
+            or host_match.group(1).decode().strip("[]").rstrip(".").lower() != host
+            or (host_match.group(2) is not None and int(host_match.group(2)) != port)
+        ):
+            raise _RefusalError(400, "the Host header must name the CONNECT host")
         names = frozenset(approved)
-        name = _PlaceholderScan(names).feed(target)
+        name = _PlaceholderScan(names).feed(path)
         if name is not None:
             raise _RefusalError(403, f"secret {name} can go only in a request header")
-        values = {key.lower(): value for key, value in headers}
         chunked = values.get(b"transfer-encoding", b"").strip().lower()
         length_text = values.get(b"content-length")
         if chunked not in (b"", b"chunked") or (chunked and length_text is not None):
@@ -807,61 +989,118 @@ class LocalEgressProxy:
             used[secret.name] = secret.value.encode()
             return used[secret.name]
 
-        lines = [b" ".join([method, target, b"HTTP/1.1"])]
-        lines += [
-            name + b": " + _PLACEHOLDER.sub(swap, value) for name, value in headers if name.lower() not in _HOP_HEADERS
-        ]
-        out_head = b"\r\n".join([*lines, b"Connection: close"]) + b"\r\n\r\n"
         if b"100-continue" in values.get(b"expect", b"").lower() and (chunked or length):
             tls.sendall(_CONTINUE)
         call.update(reason="the upstream TLS handshake failed")
         with self._upstream_context.wrap_socket(upstream, server_hostname=host) as upstream_tls:
-            call.update(reason=None)
-            upstream_tls.sendall(out_head)
-            call["bytes_sent"] = len(out_head)
-            scan = _PlaceholderScan(names)
-            for raw, data in _body_pieces(reader, chunked=bool(chunked), length=length):
-                name = scan.feed(data)
-                if name is not None:
-                    raise _RefusalError(403, f"secret {name} can go only in a request header")
-                upstream_tls.sendall(raw)
-                call["bytes_sent"] += len(raw)
-            call.update(status="ok")
-            self._relay_response(upstream_tls, tls, used, call)
+            self._track(upstream_tls)
+            try:
+                # stop() shuts down every tracked socket, so no value goes out after it.
+                if self._stopped:
+                    raise OSError(errno.ECONNABORTED, "the proxy stopped")
+                lines = [b" ".join([method, path, b"HTTP/1.1"])]
+                lines += [
+                    name + b": " + _PLACEHOLDER.sub(swap, value)
+                    for name, value in headers
+                    if name.lower() not in _INSPECT_DROP
+                ]
+                out_head = b"\r\n".join([*lines, b"Accept-Encoding: identity", b"Connection: close"]) + b"\r\n\r\n"
+                call.update(reason=None)
+                upstream_tls.sendall(out_head)
+                call["bytes_sent"] = len(out_head)
+                scan = _PlaceholderScan(names)
+                for raw, data in _body_pieces(reader, chunked=bool(chunked), length=length):
+                    name = scan.feed(data)
+                    if name is not None:
+                        raise _RefusalError(403, f"secret {name} can go only in a request header")
+                    upstream_tls.sendall(raw)
+                    call["bytes_sent"] += len(raw)
+                call.update(status="ok")
+                self._relay_response(upstream_tls.makefile("rb"), tls, used, method, call)
+            finally:
+                self._untrack(upstream_tls)
 
-    def _relay_response(self, upstream: ssl.SSLSocket, tls: ssl.SSLSocket, used: dict[str, bytes], call: dict) -> None:
-        """Copy the response to the client, and stop it if it holds a swapped value.
+    def _relay_response(
+        self, upstream: io.BufferedReader, tls: ssl.SSLSocket, used: dict[str, bytes], method: bytes, call: dict
+    ) -> None:
+        """Copy the response to the client, and stop it if it could hold a swapped value.
 
-        An echo endpoint would otherwise hand the real value to the command.
+        An echo endpoint would otherwise hand the real value to the command. The
+        proxy scans the decoded body, so a chunk boundary cannot split a value
+        past the scan, and sends a chunked body on in chunks of its own.
 
         Args:
-            upstream: The upstream TLS connection.
+            upstream: The buffered upstream TLS stream.
             tls: The client TLS connection.
             used: The swapped values by secret name.
+            method: The request method.
             call: The request's record, updated in place.
 
         Raises:
-            _CutError: With the secret name, when the response holds its value.
+            _CutError: When the response holds a swapped value, or is encoded
+                after a swap so the proxy cannot check it.
         """
         guard = {name: value for name, value in used.items() if len(value) >= _ECHO_GUARD_MIN}
-        keep = max((len(value) for value in guard.values()), default=1) - 1
-        pending = b""
+
+        def check(data: bytes) -> None:
+            """Stop the response when it holds a swapped value.
+
+            Args:
+                data: Response bytes the client has not got yet.
+
+            Raises:
+                _CutError: When a value is in the bytes.
+            """
+            for name, value in guard.items():
+                if value in data:
+                    raise _CutError(f"the response held the value of secret {name}, so it was cut")
+
         while True:
             try:
-                chunk = upstream.recv(65_536)
-            except ssl.SSLEOFError:
+                head = _read_tls_head(upstream)
+            except _RefusalError as error:
+                raise _CutError("the response head was too long") from error
+            if head is None:
+                return
+            call["bytes_received"] += len(head)
+            call["code"] = code = _status_code(head)
+            check(head)
+            if code is None or not 100 <= code < 200 or code == 101:
                 break
-            if not chunk:
-                break
-            if call["bytes_received"] == 0:
-                call["code"] = _status_code(chunk)
-            call["bytes_received"] += len(chunk)
-            pending += chunk
-            for name, value in guard.items():
-                if value in pending:
-                    raise _CutError(name)
+            tls.sendall(head)
+        fields = [line.partition(b":") for line in head.removesuffix(b"\r\n\r\n").split(b"\r\n")[1:]]
+        values = {name.strip().lower(): value.strip().lower() for name, _, value in fields}
+        if guard and values.get(b"content-encoding", b"identity") not in (b"", b"identity"):
+            raise _CutError("the response was encoded, so the proxy could not check it for secret values")
+        framing = values.get(b"transfer-encoding", b"")
+        chunked = framing == b"chunked"
+        if guard and framing and not chunked:
+            raise _CutError("the response framing was not chunked, so the proxy could not check it")
+        length_text = values.get(b"content-length", b"")
+        length = int(length_text) if length_text.isdigit() and not chunked else None
+        tls.sendall(head)
+        if method == b"HEAD" or code in (204, 304):
+            return
+        keep = max((len(value) for value in guard.values()), default=1) - 1
+        pending = b""
+
+        def emit(data: bytes) -> None:
+            """Send body data to the client in the response's framing.
+
+            Args:
+                data: Checked body data.
+            """
+            if data:
+                tls.sendall(b"%x\r\n%s\r\n" % (len(data), data) if chunked else data)
+
+        for data in _response_pieces(upstream, chunked=chunked, length=length):
+            call["bytes_received"] += len(data)
+            pending += data
+            check(pending)
             cut = len(pending) - keep
             if cut > 0:
-                tls.sendall(pending[:cut])
+                emit(pending[:cut])
                 pending = pending[cut:]
-        tls.sendall(pending)
+        emit(pending)
+        if chunked:
+            tls.sendall(b"0\r\n\r\n")
