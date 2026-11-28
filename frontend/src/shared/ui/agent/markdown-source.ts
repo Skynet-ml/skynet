@@ -80,6 +80,45 @@ export function prepareMath(text: string): string {
 }
 
 /**
+ * Find the inline code spans by the CommonMark rule: a run of n backticks
+ * opens a span, and the next run of exactly n backticks closes it.
+ *
+ * Args:
+ *   text: Markdown prose with no code fence in it.
+ *
+ * Returns:
+ *   The text with each closed span cut out, and the span that has no
+ *   closer yet (its start index and run length), or null.
+ */
+function scanCodeSpans(text: string): {
+  text: string;
+  open: { at: number; size: number } | null;
+} {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\\" && text[i + 1] === "`") {
+      out += text.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (text[i] !== "`") {
+      out += text[i];
+      i += 1;
+      continue;
+    }
+    let size = 1;
+    while (text[i + size] === "`") size += 1;
+    const closers = new RegExp(`(?<!\`)\`{${size}}(?!\`)`, "g");
+    closers.lastIndex = i + size;
+    const close = closers.exec(text);
+    if (!close) return { text: out, open: { at: i, size } };
+    i = close.index + size;
+  }
+  return { text: out, open: null };
+}
+
+/**
  * Fix the end of a reply that is still streaming, so half-typed syntax does
  * not flash: drop a link or image whose `[` has no full target yet, and
  * close a dangling inline code span, `*` or `**`. An open code fence stays
@@ -95,10 +134,14 @@ export function repairStreamingMarkdown(text: string): string {
 
   tail = tail.replace(/!?\[[^\]\n]*(\]\([^)\n]*)?$/, "");
   // Close the code span first, so a `*` inside it does not count as emphasis below.
-  if (tail.replace(/`[^`]*`/g, "").includes("`"))
-    tail = /`\s*$/.test(tail) ? tail.replace(/`\s*$/, "") : `${tail}\``;
-  const plain = tail
-    .replace(/`[^`\n]*`/g, "")
+  const span = scanCodeSpans(tail).open;
+  if (span) {
+    const run = "`".repeat(span.size);
+    if (!tail.slice(span.at + span.size).trim()) tail = tail.slice(0, span.at);
+    else tail = `${tail}${tail.endsWith("`") ? " " : ""}${run}`;
+  }
+  const plain = scanCodeSpans(tail)
+    .text.replace(/^[ \t]*[*+-][ \t]+/gm, "")
     .replace(/^[ \t]*[*+-][ \t]+/gm, "")
     .replace(/^[ \t]*(\*[ \t]*){3,}$/gm, "");
   const strong = (plain.match(/\*\*/g) ?? []).length;
@@ -223,6 +266,12 @@ export function svgDataUrl(code: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(code.trim())}`;
 }
 
+const SHELL_COMMAND =
+  /^(sudo|npm|npx|pnpm|yarn|pip3?|uv|git|cd|ls|curl|wget|brew|docker|kubectl|export|echo|mkdir|chmod|cargo|just)( |$)/;
+// A flag, a path, an assignment, or a package manager or git with a known subcommand.
+const SHELL_SIGN =
+  /\s--?\w|\s(\.\/|\/|~|\$)|\w+=|^(sudo )?npx \S|^(sudo )?(npm|pnpm|yarn|pip3?|uv|git|brew|docker|kubectl|cargo) (install|add|i|ci|run|exec|init|build|test|clone|status|commit|push|pull|checkout|log|diff|ps|apply|get)\b/;
+
 // Each rule needs a strong sign of its language, so prose in an untagged fence stays plain.
 const GUESSES: Array<[string, (code: string) => boolean]> = [
   ["diff", (c) => /^(diff --git |@@ -\d)/m.test(c) || /^--- .*\n\+\+\+ /m.test(c)],
@@ -246,10 +295,16 @@ const GUESSES: Array<[string, (code: string) => boolean]> = [
   ],
   [
     "bash",
-    (c) =>
-      /^(\$ |#!.*\b(ba|z)?sh\b|(sudo|npm|npx|pnpm|yarn|pip3?|uv|git|cd|ls|curl|wget|brew|docker|kubectl|export|echo|mkdir|chmod|cargo|just)( |$))/.test(
-        c,
-      ),
+    (c) => {
+      if (/^(\$ |#!.*\b(ba|z)?sh\b)/.test(c)) return true;
+      // Words like "cd", "echo" or "just" also start prose, so the first line must look like a command.
+      const lines = c.split("\n").filter((l) => l.trim() && !/^\s*#/.test(l));
+      return (
+        lines.length > 0 &&
+        lines.every((l) => SHELL_COMMAND.test(l.trim())) &&
+        SHELL_SIGN.test(lines[0]!.trim())
+      );
+    },
   ],
   [
     "python",
@@ -261,22 +316,25 @@ const GUESSES: Array<[string, (code: string) => boolean]> = [
   [
     "typescript",
     (c) =>
-      /^\s*(export )?(interface \w+|type \w+(<.*>)? =|enum \w+ \{)/m.test(c) ||
+      /^\s*(export )?(interface \w+(<.*>)?( extends [^{\n]+)? \{|type \w+(<.*>)? = [^\n]*[;{|&<[=>'"]|enum \w+ \{)/m.test(
+        c,
+      ) ||
       /\b(const|let|function)\b[^\n]*: (string|number|boolean|unknown)\b/.test(c),
   ],
   [
     "javascript",
     (c) =>
-      /^\s*(import .+ from ['"]|export (default|const|function)|(const|let|var) \w+ = |function \w*\(|console\.log\()/m.test(
+      /^\s*(import .+ from ['"]|export (default|const|function)|function \w*\(|console\.log\()/m.test(
         c,
-      ),
+      ) ||
+      (/^\s*(const|let|var) \w+ = /m.test(c) && /[;{}()]|=>/.test(c)),
   ],
   ["go", (c) => /^package \w+$/m.test(c) || /^func (\(.+\) )?\w+\(/m.test(c)],
   ["rust", (c) => /^\s*(pub )?fn \w+(<.*>)?\(/m.test(c) || /\blet mut \w+/.test(c)],
   [
     "sql",
     (c) =>
-      /^\s*(SELECT\b[\s\S]*\bFROM\b|INSERT INTO\b|UPDATE \w+ SET\b|DELETE FROM\b|CREATE (TABLE|INDEX|VIEW)\b)/i.test(
+      /^\s*(SELECT\b[\s\S]*\bFROM\b|INSERT INTO\b|UPDATE \w+ SET\b|DELETE FROM\b|CREATE (TABLE|INDEX|VIEW)\b)/.test(
         c,
       ),
   ],

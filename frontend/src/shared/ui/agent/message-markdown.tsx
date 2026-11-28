@@ -518,7 +518,7 @@ function PreBlock({ end, children }: { end?: number; children?: React.ReactNode 
   // As in Codex, a fence with no tag gets a guessed language; text outside fences gets none.
   return (
     <CodeBlock
-      language={language || guessLanguage(code)}
+      language={language || (open ? "" : guessLanguage(code))}
       code={code}
       open={open}
       preview={preview}

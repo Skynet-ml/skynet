@@ -100,6 +100,12 @@ test("repairStreamingMarkdown closes a half-typed code span", () => {
   assert.equal(repairStreamingMarkdown("run `a*b"), "run `a*b`");
   assert.equal(repairStreamingMarkdown("run `"), "run ");
   assert.equal(repairStreamingMarkdown("run `x` and `y`"), "run `x` and `y`");
+  assert.equal(repairStreamingMarkdown("use ``a`b`` here"), "use ``a`b`` here");
+  assert.equal(repairStreamingMarkdown("run ``a` b"), "run ``a` b``");
+  assert.equal(repairStreamingMarkdown("type ``foo"), "type ``foo``");
+  assert.equal(repairStreamingMarkdown("type ``"), "type ");
+  assert.equal(repairStreamingMarkdown("a \\` b"), "a \\` b");
+  assert.equal(repairStreamingMarkdown("use ``a*b`` and *it"), "use ``a*b`` and *it*");
 });
 
 test("isMathFence and isSvgFence pick the fences that get a preview", () => {
@@ -142,4 +148,18 @@ test("guessLanguage names an untagged fence only on a strong sign", () => {
   assert.equal(guessLanguage("Note: read this first.\nThen go on."), "");
   assert.equal(guessLanguage("make sure you select the files from the list"), "");
   assert.equal(guessLanguage(""), "");
+  for (const prose of [
+    "Select the rows from the table you want.",
+    "cd into the folder and run it",
+    "just run the tests again",
+    "export the data please",
+    "echo is a sound",
+    "let x = 1 means x is one",
+    "type Foo = bar",
+  ])
+    assert.equal(guessLanguage(prose), "", prose);
+  assert.equal(guessLanguage("cd ./app\nls -la"), "bash");
+  assert.equal(guessLanguage("export FOO=1"), "bash");
+  assert.equal(guessLanguage("type Id = string;"), "typescript");
+  assert.equal(guessLanguage("let x = f(1);"), "javascript");
 });
