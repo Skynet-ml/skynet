@@ -369,7 +369,6 @@
   "submit.v2.task.background_placeholder": "背景、制約、良い結果とはどんなものか",
   "submit.v2.task.desc": "チャットでタスクを説明してください。アシスタントが目的と背景を書き、最適化するものを判断します。",
   "submit.v2.task.desc.guided": "改善したいことをアシスタントと話してください。このページを代わりに埋めてくれます。",
-  "submit.v2.task.objective_hint_auto": "チャットの内容から書かれました。自由に編集できます。アシスタントがあなたの編集を上書きすることはありません。",
   "submit.v2.task.objective_label": "目的",
   "submit.v2.task.objective_label.guided": "ゴール",
   "submit.v2.task.objective_placeholder": "最適化されたアーティファクトがうまくこなすべきこと",

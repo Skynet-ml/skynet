@@ -369,7 +369,6 @@
   "submit.v2.task.background_placeholder": "背景、约束条件，以及好的结果是什么样子",
   "submit.v2.task.desc": "在聊天中描述你的任务。助手会写出目标和背景，并判断要优化什么。",
   "submit.v2.task.desc.guided": "和助手聊聊你想改进什么。它会帮你填写这个页面。",
-  "submit.v2.task.objective_hint_auto": "根据你的聊天内容编写。可随意编辑，助手不会覆盖你的修改。",
   "submit.v2.task.objective_label": "目标",
   "submit.v2.task.objective_label.guided": "你的目标",
   "submit.v2.task.objective_placeholder": "优化后的工件应当做好什么",

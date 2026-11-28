@@ -3827,7 +3827,6 @@
   "submit.v2.task.desc.guided": "Chat with the assistant about what you want to improve. It fills in this page for you.",
   "submit.v2.task.objective_label": "Objective",
   "submit.v2.task.objective_label.guided": "Goal",
-  "submit.v2.task.objective_hint_auto": "Written from the chat. Edit it freely; the assistant won't overwrite your edits.",
   "submit.v2.task.objective_placeholder": "What the optimized artifact should do well",
   "submit.v2.task.background_label": "Background",
   "submit.v2.task.background_label.guided": "Extra context",

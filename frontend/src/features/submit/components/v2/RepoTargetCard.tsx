@@ -6,7 +6,6 @@ import { toast } from "react-toastify";
 
 import { cn } from "@/shared/lib/utils";
 import {
-  CheckCircle,
   CircleNotch,
   Desktop,
   FolderOpen,
@@ -49,6 +48,7 @@ import { userErrorMessage } from "@/shared/lib/user-error";
 
 import { isLocalRepo, withLocalFolder, type RepoDraft } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
+import { ChoiceIconTile, type ChoiceIconGesture } from "./ChoiceIconTile";
 import { HostMark, RepoPicker } from "./RepoPicker";
 import { InfoTip, RepoSecretsField } from "./RepoSecretsField";
 
@@ -374,6 +374,7 @@ export function RepoTargetCard({
           }}
           title={t("submit.v2.repo.source.existing")}
           desc={t("submit.v2.repo.source.existing_desc")}
+          gesture="open"
           icon={
             <FolderOpen
               className="size-5 transition-transform duration-300 ease-out group-hover:-rotate-12 group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
@@ -392,6 +393,7 @@ export function RepoTargetCard({
           }}
           title={t("submit.v2.repo.source.new")}
           desc={t("submit.v2.repo.source.new_desc")}
+          gesture="add"
           icon={
             <Plus
               className="size-5 transition-transform duration-300 ease-out group-hover:rotate-90 group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
@@ -408,6 +410,7 @@ export function RepoTargetCard({
             onSelect={() => setSource("folder")}
             title={t("submit.v2.repo.source.folder")}
             desc={t("submit.v2.repo.source.folder_desc")}
+            gesture="boot"
             icon={
               <Desktop
                 className="size-5 transition-transform duration-300 ease-out group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
@@ -822,7 +825,7 @@ function EnvSecrets({
 /**
  * One of the two ways to start: a wide pressable row. Hover lifts it, lights a
  * glow under the cursor side and animates its icon; the chosen card keeps a primary
- * border and a check.
+ * border, and its icon tile pops and sends out one ring.
  */
 function SourceCard({
   selected,
@@ -830,6 +833,7 @@ function SourceCard({
   title,
   desc,
   icon,
+  gesture,
   disabled = false,
 }: {
   selected: boolean;
@@ -837,6 +841,7 @@ function SourceCard({
   title: string;
   desc: string;
   icon: ReactNode;
+  gesture: ChoiceIconGesture;
   disabled?: boolean;
 }) {
   return (
@@ -848,19 +853,19 @@ function SourceCard({
       className={cn(
         "group relative isolate flex min-h-20 flex-1 cursor-pointer items-center gap-4 overflow-hidden rounded-xl border bg-card px-5 py-4 text-start outline-none",
         "transition-[transform,border-color,box-shadow,background-color] duration-300 ease-out motion-reduce:transition-none",
-        "hover:-translate-y-0.5 hover:shadow-[0_10px_30px_-12px] hover:shadow-primary/40 active:translate-y-0 active:scale-[0.99] motion-reduce:hover:translate-y-0",
+        "hover:-translate-y-0.5 hover:shadow-[0_10px_30px_-12px] hover:shadow-primary-fill/40 active:translate-y-0 active:scale-[0.99] motion-reduce:hover:translate-y-0",
         "focus-visible:ring-[3px] focus-visible:ring-ring/50",
         "disabled:pointer-events-none disabled:opacity-60",
         selected
-          ? "border-primary bg-primary/5 shadow-[0_0_0_1px] shadow-primary/40"
-          : "border-border hover:border-primary/50",
+          ? "border-primary-fill bg-primary-fill/5 shadow-[0_0_0_1px] shadow-primary-fill/40"
+          : "border-border hover:border-primary-fill/50",
       )}
     >
       {/* A soft glow that rises from the card's top corner on hover. */}
       <span
         aria-hidden="true"
         className={cn(
-          "pointer-events-none absolute -top-16 -start-16 -z-10 size-48 rounded-full bg-primary/20 blur-3xl transition-opacity duration-500",
+          "pointer-events-none absolute -top-16 -start-16 -z-10 size-48 rounded-full bg-primary-fill/20 blur-3xl transition-opacity duration-500",
           selected ? "opacity-70" : "opacity-0 group-hover:opacity-100",
         )}
       />
@@ -869,28 +874,13 @@ function SourceCard({
         aria-hidden="true"
         className="pointer-events-none absolute inset-y-0 -start-1/2 -z-10 w-1/3 -skew-x-12 bg-gradient-to-r from-transparent via-foreground/[0.06] to-transparent opacity-0 transition-[inset-inline-start,opacity] duration-700 ease-out group-hover:start-[120%] group-hover:opacity-100 motion-reduce:hidden"
       />
-      <span
-        className={cn(
-          "flex size-11 shrink-0 items-center justify-center rounded-lg border transition-colors duration-300",
-          selected
-            ? "border-primary/30 bg-primary text-primary-foreground"
-            : "border-border bg-muted text-muted-foreground group-hover:border-primary/30 group-hover:bg-primary/10 group-hover:text-primary",
-        )}
-      >
+      <ChoiceIconTile selected={selected} gesture={gesture}>
         {icon}
-      </span>
+      </ChoiceIconTile>
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="text-sm font-semibold text-foreground">{title}</span>
         <span className="text-xs leading-relaxed text-muted-foreground">{desc}</span>
       </span>
-      <CheckCircle
-        weight="fill"
-        aria-hidden="true"
-        className={cn(
-          "size-5 shrink-0 text-primary transition-[opacity,transform] duration-300 ease-out motion-reduce:transition-none",
-          selected ? "scale-100 opacity-100" : "scale-50 opacity-0",
-        )}
-      />
     </button>
   );
 }

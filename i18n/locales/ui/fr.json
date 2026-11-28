@@ -369,7 +369,6 @@
   "submit.v2.task.background_placeholder": "Contexte, contraintes et à quoi ressemble un bon résultat",
   "submit.v2.task.desc": "Décrivez la tâche dans le chat. L'assistant rédige l'objectif et le contexte et détermine ce qui sera optimisé.",
   "submit.v2.task.desc.guided": "Discutez avec l'assistant de ce que vous voulez améliorer. Il remplit cette page pour vous.",
-  "submit.v2.task.objective_hint_auto": "Rédigé à partir du chat. Modifiez-le librement ; l'assistant n'écrasera pas vos modifications.",
   "submit.v2.task.objective_label": "Objectif",
   "submit.v2.task.objective_label.guided": "But",
   "submit.v2.task.objective_placeholder": "Ce que l'artefact optimisé doit bien faire",

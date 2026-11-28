@@ -369,7 +369,6 @@
   "submit.v2.task.background_placeholder": "Контекст, обмеження та яким має бути добрий результат",
   "submit.v2.task.desc": "Опишіть завдання в чаті. Асистент напише мету й контекст і визначить, що оптимізуватиметься.",
   "submit.v2.task.desc.guided": "Розкажіть асистентові, що ви хочете покращити. Він заповнить цю сторінку за вас.",
-  "submit.v2.task.objective_hint_auto": "Написано за підсумками чату. Редагуйте вільно — асистент не перезапише ваших змін.",
   "submit.v2.task.objective_label": "Мета",
   "submit.v2.task.objective_label.guided": "Завдання",
   "submit.v2.task.objective_placeholder": "Що оптимізований артефакт має робити добре",

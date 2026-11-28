@@ -369,7 +369,6 @@
   "submit.v2.task.background_placeholder": "السياق والقيود وكيف تبدو النتيجة الجيدة",
   "submit.v2.task.desc": "صف مهمتك في المحادثة. يكتب المساعد الهدف والخلفية ويحدّد ما الذي سيُحسَّن.",
   "submit.v2.task.desc.guided": "تحدّث مع المساعد عمّا تريد تحسينه. سيملأ هذه الصفحة نيابةً عنك.",
-  "submit.v2.task.objective_hint_auto": "كُتب من محادثتك. عدّله بحرية؛ لن يكتب المساعد فوق تعديلاتك.",
   "submit.v2.task.objective_label": "الهدف",
   "submit.v2.task.objective_label.guided": "غايتك",
   "submit.v2.task.objective_placeholder": "ما الذي يجب أن يتقنه العنصر المُحسَّن",
