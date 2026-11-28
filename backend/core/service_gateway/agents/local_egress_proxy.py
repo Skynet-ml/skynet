@@ -18,7 +18,14 @@ fills ``${NAME}`` only in declared headers. The proxy never changes the URL or
 the body: a placeholder of an approved secret there fails the request with
 "secret NAME can go only in a request header". A ``CONNECT`` to any other
 host is a plain tunnel, so its bytes, and any placeholder in them, go out
-unchanged. A plain ``http://`` request is forwarded without any swap.
+unchanged. A plain ``http://`` request is forwarded without any swap, and is
+refused for a host that some secret approves.
+
+Every response from an approved host is checked for the real values of all
+the secrets that the host approves, also on a request with no placeholder,
+because the host could store a header and send it back later. A value that an
+approved host stores and an unapproved host sends back (a plain tunnel) is
+not caught.
 
 The CA's key stays in memory. The leaf key and certificates are files in a
 folder of the app's state folder, which the command cannot read, and
@@ -103,6 +110,7 @@ _INSPECT_DROP = _HOP_HEADERS | {b"accept-encoding", b"range", b"if-range"}
 # A second copy of these could make the upstream read a request the proxy did not check.
 _SINGLE_HEADERS = (b"host", b"content-length", b"transfer-encoding")
 _RESPONSE_SINGLE_HEADERS = (b"content-encoding", b"content-length", b"transfer-encoding")
+_CONNECT_HOST = re.compile(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)*")
 _HOST_HEADER = re.compile(rb"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::([0-9]{1,5}))?")
 _PROXY_USER = "skynet"
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
@@ -393,6 +401,24 @@ def _echo_needles(value: bytes) -> frozenset[bytes]:
                 needles.add(html.encode())
                 needles.add(_UNICODE_ESCAPE.sub(lambda match: b"\\u" + match.group(1).upper(), html.encode()))
     return frozenset(needles)
+
+
+def _valid_host(host: str) -> bool:
+    """Tell whether a ``CONNECT`` host is an IP address or an ASCII host name.
+
+    A non-ASCII name would make the leaf certificate fail to build.
+
+    Args:
+        host: The lower-case host from :func:`parse_connect`.
+
+    Returns:
+        ``True`` for a host the proxy can serve.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return _CONNECT_HOST.fullmatch(host) is not None
+    return True
 
 
 def _status_code(first: bytes) -> int | None:
@@ -858,6 +884,8 @@ class LocalEgressProxy:
         if target is None:
             raise _RefusalError(400, "bad CONNECT target")
         host, port = target
+        if not _valid_host(host):
+            raise _RefusalError(400, "the CONNECT host must be an ASCII host name or an IP address")
         approved = self._approved(host)
         call["mode"] = "inspect" if approved else "tunnel"
         if approved and rest:
@@ -876,7 +904,7 @@ class LocalEgressProxy:
                 self._untrack(upstream)
 
     def _plain_http(self, client: socket.socket, head: bytes, rest: bytes, call: dict) -> None:
-        """Forward a plain ``http://`` request without any swap.
+        """Forward a plain ``http://`` request without any swap, for a host that no secret approves.
 
         Args:
             client: The client connection.
@@ -885,7 +913,7 @@ class LocalEgressProxy:
             call: The request's record, updated in place.
 
         Raises:
-            _RefusalError: For a bad request or a private host.
+            _RefusalError: For a bad request, a private host, or a host that a secret approves.
         """
         (method, target, _), headers = _parse_head(head)
         self._check_auth(headers)
@@ -897,6 +925,9 @@ class LocalEgressProxy:
         if url is None or url.scheme != "http" or not host:
             raise _RefusalError(400, "a request through the proxy must be CONNECT or an absolute http:// URL")
         call.update(host=host, port=port, mode="http", method=method.decode("latin-1"))
+        # The plain bytes cannot be checked for an echo the way an inspected response is.
+        if self._approved(host):
+            raise _RefusalError(403, "a host that a secret approves must use https://")
         upstream = self._checked_upstream(host, port)
         path = (url.path or "/") + (f"?{url.query}" if url.query else "")
         lines = [b" ".join([method, path.encode(), b"HTTP/1.1"])]
@@ -1023,7 +1054,6 @@ class LocalEgressProxy:
         if length_text is not None and not length_text.isdigit():
             raise _RefusalError(400, "bad Content-Length")
         length = int(length_text or 0)
-        used: dict[str, bytes] = {}
 
         def swap(match: re.Match[bytes]) -> bytes:
             """Return the real value for an approved secret's placeholder.
@@ -1035,10 +1065,7 @@ class LocalEgressProxy:
                 The real value, or the match unchanged for a secret the host does not approve.
             """
             secret = approved.get(match.group(1).decode())
-            if secret is None:
-                return match.group(0)
-            used[secret.name] = secret.value.encode()
-            return used[secret.name]
+            return match.group(0) if secret is None else secret.value.encode()
 
         if b"100-continue" in values.get(b"expect", b"").lower() and (chunked or length):
             tls.sendall(_CONTINUE)
@@ -1067,34 +1094,45 @@ class LocalEgressProxy:
                     upstream_tls.sendall(raw)
                     call["bytes_sent"] += len(raw)
                 call.update(status="ok")
-                self._relay_response(upstream_tls.makefile("rb"), tls, used, method, call)
+                self._relay_response(upstream_tls.makefile("rb"), tls, approved, method, call)
             finally:
                 self._untrack(upstream_tls)
 
     def _relay_response(
-        self, upstream: io.BufferedReader, tls: ssl.SSLSocket, used: dict[str, bytes], method: bytes, call: dict
+        self,
+        upstream: io.BufferedReader,
+        tls: ssl.SSLSocket,
+        approved: dict[str, SetupSecret],
+        method: bytes,
+        call: dict,
     ) -> None:
-        """Copy the response to the client, and stop it if it could hold a swapped value.
+        """Copy the response to the client, and stop it if it could hold a real value.
 
         An echo endpoint would otherwise hand the real value to the command. The
+        guard covers every secret the host approves, not only the swapped ones,
+        because the host could send back a value that an earlier request stored. The
         proxy scans the decoded body, so a chunk boundary cannot split a value
         past the scan, and sends a chunked body on in chunks of its own.
 
         Args:
             upstream: The buffered upstream TLS stream.
             tls: The client TLS connection.
-            used: The swapped values by secret name.
+            approved: The secrets that may go to the host.
             method: The request method.
             call: The request's record, updated in place.
 
         Raises:
-            _CutError: When the response holds a swapped value, or is encoded
-                after a swap so the proxy cannot check it.
+            _CutError: When the response holds a real value, or is encoded so
+                the proxy cannot check it.
         """
-        guard = {name: _echo_needles(value) for name, value in used.items() if len(value) >= _ECHO_GUARD_MIN}
+        guard = {
+            name: _echo_needles(secret.value.encode())
+            for name, secret in approved.items()
+            if len(secret.value.encode()) >= _ECHO_GUARD_MIN
+        }
 
         def check(data: bytes) -> None:
-            """Stop the response when it holds a swapped value.
+            """Stop the response when it holds a real value.
 
             Args:
                 data: Response bytes the client has not got yet.

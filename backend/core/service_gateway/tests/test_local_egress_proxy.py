@@ -11,6 +11,7 @@ import io
 import json
 import socket
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -815,3 +816,63 @@ def test_echo_needles_cover_go_and_upper_case_escapes() -> None:
     needles = proxy_module._echo_needles(value.encode())
     assert go_style.replace("\\u00e9", "\\u00E9").encode() in needles
     assert len(needles) <= 17
+
+
+def test_value_stored_by_an_approved_host_is_cut_on_a_later_request(
+    proxy: LocalEgressProxy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a host cannot store the real value and send it back on a request with no placeholder."""
+    stored: dict[str, bytes] = {}
+    real_answer = _answer_for
+
+    def answer(request: bytes) -> bytes:
+        """Store the Authorization value on ``/store`` and return it on ``/fetch``.
+
+        Args:
+            request: The request the host got.
+
+        Returns:
+            The response bytes.
+        """
+        path = request.split(b" ")[1]
+        if path == b"/store":
+            stored["value"] = request.split(b"Authorization: Bearer ")[1].split(b"\r\n")[0]
+            return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        if path == b"/fetch":
+            body = stored.get("value", b"")
+            return b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+        return real_answer(request)
+
+    monkeypatch.setattr(sys.modules[__name__], "_answer_for", answer)
+    _via_proxy(proxy, APPROVED, _get("/store", header=placeholder("API_KEY")), trust=proxy.ca_pem)
+    assert stored["value"] == VALUE.encode()
+    response = _via_proxy(proxy, APPROVED, _get("/fetch", header="nothing"), trust=proxy.ca_pem)
+    assert VALUE.encode() not in response
+    record = _calls(proxy, 2)[-1]
+    assert record["status"] == "failed"
+    assert "API_KEY" in record["reason"]
+
+
+def test_plain_http_to_an_approved_host_is_refused(proxy: LocalEgressProxy) -> None:
+    """Check that plain ``http://`` to a host that a secret approves gets 403, as its response cannot be checked."""
+    sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+    sock.sendall(f"GET http://{APPROVED}/fetch HTTP/1.1\r\nHost: {APPROVED}\r\n{_auth(proxy)}\r\n".encode())
+    answer = sock.recv(4096)
+    sock.close()
+    assert answer.startswith(b"HTTP/1.1 403")
+    record = _calls(proxy, 1)[-1]
+    assert record["status"] == "refused"
+    assert "https://" in record["reason"]
+
+
+@pytest.mark.parametrize("host", ["bücher.wild.test", "bad!.wild.test"])
+def test_connect_host_that_is_not_an_ascii_name_is_refused(proxy: LocalEgressProxy, host: str) -> None:
+    """Check that a non-ASCII or malformed CONNECT host under a wildcard approval gets 400, not a dead thread."""
+    sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+    sock.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n{_auth(proxy)}\r\n".encode())
+    answer = sock.recv(4096)
+    sock.close()
+    assert answer.startswith(b"HTTP/1.1 400")
+    record = _calls(proxy, 1)[-1]
+    assert record["status"] == "refused"
+    assert "ASCII host name" in record["reason"]
