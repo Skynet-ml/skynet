@@ -673,6 +673,19 @@ export function deleteWorkspaceFile(
     : { files };
 }
 
+/** The patch that takes back the delete of one file, so the run keeps it (SKY-1011). */
+export function restoreWorkspaceFile(
+  ws: Pick<WorkspaceSlice, "files" | "deleted">,
+  path: string,
+): Partial<WorkspaceSlice> | null {
+  if (!ws.deleted?.includes(path)) return null;
+  const deleted = ws.deleted.filter((other) => other !== path);
+  // With no draft left, the next draft records the commit it is read at.
+  return Object.keys(ws.files).length === 0 && deleted.length === 0
+    ? { deleted: undefined, filesBase: undefined }
+    : { deleted: deleted.length ? deleted : undefined };
+}
+
 /**
  * The contract file's proposer command when it is the run's proposer (SKY-771).
  *

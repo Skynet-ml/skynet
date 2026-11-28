@@ -143,20 +143,26 @@ function useWidth(): [(el: HTMLElement | null) => void, number] {
 export function AgenticIde({
   chat,
   texts,
+  deleted,
   repo,
   busy,
   onWrite,
+  onRestore,
   host,
 }: {
   /** The setup agent's chat, docked here. */
   chat: React.ReactNode;
   /** The draft's files, by path. */
   texts: Readonly<Record<string, string>>;
+  /** The repository files the agent deleted in the draft; the run removes them. */
+  deleted?: readonly string[];
   repo: RepoSource | null;
   /** The agent is on a turn; edits wait for it. */
   busy: boolean;
   /** Write a draft file, or drop it with null. */
   onWrite: (path: string, text: string | null) => void;
+  /** Take back the delete of a file, so the run keeps it. */
+  onRestore?: (path: string) => void;
   /** The repository's page on its host, or null when the run has none. */
   host?: RepoHostLink | null;
 }) {
@@ -287,7 +293,7 @@ export function AgenticIde({
       });
     return [...draft, ...rest];
   }, [allFiles, base, treePaths, texts, reads]);
-  const anyChange = allFiles.some((f) => base.has(f.path) && isChanged(f));
+  const anyChange = !!deleted?.length || allFiles.some((f) => base.has(f.path) && isChanged(f));
 
   // The pane opens by itself once, on the first change; after that the user decides.
   const autoOpened = React.useRef(false);
@@ -396,6 +402,13 @@ export function AgenticIde({
     },
     [busy, onWrite],
   );
+  const restoreFile = React.useCallback(
+    (path: string) => {
+      if (busy) return;
+      onRestore?.(path);
+    },
+    [busy, onRestore],
+  );
   const openFile = React.useCallback(
     (path: string) => {
       if (reads.get(path) === null) retry();
@@ -456,6 +469,8 @@ export function AgenticIde({
       readOnly={busy}
       onEdit={editFile}
       onOpenFile={openFile}
+      deleted={deleted}
+      onRestore={onRestore ? restoreFile : undefined}
       comments={comments}
       onComment={comment}
       onRemoveComment={removeComment}

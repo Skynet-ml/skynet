@@ -113,6 +113,10 @@ type Props = {
   onEdit: (path: string, text: string) => void;
   /** A file tab opened: its repository text is needed. */
   onOpenFile: (path: string) => void;
+  /** The repository files the draft deletes; each lists with a Restore button. */
+  deleted?: readonly string[];
+  /** Take back a delete; absent where no delete can be taken back. */
+  onRestore?: (path: string) => void;
   comments: readonly PaneComment[];
   /** Absent when no chat takes comments. */
   onComment?: (c: Omit<PaneComment, "id">) => void;
@@ -521,6 +525,8 @@ export function ReviewPane({
   readOnly,
   onEdit,
   onOpenFile,
+  deleted,
+  onRestore,
   comments,
   onComment,
   onRemoveComment,
@@ -752,6 +758,11 @@ export function ReviewPane({
   const commentCount = (path: string) =>
     source === "turn" ? 0 : comments.filter((c) => c.path === path).length;
   const matching = filter.trim() ? changed.filter((f) => fuzzyScore(filter, f.path) > 0) : changed;
+  // A delete has no turn data, so "Last turn" shows none.
+  const draftDeleted = source === "turn" ? [] : (deleted ?? []);
+  const deletedMatching = draftDeleted.filter(
+    (path) => !filter.trim() || fuzzyScore(filter, path) > 0,
+  );
   const newPage = isNewTab(active);
   const tabFile = active === "changes" || newPage ? null : (byPath.get(active) ?? null);
   const plainFile = !!tabFile && statusOf(tabFile) === "unchanged";
@@ -890,6 +901,36 @@ export function ReviewPane({
       </button>
     );
   });
+
+  // A deleted file has no text left to diff: its row shows the path struck through.
+  const deletedRow = (path: string, inBody: boolean) => (
+    <div
+      key={`deleted:${path}`}
+      title={path}
+      className={cn(
+        "flex w-full shrink-0 items-center gap-1.5 text-[13px]",
+        inBody ? "h-9 bg-[var(--surface-2)] ps-3 pe-2" : "h-7 rounded-md ps-5 pe-1",
+      )}
+    >
+      <FileGlyph path={path} />
+      <span className="min-w-0 flex-1 truncate text-[var(--destructive)] line-through" dir="ltr">
+        {inBody ? path : baseName(path)}
+      </span>
+      <span className="sr-only">{msg("submit.agentic_ide.review.status.deleted")}</span>
+      {onRestore && (
+        <button
+          type="button"
+          onClick={() => onRestore(path)}
+          disabled={readOnly}
+          aria-label={formatMsg("submit.agentic_ide.review.restore_file", { path })}
+          className="h-6 shrink-0 rounded px-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+        >
+          {msg("submit.agentic_ide.review.restore")}
+        </button>
+      )}
+    </div>
+  );
+  const deletedRows = deletedMatching.map((path) => deletedRow(path, false));
 
   const body = (f: RepoFile) => {
     if (f.loading || f.issue) return <FileNotice file={f} />;
@@ -1265,7 +1306,7 @@ export function ReviewPane({
               <NewTabPage showList={showList} onShowList={() => setShowList(true)} />
             ) : tabFile ? (
               tabView(tabFile)
-            ) : !changed.length ? (
+            ) : !changed.length && !draftDeleted.length ? (
               <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 pb-16 text-center">
                 <h2 className="text-[14px] font-medium text-foreground">
                   {source === "turn"
@@ -1378,6 +1419,14 @@ export function ReviewPane({
                 );
               })
             )}
+            {/* The diffs list the deletes too, so a hidden file list still shows them. */}
+            {!newPage &&
+              !tabFile &&
+              draftDeleted.map((path) => (
+                <section key={path} className="border-t border-border/60 first:border-t-0">
+                  {deletedRow(path, true)}
+                </section>
+              ))}
           </div>
         </div>
 
@@ -1434,10 +1483,13 @@ export function ReviewPane({
                 {!plainFile && (
                   <Section
                     label={msg("submit.agentic_ide.review.changed_files")}
-                    marker={matching.length > 0}
+                    marker={matching.length + deletedRows.length > 0}
                   >
-                    {matching.length ? (
-                      changedRows
+                    {matching.length || deletedRows.length ? (
+                      <>
+                        {changedRows}
+                        {deletedRows}
+                      </>
                     ) : (
                       <p className="px-2 py-2 text-[12.5px] text-muted-foreground">
                         {msg("submit.agentic_ide.review.no_matching")}
