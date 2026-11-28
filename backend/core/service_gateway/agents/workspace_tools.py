@@ -695,8 +695,11 @@ def workspace_tools(
 
         Returns:
             The text with line numbers, or ``{"error": ...}`` for a missing file,
-            the read limit, a failed read, or a repository that cannot open.
+            a file the draft deletes, the read limit, a failed read, or a
+            repository that cannot open.
         """
+        if (gone := deleted_error(path.strip().strip("/"))) is not None:
+            return gone
         return await browse(lambda browser: browser.read_repo_file(path))
 
     def target(path: str) -> tuple[str, str | None] | str:
@@ -727,6 +730,22 @@ def workspace_tools(
         """
         current = {**state, **turn.wizard_patch}.get(DRAFT_FILES_FIELD)
         return {str(k): str(v) for k, v in current.items()} if isinstance(current, dict) else {}
+
+    def deleted_error(path: str) -> dict[str, str] | None:
+        """Refuse a read of a file the draft deletes, as the run starts without it.
+
+        Args:
+            path: The clean file path.
+
+        Returns:
+            ``{"error": ...}`` when ``workspace_deleted`` holds ``path``, else ``None``.
+        """
+        current = {**state, **turn.wizard_patch}.get(DRAFT_DELETED_FIELD)
+        if isinstance(current, list) and path in current:
+            return {
+                "error": f"The draft deletes {path}, so the run starts without it. Write the whole file to add it back."
+            }
+        return None
 
     def save(path: str, field: str | None, text: str) -> dict[str, Any]:
         """Put one file into this turn's patch and say what the editor gets.
@@ -874,7 +893,8 @@ def workspace_tools(
 
         Returns:
             The current text, or ``{"error": ...}`` when the file is in neither
-            the draft nor the repository, or the repository read fails.
+            the draft nor the repository, the draft deletes it, or the
+            repository read fails.
         """
         if field is not None:
             text = str({**state, **turn.wizard_patch}.get(field) or "")
@@ -888,6 +908,9 @@ def workspace_tools(
             files = drafts()
             if path in files:
                 return files[path]
+            # The folder still holds the old text, and an edit must not bring a deleted file back.
+            if (gone := deleted_error(path)) is not None:
+                return gone
         return await browse(lambda browser: browser.file_text(path, DRAFT_FILE_BYTES))
 
     async def edit_workspace_file(path: str, old_text: str, new_text: str) -> dict[str, Any]:

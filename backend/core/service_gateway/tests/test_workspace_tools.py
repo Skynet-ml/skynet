@@ -2424,3 +2424,23 @@ async def test_delete_drafts_of_an_older_folder_are_refused_too(
     assert result == {"error": FOLDER_CHANGED}
     assert open_folder(drafted) == (None, FOLDER_CHANGED)
     assert "choose another folder" in FOLDER_CHANGED
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_file_reads_as_missing_and_an_edit_cannot_bring_it_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The draft deletes README.md, so a read refuses it and an edit cannot start from the folder's old text."""
+    root = tmp_path / "project"
+    root.mkdir()
+    state = {**_local_folder(monkeypatch, root), "workspace_deleted": ["README.md"]}
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn, key=None)
+
+    read = await tools["read_repo_file"].acall(path="README.md")
+    edit = await tools["edit_workspace_file"].acall(path="README.md", old_text="# Shop", new_text="# Store")
+
+    assert "deletes README.md" in read["error"]
+    assert "deletes README.md" in edit["error"]
+    assert turn.wizard_patch == {}
+    assert "x = 1" in await tools["read_repo_file"].acall(path="src/app.py")
