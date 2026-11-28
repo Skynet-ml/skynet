@@ -13,7 +13,6 @@ export type ShareBar = { key: string; name: string; value: number; pct: number }
 export type HistogramBar = {
   label: string;
   count: number;
-  avgImprovement: number | null;
   /** Backend `[lower, upper)` edges (null = open end) so a bar can become a filter. */
   lower: number | null;
   upper: number | null;
@@ -104,7 +103,6 @@ function histogram(
   return buckets.map((b) => ({
     label: bucketLabel(b, fmt),
     count: b.count,
-    avgImprovement: b.avg_improvement,
     lower: b.lower,
     upper: b.upper,
   }));

@@ -196,9 +196,6 @@ export function AnalyticsTabSkeleton() {
                 <ChartPanel height={240} />
                 <ChartPanel height={240} />
               </div>
-              <div className="mt-6">
-                <ChartPanel height={240} />
-              </div>
             </AnalyticsSection>
           </div>
 
