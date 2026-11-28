@@ -4,13 +4,16 @@ Frontend-only (hidden from public docs):
 - ``GET /optimizations/{id}/repository/tree`` — every file and folder at the commit.
 - ``GET /optimizations/{id}/repository/file`` — one file's text at the commit.
 - ``POST /optimizations/{id}/repository/archive`` — the whole repository with one version applied, as a zip.
+- ``POST /optimizations/{id}/repository/apply`` — write a local run's best version into its folder (SKY-991).
+- ``POST /optimizations/{id}/repository/undo`` — put the folder back as it was before Apply (SKY-991).
 
 Every version of a repository run is a patch against one pinned commit; the
 run page applies the patches itself and only needs the base tree and files.
 The repository host is read with the run owner's connection, since the commit belongs to
 the run rather than to whoever is viewing it, and anonymously when the owner
 has none, so public repositories still open. A local folder run reads the
-copy of the folder that staging kept on this computer (SKY-990).
+copy of the folder that staging kept on this computer (SKY-990), and only a
+local run can Apply its best version to that folder and Undo it.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, TypeVar
 
@@ -27,6 +31,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
+from ....config import settings
 from ....connectors import repo_hosts
 from ....connectors.github_repo import RepoFetchError, github_token, patched_repo_zip
 from ....models import (
@@ -34,12 +39,25 @@ from ....models import (
     BlackboxRepoFileResponse,
     BlackboxRepoTreeEntry,
     BlackboxRepoTreeResponse,
+    OptimizationStatus,
 )
-from ....worker.local_folder import LOCAL_PROVIDER, LocalFolderError, snapshot_file, snapshot_tree, snapshot_zip
+from ....models.blackbox import LOCAL_FOLDER_ONLY_HERE
+from ....service_gateway.optimization.blackbox.repo_tree import patch_violations
+from ....worker.local_folder import (
+    LOCAL_PROVIDER,
+    LocalFolderConflictError,
+    LocalFolderError,
+    apply_version,
+    snapshot_file,
+    snapshot_tree,
+    snapshot_zip,
+    undo_version,
+)
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import job_owner
 from ...errors import DomainError
-from .._helpers import load_job_for_user
+from ...sharing_access import ShareRole
+from .._helpers import load_job_for_user, require_role_at_least
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
@@ -47,6 +65,13 @@ MAX_FILE_BYTES = 1024 * 1024
 _TREE_CACHE_ENTRIES = 32
 _FILE_CACHE_ENTRIES = 2048
 _FILE_CACHE_BYTES = 64 * 1024 * 1024
+# A running run still writes its result, so Apply and Undo wait until it stops.
+_STOPPED = {
+    OptimizationStatus.success.value,
+    OptimizationStatus.failed.value,
+    OptimizationStatus.cancelled.value,
+    OptimizationStatus.stopped.value,
+}
 
 T = TypeVar("T")
 
@@ -305,6 +330,79 @@ def _run_readonly_paths(job_data: dict[str, Any]) -> list[str]:
     return [str(path) for path in paths] if isinstance(paths, list) else []
 
 
+def _local_run(job_data: dict[str, Any], optimization_id: str) -> tuple[dict[str, Any], str]:
+    """Check that a run is a stopped local folder run on this computer.
+
+    Args:
+        job_data: The stored job row.
+        optimization_id: The run, for the error message.
+
+    Returns:
+        ``(repo, commit)``: the run's repository target and its pinned commit.
+
+    Raises:
+        DomainError: 404 when the run is not a local folder run; 409 before
+            its commit is pinned, away from the desktop app, or while it runs.
+    """
+    _repo, commit = _repo_target(job_data, optimization_id)
+    if _repo_provider(job_data) != LOCAL_PROVIDER:
+        raise DomainError("optimization.not_found", status=404, optimization_id=optimization_id)
+    if not settings.local_mode:
+        raise DomainError("optimization.local_folder_failed", status=409, reason=LOCAL_FOLDER_ONLY_HERE)
+    if job_data.get("status") not in _STOPPED:
+        raise DomainError("optimization.local_folder_failed", status=409, reason="The run is still running.")
+    return job_data["payload"]["target"]["repo"], commit
+
+
+def _change_folder(change: Callable[[], Any]) -> None:
+    """Run an Apply or an Undo, and turn its refusal into an API error.
+
+    Args:
+        change: The Apply or the Undo.
+
+    Raises:
+        DomainError: 409 with the changed files when the folder changed, or
+            with the reason when the folder cannot be changed.
+    """
+    try:
+        change()
+    except LocalFolderConflictError as error:
+        raise DomainError("optimization.local_folder_conflict", status=409, files=", ".join(error.paths)) from None
+    except LocalFolderError as error:
+        raise DomainError("optimization.local_folder_failed", status=409, reason=str(error)) from None
+
+
+def _record_apply(job_store, optimization_id: str, job_data: dict[str, Any], applied: bool) -> dict[str, Any]:
+    """Save whether the best version is in the folder, and when it was first applied.
+
+    ``applied_at`` is the feature's metric, so Undo keeps it.
+
+    Args:
+        job_store: Job-store the run is saved in.
+        optimization_id: The run.
+        job_data: The stored job row.
+        applied: Whether the version is in the folder now.
+
+    Returns:
+        ``{"applied", "applied_at"}``, as the run's ``result.details.local_apply`` now holds it.
+    """
+    result = dict(job_data.get("result") or {})
+    details = dict(result.get("details") or {})
+    previous = details.get("local_apply") if isinstance(details.get("local_apply"), dict) else {}
+    state = {"applied": applied, "applied_at": previous.get("applied_at") or datetime.now(UTC).isoformat()}
+    details["local_apply"] = state
+    result["details"] = details
+    job_store.update_job(optimization_id, result=result)
+    # The run page's ETag counts log lines but not the result, so a log line makes it reload the new state.
+    job_store.append_log(
+        optimization_id,
+        level="INFO",
+        logger_name="skynet.local_folder",
+        message="Applied the best version to the folder." if applied else "Undid the best version in the folder.",
+    )
+    return state
+
+
 def _tree_with_drafts(tree: BlackboxRepoTreeResponse, drafts: dict[str, str]) -> BlackboxRepoTreeResponse:
     """Show the run's draft files in the commit's tree, as the run started from both.
 
@@ -533,3 +631,76 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
             filename=archive.name,
             background=BackgroundTask(shutil.rmtree, workdir, ignore_errors=True),
         )
+
+    @router.post(
+        "/optimizations/{optimization_id}/repository/apply",
+        summary="Write a local run's best version into its folder",
+    )
+    def apply_to_folder(optimization_id: str, current_user: AuthenticatedUserDep) -> dict[str, Any]:
+        """Write the best version of a local folder run into the folder, and keep what Undo needs.
+
+        Args:
+            optimization_id: The local folder run.
+            current_user: Authenticated caller resolved from the bearer token.
+
+        Returns:
+            ``{"applied": True, "applied_at"}``.
+
+        Raises:
+            DomainError: 403 below the editor role; 404 when the run is not a
+                local folder run; 409 away from the desktop app, while the run
+                runs, without a best version, when it breaks the run's editing
+                rules, when a file to change changed, or when it is already
+                applied.
+        """
+        job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
+        repo, commit = _local_run(job_data, optimization_id)
+        result = job_data.get("result")
+        patch = result.get("best_candidate") if isinstance(result, dict) else None
+        if not isinstance(patch, str) or not patch:
+            raise DomainError("optimization.no_result_pending", status=409)
+        environment = repo.get("environment") if isinstance(repo.get("environment"), dict) else {}
+        # A local run skips publish, which checks the best version again, so the check runs here.
+        problems = patch_violations(
+            patch,
+            repo.get("editable_paths") or (),
+            environment.get("readonly_paths") or (),
+            environment.get("protected_paths") or (),
+        )
+        if problems:
+            raise DomainError("optimization.local_folder_failed", status=409, reason=problems[0])
+        _change_folder(
+            lambda: apply_version(
+                repo["path"],
+                commit,
+                patch,
+                optimization_id,
+                drafts=_run_drafts(job_data),
+                readonly_paths=_run_readonly_paths(job_data),
+            )
+        )
+        return _record_apply(job_store, optimization_id, job_data, applied=True)
+
+    @router.post(
+        "/optimizations/{optimization_id}/repository/undo",
+        summary="Put a local run's folder back as it was before Apply",
+    )
+    def undo_in_folder(optimization_id: str, current_user: AuthenticatedUserDep) -> dict[str, Any]:
+        """Restore every file Apply changed in a local folder run's folder.
+
+        Args:
+            optimization_id: The local folder run.
+            current_user: Authenticated caller resolved from the bearer token.
+
+        Returns:
+            ``{"applied": False, "applied_at"}``, which keeps the first Apply's time.
+
+        Raises:
+            DomainError: 403 below the editor role; 404 when the run is not a
+                local folder run; 409 away from the desktop app, while the run
+                runs, when a file changed after Apply, or when nothing is applied.
+        """
+        job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
+        repo, _commit = _local_run(job_data, optimization_id)
+        _change_folder(lambda: undo_version(repo["path"], optimization_id))
+        return _record_apply(job_store, optimization_id, job_data, applied=False)

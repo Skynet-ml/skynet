@@ -266,6 +266,8 @@
     "optimization.no_result_pending": "A otimização ainda não tem resultado.",
     "optimization.repo_version_unknown": "Essa versão não faz parte desta execução.",
     "optimization.repo_archive_failed": "Não foi possível empacotar o repositório: {reason}",
+    "optimization.local_folder_conflict": "Estes arquivos mudaram na pasta, então nada foi escrito: {files}",
+    "optimization.local_folder_failed": "Não foi possível alterar a pasta: {reason}",
     "optimization.not_found": "Otimização não encontrada: '{optimization_id}'.",
     "optimization.agent_run_not_found": "Execução do agente {run_id} não encontrada para a otimização '{optimization_id}'.",
     "optimization.pair_not_rerunnable": "Não é possível voltar a executar um par enquanto a otimização está no estado '{status}'.",

@@ -169,7 +169,9 @@ def _client(store: FakeJobStore, user: AuthenticatedUser | None = None) -> TestC
         Returns:
             The envelope.
         """
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "code": exc.code})
+        return JSONResponse(
+            status_code=exc.status_code, content={"detail": exc.detail, "code": exc.code, "params": exc.params}
+        )
 
     return TestClient(app, raise_server_exceptions=False)
 
@@ -606,3 +608,189 @@ def test_a_local_run_without_its_kept_copy_is_a_502(
 
     assert response.status_code == 502
     assert response.json()["code"] == "optimization.repo_archive_failed"
+
+
+class _LoggingJobStore(FakeJobStore):
+    """The router fake, plus the log append that Apply and Undo use to move the run page's ETag."""
+
+    def append_log(self, optimization_id: str, **entry: Any) -> None:
+        """Keep one log entry.
+
+        Args:
+            optimization_id: The run.
+            **entry: The entry's fields.
+        """
+        self._logs.setdefault(optimization_id, []).append(entry)
+
+
+def _local_apply_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, status: str = "success", editable: list[str] | None = None
+) -> tuple[_LoggingJobStore, Path]:
+    """Seed a stopped local folder run whose best version changes one file.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+        status: The run's status.
+        editable: The run's editable paths.
+
+    Returns:
+        The store and the run's folder.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
+    folder = tmp_path / "app"
+    (folder / "src").mkdir(parents=True)
+    (folder / "src" / "main.py").write_text("x = 1\n")
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(folder, workdir).commit
+    jobs = _LoggingJobStore()
+    jobs.seed_job(
+        "local-run",
+        status=status,
+        payload={
+            "username": "alice",
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "provider": "local",
+                    "repository": "local/app",
+                    "path": str(folder),
+                    "commit": commit,
+                    "editable_paths": editable or ["src"],
+                    "draft_files": {"src/cfg.toml": "[run]\n"},
+                    "environment": {"readonly_paths": [], "protected_paths": []},
+                },
+            },
+        },
+        result={
+            "best_candidate": (
+                "diff --git a/src/main.py b/src/main.py\n--- a/src/main.py\n+++ b/src/main.py\n"
+                "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+            ),
+            "details": {"kept": True},
+        },
+    )
+    return jobs, folder
+
+
+def test_apply_and_undo_change_the_folder_and_keep_the_first_apply_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Apply writes the best version and drafts, Undo restores the folder, and ``applied_at`` stays (SKY-991).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    client = _client(jobs)
+
+    applied = client.post("/optimizations/local-run/repository/apply")
+    again = client.post("/optimizations/local-run/repository/apply")
+
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"] is True
+    first_time = applied.json()["applied_at"]
+    assert first_time
+    assert (folder / "src" / "main.py").read_text() == "x = 2\n"
+    assert (folder / "src" / "cfg.toml").read_text() == "[run]\n"
+    assert again.status_code == 409
+    assert again.json()["code"] == "optimization.local_folder_failed"
+    stored = jobs.get_job("local-run")["result"]
+    assert stored["details"] == {"kept": True, "local_apply": {"applied": True, "applied_at": first_time}}
+    assert stored["best_candidate"].startswith("diff --git a/src/main.py")
+
+    undone = client.post("/optimizations/local-run/repository/undo")
+    reapplied = client.post("/optimizations/local-run/repository/apply")
+
+    assert undone.status_code == 200, undone.text
+    assert undone.json() == {"applied": False, "applied_at": first_time}
+    assert reapplied.json() == {"applied": True, "applied_at": first_time}
+    assert client.post("/optimizations/local-run/repository/undo").status_code == 200
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+    assert not (folder / "src" / "cfg.toml").exists()
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"] == {"applied": False, "applied_at": first_time}
+    assert jobs.get_log_count("local-run") == 4
+
+
+def test_apply_with_a_changed_file_writes_nothing_and_names_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A file the version changes that the user edited since setup stops Apply, with the file named.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    (folder / "src" / "main.py").write_text("x = 9\n")
+
+    response = _client(jobs).post("/optimizations/local-run/repository/apply")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "optimization.local_folder_conflict"
+    assert response.json()["params"] == {"files": "src/main.py"}
+    assert (folder / "src" / "main.py").read_text() == "x = 9\n"
+    assert not (folder / "src" / "cfg.toml").exists()
+    assert "local_apply" not in jobs.get_job("local-run")["result"]["details"]
+
+
+@pytest.mark.parametrize(
+    ("status", "editable", "local_mode", "code"),
+    [
+        ("running", None, True, "optimization.local_folder_failed"),
+        ("success", ["docs"], True, "optimization.local_folder_failed"),
+        ("success", None, False, "optimization.local_folder_failed"),
+    ],
+)
+def test_apply_is_refused_while_running_off_this_computer_or_outside_the_editable_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status: str,
+    editable: list[str] | None,
+    local_mode: bool,
+    code: str,
+) -> None:
+    """A running run, a patch that breaks the editing rules, and a hosted API never write the folder.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+        status: The run's status.
+        editable: The run's editable paths.
+        local_mode: Whether this is the desktop app.
+        code: The expected error code.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path, status=status, editable=editable)
+    monkeypatch.setattr(settings, "local_mode", local_mode)
+
+    response = _client(jobs).post("/optimizations/local-run/repository/apply")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == code
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+
+
+def test_apply_and_undo_are_only_for_a_local_run_and_its_editors(
+    store: FakeJobStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A hosted repository run has no folder (404), and a stranger cannot see the local run (404).
+
+    Args:
+        store: Fake job store.
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    stranger = AuthenticatedUser(username="mallory", role="user", groups=())
+
+    hosted = _client(store).post("/optimizations/repo-run/repository/apply")
+    hidden = _client(jobs, stranger).post("/optimizations/local-run/repository/apply")
+    nothing = _client(jobs).post("/optimizations/local-run/repository/undo")
+
+    assert hosted.status_code == 404
+    assert hidden.status_code == 404
+    assert nothing.status_code == 409
+    assert nothing.json()["code"] == "optimization.local_folder_failed"
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"

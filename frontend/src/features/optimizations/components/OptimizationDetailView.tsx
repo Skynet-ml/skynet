@@ -1212,6 +1212,10 @@ export function OptimizationDetailView({
                   source={source}
                   jobName={job.name}
                   repository={payloadRecipe === "repo"}
+                  localFolder={
+                    (payload?.payload?.target as { repo?: { provider?: unknown } } | undefined)
+                      ?.repo?.provider === "local"
+                  }
                   optimizationId={job.optimization_id}
                 />
               </TabsContent>

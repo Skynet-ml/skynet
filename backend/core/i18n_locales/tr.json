@@ -266,6 +266,8 @@
     "optimization.no_result_pending": "Optimizasyonun henüz bir sonucu yok.",
     "optimization.repo_version_unknown": "Bu sürüm bu çalıştırmaya ait değil.",
     "optimization.repo_archive_failed": "Depo paketlenemedi: {reason}",
+    "optimization.local_folder_conflict": "Klasördeki bu dosyalar değişti, bu yüzden hiçbir şey yazılmadı: {files}",
+    "optimization.local_folder_failed": "Klasör değiştirilemedi: {reason}",
     "optimization.not_found": "Optimizasyon bulunamadı: '{optimization_id}'.",
     "optimization.agent_run_not_found": "'{optimization_id}' optimizasyonu için {run_id} numaralı ajan çalışması bulunamadı.",
     "optimization.pair_not_rerunnable": "Optimizasyon '{status}' durumundayken bir çift yeniden çalıştırılamaz.",

@@ -6,6 +6,7 @@ import { useMemo, useState, type KeyboardEvent } from "react";
 import { toast } from "react-toastify";
 import { motion } from "motion/react";
 import {
+  ArrowCounterClockwise,
   ArrowSquareOut,
   Code,
   Cube,
@@ -31,7 +32,12 @@ import { HelpTip } from "@/shared/ui/help-tip";
 import type { BlackboxRunResult } from "@/shared/types/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
-import { downloadRepositoryArchive } from "@/shared/lib/api";
+import {
+  applyLocalVersion,
+  downloadRepositoryArchive,
+  undoLocalVersion,
+  type LocalApplyState,
+} from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
 import { tip } from "@/shared/lib/tooltips";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
@@ -339,6 +345,7 @@ export function BestVersionTab({
   result,
   jobName,
   repository = false,
+  localFolder = false,
   optimizationId,
   source,
 }: {
@@ -346,6 +353,8 @@ export function BestVersionTab({
   jobName?: string | null;
   /** Each version is a patch against the pinned commit, not a text artifact. */
   repository?: boolean;
+  /** The run optimizes a folder on this computer, so its best version can be applied there. */
+  localFolder?: boolean;
   /** Needed to browse a repository version's files at the pinned commit. */
   optimizationId?: string;
   /** Where the run lives; a hosted run reads its repository through the hosted proxy. */
@@ -449,7 +458,14 @@ export function BestVersionTab({
           {result.regression_guard_applied && (
             <InlineWarningRow message={msg("optimization.blackbox.best.regression_guard")} />
           )}
-          {pullRequest && <PullRequestRow pullRequest={pullRequest} />}
+          {pullRequest && !localFolder && <PullRequestRow pullRequest={pullRequest} />}
+          {browse && localFolder && optimizationId && typeof result.best_candidate === "string" && (
+            <LocalApplyRow
+              optimizationId={optimizationId}
+              initial={readLocalApply(result.details)}
+              source={source}
+            />
+          )}
           {!result.versions?.length && versions.length > 1 && (
             <p className="text-xs text-muted-foreground">
               {msg("optimization.blackbox.versions.history_missing")}
@@ -534,6 +550,68 @@ export function BestVersionTab({
         )}
       </section>
     </FadeIn>
+  );
+}
+
+/** Whether the best version is in the run's folder, from the run's details. */
+function readLocalApply(details: Record<string, unknown>): LocalApplyState {
+  const raw = details?.local_apply as Record<string, unknown> | undefined;
+  return {
+    applied: raw?.applied === true,
+    applied_at: typeof raw?.applied_at === "string" ? raw.applied_at : null,
+  };
+}
+
+/** Apply the best version to the run's folder on this computer, or Undo it. */
+function LocalApplyRow({
+  optimizationId,
+  initial,
+  source,
+}: {
+  optimizationId: string;
+  initial: LocalApplyState;
+  source?: ApiSource;
+}) {
+  const [state, setState] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const change = async () => {
+    setBusy(true);
+    try {
+      setState(
+        await (state.applied ? undoLocalVersion : applyLocalVersion)(optimizationId, source),
+      );
+    } catch (err) {
+      const fallback = state.applied
+        ? "optimization.blackbox.repo.undo_failed"
+        : "optimization.blackbox.repo.apply_failed";
+      toast.error(userErrorMessage(err, msg(fallback)));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const Icon = busy ? CircleNotch : state.applied ? ArrowCounterClockwise : FolderOpen;
+  return (
+    <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-sm">
+      <span className="min-w-0 flex-1 text-muted-foreground" dir="auto" aria-live="polite">
+        {msg(
+          state.applied
+            ? "optimization.blackbox.repo.applied"
+            : "optimization.blackbox.repo.apply_hint",
+        )}
+      </span>
+      <Button
+        type="button"
+        size="sm"
+        variant={state.applied ? "outline" : "default"}
+        disabled={busy}
+        onClick={change}
+      >
+        <Icon className={cn("size-4", busy && "animate-spin")} aria-hidden="true" />
+        {msg(
+          state.applied ? "optimization.blackbox.repo.undo" : "optimization.blackbox.repo.apply",
+        )}
+      </Button>
+    </div>
   );
 }
 

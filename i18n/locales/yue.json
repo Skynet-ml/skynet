@@ -256,6 +256,8 @@
     "optimization.no_result_pending": "優化仲未有結果。",
     "optimization.repo_version_unknown": "呢個版本唔屬於今次運行。",
     "optimization.repo_archive_failed": "打包唔到儲存庫：{reason}",
+    "optimization.local_folder_conflict": "資料夾入面呢啲檔案改咗，所以乜都冇寫入：{files}",
+    "optimization.local_folder_failed": "改唔到資料夾：{reason}",
     "optimization.not_found": "搵唔到優化：「{optimization_id}」。",
     "optimization.agent_run_not_found": "搵唔到優化「{optimization_id}」嘅代理執行 {run_id}。",
     "optimization.pair_not_rerunnable": "當優化處於「{status}」狀態嗰陣無法重新執行配對。",

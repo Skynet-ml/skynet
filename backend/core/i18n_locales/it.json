@@ -266,6 +266,8 @@
     "optimization.no_result_pending": "L'ottimizzazione non ha ancora alcun risultato.",
     "optimization.repo_version_unknown": "Questa versione non fa parte di questa esecuzione.",
     "optimization.repo_archive_failed": "Impossibile creare l'archivio del repository: {reason}",
+    "optimization.local_folder_conflict": "Questi file sono cambiati nella cartella, quindi non è stato scritto nulla: {files}",
+    "optimization.local_folder_failed": "Impossibile modificare la cartella: {reason}",
     "optimization.not_found": "Ottimizzazione non trovata: '{optimization_id}'.",
     "optimization.agent_run_not_found": "Esecuzione dell'agente {run_id} non trovata per l'ottimizzazione '{optimization_id}'.",
     "optimization.pair_not_rerunnable": "Impossibile rieseguire una coppia mentre l'ottimizzazione è nello stato '{status}'.",
