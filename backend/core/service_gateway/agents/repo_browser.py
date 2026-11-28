@@ -247,6 +247,9 @@ class RepoBrowser:
         self._files = {str(e.get("path")) for e in entries if e.get("type") == "file"}
         self._reads = 0
         self._key_files: list[tuple[str, str]] = []
+        self._hidden: set[str] = set()
+        # The tree before the first hide, so a path the draft stops deleting comes back.
+        self._unhidden: tuple[set[str], list[dict[str, Any]], list[tuple[str, str]]] | None = None
         # What the agent opened, in order, so its result can name the files.
         self.files_read: list[str] = []
 
@@ -407,27 +410,32 @@ class RepoBrowser:
         return self._read_text(path, limit)
 
     def hide(self, paths: Collection[str]) -> None:
-        """Leave files out of every later tree, listing and read, as the setup draft deletes them (SKY-997).
+        """Leave exactly these files out of every later tree, listing and read, as the setup draft deletes them.
 
-        A folder that only held such files goes too. The call can repeat: a
-        path that is already gone is skipped.
+        A folder that only held such files goes too. A file that an earlier
+        call hid and ``paths`` no longer holds comes back, as the draft wrote
+        it again (SKY-997).
 
         Args:
             paths: File paths inside the repository.
         """
-        gone = {path for path in paths if path in self._files}
-        if not gone:
+        if self._unhidden is None:
+            self._unhidden = (self._files, self._entries, self._key_files)
+        files, entries, key_files = self._unhidden
+        gone = {path for path in paths if path in files}
+        if gone == self._hidden:
             return
-        self._files -= gone
-        kept = [entry for entry in self._entries if str(entry.get("path")) not in gone]
+        self._hidden = gone
+        kept = [entry for entry in entries if str(entry.get("path")) not in gone]
         for path in gone:
             parent = path.rpartition("/")[0]
             while parent and not any(str(entry.get("path")).startswith(f"{parent}/") for entry in kept):
                 kept = [entry for entry in kept if str(entry.get("path")) != parent]
                 parent = parent.rpartition("/")[0]
+        self._files = files - gone
         self._entries = kept
         self._nodes = _build_nodes(kept)
-        self._key_files = [(path, text) for path, text in self._key_files if path not in gone]
+        self._key_files = [(path, text) for path, text in key_files if path not in gone]
 
     def overview(self) -> RepoRead:
         """Show the repository's tree with its README and manifest, as one read.

@@ -2217,6 +2217,25 @@ async def test_a_folder_copy_that_cannot_open_keeps_the_attachment_shell(
     assert FOLDER_FILES_PROMPT not in system
 
 
+@pytest.mark.asyncio
+async def test_a_file_written_again_after_a_delete_shows_in_the_same_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A deleted file that the agent writes again is in the tree and readable again in the same turn."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Delete File: README.md\n*** End Patch")
+    assert "error" in await tools[READ_REPO_TOOL].acall(path="README.md")
+    assert "README.md" not in await tools[LIST_REPO_TOOL].acall(path="")
+    await tools[WRITE_FILE_TOOL].acall(path="README.md", text="# New\n")
+
+    assert "workspace_deleted" not in turn.wizard_patch or not turn.wizard_patch["workspace_deleted"]
+    assert await tools[READ_REPO_TOOL].acall(path="README.md") == "   1 # Shop"
+    assert "README.md" in await tools[LIST_REPO_TOOL].acall(path="")
+
+
 @on_mac
 @pytest.mark.asyncio
 async def test_a_shell_delete_lasts_into_the_next_turn(
