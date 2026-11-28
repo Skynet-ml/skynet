@@ -2874,6 +2874,7 @@ def _service_answer(
     path: str = "grade",
     method: str = "POST",
     headers: list[list[str]] | None = None,
+    body: bytes = b"",
 ) -> dict[str, Any]:
     """Send one service frame through the relay and wait for its answer.
 
@@ -2884,11 +2885,19 @@ def _service_answer(
         path: The request path under the service url.
         method: The request method.
         headers: The guest's headers.
+        body: The guest's body.
 
     Returns:
         The answer the scorer box gets.
     """
-    frame = {"id": "d" * 32, "service": name, "path": path, "method": method, "headers": headers or [], "body": ""}
+    frame = {
+        "id": "d" * 32,
+        "service": name,
+        "path": path,
+        "method": method,
+        "headers": headers or [],
+        "body": base64.b64encode(body).decode("ascii"),
+    }
     relay.output("stdout", relay._prefix + json.dumps({**frame, "role": relay._role}) + "\n")
     deadline = time.monotonic() + 10
     while not workspace.writes and time.monotonic() < deadline:
@@ -3117,7 +3126,7 @@ def test_an_upstream_that_echoes_the_key_gives_the_box_only_the_redacted_form(ec
 
 
 def _query_relay(workspace: _Workspace, port: int, **hosts: Any) -> _StageRelay:
-    """Build a metric relay to the echo upstream with ``JUDGE_KEY`` in the ``key`` query parameter.
+    """Build a metric relay to the echo upstream with a plain ``key`` query and ``JUDGE_KEY`` in a header.
 
     Args:
         workspace: Records the answers.
@@ -3128,7 +3137,10 @@ def _query_relay(workspace: _Workspace, port: int, **hosts: Any) -> _StageRelay:
         The relay.
     """
     spec = ServiceSpec(
-        secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{port}/geocode", query={"key": "${JUDGE_KEY}"}
+        secrets=("JUDGE_KEY",),
+        url=f"http://judge.example.test:{port}/geocode",
+        headers={"X-Goog-Api-Key": "${JUDGE_KEY}"},
+        query={"key": "plain-value"},
     )
     return _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec}, **hosts)
 
@@ -3145,51 +3157,25 @@ def _sent_query(path: str) -> dict[str, list[str]]:
     return urllib.parse.parse_qs(urllib.parse.urlsplit(path).query, keep_blank_values=True)
 
 
-@pytest.mark.parametrize("secret", ["judge-secret-value", "geo/key+v=1&x y"])
-def test_a_query_secret_is_filled_in_the_parent_and_scrubbed_from_the_answer(
-    echo: _Echo, caplog: pytest.LogCaptureFixture, secret: str
-) -> None:
-    """The upstream gets ?key=<secret> next to the guest's query; the box and the logs never see it (SKY-630)."""
-    sink = _CallSink()
+def test_a_header_secret_fills_next_to_the_declared_plain_query(echo: _Echo) -> None:
+    """The upstream gets the key in its header and the plain query next to the guest's (SKY-630, SKY-1000)."""
     workspace = _Workspace()
-    relay = _query_relay(workspace, echo.port, secret=secret, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
 
-    with caplog.at_level(logging.INFO):
-        answer = _service_answer(relay, workspace, "judge", path="json?address=Tel+Aviv", method="GET")
+    answer = _service_answer(
+        _query_relay(workspace, echo.port), workspace, "judge", path="json?address=Tel+Aviv", method="GET"
+    )
 
     assert answer["status"] == 200
     [path] = echo.paths
     assert path.startswith("/geocode/json?")
-    assert _sent_query(path) == {"address": ["Tel Aviv"], "key": [secret]}
-    assert "authorization" not in echo.headers[0]
-    body = json.loads(base64.b64decode(answer["body"]))
-    assert body["seen"] == "[REDACTED]"
-    assert ["X-Echo", "[REDACTED]"] in answer["headers"]
-    shown = json.dumps(answer)
-    assert all(form not in shown for form in (secret, urllib.parse.quote(secret), urllib.parse.quote_plus(secret)))
-    logged = "\n".join(record.getMessage() for record in caplog.records)
-    assert urllib.parse.quote_plus(secret) not in logged
-    assert secret not in logged
-    [(_, call, secrets)] = sink.calls
-    assert (call["status"], call["target"]) == ("ok", "judge.example.test")
-    assert secret in secrets
-
-
-def test_a_query_secret_in_a_redirect_location_is_scrubbed(echo: _Echo) -> None:
-    """A 302 whose Location repeats the filled url reaches the box without the key (SKY-630)."""
-    workspace = _Workspace()
-
-    answer = _service_answer(_query_relay(workspace, echo.port), workspace, "judge", path="redirect", method="GET")
-
-    assert answer["status"] == 302
-    [location] = [value for name, value in answer["headers"] if name == "Location"]
-    assert location == "/geocode/redirect?key=[REDACTED]"
+    assert _sent_query(path) == {"address": ["Tel Aviv"], "key": ["plain-value"]}
+    assert echo.headers[0]["x-goog-api-key"] == "judge-secret-value"
     assert "judge-secret-value" not in json.dumps(answer)
 
 
 @pytest.mark.parametrize("guest", ["key=guest", "KEY=guest", "key=", "Key=a&key=b", "a=1;key=guest"])
-def test_a_guest_query_parameter_cannot_replace_the_declared_secret(echo: _Echo, guest: str) -> None:
-    """A guest parameter with a declared name, in any case, is dropped; only the filled secret goes out (SKY-630)."""
+def test_a_guest_query_parameter_cannot_replace_the_declared_value(echo: _Echo, guest: str) -> None:
+    """A guest parameter with a declared name, in any case, is dropped; only the declared value goes out (SKY-630)."""
     workspace = _Workspace()
 
     answer = _service_answer(
@@ -3199,47 +3185,31 @@ def test_a_guest_query_parameter_cannot_replace_the_declared_secret(echo: _Echo,
     assert answer["status"] == 200
     [path] = echo.paths
     sent = _sent_query(path)
-    assert (sent["address"], sent["key"]) == (["a"], ["judge-secret-value"])
+    assert (sent["address"], sent["key"]) == (["a"], ["plain-value"])
     assert "guest" not in path
 
 
-def test_a_refused_query_secret_names_the_secret_never_its_value(echo: _Echo) -> None:
-    """A run that does not allow the host gets a refusal that names ${JUDGE_KEY}, and nothing goes out (SKY-630)."""
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [("json?key=${JUDGE_KEY}", b""), ("json?key=%24%7BJUDGE_KEY%7D", b""), ("json", b'{"key": "${JUDGE_KEY}"}')],
+    ids=["url", "encoded-url", "body"],
+)
+def test_a_secret_outside_a_header_is_refused_with_a_reason(echo: _Echo, path: str, body: bytes) -> None:
+    """A guest ``${JUDGE_KEY}`` in the url or body to the secret's own host gets a 403, and nothing goes out (SKY-1000)."""
     sink = _CallSink()
     workspace = _Workspace()
-    relay = _query_relay(workspace, echo.port, allowed_hosts=(), recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
+    relay = _query_relay(workspace, echo.port, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
 
-    answer = _service_answer(relay, workspace, "judge", path="json?address=a", method="GET")
+    answer = _service_answer(relay, workspace, "judge", path=path, body=body)
 
     assert answer["status"] == 403
-    assert "${JUDGE_KEY}" in answer["error"]
+    assert "secret JUDGE_KEY can go only in a request header" in answer["error"]
+    assert "judge.example.test" in answer["error"]
     assert "judge-secret-value" not in json.dumps(answer)
     assert echo.paths == []
     [(_, call, _)] = sink.calls
     assert call["status"] == "refused"
     assert "judge-secret-value" not in repr(call)
-
-
-def test_an_unreachable_query_service_keeps_the_secret_out_of_errors_and_logs(
-    echo: _Echo, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A failed connect returns a plain 502, and neither the record nor a log line holds the key (SKY-630)."""
-    sink = _CallSink()
-    workspace = _Workspace()
-    port = echo.port
-    echo.close()
-    relay = _query_relay(workspace, port, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
-
-    with caplog.at_level(logging.DEBUG):
-        answer = _service_answer(relay, workspace, "judge", path="json?address=a", method="GET")
-
-    assert answer == {"status": 502, "error": "Service 'judge' could not be reached."}
-    logged = "\n".join(record.getMessage() + str(record.exc_info or "") for record in caplog.records)
-    assert "judge-secret-value" not in logged
-    [(_, call, secrets)] = sink.calls
-    assert call["status"] == "failed"
-    assert "judge-secret-value" not in str(call.get("failure_reason"))
-    assert "judge-secret-value" in secrets
 
 
 # The proposer relay's refused paths (test_scoped_relay.py), relative to one service or MCP server.
