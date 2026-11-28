@@ -397,12 +397,27 @@ def test_an_unfinished_hardening_job_keeps_the_pack(
     assert kept.is_file()
 
 
-def test_a_finished_hardening_job_does_not_keep_the_pack(sqlite_store: SQLiteJobStore) -> None:
-    """A hardening job that ended runs no more passes."""
+@pytest.mark.parametrize(
+    ("status", "kept"),
+    [("failed", True), ("stale", True), ("rejected", True), ("done", False), ("budget_stop", False)],
+)
+def test_a_retryable_hardening_job_keeps_its_pack(sqlite_store: SQLiteJobStore, status: str, kept: bool) -> None:
+    """A retry reuses the pinned commit's pack; a job that ended for good needs it no more."""
     _sqlite_local_run(sqlite_store, "done", COMMIT)
-    _hardening_job(sqlite_store, "done", COMMIT)
-    kept = _pack(COMMIT)
+    _hardening_job(sqlite_store, status, COMMIT)
+    pack = _pack(COMMIT)
 
     assert _client(sqlite_store).delete("/optimizations/done").status_code == 200
 
-    assert not kept.exists()
+    assert pack.is_file() is kept
+
+
+def test_a_retryable_hardening_job_without_a_commit_keeps_no_pack(sqlite_store: SQLiteJobStore) -> None:
+    """A job that failed before it pinned a commit packs the folder again on retry."""
+    _sqlite_local_run(sqlite_store, "done", COMMIT)
+    _hardening_job(sqlite_store, "preflight_failed", None)
+    pack = _pack(COMMIT)
+
+    assert _client(sqlite_store).delete("/optimizations/done").status_code == 200
+
+    assert not pack.exists()

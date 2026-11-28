@@ -29,6 +29,7 @@ from ....models import (
 )
 from ....models.hardening import ACTIVE_STATUSES as HARDENING_ACTIVE_STATUSES
 from ....models.hardening import HardeningJobModel
+from ....service_gateway.optimization.blackbox.hardening import RETRYABLE_STATUSES as HARDENING_RETRYABLE_STATUSES
 from ....storage.tree_purge import TreePurgeError
 from ....worker.local_folder import LocalFolderError, forget_snapshot, is_local
 from ...auth import AuthenticatedUser, get_authenticated_user
@@ -91,27 +92,28 @@ def _local_commits(job_store, optimization_ids: list[str]) -> set[str]:
     return {commit for payload in payloads.values() if (repo := _local_repo(payload)) and (commit := _pinned(repo))}
 
 
-def _active_hardening_repos(job_store) -> list[dict[str, Any]]:
-    """Read the local repository blocks of the unfinished metric-hardening jobs.
+def _hardening_repos(job_store) -> list[tuple[str, dict[str, Any]]]:
+    """Read the local repository blocks of the metric-hardening jobs that can still run.
 
-    Hardening jobs live in their own table, and their later passes reuse the
-    pack of the commit they pinned.
+    Hardening jobs live in their own table. Their later passes, and a retry of
+    a failed, stale or rejected job, reuse the pack of the commit they pinned.
 
     Args:
         job_store: Job-store whose ``engine`` holds the hardening jobs.
 
     Returns:
-        The ``target.repo`` blocks that name a local folder; empty for a store
-        without an engine.
+        The status and ``target.repo`` block of each job that names a local
+        folder; empty for a store without an engine.
     """
     engine = getattr(job_store, "engine", None)
     if engine is None:
         return []
+    statuses = HARDENING_ACTIVE_STATUSES | HARDENING_RETRYABLE_STATUSES
     with Session(engine) as session:
-        documents = session.scalars(
-            select(HardeningJobModel.job).where(HardeningJobModel.status.in_(HARDENING_ACTIVE_STATUSES))
+        rows = session.execute(
+            select(HardeningJobModel.status, HardeningJobModel.job).where(HardeningJobModel.status.in_(statuses))
         ).all()
-    return [repo for document in documents if (repo := _local_repo(document))]
+    return [(status, repo) for status, document in rows if (repo := _local_repo(document))]
 
 
 def _forget_unused_packs(job_store, commits: set[str]) -> None:
@@ -142,11 +144,13 @@ def _forget_unused_packs(job_store, commits: set[str]) -> None:
                 # A starting run keeps its pack before it stores the commit, so any pack may be its pack.
                 logger.info("Kept folder packs kept: run %s has not stored its commit yet", optimization_id)
                 return
-        for repo in _active_hardening_repos(job_store):
-            if not (commit := _pinned(repo)):
+        for status, repo in _hardening_repos(job_store):
+            if commit := _pinned(repo):
+                in_use.add(commit)
+            elif status in HARDENING_ACTIVE_STATUSES:
+                # A retryable job without a commit packs the folder again; only a working one may be writing a pack.
                 logger.info("Kept folder packs kept: a hardening job has not stored its commit yet")
                 return
-            in_use.add(commit)
     except Exception:
         logger.exception("Kept folder packs kept: the stored runs could not be read")
         return
