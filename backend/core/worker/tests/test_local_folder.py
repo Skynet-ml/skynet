@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import io
 import os
@@ -273,28 +274,46 @@ def test_forget_snapshot_deletes_only_the_named_pack(tmp_path: Path, local_state
     assert outside.is_file()
 
 
-def test_a_reuse_between_the_cleanups_check_and_delete_keeps_the_pack(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("changed", [False, True], ids=["same-folder", "changed-folder"])
+def test_a_reuse_during_a_cleanup_waits_and_then_packs_the_folder_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: bool
 ) -> None:
-    """A run that reuses the pack while a cleanup checks it waits for the lock, so the pack is there after both."""
+    """A run that reuses the pack between the cleanup's check and delete waits for the lock.
+
+    The cleanup then deletes the pack, and the run packs the folder again: the
+    same folder gives the same pack back, and a changed folder fails in plain
+    words. No run ever holds a copy of a pack that the cleanup deletes after.
+    """
     root = _write(tmp_path / "app", {"main.py": "x = 1\n"})
     first = tmp_path / "w1"
     first.mkdir()
     commit = local_folder.snapshot_folder(root, first).commit
     kept = local_folder.kept_snapshot(commit)
     _age(kept)
+    if changed:
+        (root / "main.py").write_text("x = 2\n")
     second = tmp_path / "w2"
     second.mkdir()
-    reused: list[str] = []
-    reuse = threading.Thread(target=lambda: reused.append(local_folder.snapshot_folder(root, second, commit).commit))
+    reused: list[object] = []
+
+    def run() -> None:
+        """Reuse the pack, and keep the commit or the error."""
+        try:
+            reused.append(local_folder.snapshot_folder(root, second, commit).commit)
+        except LocalFolderError as error:
+            reused.append(error)
+
+    reuse = threading.Thread(target=run)
     cleanup = threading.get_ident()
-    real = local_folder.kept_snapshot
+    real_kept, real_keep = local_folder.kept_snapshot, local_folder._keep
+    kept_by_reuse: list[str] = []
+    seen: dict[str, bool] = {}
 
     class _Paused(type(kept)):  # type: ignore[misc]
         """A pack path whose stat starts the reuse, before the cleanup's unlink."""
 
         def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
-            """Stat the pack, then start the reuse and give it time to finish.
+            """Stat the pack, then check the lock and start the reuse.
 
             Args:
                 follow_symlinks: Passed on to ``Path.stat``.
@@ -305,8 +324,16 @@ def test_a_reuse_between_the_cleanups_check_and_delete_keeps_the_pack(
             status = super().stat(follow_symlinks=follow_symlinks)
             # Only the pack's own stat; its folder's stat comes before the lock.
             if self == kept and reuse.ident is None:
+                with (kept.parent / ".lock").open("a") as probe:
+                    try:
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        seen["locked"] = False
+                    except BlockingIOError:
+                        seen["locked"] = True
                 reuse.start()
-                reuse.join(timeout=1)
+                # The reuse cannot finish while the cleanup holds the lock, however long this waits.
+                reuse.join(timeout=0.2)
+                seen["waiting"] = reuse.is_alive()
             return status
 
     def paused(name: str) -> Path:
@@ -318,16 +345,37 @@ def test_a_reuse_between_the_cleanups_check_and_delete_keeps_the_pack(
         Returns:
             The pack's path.
         """
-        path = real(name)
+        path = real_kept(name)
         return _Paused(path) if threading.get_ident() == cleanup else path
 
+    def keep(archive: Path, digest: str) -> None:
+        """Count the packs the reuse writes, and write them.
+
+        Args:
+            archive: The packed tree.
+            digest: Its SHA-1.
+        """
+        kept_by_reuse.append(digest)
+        real_keep(archive, digest)
+
     monkeypatch.setattr(local_folder, "kept_snapshot", paused)
-    local_folder.forget_snapshot(commit)
+    monkeypatch.setattr(local_folder, "_keep", keep)
+
+    assert local_folder.forget_snapshot(commit) is True
     reuse.join(timeout=10)
 
-    assert reused == [commit]
-    assert kept.is_file()
-    assert (second / "tree.tgz").is_file()
+    assert seen == {"locked": True, "waiting": True}
+    if changed:
+        assert [str(error) for error in reused] == [
+            "The folder changed after the run was set up. Set up the run again."
+        ]
+        assert kept_by_reuse == []
+        assert not kept.exists()
+    else:
+        assert reused == [commit]
+        assert kept_by_reuse == [commit]
+        assert kept.is_file()
+        assert (second / "tree.tgz").is_file()
 
 
 def test_the_pack_commit_is_the_folder_source_id(tmp_path: Path) -> None:

@@ -197,6 +197,18 @@ def test_a_local_run_without_a_commit_keeps_the_packs_only_for_a_day(
     assert pack.is_file() is kept
 
 
+def test_a_long_queued_run_keeps_the_pack_it_just_wrote(client: TestClient, store: _BaseFakeJobStore) -> None:
+    """A run created over a day ago that packs the folder only now keeps its fresh pack."""
+    created = (datetime.now(UTC) - UNPINNED_RUN_MAX_AGE - timedelta(hours=1)).isoformat()
+    _local_run(store, "done", COMMIT)
+    _local_run(store, "queued", None, status="pending", created_at=created)
+    kept = _pack(COMMIT, fresh=True)
+
+    assert client.delete("/optimizations/done").status_code == 200
+
+    assert kept.is_file()
+
+
 def test_a_local_run_without_a_commit_or_a_readable_start_time_keeps_every_pack(
     client: TestClient, store: _BaseFakeJobStore
 ) -> None:
@@ -485,7 +497,10 @@ def test_a_retryable_hardening_job_keeps_its_pack_for_30_days(
     assert pack.is_file() is kept
 
 
-@pytest.mark.parametrize(("status", "commit"), [("waiting_review", COMMIT), ("running", COMMIT), ("preflight", None)])
+@pytest.mark.parametrize(
+    ("status", "commit"),
+    [("waiting_review", COMMIT), ("waiting_fix", COMMIT), ("running", COMMIT), ("preflight", None)],
+)
 def test_an_active_hardening_job_keeps_the_pack_at_any_age(
     sqlite_store: SQLiteJobStore, status: str, commit: str | None
 ) -> None:

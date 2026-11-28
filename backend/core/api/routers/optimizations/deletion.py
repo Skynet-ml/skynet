@@ -44,11 +44,13 @@ logger = logging.getLogger(__name__)
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
-# A run stores its commit minutes after it starts. One without a commit after this long
-# is stuck and writes no pack, so it no longer keeps every pack (SKY-1012).
+# A run stores its commit minutes after it starts. One whose created_at is longer ago than
+# this and has no commit is stuck, so it no longer keeps every pack (SKY-1012). A run that
+# waited in the queue that long and packs only now is safe: FRESH_PACK_SECONDS keeps its new pack.
 UNPINNED_RUN_MAX_AGE = timedelta(hours=24)
-# A failed, stale or rejected hardening job untouched this long is not retried, so it
-# no longer keeps its pack (SKY-1012).
+# A failed, stale or rejected hardening job untouched this long is unlikely to be retried, so
+# it no longer keeps its pack (SKY-1012). A late retry packs the folder again, and fails if
+# the folder changed.
 RETRYABLE_HARDENING_MAX_AGE = timedelta(days=30)
 
 
