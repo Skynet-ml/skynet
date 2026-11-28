@@ -261,6 +261,110 @@ def open_no_follow(root: Path, rel: str) -> io.BufferedReader:
         raise
 
 
+def _with_gitignore(folder: Path, rel: str, rules: list[tuple[str, list[_Rule]]]) -> list[tuple[str, list[_Rule]]]:
+    """Add a folder's own ``.gitignore`` rules to the rules of the folders above it.
+
+    Args:
+        folder: The folder on disk.
+        rel: Its ``/``-joined path below the root; empty for the root.
+        rules: The rules of every folder above, highest first.
+
+    Returns:
+        ``rules``, with this folder's rules last when it has a readable ``.gitignore``.
+    """
+    try:
+        # Opened without a check first, so a pipe or link swapped in cannot block or redirect the read.
+        with open_no_follow(folder, GITIGNORE) as ignore_file:
+            text = ignore_file.read().decode("utf-8", errors="replace")
+    except OSError:
+        return rules
+    return [*rules, (rel, parse_gitignore(text))]
+
+
+def _name_kept(name: str) -> bool:
+    """Check the name rules of the listing, which need no look at the disk.
+
+    Args:
+        name: One path part.
+
+    Returns:
+        False for a ``.env*`` name, an operating system file or ``.git``.
+    """
+    # A worktree's or submodule's ``.git`` is a file, and it stays out too.
+    return not (is_env_name(name) or is_os_name(name) or name == ".git")
+
+
+def _kind_kept(path: Path, rel: str, is_dir: bool, is_file: bool, rules: list[tuple[str, list[_Rule]]]) -> bool:
+    """Check the listing's rules for a child that is not a link and has a kept name.
+
+    Args:
+        path: The child on disk.
+        rel: Its ``/``-joined path below the root.
+        is_dir: Whether it is a folder, without following a link.
+        is_file: Whether it is a regular file, without following a link.
+        rules: The ``.gitignore`` rules of every folder above it, highest first.
+
+    Returns:
+        False for a socket, pipe or device, a skipped or virtual environment folder, or an ignored path.
+    """
+    if not (is_dir or is_file):
+        return False
+    if is_dir and (path.name in SKIPPED_DIRS or os.path.lexists(path / VENV_MARKER)):
+        return False
+    return not _ignored(rel, is_dir, rules)
+
+
+def is_listed_file(root: str | os.PathLike[str], rel: str) -> bool:
+    """Check that :func:`folder_entries` with no limit lists one file, without a walk of the whole folder.
+
+    Each folder on the way gets the same checks as in the walk, and its
+    ``.gitignore`` applies to the parts below it. Only the folders on the
+    path are listed.
+
+    Args:
+        root: The folder.
+        rel: The file's ``/``-joined path below ``root``.
+
+    Returns:
+        True when the full listing holds ``rel`` as a file.
+    """
+    folder = Path(root)
+    if folder.is_symlink() or not folder.is_dir():
+        return False
+    parts = rel.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return False
+    rules: list[tuple[str, list[_Rule]]] = []
+    current = ""
+    for index, name in enumerate(parts):
+        rules = _with_gitignore(folder, current, rules)
+        # An exact name from the folder's own listing: a disk that ignores case would let ``IGNORED.TXT`` slip past a
+        # case-sensitive rule, and the walk lists no child of a folder it cannot list.
+        try:
+            with os.scandir(folder) as found:
+                if name not in {entry.name for entry in found}:
+                    return False
+        except OSError:
+            return False
+        child = folder / name
+        child_rel = f"{current}/{name}" if current else name
+        try:
+            mode = child.lstat().st_mode
+        except OSError:
+            return False
+        if stat.S_ISLNK(mode) or not _name_kept(name):
+            return False
+        is_dir, is_file = stat.S_ISDIR(mode), stat.S_ISREG(mode)
+        if not _kind_kept(child, child_rel, is_dir, is_file, rules):
+            return False
+        if index == len(parts) - 1:
+            return is_file
+        if not is_dir:
+            return False
+        folder, current = child, child_rel
+    return False
+
+
 def _visit(
     folder: Path, rel: str, rules: list[tuple[str, list[_Rule]]], entries: list[dict[str, Any]], limit: int | None
 ) -> bool:
@@ -277,22 +381,14 @@ def _visit(
     Returns:
         False once ``limit`` is reached.
     """
-    try:
-        # Opened without a check first, so a pipe or link swapped in cannot block or redirect the read.
-        with open_no_follow(folder, GITIGNORE) as ignore_file:
-            text = ignore_file.read().decode("utf-8", errors="replace")
-    except OSError:
-        text = None
-    if text is not None:
-        rules = [*rules, (rel, parse_gitignore(text))]
+    rules = _with_gitignore(folder, rel, rules)
     try:
         with os.scandir(folder) as found:
             children = sorted(found, key=lambda child: child.name)
     except OSError:
         return True
     for child in children:
-        # A worktree's or submodule's ``.git`` is a file, and it stays out too.
-        if child.is_symlink() or is_env_name(child.name) or is_os_name(child.name) or child.name == ".git":
+        if child.is_symlink() or not _name_kept(child.name):
             continue
         child_rel = f"{rel}/{child.name}" if rel else child.name
         try:
@@ -300,11 +396,7 @@ def _visit(
             is_file = not is_dir and child.is_file(follow_symlinks=False)
         except OSError:
             continue
-        if not (is_dir or is_file):
-            continue
-        if is_dir and (child.name in SKIPPED_DIRS or os.path.lexists(Path(child.path, VENV_MARKER))):
-            continue
-        if _ignored(child_rel, is_dir, rules):
+        if not _kind_kept(Path(child.path), child_rel, is_dir, is_file, rules):
             continue
         if limit is not None and len(entries) >= limit:
             return False

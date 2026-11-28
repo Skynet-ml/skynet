@@ -11,7 +11,7 @@ In desktop local mode the source can be a local folder (SKY-995).
 :class:`LocalFolderBrowser` reads it from disk with the same tree and file
 output, and never writes to it. It lists and hashes the folder with
 :mod:`core.local.folder_tree`, as the run does, so a draft's base is the
-run's commit. :func:`read_folder_text` reads one file of it.
+run's commit. :func:`read_folder_text` and :func:`read_folder_bytes` read one file of it.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from ...local.folder_tree import (
     folder_entries,
     folder_source_id,
     is_env_name,
+    is_listed_file,
     open_no_follow,
 )
 from ...models.blackbox import LOCAL_REPO_PROVIDER
@@ -486,7 +487,7 @@ class FolderReadRefusedError(FolderTreeError):
     """A local folder read that is refused: not in local mode, or a path outside the folder."""
 
 
-def _folder_root(root: str | Path) -> Path:
+def folder_root(root: str | Path) -> Path:
     """Check the chosen folder and resolve it.
 
     Args:
@@ -527,7 +528,7 @@ def _folder_file(base: Path, path: str) -> str:
     """Find one file under the folder, and refuse any path that leaves it, has a link or names a ``.env*`` file.
 
     Args:
-        base: The resolved folder from :func:`_folder_root`.
+        base: The resolved folder from :func:`folder_root`.
         path: The file path from the folder root.
 
     Returns:
@@ -556,6 +557,38 @@ def _folder_file(base: Path, path: str) -> str:
     return "/".join(parts)
 
 
+def read_folder_bytes(
+    root: str | Path, path: str, limit: int, files: Collection[str] | None = None
+) -> tuple[bytes, bool]:
+    """Read the raw bytes of one file of a local folder, with the checks of :func:`read_folder_text`.
+
+    Args:
+        root: The folder's absolute path.
+        path: The file path from the folder root.
+        limit: Most bytes to return.
+        files: The folder's full listing of files, or ``None`` to check only
+            this path with :func:`is_listed_file`, without a walk of the folder.
+
+    Returns:
+        The bytes and whether they were cut at ``limit``.
+
+    Raises:
+        FolderReadRefusedError: See :func:`folder_root` and :func:`_folder_file`.
+        DomainError: ``connectors.not_found`` when no file is there, or the listing leaves it out.
+        OSError: When the file cannot be read, or became a link or a non-regular file since the check.
+    """
+    base = folder_root(root)
+    rel = _folder_file(base, path)
+    # Only what the run would copy is readable, so a gitignored or skipped file stays out (SKY-990's filter).
+    listed = is_listed_file(base, rel) if files is None else rel in files
+    if not listed:
+        raise DomainError("connectors.not_found", status=404, provider=_FOLDER_LABEL)
+    # The checks above can race a swap on disk; open_no_follow walks each part again without following links.
+    with open_no_follow(base, rel) as handle:
+        content = handle.read(limit + 1)
+    return content[:limit], len(content) > limit
+
+
 def read_folder_text(root: str | Path, path: str, limit: int, files: Collection[str]) -> tuple[str, bool]:
     """Read one text file of a local folder, like a host's ``read_text_file``.
 
@@ -569,19 +602,12 @@ def read_folder_text(root: str | Path, path: str, limit: int, files: Collection[
         The text (bad UTF-8 replaced) and whether it was cut at ``limit``.
 
     Raises:
-        FolderReadRefusedError: See :func:`_folder_root` and :func:`_folder_file`.
+        FolderReadRefusedError: See :func:`folder_root` and :func:`_folder_file`.
         DomainError: ``connectors.not_found`` when no file is there, or the listing leaves it out.
         OSError: When the file cannot be read, or became a link or a non-regular file since the check.
     """
-    base = _folder_root(root)
-    rel = _folder_file(base, path)
-    # Only what the run would copy is readable, so a gitignored or skipped file stays out (SKY-990's filter).
-    if rel not in files:
-        raise DomainError("connectors.not_found", status=404, provider=_FOLDER_LABEL)
-    # The checks above can race a swap on disk; open_no_follow walks each part again without following links.
-    with open_no_follow(base, rel) as handle:
-        content = handle.read(limit + 1)
-    return content[:limit].decode("utf-8", errors="replace"), len(content) > limit
+    content, cut = read_folder_bytes(root, path, limit, files)
+    return content.decode("utf-8", errors="replace"), cut
 
 
 class LocalFolderBrowser(RepoBrowser):
@@ -599,10 +625,10 @@ class LocalFolderBrowser(RepoBrowser):
             root: The folder's absolute path.
 
         Raises:
-            FolderReadRefusedError: See :func:`_folder_root`, and when the files sum past ``LOCAL_FOLDER_READ_BYTES``.
+            FolderReadRefusedError: See :func:`folder_root`, and when the files sum past ``LOCAL_FOLDER_READ_BYTES``.
             FolderTreeError: When the folder cannot be listed.
         """
-        base = _folder_root(root)
+        base = folder_root(root)
         # The cut walk is a prefix of the full one, so one full walk gives the tree, the id and the reads.
         full, _ = folder_entries(base, None)
         # Hashing reads every byte, so a folder too large to read is refused before the first read.

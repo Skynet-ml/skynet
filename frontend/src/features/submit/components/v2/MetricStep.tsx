@@ -7,7 +7,15 @@ import {
   lockedCodeFiles,
   useWizardStateOptional,
 } from "@/features/agent-panel";
-import { githubRepoFile, githubRepoTree, type RepoHost } from "@/shared/lib/api";
+import {
+  githubRepoFile,
+  githubRepoTree,
+  localFolderFile,
+  localFolderTree,
+  type GithubFileResponse,
+  type GithubTreeResponse,
+  type RepoHost,
+} from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
 import { AgenticIde } from "../../agentic-ide/AgenticIde";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
@@ -17,6 +25,7 @@ import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-f
 import { workspaceTexts } from "../../lib/ide-workspace";
 import { metricCommandText } from "../../lib/repo-run";
 import { withScorerImports } from "../../lib/scorer-dependencies";
+import { metricRepoSource } from "../../lib/metric-repo-source";
 import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
 import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
@@ -32,28 +41,31 @@ const HOST_ORIGIN: Record<RepoHost, string> = {
 };
 
 /**
- * The repository's checkout for the IDE's explorer, read from its host at the
- * run's commit (or branch) as the run will clone it.
+ * A source's checkout for the IDE's explorer: its tree now, each file when it is opened.
  *
  * Args:
- *   repository: The repository as `owner/name`.
- *   ref: The commit or branch; empty for the default branch.
- *   host: The repository's host.
+ *   name: The repository as `owner/name`, or the folder's path; its last part names the explorer's folder.
+ *   tree: The source's tree, already requested.
+ *   readFile: Reads one file of the source.
  *
  * Returns:
- *   The tree, fetched now, and a reader that fetches each file when it is opened.
+ *   The tree and a reader that fetches each file once.
  */
-function repoSource(repository: string, ref: string, host: RepoHost): RepoSource {
+function repoSource(
+  name: string,
+  tree: Promise<GithubTreeResponse>,
+  readFile: (path: string) => Promise<GithubFileResponse>,
+): RepoSource {
   const reads = new Map<string, ReturnType<RepoSource["read"]>>();
   const fetchFile = async (path: string): ReturnType<RepoSource["read"]> => {
-    const file = await githubRepoFile(repository, ref, path, host);
+    const file = await readFile(path);
     if (file.text !== null) return { text: file.text };
     return { issue: file.binary ? "binary" : file.too_large ? "too_large" : "missing" };
   };
   return {
     // A repository run's workspace is run.py and metric.py, nothing else.
-    folder: repoFolderName(repository, new Set([RUN_FILE, METRIC_FILE])),
-    tree: githubRepoTree(repository, ref, host).then((tree) => indexRepoTree(tree.entries)),
+    folder: repoFolderName(name, new Set([RUN_FILE, METRIC_FILE])),
+    tree: tree.then((listing) => indexRepoTree(listing.entries)),
     read: (path) => {
       let read = reads.get(path);
       if (!read) {
@@ -64,6 +76,20 @@ function repoSource(repository: string, ref: string, host: RepoHost): RepoSource
       return read;
     },
   };
+}
+
+/** A hosted repository, read from its host at the run's commit (or branch) as the run will clone it. */
+function hostRepoSource(repository: string, ref: string, host: RepoHost): RepoSource {
+  return repoSource(repository, githubRepoTree(repository, ref, host), (path) =>
+    githubRepoFile(repository, ref, path, host),
+  );
+}
+
+/** A folder on this computer, read by the backend's local routes with the run's filter (SKY-1001). */
+function localFolderSource(folder: string): RepoSource {
+  return repoSource(folder.replace(/\/+$/, ""), localFolderTree(folder), (path) =>
+    localFolderFile(folder, path),
+  );
 }
 
 /**
@@ -77,12 +103,19 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   const { task, workspace } = state;
 
   const repoDraft = !repoIssue(task.repo) ? task.repo : null;
-  const repoName = repoDraft?.repository.trim() ?? "";
-  const repoRef = repoDraft ? repoDraft.commit.trim() || repoDraft.branch.trim() : "";
-  const repoHost = repoDraft?.provider ?? "github";
+  const source = metricRepoSource(repoDraft);
+  const localPath = source?.kind === "local" ? source.folder : "";
+  const repoName = source?.kind === "host" ? source.repository : "";
+  const repoRef = source?.kind === "host" ? source.ref : "";
+  const repoHost = source?.kind === "host" ? source.host : "github";
   const repoFiles = React.useMemo(
-    () => (repoName ? repoSource(repoName, repoRef, repoHost) : null),
-    [repoName, repoRef, repoHost],
+    () =>
+      localPath
+        ? localFolderSource(localPath)
+        : repoName
+          ? hostRepoSource(repoName, repoRef, repoHost)
+          : null,
+    [localPath, repoName, repoRef, repoHost],
   );
 
   const setMetricCode = React.useCallback(
@@ -168,7 +201,11 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
               repo={repoFiles}
               busy={agent?.agentBusy ?? false}
               onWrite={setWorkspaceFile}
-              host={repoName ? { provider: repoHost, url: `${HOST_ORIGIN[repoHost]}/${repoName}` } : null}
+              host={
+                repoName
+                  ? { provider: repoHost, url: `${HOST_ORIGIN[repoHost]}/${repoName}` }
+                  : null
+              }
             />
           ) : (
             ideWorkspace(
@@ -181,7 +218,9 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
       </WizardScreen>
       <WizardScreen active={page === 1} className="overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
         {metricCommand ? (
-          <p className="text-sm text-muted-foreground">{msg("submit.v2.metric.command_no_hardening")}</p>
+          <p className="text-sm text-muted-foreground">
+            {msg("submit.v2.metric.command_no_hardening")}
+          </p>
         ) : (
           <HardenMetricScreen
             active={onStep && page === 1}
@@ -193,7 +232,11 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
         )}
       </WizardScreen>
       <WizardScreen active={page === 2} className="flex flex-col overflow-hidden">
-        <RunOverview state={state} guided={guided} hardening={metricCommand ? null : hardening.job} />
+        <RunOverview
+          state={state}
+          guided={guided}
+          hardening={metricCommand ? null : hardening.job}
+        />
       </WizardScreen>
     </div>
   );

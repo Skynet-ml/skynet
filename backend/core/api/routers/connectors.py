@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
@@ -35,6 +36,8 @@ from ...connectors.pruning import browse_importable
 from ...connectors.transport import label
 from ...connectors.vault import ConnectorSecret, ConnectorVault
 from ...local import connector_relay, hosted_link
+from ...local.folder_tree import FolderTreeError, folder_entries
+from ...service_gateway.agents.repo_browser import folder_root, read_folder_bytes
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..dataset_access import ShareRole
@@ -53,6 +56,8 @@ GITHUB_CASES_MAX_ITEMS = 10_000
 GITHUB_CASES_MAX_BYTES = 5 * 1024 * 1024
 # GitLab paths may hold subgroups, so they can be longer than GitHub's ``owner/name``.
 REPO_PATH_MAX = 1024
+# macOS PATH_MAX; a local folder path is never longer.
+LOCAL_FOLDER_PATH_MAX = 1024
 # Providers whose hosted OAuth link the Mac app can copy (SKY-986).
 RELAY_PROVIDERS = registry.OAUTH_PROVIDERS | {hf.PROVIDER}
 OtherRepoHost = Literal["gitlab", "bitbucket"]
@@ -313,6 +318,27 @@ def connector_secret(vault: ConnectorVault, username: str, provider: str) -> Con
             account_label=secret.account_label,
         )
     return secret
+
+
+def local_folder(path: str) -> Path:
+    """Check that a local folder may be read, and resolve it, with the setup agent's rules (SKY-995).
+
+    Args:
+        path: The folder's absolute path.
+
+    Returns:
+        The resolved folder.
+
+    Raises:
+        DomainError: 404 ``local.not_available`` outside desktop local mode;
+            400 ``connectors.invalid_ref`` for a relative, linked or missing folder.
+    """
+    if not settings.local_mode:
+        raise DomainError("local.not_available", status=404)
+    try:
+        return folder_root(path)
+    except FolderTreeError:
+        raise DomainError("connectors.invalid_ref", status=400) from None
 
 
 def create_connectors_router(*, job_store) -> APIRouter:
@@ -956,6 +982,82 @@ def create_connectors_router(*, job_store) -> APIRouter:
         """
         token = _optional_github_token(user.username)
         return GithubFileResponse(**github.read_repo_file(token, repo, ref, path, GITHUB_FILE_MAX_BYTES))
+
+    # Declared before the ``{provider}`` routes, so ``/connectors/local/...`` keeps its own handlers.
+    @router.get(
+        "/connectors/local/tree",
+        response_model=GithubTreeResponse,
+        summary="List every file and folder of a local folder (desktop app only)",
+    )
+    def local_folder_tree(
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        path: str = Query(min_length=1, max_length=LOCAL_FOLDER_PATH_MAX),
+    ) -> GithubTreeResponse:
+        """List a local folder's tree with the run's filter, for the Metric step's explorer.
+
+        Args:
+            user: Authenticated caller.
+            path: The folder's absolute path.
+
+        Returns:
+            Every kept file and folder path, and whether the listing stopped early.
+
+        Raises:
+            DomainError: See :func:`local_folder`.
+        """
+        base = local_folder(path)
+        try:
+            entries, truncated = folder_entries(base)
+        except (FolderTreeError, OSError):
+            raise DomainError("connectors.invalid_ref", status=400) from None
+        return GithubTreeResponse(entries=entries, truncated=truncated)
+
+    @router.get(
+        "/connectors/local/file",
+        response_model=GithubFileResponse,
+        summary="Read one file of a local folder (desktop app only)",
+    )
+    def local_folder_file(
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        path: str = Query(min_length=1, max_length=LOCAL_FOLDER_PATH_MAX),
+        file: str = Query(min_length=1, max_length=github.FILE_PATH_MAX),
+    ) -> GithubFileResponse:
+        """Read one local folder file for the read-only code view, opened lazily per file.
+
+        Args:
+            user: Authenticated caller.
+            path: The folder's absolute path.
+            file: The file path from the folder root.
+
+        Returns:
+            The file's text, or flags for a binary, oversized or missing file.
+            A file the run would not copy (``.env*``, gitignored) reads as missing.
+
+        Raises:
+            DomainError: 400 ``connectors.invalid_ref`` for a path that is
+                absolute, walks out with ``..``, names a ``.env*`` file or goes
+                through a link; see also :func:`local_folder`.
+        """
+        base = local_folder(path)
+        try:
+            # The reader checks this one path against the run's copy filter, so a click never walks the whole folder.
+            content, cut = read_folder_bytes(base, file, GITHUB_FILE_MAX_BYTES)
+        except DomainError as error:
+            if error.code != "connectors.not_found":
+                raise
+            return GithubFileResponse(path=file, missing=True)
+        except (FolderTreeError, OSError):
+            raise DomainError("connectors.invalid_ref", status=400) from None
+        if cut:
+            return GithubFileResponse(path=file, too_large=True)
+        # Strict decoding, as the GitHub route does, so a real U+FFFD in valid UTF-8 stays text.
+        if b"\x00" in content:
+            return GithubFileResponse(path=file, binary=True)
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return GithubFileResponse(path=file, binary=True)
+        return GithubFileResponse(path=file, text=text)
 
     # Declared after the GitHub routes, so ``/connectors/github/...`` keeps its own handlers.
     @router.get(
