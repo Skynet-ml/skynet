@@ -167,6 +167,8 @@ export function RepoTargetCard({
       setEnvPreview(null);
       return;
     }
+    // A new folder must not show the last folder's preview while its own read runs or fails.
+    setEnvPreview(null);
     let controller = new AbortController();
     const load = () => {
       controller.abort();

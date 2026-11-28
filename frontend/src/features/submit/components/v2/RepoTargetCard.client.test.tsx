@@ -588,6 +588,51 @@ void test("a folder draft without the folder card asks for a repository instead"
   }
 });
 
+void test("a new folder hides the last folder's .env preview while its read waits or fails (SKY-994)", async () => {
+  for (const second of ["pending", "rejected"] as const) {
+    const bridge: Bridge = { pickFolder: async () => "/Users/me/b" };
+    const linkedFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes("/secrets/local-env?")) return linkedFetch(input);
+      const path = new URL(url, "https://api.example.test").searchParams.get("path");
+      if (path === "/Users/me/b") {
+        if (second === "rejected") throw new TypeError("network down");
+        return new Promise<Response>(() => {});
+      }
+      return new Response(
+        JSON.stringify({
+          status: "found",
+          entries: [{ name: "NEW_KEY", clash: false }],
+          skipped: [{ line: 4, name: "MY-KEY", reason: "invalid_name" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+    await asDesktop(bridge, true, async () => {
+      const sent: RepoDraft[] = [];
+      const { container, unmount } = await mountControlled({ ...repo, localPath: "/Users/me/a" }, sent);
+      try {
+        await React.act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        assert.ok((container.textContent ?? "").includes("Skipped .env lines"), "no preview for folder A");
+        const choose = container.querySelector<HTMLButtonElement>('button[aria-describedby="v2-repo-folder-path"]');
+        assert.ok(choose, "no Choose folder button");
+        await React.act(async () => {
+          choose.click();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        assert.equal(sent.at(-1)!.localPath, "/Users/me/b");
+        assert.ok(!(container.textContent ?? "").includes("Skipped .env lines"), `${second}: folder A preview stays`);
+      } finally {
+        await unmount();
+        globalThis.fetch = linkedFetch;
+      }
+    });
+  }
+});
+
 void test("the folder card keeps a run-start .env clash pick when the preview finds no file (SKY-994)", async () => {
   const bridge: Bridge = { pickFolder: async () => null };
   const linkedFetch = globalThis.fetch;
