@@ -24,6 +24,7 @@ const {
   fileProposerCommand,
   parseAllowedHosts,
   repoIssue,
+  taskIssue,
   undecidedEnvClashes,
   withLocalFolder,
 } = await import("./wizard-v2.ts");
@@ -38,6 +39,7 @@ const {
   repoBaseText,
   RUN_SECRETS_MAX,
   TooManyRunSecretsError,
+  UndecidedEnvClashesError,
   envSecretClashesState,
   repoRunRequest,
   withEnvSecrets,
@@ -764,18 +766,26 @@ test("a local run imports the folder's .env with the Use .env picks and sends th
     ...state.task.repo,
     localPath: " /Users/me/app ",
     secrets: [],
-    envClashes: ["A", "B", "C"],
+    envClashes: ["A", "B"],
     envChoices: { A: "use", B: "keep" },
   };
   const request = repoRunRequest(state, options)!;
   const calls: Array<[string, string[]]> = [];
   const sent = await withLocalEnvImport(request, state.task.repo, async (path, replace) => {
     calls.push([path, replace]);
-    return { secrets: [{ id: "s-a", name: "A" }, { id: "s-db", name: "DB_URL" }] };
+    return {
+      kept: ["B"],
+      secrets: [
+        { id: "s-a", name: "A" },
+        { id: "s-b", name: "B" },
+        { id: "s-db", name: "DB_URL" },
+      ],
+    };
   });
   assert.deepEqual(calls, [["/Users/me/app", ["A"]]]);
   assert.deepEqual(sent.target.repo!.secrets, [
     { name: "A", saved_secret_id: "s-a", allowed_hosts: [] },
+    { name: "B", saved_secret_id: "s-b", allowed_hosts: [] },
     { name: "DB_URL", saved_secret_id: "s-db", allowed_hosts: [] },
   ]);
 });
@@ -786,7 +796,7 @@ test("a repository run never imports a .env (SKY-994)", async () => {
   let called = false;
   const sent = await withLocalEnvImport(request, state.task.repo, async () => {
     called = true;
-    return { secrets: [] };
+    return { kept: [], secrets: [] };
   });
   assert.equal(called, false);
   assert.equal(sent, request);
@@ -810,10 +820,11 @@ test("a local run with more secrets than a run takes fails with the count before
   const request = repoRunRequest(state, options)!;
   const many = Array.from({ length: RUN_SECRETS_MAX + 1 }, (_, i) => ({ id: `s-${i}`, name: `K_${i}` }));
   await assert.rejects(
-    withLocalEnvImport(request, state.task.repo, async () => ({ secrets: many })),
+    withLocalEnvImport(request, state.task.repo, async () => ({ kept: [], secrets: many })),
     (err: unknown) => err instanceof TooManyRunSecretsError && err.count === RUN_SECRETS_MAX + 1,
   );
   const atLimit = await withLocalEnvImport(request, state.task.repo, async () => ({
+    kept: [],
     secrets: many.slice(0, RUN_SECRETS_MAX),
   }));
   assert.equal(atLimit.target.repo!.secrets!.length, RUN_SECRETS_MAX);
@@ -824,5 +835,47 @@ test("the wizard starts a run through the .env import and shows the secret limit
   assert.ok(wizard.includes("withLocalEnvImport(request, state.task.repo, importLocalEnvSecrets)"));
   assert.ok(wizard.includes("env_secret_clashes: envSecretClashesState(task.repo)"));
   assert.ok(wizard.includes("err instanceof TooManyRunSecretsError"));
+  assert.ok(wizard.includes("err instanceof UndecidedEnvClashesError"));
+  assert.ok(wizard.includes('"submit.v2.repo.env.undecided"'));
   assert.ok(wizard.includes('"submit.v2.repo.env.too_many"'));
+});
+
+test("a local run with an undecided .env clash does not import or submit (SKY-994)", async () => {
+  const state = repoState();
+  state.task.repo = {
+    ...state.task.repo,
+    localPath: "/Users/me/app",
+    secrets: [],
+    envClashes: ["A", "B"],
+    envChoices: { A: "use" },
+  };
+  assert.equal(taskIssue(state.task), "submit.v2.repo.issue.env_clash");
+  const request = repoRunRequest(state, options)!;
+  let called = false;
+  await assert.rejects(
+    withLocalEnvImport(request, state.task.repo, async () => {
+      called = true;
+      return { kept: [], secrets: [] };
+    }),
+    (err: unknown) => err instanceof UndecidedEnvClashesError && err.names.join() === "B",
+  );
+  assert.equal(called, false);
+  state.task.repo = { ...state.task.repo, envChoices: { A: "use", B: "keep" } };
+  assert.equal(taskIssue(state.task), null);
+});
+
+test("a clash that the .env got after the preview stops the run with its name (SKY-994)", async () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [], envClashes: ["A"], envChoices: { A: "keep" } };
+  const request = repoRunRequest(state, options)!;
+  await assert.rejects(
+    withLocalEnvImport(request, state.task.repo, async () => ({
+      kept: ["A", "LATE"],
+      secrets: [
+        { id: "s-a", name: "A" },
+        { id: "s-late", name: "LATE" },
+      ],
+    })),
+    (err: unknown) => err instanceof UndecidedEnvClashesError && err.names.join() === "LATE",
+  );
 });

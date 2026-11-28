@@ -1,8 +1,8 @@
 """The chat tool that asks the user for a saved secret through a secure card (SKY-641).
 
 The agent names the secret, says what it is for and which host gets it, or
-gives no host for a secret that a run only reads as an environment variable
-(SKY-994). The call pauses on the approval flow, and the chat shows a password card instead
+gives no host for a secret that a local folder's ``.env`` names; Skynet uses a
+secret with no host only then (SKY-994). The call pauses on the approval flow, and the chat shows a password card instead
 of the usual approval card. The browser saves the typed value with
 ``PUT /secrets`` and only then confirms. The value never passes through this
 module: the tool's arguments, its stream events and its result carry the
@@ -96,8 +96,8 @@ def secret_request_tool() -> dspy.Tool:
             "name": "The environment variable name, exactly as in the ${NAME} placeholder, e.g. MAPS_KEY.",
             "purpose": "What the secret is for, in one short line in the reply language.",
             "host": (
-                "The bare host the secret goes to, e.g. maps.googleapis.com. Leave it empty when the run only "
-                "reads the secret as an environment variable and sends it to no host."
+                "The bare host the secret goes to, e.g. maps.googleapis.com. Leave it empty only for a name in a "
+                "local folder's .env: Skynet uses a secret with no host only when such a .env names it."
             ),
         },
     )

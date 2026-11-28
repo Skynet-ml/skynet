@@ -60,7 +60,7 @@ export interface RepoDraft {
   localPath?: string;
   /** The names in the folder's root `.env` that are saved with another value (SKY-994); names only. */
   envClashes?: string[];
-  /** The user's pick per clash: keep the saved value, or use the `.env` value. No pick keeps the saved one. */
+  /** The user's pick per clash: keep the saved value, or use the `.env` value. A run needs a pick for each. */
   envChoices?: Record<string, "keep" | "use">;
 }
 
@@ -285,7 +285,12 @@ const hasModel = (config: ModelConfig | null): boolean => Boolean(config?.name.t
  * move on. There is no separate confirm: Continue is the confirmation.
  */
 export function taskIssue(task: TaskSlice): string | null {
-  return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
+  return repoIssue(task.repo) ?? envClashIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
+}
+
+/** The issue of a local draft whose `.env` clashes are not all picked; no silent default (SKY-994). */
+function envClashIssue(repo: RepoDraft): string | null {
+  return isLocalRepo(repo) && undecidedEnvClashes(repo).length > 0 ? "submit.v2.repo.issue.env_clash" : null;
 }
 
 const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;

@@ -234,11 +234,30 @@ export class TooManyRunSecretsError extends Error {
   }
 }
 
+/** A local run whose folder `.env` has clashing names with no Keep saved or Use .env pick (SKY-994). */
+export class UndecidedEnvClashesError extends Error {
+  readonly names: string[];
+
+  /**
+   * Keep the names for the message and the clash list.
+   *
+   * Args:
+   *   names: The clashing names with no pick.
+   */
+  constructor(names: string[]) {
+    super("submit.v2.repo.env.undecided");
+    this.names = names;
+    this.name = "UndecidedEnvClashesError";
+  }
+}
+
 /**
  * Import the folder's `.env` at a local run start and add its secrets to the run.
  *
- * A clashing name changes only when the user picked Use .env for it. A git run
- * imports nothing (SKY-994).
+ * Every clashing name needs a pick first: Use .env replaces the saved value,
+ * Keep saved keeps it. A clash that the `.env` got after the preview stops the
+ * run too; the import then saved no value for it. A git run imports nothing
+ * (SKY-994).
  *
  * Args:
  *   request: The run request.
@@ -249,15 +268,23 @@ export class TooManyRunSecretsError extends Error {
  *   The request with the `.env` secrets.
  *
  * Throws:
+ *   UndecidedEnvClashesError: When a clashing name has no pick.
  *   TooManyRunSecretsError: When the run would send more than `RUN_SECRETS_MAX` secrets.
  */
 export async function withLocalEnvImport(
   request: BlackboxRunRequest,
   repo: RepoDraft,
-  importEnv: (path: string, replace: string[]) => Promise<{ secrets: ReadonlyArray<{ id: string; name: string }> }>,
+  importEnv: (
+    path: string,
+    replace: string[],
+  ) => Promise<{ kept: readonly string[]; secrets: ReadonlyArray<{ id: string; name: string }> }>,
 ): Promise<BlackboxRunRequest> {
   if (!isLocalRepo(repo)) return request;
+  const undecided = undecidedEnvClashes(repo);
+  if (undecided.length > 0) throw new UndecidedEnvClashesError(undecided);
   const imported = await importEnv((repo.localPath ?? "").trim(), envReplaceNames(repo));
+  const late = imported.kept.filter((name) => repo.envChoices?.[name] !== "keep");
+  if (late.length > 0) throw new UndecidedEnvClashesError(late);
   const sent = withEnvSecrets(request, imported.secrets);
   const count = sent.target.repo?.secrets?.length ?? 0;
   if (count > RUN_SECRETS_MAX) throw new TooManyRunSecretsError(count);

@@ -624,8 +624,10 @@ void test("the folder card lists .env clashes and a pick goes into the draft (SK
       const use = buttonWithText(container, "Use .env");
       assert.ok(use, "no Use .env choice");
       assert.ok(buttonWithText(container, "Keep saved"), "no Keep saved choice");
+      assert.ok(text.includes("Pick Keep saved or Use .env for: DB_URL."), "no undecided notice");
       await React.act(async () => use.click());
       assert.deepEqual(sent.at(-1)!.envChoices, { DB_URL: "use" });
+      assert.ok(!(container.textContent ?? "").includes("Pick Keep saved or Use .env for:"));
       // The same preview again changes nothing, so the draft does not loop.
       const count = sent.length;
       await React.act(async () => {

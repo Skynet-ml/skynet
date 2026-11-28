@@ -762,6 +762,7 @@ function EnvSecrets({
     { value: "keep" as const, label: t("submit.v2.repo.env.keep") },
     { value: "use" as const, label: t("submit.v2.repo.env.use") },
   ];
+  const undecided = clashes.filter((name) => !choices[name]);
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
       <span className="text-sm font-medium text-foreground">{t("submit.v2.repo.env.title")}</span>
@@ -787,6 +788,11 @@ function EnvSecrets({
               </li>
             ))}
           </ul>
+          {undecided.length > 0 && (
+            <p role="status" className="text-xs text-destructive">
+              {t("submit.v2.repo.env.undecided", { names: undecided.join(", ") })}
+            </p>
+          )}
         </div>
       )}
       {preview.skipped.length > 0 && (
