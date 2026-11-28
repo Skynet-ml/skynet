@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "Code",
   "shared.agent.wrap_on": "Activer le retour à la ligne",
   "shared.agent.wrap_off": "Désactiver le retour à la ligne",
+  "shared.agent.show_source": "Afficher la source",
+  "shared.agent.show_preview": "Afficher l’aperçu",
   "shared.agent.copy_table": "Copier le tableau",
   "shared.agent.scrollable_table": "Tableau défilant",
   "shared.agent.edit_and_resend": "Modifier et renvoyer",

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowsOut, Play, TextAlignLeft } from "@/shared/ui/icons";
+import { ArrowsOut, Code, Eye, Play, TextAlignLeft } from "@/shared/ui/icons";
 import ReactMarkdown, {
   defaultUrlTransform,
   type Components,
@@ -23,12 +23,17 @@ import { Button } from "@/shared/ui/primitives/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/primitives/dialog";
 import type { CodeToken } from "./markdown-highlight";
 import {
+  DISPLAY_MATH_LANG,
   INLINE_MATH_MARK,
   codeBlockLabel,
   endsInOpenFence,
+  guessLanguage,
   isInlineImageSrc,
+  isMathFence,
+  isSvgFence,
   prepareMath,
   repairStreamingMarkdown,
+  svgDataUrl,
 } from "./markdown-source";
 import { MARKDOWN_CSS } from "./message-markdown-styles";
 
@@ -146,11 +151,25 @@ function CodeThemeStyle() {
 
 const WRAP_CLASS = { on: "whitespace-pre-wrap wrap-anywhere", off: "whitespace-pre" };
 
-function CodeBlock({ language, code, open }: { language: string; code: string; open: boolean }) {
+function CodeBlock({
+  language,
+  code,
+  open,
+  preview,
+}: {
+  language: string;
+  code: string;
+  open: boolean;
+  /** A rendered view of the code (an image or a formula); the header toggles it with the source. */
+  preview?: React.ReactNode;
+}) {
   const { onRunCode } = React.useContext(MarkdownContext);
   const wrap = React.useSyncExternalStore(subscribeWrap, readWrap, () => false);
   const highlighted = useHighlight(language, code);
+  const [showSource, setShowSource] = React.useState(false);
+  const previewing = preview != null && !showSource;
   const wrapLabel = msg(wrap ? "shared.agent.wrap_off" : "shared.agent.wrap_on");
+  const viewLabel = msg(showSource ? "shared.agent.show_preview" : "shared.agent.show_source");
   return (
     <div className="md-code">
       <CodeThemeStyle />
@@ -160,15 +179,31 @@ function CodeBlock({ language, code, open }: { language: string; code: string; o
             msg(language ? "shared.agent.plain_text" : "shared.agent.code_block")}
         </span>
         <div className="flex shrink-0 items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            aria-pressed={wrap}
-            aria-label={wrapLabel}
-            onClick={() => setWrap(!wrap)}
-          >
-            <TextAlignLeft className="size-3.5" aria-hidden="true" />
-          </Button>
+          {preview != null && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={viewLabel}
+              onClick={() => setShowSource(!showSource)}
+            >
+              {showSource ? (
+                <Eye className="size-3.5" aria-hidden="true" />
+              ) : (
+                <Code className="size-3.5" aria-hidden="true" />
+              )}
+            </Button>
+          )}
+          {!previewing && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-pressed={wrap}
+              aria-label={wrapLabel}
+              onClick={() => setWrap(!wrap)}
+            >
+              <TextAlignLeft className="size-3.5" aria-hidden="true" />
+            </Button>
+          )}
           {onRunCode && (
             <button
               type="button"
@@ -184,32 +219,36 @@ function CodeBlock({ language, code, open }: { language: string; code: string; o
           {!open && <CopyButton text={code} ariaLabel={msg("shared.agent.copy_code")} />}
         </div>
       </div>
-      <pre
-        dir="ltr"
-        className={cn(
-          "overflow-auto px-4 pb-3 text-left md:px-5",
-          wrap ? WRAP_CLASS.on : WRAP_CLASS.off,
-        )}
-      >
-        <code>
-          {highlighted ? (
-            <>
-              {highlighted.tokens.map((t, i) =>
-                t.style ? (
-                  <span key={i} style={t.style}>
-                    {t.text}
-                  </span>
-                ) : (
-                  t.text
-                ),
-              )}
-              {code.slice(highlighted.code.length)}
-            </>
-          ) : (
-            code
+      {previewing ? (
+        <div className="overflow-auto px-4 pb-3 md:px-5">{preview}</div>
+      ) : (
+        <pre
+          dir="ltr"
+          className={cn(
+            "overflow-auto px-4 pb-3 text-left md:px-5",
+            wrap ? WRAP_CLASS.on : WRAP_CLASS.off,
           )}
-        </code>
-      </pre>
+        >
+          <code>
+            {highlighted ? (
+              <>
+                {highlighted.tokens.map((t, i) =>
+                  t.style ? (
+                    <span key={i} style={t.style}>
+                      {t.text}
+                    </span>
+                  ) : (
+                    t.text
+                  ),
+                )}
+                {code.slice(highlighted.code.length)}
+              </>
+            ) : (
+              code
+            )}
+          </code>
+        </pre>
+      )}
     </div>
   );
 }
@@ -218,10 +257,18 @@ function MathFallback({ tex }: { tex: string }) {
   return <code dir="ltr">{tex}</code>;
 }
 
-function MathFormula({ tex, display }: { tex: string; display: boolean }) {
+function MathFormula({
+  tex,
+  display,
+  onError,
+}: {
+  tex: string;
+  display: boolean;
+  onError?: () => void;
+}) {
   return (
     <React.Suspense fallback={<MathFallback tex={tex} />}>
-      <MarkdownMath tex={tex} display={display} />
+      <MarkdownMath tex={tex} display={display} onError={onError} />
     </React.Suspense>
   );
 }
@@ -451,6 +498,9 @@ const urlTransform: UrlTransform = (url, key, node) =>
 
 function PreBlock({ end, children }: { end?: number; children?: React.ReactNode }) {
   const { userTone, openFenceEnd } = React.useContext(MarkdownContext);
+  const [svgFailed, setSvgFailed] = React.useState(false);
+  const [mathFailed, setMathFailed] = React.useState(false);
+  const onMathError = React.useCallback(() => setMathFailed(true), []);
   const child = React.Children.toArray(children).find(
     (c): c is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
       React.isValidElement(c),
@@ -467,9 +517,31 @@ function PreBlock({ end, children }: { end?: number; children?: React.ReactNode 
       </pre>
     );
   }
-  if (language === "math") return <MathFormula tex={code} display />;
+  if (language === DISPLAY_MATH_LANG) return <MathFormula tex={code} display />;
   const open = openFenceEnd !== null && end !== undefined && end >= openFenceEnd;
-  return <CodeBlock language={language} code={code} open={open} />;
+  // A half-streamed image or formula would flicker, so it shows as code until its fence closes.
+  const preview = open ? undefined : isSvgFence(language, code) && !svgFailed ? (
+    // An <img> never runs the SVG's scripts or loads its links, unlike inline markup.
+    // SVG that does not parse shows its source, not a broken image.
+    <img
+      src={svgDataUrl(code)}
+      alt="SVG"
+      className="max-h-96 max-w-full"
+      onError={() => setSvgFailed(true)}
+    />
+  ) : isMathFence(language) && !mathFailed ? (
+    // TeX that KaTeX cannot draw, such as a whole document, shows as highlighted code.
+    <MathFormula tex={code} display onError={onMathError} />
+  ) : undefined;
+  // As in Codex, a fence with no tag gets a guessed language; text outside fences gets none.
+  return (
+    <CodeBlock
+      language={language || (open ? "" : guessLanguage(code))}
+      code={code}
+      open={open}
+      preview={preview}
+    />
+  );
 }
 
 const COMPONENTS: Components = {

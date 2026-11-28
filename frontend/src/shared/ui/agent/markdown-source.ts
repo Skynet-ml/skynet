@@ -7,6 +7,9 @@
 /** Marks an inline code span that holds TeX, so the renderer draws math. */
 export const INLINE_MATH_MARK = "";
 
+/** The fence language {@link prepareMath} gives `$$…$$` and `\[…\]`: plain display math, no toggle. */
+export const DISPLAY_MATH_LANG = "skynet-display-math";
+
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
 /** Split text into runs outside and inside fenced code blocks. */
@@ -67,7 +70,8 @@ export function prepareMath(text: string): string {
               const before = all.slice(0, offset);
               const after = all.slice(offset + match.length);
               const ownLines = /(^|\n)[ \t]*$/.test(before) && /^[ \t]*(\n|$)/.test(after);
-              if (paren === undefined && ownLines) return `\`\`\`math\n${tex}\n\`\`\``;
+              if (paren === undefined && ownLines)
+                return `\`\`\`${DISPLAY_MATH_LANG}\n${tex}\n\`\`\``;
               return `\`\` ${INLINE_MATH_MARK}${tex.replace(/\s+/g, " ")} \`\``;
             },
           ),
@@ -76,9 +80,50 @@ export function prepareMath(text: string): string {
 }
 
 /**
+ * Find the inline code spans by the CommonMark rule: a run of n backticks
+ * opens a span, and the next run of exactly n backticks closes it.
+ *
+ * Args:
+ *   text: Markdown prose with no code fence in it.
+ *
+ * Returns:
+ *   The text with each closed span cut out, and the span that has no
+ *   closer yet (its start index and run length), or null.
+ */
+function scanCodeSpans(text: string): {
+  text: string;
+  open: { at: number; size: number } | null;
+} {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    // As in CommonMark, `\` escapes only ASCII punctuation, so `\\` then a backtick opens a span.
+    if (text[i] === "\\" && /[!-/:-@[-`{-~]/.test(text[i + 1] ?? "")) {
+      out += text.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (text[i] !== "`") {
+      out += text[i];
+      i += 1;
+      continue;
+    }
+    let size = 1;
+    while (text[i + size] === "`") size += 1;
+    const closers = new RegExp(`(?<!\`)\`{${size}}(?!\`)`, "g");
+    closers.lastIndex = i + size;
+    const close = closers.exec(text);
+    if (!close) return { text: out, open: { at: i, size } };
+    i = close.index + size;
+  }
+  return { text: out, open: null };
+}
+
+/**
  * Fix the end of a reply that is still streaming, so half-typed syntax does
  * not flash: drop a link or image whose `[` has no full target yet, and
- * close a dangling `*` or `**`. An open code fence stays as it is.
+ * close a dangling inline code span, `*` or `**`. An open code fence stays
+ * as it is: the parser already reads it as a code block to the end.
  */
 export function repairStreamingMarkdown(text: string): string {
   const last = splitFences(text).at(-1);
@@ -89,9 +134,15 @@ export function repairStreamingMarkdown(text: string): string {
   let tail = blank < 0 ? prose : prose.slice(blank);
 
   tail = tail.replace(/!?\[[^\]\n]*(\]\([^)\n]*)?$/, "");
-  const plain = tail
-    .replace(/`[^`\n]*`/g, "")
-    .replace(/^[ \t]*[*+-][ \t]+/gm, "")
+  // Close the code span first, so a `*` inside it does not count as emphasis below.
+  const span = scanCodeSpans(tail).open;
+  if (span) {
+    const run = "`".repeat(span.size);
+    if (!tail.slice(span.at + span.size).trim()) tail = tail.slice(0, span.at);
+    else tail = `${tail}${tail.endsWith("`") ? " " : ""}${run}`;
+  }
+  const plain = scanCodeSpans(tail)
+    .text.replace(/^[ \t]*[*+-][ \t]+/gm, "")
     .replace(/^[ \t]*(\*[ \t]*){3,}$/gm, "");
   const strong = (plain.match(/\*\*/g) ?? []).length;
   const single = (plain.replace(/\*\*/g, "").match(/\*/g) ?? []).length;
@@ -129,6 +180,7 @@ const LANGUAGE_NAMES: Record<string, string> = {
   less: "Less",
   lua: "Lua",
   makefile: "Makefile",
+  math: "Math",
   markdown: "Markdown",
   mermaid: "Mermaid",
   objectivec: "Objective-C",
@@ -144,6 +196,7 @@ const LANGUAGE_NAMES: Record<string, string> = {
   scss: "SCSS",
   shell: "Shell",
   sql: "SQL",
+  svg: "SVG",
   swift: "Swift",
   typescript: "TypeScript",
   vbnet: "Visual Basic .NET",
@@ -192,4 +245,148 @@ const DATA_IMAGE = /^data:image\/(png|jpeg|jpg|webp|gif|avif);base64,/i;
 /** Whether an image source is an inline raster image, the only kind chat loads by itself. */
 export function isInlineImageSrc(src: string): boolean {
   return DATA_IMAGE.test(src);
+}
+
+const MATH_FENCES = new Set(["latex", "math", "tex"]);
+
+/** Whether a fence holds TeX that renders as display math with a source toggle. */
+export function isMathFence(language: string): boolean {
+  return MATH_FENCES.has(language.toLowerCase());
+}
+
+/** Whether a fence holds an SVG image: an `svg` fence, or an `xml` or `html` one that starts with `<svg`. */
+export function isSvgFence(language: string, code: string): boolean {
+  const key = language.toLowerCase();
+  if (key === "svg") return true;
+  return (key === "xml" || key === "html") && /^<svg[\s>]/i.test(code.trimStart());
+}
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * The SVG as a data URL for an `<img>`, where its scripts and links never run.
+ * An `<img>` shows no SVG without the SVG namespace, so a root `<svg>` with none gets it.
+ */
+export function svgDataUrl(code: string): string {
+  // encodeURIComponent throws on a lone surrogate, so that one becomes U+FFFD first.
+  // A regex, not toWellFormed(): Firefox before 119 has no such method.
+  const svg = code
+    .replace(LONE_SURROGATE, "\uFFFD")
+    .trim()
+    .replace(/<svg\b(?![^>]*\sxmlns=)/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+const SHELL_COMMAND =
+  /^(sudo|npm|npx|pnpm|yarn|pip3?|uv|git|cd|ls|curl|wget|brew|docker|kubectl|export|echo|mkdir|chmod|cargo|just)( |$)/;
+// Function words that prose has and a command line almost never has outside its quotes.
+const PROSE_WORD = /(^|\s)(the|to|is|are|and|when|then|into|you|your)(?=\s|$)/i;
+// A flag, a path, an assignment, or a package manager or git with a known subcommand.
+const SHELL_SIGN =
+  /\s--?\w|\s(\.\/|\/|~|\$)|\w+=|^(sudo )?npx \S|^(sudo )?(npm|pnpm|yarn|pip3?|uv|git|brew|docker|kubectl|cargo) (install|add|i|ci|run|exec|init|build|test|clone|status|commit|push|pull|checkout|log|diff|ps|apply|get)\b/;
+
+// Each rule needs a strong sign of its language, so prose in an untagged fence stays plain.
+const GUESSES: Array<[string, (code: string) => boolean]> = [
+  ["diff", (c) => /^(diff --git |@@ -\d)/m.test(c) || /^--- .*\n\+\+\+ /m.test(c)],
+  [
+    "json",
+    (c) => {
+      if (!/^[[{]/.test(c)) return false;
+      try {
+        JSON.parse(c);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  ],
+  ["xml", (c) => /^<\?xml\b|^<svg[\s>]/i.test(c)],
+  [
+    "html",
+    (c) =>
+      /^<(!doctype html|html|head|body|div|span|p|a|ul|ol|table|section|main|form)[\s>]/i.test(c),
+  ],
+  [
+    "bash",
+    (c) => {
+      if (/^(\$ |#!.*\b(ba|z)?sh\b)/.test(c)) return true;
+      // Words like "cd", "echo" or "just" also start prose, so the first line must look like a command.
+      const lines = c.split("\n").filter((l) => l.trim() && !/^\s*#/.test(l));
+      return (
+        lines.length > 0 &&
+        lines.every(
+          (l) =>
+            SHELL_COMMAND.test(l.trim()) && !PROSE_WORD.test(l.replace(/(["'])[^"'\n]*\1/g, "")),
+        ) &&
+        SHELL_SIGN.test(lines[0]!.trim())
+      );
+    },
+  ],
+  [
+    "python",
+    (c) =>
+      // A class needs an indented body, and a one-word module import needs a next line, as prose has neither.
+      /^\s*(def \w+\(.*\)( -> .+)?:|class \w+(\(.*\))?:[ \t]*\n[ \t]+\S|from (\w+\.)+\w+ import |from \w+ import .*\n|import \w+(\.\w+)*\s*$|if __name__ ==|elif .+:)/m.test(
+        c,
+      ),
+  ],
+  [
+    "typescript",
+    (c) =>
+      /^\s*(export )?(interface \w+(<.*>)?( extends [^{\n]+)? \{|type \w+(<.*>)? = [^\n]*[;{|&<[=>'"]|enum \w+ \{)/m.test(
+        c,
+      ) ||
+      /^\s*(export )?((const|let) \w+|function \w*\([^)\n]*\)?): (string|number|boolean|unknown)\b/m.test(
+        c,
+      ),
+  ],
+  [
+    "javascript",
+    (c) =>
+      /^\s*(import .+ from ['"]|export (default|const|function)|function \w*\(|console\.log\()/m.test(
+        c,
+      ) ||
+      (/^\s*(const|let|var) \w+ = /m.test(c) && /[;{}()]|=>/.test(c)),
+  ],
+  ["go", (c) => /^package \w+$/m.test(c) || /^func (\(.+\) )?\w+\(/m.test(c)],
+  ["rust", (c) => /^\s*(pub )?fn \w+(<.*>)?\(/m.test(c) || /\blet mut \w+/.test(c)],
+  [
+    "sql",
+    (c) =>
+      /^\s*(SELECT\b[\s\S]*\bFROM\b|INSERT INTO\b|UPDATE \w+ SET\b|DELETE FROM\b|CREATE (TABLE|INDEX|VIEW)\b)/.test(
+        c,
+      ),
+  ],
+  ["css", (c) => /^[.#@:\w][^{}\n;=()]*\{\s*[\w-]+\s*:[^;{}]+;/.test(c)],
+  [
+    "yaml",
+    (c) => {
+      const lines = c.split("\n").filter((l) => l.trim() && !/^\s*#/.test(l));
+      return (
+        lines.length >= 2 &&
+        /^[\w.-]+:( |$)/.test(lines[0]!) &&
+        lines.every((l) => /^\s*(- .*|-$|[\w.-]+:( .*)?)$/.test(l)) &&
+        // Prose like "Error: x" then "Hint: y" also has key lines, so YAML needs nesting.
+        lines.some((l) => /^\s+\S/.test(l) || /^\s*- [\w.-]+:( |$)/.test(l)) &&
+        // A heading over a bullet list has one key, so YAML needs two.
+        lines.filter((l) => /^\s*(- )?[\w.-]+:( |$)/.test(l)).length >= 2
+      );
+    },
+  ],
+];
+
+/**
+ * Guess the language of a fence that has no tag, as Codex does with
+ * highlight.js `highlightAuto`. "" means no strong sign, so the block stays plain.
+ *
+ * Args:
+ *   code: The fence's text.
+ *
+ * Returns:
+ *   A fence language name, such as "python", or "".
+ */
+export function guessLanguage(code: string): string {
+  const text = code.trim();
+  if (!text) return "";
+  return GUESSES.find(([, test]) => test(text))?.[0] ?? "";
 }

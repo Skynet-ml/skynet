@@ -101,6 +101,36 @@ void describe("MessageMarkdown", () => {
     assert.ok(html.includes('aria-label="Copy table"'), html);
   });
 
+  void it("draws an svg fence as an image, never as inline markup", () => {
+    const html = render('```svg\n<svg onload="x()"><circle r="1"/></svg>\n```');
+    assert.ok(html.includes('<img src="data:image/svg+xml;charset=utf-8,%3Csvg'), html);
+    assert.ok(!html.includes("<svg onload"), html);
+    assert.ok(html.includes('aria-label="Show source"'), html);
+    assert.ok(!html.includes('aria-label="Enable word wrap"'), html);
+  });
+
+  void it("draws an svg fence with a lone surrogate without a crash", () => {
+    const html = render("```svg\n<svg>\ud83d</svg>\n```");
+    assert.ok(html.includes('<img src="data:image/svg+xml;charset=utf-8,'), html);
+  });
+
+  void it("keeps a streaming svg fence as code until it closes", () => {
+    const html = render("```svg\n<svg>", undefined, true);
+    assert.ok(!html.includes("<img"), html);
+    assert.ok(html.includes("&lt;svg&gt;"), html);
+  });
+
+  void it("gives a latex fence a preview with a source toggle", () => {
+    const html = render("```latex\nx^2\n```");
+    assert.ok(html.includes(">LaTeX</span>"), html);
+    assert.ok(html.includes('aria-label="Show source"'), html);
+  });
+
+  void it("names an untagged fence by a guessed language", () => {
+    assert.ok(render('```\n{"a": 1}\n```').includes(">JSON</span>"));
+    assert.ok(render("```\ndef f(x):\n    return x\n```").includes(">Python</span>"));
+  });
+
   void it("renders a user message's code fence as a plain block", () => {
     const html = render("hi\n\n```js\nx\n```", "user-message");
     assert.ok(html.includes("md-user"), html);

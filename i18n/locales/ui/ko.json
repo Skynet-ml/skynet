@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "코드",
   "shared.agent.wrap_on": "자동 줄 바꿈 켜기",
   "shared.agent.wrap_off": "자동 줄 바꿈 끄기",
+  "shared.agent.show_source": "소스 보기",
+  "shared.agent.show_preview": "미리보기 보기",
   "shared.agent.copy_table": "표 복사",
   "shared.agent.scrollable_table": "스크롤 가능한 표",
   "shared.agent.edit_and_resend": "편집 후 다시 보내기",

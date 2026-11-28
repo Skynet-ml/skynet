@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "Codice",
   "shared.agent.wrap_on": "Attiva a capo automatico",
   "shared.agent.wrap_off": "Disattiva a capo automatico",
+  "shared.agent.show_source": "Mostra sorgente",
+  "shared.agent.show_preview": "Mostra anteprima",
   "shared.agent.copy_table": "Copia tabella",
   "shared.agent.scrollable_table": "Tabella scorrevole",
   "shared.agent.edit_and_resend": "Modifica e invia di nuovo",
