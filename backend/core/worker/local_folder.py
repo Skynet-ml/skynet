@@ -13,21 +13,21 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import os
 import re
 import shutil
-import stat
 import tarfile
 import tempfile
 import zipfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from ..config import settings
 from ..connectors.github_repo import RepoFetchError, RepoSnapshot
 from ..connectors.repo_drafts import MAX_ARCHIVE_BYTES, DraftFileError, write_to_checkout
-from ..local.folder_tree import FolderTreeError, folder_entries, open_no_follow, source_id
+from ..local.folder_tree import EXEC_MARKER, FolderTreeError, folder_entries, is_executable, open_no_follow, source_id
 from ..models.blackbox import LOCAL_FOLDER_ONLY_HERE, LOCAL_REPO_PROVIDER, REPO_COMMIT_PATTERN
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 
@@ -35,10 +35,51 @@ LOCAL_PROVIDER = LOCAL_REPO_PROVIDER
 LOCAL_SANDBOX_PROVIDER = "docker"
 KEPT_FOLDER = "local-folders"
 _LARGEST_SHOWN = 5
+# Only the execute bit reaches the pack and the id, so umask and group bits do not move them.
+_DIR_MODE = 0o755
+_EXEC_MODE = 0o755
+_FILE_MODE = 0o644
 
 
 class LocalFolderError(RepoFetchError):
     """Explain why a local folder cannot be packed or read as a run's source."""
+
+
+class _Tee:
+    """Hash a file's bytes while the pack copies them, and stop when the archive is too large."""
+
+    def __init__(self, body: io.BufferedReader, digest: Any, raw: BinaryIO, entries: list[dict[str, Any]]) -> None:
+        """Wrap one open file.
+
+        Args:
+            body: The file, open for reading.
+            digest: The running SHA-1 of the bytes read so far.
+            raw: The archive file that the pack writes.
+            entries: The folder's listing, to name its largest folders in the error.
+        """
+        self._body = body
+        self._digest = digest
+        self._raw = raw
+        self._entries = entries
+
+    def read(self, size: int = -1) -> bytes:
+        """Read the next bytes for the pack and add them to the digest.
+
+        Args:
+            size: The most bytes to read; ``-1`` reads to the end.
+
+        Returns:
+            The bytes read.
+
+        Raises:
+            LocalFolderError: When the archive grew past ``MAX_ARCHIVE_BYTES``.
+        """
+        # Stopping early spares packing a huge file only to refuse it.
+        if self._raw.tell() > MAX_ARCHIVE_BYTES:
+            raise LocalFolderError(_too_large(self._entries))
+        data = self._body.read(size)
+        self._digest.update(data)
+        return data
 
 
 def is_local(repo: Mapping[str, Any] | None) -> bool:
@@ -270,9 +311,10 @@ def _open_kept(commit: str) -> tarfile.TarFile:
 def _pack(root: Path, entries: list[dict[str, Any]], archive: Path) -> str:
     """Write the listed entries into a deterministic ``tree.tgz`` and hash their content.
 
-    Owners, times and the gzip header are fixed, so the same files give the
-    same bytes. Each file is hashed from the same open handle it is packed
-    from, so the id always matches the packed bytes.
+    Owners, times, modes and the gzip header are fixed, so the same files
+    give the same bytes. Each file is read only once, and the pack and the
+    hash see the same bytes, so the id always matches the pack even when the
+    file changes during the pack.
 
     Args:
         root: The folder.
@@ -297,17 +339,18 @@ def _pack(root: Path, entries: list[dict[str, Any]], archive: Path) -> str:
             info = tarfile.TarInfo(entry["path"])
             if entry["type"] == "dir":
                 info.type = tarfile.DIRTYPE
-                info.mode = stat.S_IMODE(os.lstat(path).st_mode)
+                info.mode = _DIR_MODE
                 packed.addfile(info)
             else:
                 with open_no_follow(path) as body:
                     status = os.fstat(body.fileno())
-                    info.mode = stat.S_IMODE(status.st_mode)
+                    executable = is_executable(status.st_mode)
+                    info.mode = _EXEC_MODE if executable else _FILE_MODE
+                    # A file that grows during the pack is cut at this size, and the hash sees the same cut.
                     info.size = status.st_size
-                    hashed.append((entry["path"], hashlib.file_digest(body, "sha1").digest()))
-                    body.seek(0)
-                    packed.addfile(info, body)
-            # Stopping early spares packing a huge folder only to refuse it.
+                    digest = hashlib.sha1(usedforsecurity=False)
+                    packed.addfile(info, _Tee(body, digest, raw, entries))
+                    hashed.append((entry["path"], digest.digest() + (EXEC_MARKER if executable else b"")))
             if raw.tell() > MAX_ARCHIVE_BYTES:
                 raise LocalFolderError(_too_large(entries))
     if archive.stat().st_size > MAX_ARCHIVE_BYTES:
@@ -341,8 +384,7 @@ def _too_large(entries: list[dict[str, Any]]) -> str:
 def _keep(archive: Path, commit: str) -> None:
     """Keep the original pack under the local state folder, keyed by its source id.
 
-    The newest pack replaces an older one with the same id, because the id
-    leaves out file modes that the pack keeps.
+    A pack with the same id has the same bytes, so the newest one replaces an older one.
 
     Args:
         archive: The packed tree, before any draft is written over it.

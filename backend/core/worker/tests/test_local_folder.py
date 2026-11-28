@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import tarfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -211,3 +214,111 @@ def test_the_pack_commit_is_the_folder_source_id(tmp_path: Path) -> None:
     workdir.mkdir()
 
     assert local_folder.snapshot_folder(root, workdir).commit == folder_tree.folder_source_id(root)
+
+
+class _ChangingFile(io.BufferedReader):
+    """A file that changes on disk right after the pack's first read of it."""
+
+    def __init__(self, path: Path, change: Callable[[Path], None]) -> None:
+        """Open the file.
+
+        Args:
+            path: The file.
+            change: Called with the path once, after the first read.
+        """
+        super().__init__(io.FileIO(path, "rb"), buffer_size=1)
+        self._path = path
+        self._change: Callable[[Path], None] | None = change
+
+    def read(self, size: int | None = -1) -> bytes:
+        """Read, then change the file once.
+
+        Args:
+            size: The most bytes to read.
+
+        Returns:
+            The bytes read.
+        """
+        data = super().read(size)
+        if self._change is not None:
+            change, self._change = self._change, None
+            change(self._path)
+        return data
+
+
+def _pack_while_changing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: Callable[[Path], None]) -> tuple:
+    """Pack a folder whose one big file changes during the pack.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch fixture.
+        change: Changes the file after the pack's first read.
+
+    Returns:
+        The snapshot and the packed bytes of the file.
+    """
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "big.bin").write_bytes(b"a" * 65_536)
+    monkeypatch.setattr(local_folder, "open_no_follow", lambda path: _ChangingFile(path, change))
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    snapshot = local_folder.snapshot_folder(root, workdir)
+    with tarfile.open(snapshot.archive, "r:gz") as packed:
+        handle = packed.extractfile("big.bin")
+        assert handle is not None
+        return snapshot, handle.read()
+
+
+def test_a_file_rewritten_during_the_pack_gives_an_id_of_the_packed_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pack reads each file once, so the id matches the packed bytes, not a second read."""
+
+    def rewrite(path: Path) -> None:
+        """Rewrite the file in place with the same size."""
+        with path.open("r+b") as handle:
+            handle.write(b"b" * 65_536)
+
+    snapshot, body = _pack_while_changing(tmp_path, monkeypatch, rewrite)
+
+    assert b"a" in body
+    assert b"b" in body
+    assert snapshot.commit == folder_tree.source_id([("big.bin", hashlib.sha1(body, usedforsecurity=False).digest())])
+
+
+def test_a_file_that_grows_during_the_pack_is_cut_at_its_listed_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes added during the pack stay out of the pack and the id alike."""
+
+    def grow(path: Path) -> None:
+        """Append to the file."""
+        with path.open("ab") as handle:
+            handle.write(b"c" * 1000)
+
+    snapshot, body = _pack_while_changing(tmp_path, monkeypatch, grow)
+
+    assert body == b"a" * 65_536
+    assert snapshot.commit == folder_tree.source_id([("big.bin", hashlib.sha1(body, usedforsecurity=False).digest())])
+
+
+def test_the_pack_keeps_only_the_execute_bit_and_the_id_follows_it(tmp_path: Path) -> None:
+    """Modes become 0o755 or 0o644, so umask and group bits move neither the pack nor the id."""
+    root = _write(tmp_path / "app", {"run.sh": "echo hi\n", "lib/a.py": "x = 1\n"})
+    (root / "run.sh").chmod(0o700)
+    (root / "lib/a.py").chmod(0o600)
+    (root / "lib").chmod(0o700)
+    first_dir, second_dir = tmp_path / "w1", tmp_path / "w2"
+    first_dir.mkdir()
+    second_dir.mkdir()
+
+    first = local_folder.snapshot_folder(root, first_dir)
+    with tarfile.open(first.archive, "r:gz") as packed:
+        modes = {member.name: member.mode for member in packed.getmembers()}
+    (root / "run.sh").chmod(0o644)
+    second = local_folder.snapshot_folder(root, second_dir)
+
+    assert modes == {"lib": 0o755, "lib/a.py": 0o644, "run.sh": 0o755}
+    assert first.commit != second.commit
+    assert second.commit == folder_tree.folder_source_id(root)

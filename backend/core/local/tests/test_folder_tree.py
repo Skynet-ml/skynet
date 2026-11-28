@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -245,3 +246,20 @@ def test_a_file_that_goes_away_still_moves_the_id(tmp_path: Path) -> None:
     (root / "b.txt").unlink()
 
     assert folder_tree.folder_source_id(root, entries) != before
+
+
+def test_the_execute_bit_moves_the_id_even_with_a_cached_digest(tmp_path: Path) -> None:
+    """A chmod changes only the ctime, and the cache key holds it, so the id follows the execute bit."""
+    root = _write(tmp_path / "app", {"run.sh": "echo hi\n"})
+    script = root / "run.sh"
+    script.chmod(0o644)
+    plain = folder_tree.folder_source_id(root)
+    stamp = script.stat()
+
+    script.chmod(0o755)
+    os.utime(script, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+
+    assert folder_tree.file_digest(script).endswith(folder_tree.EXEC_MARKER)
+    assert folder_tree.folder_source_id(root) != plain
+    script.chmod(0o640)
+    assert folder_tree.folder_source_id(root) == plain

@@ -40,7 +40,7 @@ from vercel.sandbox import SandboxApiError
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
-from core.billing import model_mailbox
+from core.billing import model_mailbox, protected_execution
 from core.billing.budgets import BudgetError
 from core.billing.host_agent import attach_host_agent_token
 from core.billing.model_dispatch import ModelHTTPResult
@@ -67,7 +67,7 @@ from core.models.blackbox import (
     BlackboxProposer,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
-from core.sandbox import image_build, image_registry
+from core.sandbox import bridge, image_build, image_registry
 from core.sandbox.errors import SandboxInfraError, SandboxRejectedError, SandboxTransientError
 from core.sandbox.image_build import (
     BuildResult,
@@ -1587,7 +1587,7 @@ def _local_payload(folder: Path, **repo: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def local_stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Stage as the desktop local stack, where any host or remote box read fails the test.
+    """Stage as the desktop local stack, where any host read or remote sandbox fails the test.
 
     Args:
         monkeypatch: Pytest monkeypatch.
@@ -1605,12 +1605,23 @@ def local_stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         """
         raise AssertionError("a local folder must not read a host")
 
+    def no_remote_box(*_args: Any, **_kwargs: Any) -> Any:
+        """Fail the test: a local folder never opens a remote sandbox.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("a local folder must not open a remote sandbox")
+
     state = tmp_path / "state"
     monkeypatch.setattr(repo_staging.settings, "local_mode", True)
     monkeypatch.setattr(repo_staging.settings, "local_state_dir", str(state))
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     for name in ("github_token", "fetch_snapshot", "resolve_commit", "_owner_token"):
         monkeypatch.setattr(repo_staging, name, never)
+    # protected_execution binds the name at import, so both places are patched.
+    monkeypatch.setattr(bridge, "protected_runtime", no_remote_box)
+    monkeypatch.setattr(protected_execution, "protected_runtime", no_remote_box)
     return state
 
 

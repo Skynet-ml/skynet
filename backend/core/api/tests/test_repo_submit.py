@@ -187,30 +187,34 @@ def _local_body(folder: Path, **overrides: Any) -> dict:
     return body
 
 
-@pytest.mark.parametrize(("provider", "status"), [("vercel", 422), (None, 400)], ids=["named", "default"])
+@pytest.mark.parametrize(
+    ("local_mode", "provider"), [(True, "vercel"), (False, None)], ids=["remote-provider", "hosted-deployment"]
+)
 def test_a_local_folder_is_refused_on_a_remote_sandbox(
     client_and_store: tuple[Any, _FakeJobStore],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    local_mode: bool,
     provider: str | None,
-    status: int,
 ) -> None:
-    """A local folder never goes to a remote box, whether the run names it or the default picks it (SKY-990).
+    """The request check refuses a local folder on a remote box or outside the local stack (SKY-990).
+
+    In local mode the default provider is ``docker``, so a run that names no
+    provider stays on this computer.
 
     Args:
         client_and_store: The API client and its job store.
         monkeypatch: Pytest monkeypatch fixture.
         tmp_path: The folder the run names.
+        local_mode: Whether this deployment is the desktop local stack.
         provider: The sandbox provider the run names.
-        status: The request check refuses a named one (422); the route refuses the default (400).
     """
     client, store = client_and_store
-    monkeypatch.setattr(settings, "local_mode", True)
-    monkeypatch.setattr(_sub_mod, "default_provider", lambda _settings: "vercel")
+    monkeypatch.setattr(settings, "local_mode", local_mode)
 
     resp = client.post("/blackbox/run", json=_local_body(tmp_path, sandbox_provider=provider))
 
-    assert resp.status_code == status
+    assert resp.status_code == 422
     assert "A local folder runs only on this computer." in resp.text
     assert store._jobs == {}
 

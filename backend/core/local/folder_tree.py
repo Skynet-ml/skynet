@@ -46,9 +46,11 @@ GITIGNORE = ".gitignore"
 FOLDER_ENTRIES_MAX = 20_000
 # The digest stands in for a file that went away or cannot be read while the id is computed.
 UNREADABLE_DIGEST = b"\0unreadable"
+# Follows a file's digest in the id when the file has an execute bit, because the pack keeps that bit.
+EXEC_MARKER = b"x"
 _DIGEST_CACHE_MAX = 100_000
 
-_digests: dict[tuple[str, int, int, int], bytes] = {}
+_digests: dict[tuple[str, int, int, int, int], bytes] = {}
 _digests_lock = threading.Lock()
 
 
@@ -89,6 +91,18 @@ def is_os_name(name: str) -> bool:
         True for :data:`OS_NAMES` in any case, and for ``._*`` AppleDouble files.
     """
     return name.startswith("._") or name.lower() in OS_NAMES
+
+
+def is_executable(mode: int) -> bool:
+    """Check whether a file mode has any execute bit.
+
+    Args:
+        mode: The file's ``st_mode``.
+
+    Returns:
+        True when the owner, group or others may run the file.
+    """
+    return bool(mode & 0o111)
 
 
 def folder_entries(
@@ -171,7 +185,7 @@ def source_id(files: Iterable[tuple[str, bytes]]) -> str:
 
 
 def file_digest(path: Path) -> bytes:
-    """Hash one file's content, reusing the digest while its size, time and inode stay the same.
+    """Hash one file's content and execute bit, reusing the digest while the file's stat stays the same.
 
     The setup agent asks for the id on every turn, so a big file is hashed
     only once until it changes.
@@ -180,19 +194,23 @@ def file_digest(path: Path) -> bytes:
         path: The file; a link is refused, not followed.
 
     Returns:
-        The 20-byte SHA-1 digest of the content.
+        The 20-byte SHA-1 digest of the content, then :data:`EXEC_MARKER`
+        when the file has an execute bit.
 
     Raises:
         OSError: When the file cannot be opened or read, or is a link.
     """
     with open_no_follow(path) as body:
         info = os.fstat(body.fileno())
-        key = (str(path), info.st_size, info.st_mtime_ns, info.st_ino)
+        # A chmod, or a rewrite that restores the old time, changes only the ctime.
+        key = (str(path), info.st_size, info.st_mtime_ns, info.st_ino, info.st_ctime_ns)
         with _digests_lock:
             cached = _digests.get(key)
         if cached is not None:
             return cached
         digest = hashlib.file_digest(body, "sha1").digest()
+        if is_executable(info.st_mode):
+            digest += EXEC_MARKER
     with _digests_lock:
         if len(_digests) >= _DIGEST_CACHE_MAX:
             _digests.clear()
@@ -383,6 +401,7 @@ def _glob(part: str) -> str:
 
 
 __all__ = [
+    "EXEC_MARKER",
     "FOLDER_ENTRIES_MAX",
     "GITIGNORE",
     "OS_NAMES",
@@ -394,6 +413,7 @@ __all__ = [
     "folder_entries",
     "folder_source_id",
     "is_env_name",
+    "is_executable",
     "is_os_name",
     "open_no_follow",
     "parse_gitignore",
