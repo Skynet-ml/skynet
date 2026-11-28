@@ -17,6 +17,7 @@ run's commit. :func:`read_folder_text` reads one file of it.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Collection
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -478,6 +479,7 @@ class RepoBrowser:
 
 # The provider name in a missing-file error, as the hosts' ``connectors.not_found`` carries one.
 _FOLDER_LABEL = "Local folder"
+_BAD_PATH = "The folder path is not a valid path on this computer."
 
 
 class LocalFolderError(FolderTreeError):
@@ -494,13 +496,17 @@ def _folder_root(root: str | Path) -> Path:
         The resolved folder.
 
     Raises:
-        LocalFolderError: Outside desktop local mode, for a NUL in the path, a relative path, a linked
+        LocalFolderError: Outside desktop local mode, for a path the disk cannot take, a relative path, a linked
             folder, or when no folder is there.
     """
     if not settings.local_mode:
         raise LocalFolderError("A local folder can be read only in the desktop app.")
-    if "\x00" in str(root):
-        # Path.resolve raises a bare ValueError on a NUL, which the agent's caller does not expect.
+    # A NUL or a lone surrogate makes the path calls raise a bare ValueError, which the agent's caller does not expect.
+    try:
+        encoded = os.fsencode(root)
+    except ValueError:
+        raise LocalFolderError(_BAD_PATH) from None
+    if b"\x00" in encoded:
         raise LocalFolderError("The folder path must not hold a NUL character.")
     path = Path(root)
     if not path.is_absolute():
@@ -508,7 +514,10 @@ def _folder_root(root: str | Path) -> Path:
     # The run refuses a linked root, so the agent must not read one either; a link above it is fine.
     if path.is_symlink():
         raise LocalFolderError("The folder is a link, which is never followed.")
-    resolved = path.resolve()
+    try:
+        resolved = path.resolve()
+    except ValueError:
+        raise LocalFolderError(_BAD_PATH) from None
     if not resolved.is_dir():
         raise LocalFolderError(f"No folder at {root}.")
     return resolved
@@ -596,9 +605,9 @@ class LocalFolderBrowser(RepoBrowser):
             FolderTreeError: When the folder cannot be listed.
         """
         base = _folder_root(root)
-        entries, truncated = folder_entries(base, FOLDER_ENTRIES_MAX)
-        # A cut listing gives another id than the run's, and misses files, so the full list backs both.
-        full = folder_entries(base, None)[0] if truncated else entries
+        # The cut walk is a prefix of the full one, so one full walk gives the tree, the id and the reads.
+        full, _ = folder_entries(base, None)
+        entries, truncated = full[:FOLDER_ENTRIES_MAX], len(full) > FOLDER_ENTRIES_MAX
         super().__init__(
             token=None,
             repository=str(base),

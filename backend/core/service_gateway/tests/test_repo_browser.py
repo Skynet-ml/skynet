@@ -398,6 +398,29 @@ def test_a_cut_listing_never_reads_a_file_the_filter_drops(monkeypatch: pytest.M
 
 
 @pytest.mark.usefixtures("local_mode")
+def test_a_folder_over_the_cap_is_walked_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The cut tree is the full listing's prefix, so one walk gives the tree, the cut flag and the id."""
+    root = _folder(tmp_path, {"a.py": "", "b.py": "", "c/d.py": "1\n"})
+    monkeypatch.setattr(repo_browser, "FOLDER_ENTRIES_MAX", 2)
+    cut, _ = folder_entries(root, 2)
+    calls: list[int | None] = []
+
+    def counted(base: Path, limit: int | None) -> tuple[list[dict[str, Any]], bool]:
+        """Count each walk of the folder."""
+        calls.append(limit)
+        return folder_entries(base, limit)
+
+    monkeypatch.setattr(repo_browser, "folder_entries", counted)
+
+    browser = LocalFolderBrowser(root)
+
+    assert len(calls) == 1
+    assert (browser._entries, browser._truncated) == (cut, True)
+    assert browser.branch == folder_source_id(root)
+    assert browser._files == {"a.py", "b.py", "c/d.py"}
+
+
+@pytest.mark.usefixtures("local_mode")
 def test_a_local_folder_never_returns_env_file_content(tmp_path: Path) -> None:
     """A ``.env*`` file, a file in a ``.env*`` folder, and a link to one are refused."""
     root = _folder(

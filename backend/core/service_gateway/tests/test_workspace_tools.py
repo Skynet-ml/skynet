@@ -1838,3 +1838,13 @@ def test_open_folder_refuses_a_nul_byte_in_the_path(monkeypatch: pytest.MonkeyPa
 
     assert browser is None
     assert reason == "The folder path must not hold a NUL character."
+
+
+def test_open_folder_refuses_a_path_the_disk_cannot_encode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lone surrogate in ``repo_path`` gives the agent a clean reason, not a raised ``UnicodeEncodeError``."""
+    monkeypatch.setattr(settings, "local_mode", True)
+
+    browser, reason = open_folder({"repo_path": "/tmp/\ud800x"})
+
+    assert browser is None
+    assert reason == "The folder path is not a valid path on this computer."
