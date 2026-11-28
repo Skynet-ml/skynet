@@ -105,6 +105,7 @@ test("repairStreamingMarkdown closes a half-typed code span", () => {
   assert.equal(repairStreamingMarkdown("type ``foo"), "type ``foo``");
   assert.equal(repairStreamingMarkdown("type ``"), "type ");
   assert.equal(repairStreamingMarkdown("a \\` b"), "a \\` b");
+  assert.equal(repairStreamingMarkdown("a \\\\`b"), "a \\\\`b`");
   assert.equal(repairStreamingMarkdown("use ``a*b`` and *it"), "use ``a*b`` and *it*");
 });
 
@@ -123,8 +124,18 @@ test("isMathFence and isSvgFence pick the fences that get a preview", () => {
 
 test("svgDataUrl encodes the markup so it cannot leave the data URL", () => {
   const url = svgDataUrl(' <svg><a href="#">x</a></svg>\n');
-  assert.ok(url.startsWith("data:image/svg+xml;charset=utf-8,%3Csvg%3E"), url);
+  assert.ok(url.startsWith("data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns"), url);
   assert.ok(!/["<> ]/.test(url.slice(url.indexOf(","))), url);
+});
+
+test("svgDataUrl adds the SVG namespace only when the root has none", () => {
+  const svg = (code: string) => decodeURIComponent(svgDataUrl(code).split(",")[1]!);
+  assert.equal(
+    svg("<svg><circle r='1'/></svg>"),
+    `<svg xmlns="http://www.w3.org/2000/svg"><circle r='1'/></svg>`,
+  );
+  const own = '<svg viewBox="0 0 1 1" xmlns="http://www.w3.org/2000/svg"></svg>';
+  assert.equal(svg(own), own);
 });
 
 test("guessLanguage names an untagged fence only on a strong sign", () => {
@@ -156,10 +167,18 @@ test("guessLanguage names an untagged fence only on a strong sign", () => {
     "echo is a sound",
     "let x = 1 means x is one",
     "type Foo = bar",
+    "Please let me know: number of rows",
+    "function of x: string theory",
+    "Error: file not found\nHint: check path",
+    "TODO: fix\nNOTE: later",
+    "Q: why?\nA: because",
+    "Usage: foo\nOptions:",
   ])
     assert.equal(guessLanguage(prose), "", prose);
   assert.equal(guessLanguage("cd ./app\nls -la"), "bash");
   assert.equal(guessLanguage("export FOO=1"), "bash");
   assert.equal(guessLanguage("type Id = string;"), "typescript");
+  assert.equal(guessLanguage("const id: string = f();"), "typescript");
+  assert.equal(guessLanguage("function f(): number {}"), "typescript");
   assert.equal(guessLanguage("let x = f(1);"), "javascript");
 });

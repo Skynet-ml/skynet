@@ -137,3 +137,16 @@ void test("passes the Settings code font and size to code", async () => {
   assert.equal(root.style.getPropertyValue("--md-code-size"), "15px");
   await unmount();
 });
+
+void test("shows an svg fence's source when its image fails to load", async () => {
+  const { container, unmount } = await mount("```svg\n<svg><bad\n```");
+  const img = container.querySelector("img");
+  assert.ok(img, container.innerHTML);
+  await React.act(async () => img.dispatchEvent(new Event("error")));
+  assert.equal(container.querySelector("img"), null, container.innerHTML);
+  assert.ok(
+    container.querySelector("pre")?.textContent?.includes("<svg><bad"),
+    container.innerHTML,
+  );
+  await unmount();
+});

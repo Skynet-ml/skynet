@@ -490,6 +490,7 @@ const urlTransform: UrlTransform = (url, key, node) =>
 
 function PreBlock({ end, children }: { end?: number; children?: React.ReactNode }) {
   const { userTone, openFenceEnd } = React.useContext(MarkdownContext);
+  const [svgFailed, setSvgFailed] = React.useState(false);
   const child = React.Children.toArray(children).find(
     (c): c is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
       React.isValidElement(c),
@@ -509,9 +510,15 @@ function PreBlock({ end, children }: { end?: number; children?: React.ReactNode 
   if (language === DISPLAY_MATH_LANG) return <MathFormula tex={code} display />;
   const open = openFenceEnd !== null && end !== undefined && end >= openFenceEnd;
   // A half-streamed image or formula would flicker, so it shows as code until its fence closes.
-  const preview = open ? undefined : isSvgFence(language, code) ? (
+  const preview = open ? undefined : isSvgFence(language, code) && !svgFailed ? (
     // An <img> never runs the SVG's scripts or loads its links, unlike inline markup.
-    <img src={svgDataUrl(code)} alt="SVG" className="max-h-96 max-w-full" />
+    // SVG that does not parse shows its source, not a broken image.
+    <img
+      src={svgDataUrl(code)}
+      alt="SVG"
+      className="max-h-96 max-w-full"
+      onError={() => setSvgFailed(true)}
+    />
   ) : isMathFence(language) ? (
     <MathFormula tex={code} display />
   ) : undefined;

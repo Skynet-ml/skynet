@@ -97,7 +97,8 @@ function scanCodeSpans(text: string): {
   let out = "";
   let i = 0;
   while (i < text.length) {
-    if (text[i] === "\\" && text[i + 1] === "`") {
+    // As in CommonMark, `\` escapes only ASCII punctuation, so `\\` then a backtick opens a span.
+    if (text[i] === "\\" && /[!-/:-@[-`{-~]/.test(text[i + 1] ?? "")) {
       out += text.slice(i, i + 2);
       i += 2;
       continue;
@@ -142,7 +143,6 @@ export function repairStreamingMarkdown(text: string): string {
   }
   const plain = scanCodeSpans(tail)
     .text.replace(/^[ \t]*[*+-][ \t]+/gm, "")
-    .replace(/^[ \t]*[*+-][ \t]+/gm, "")
     .replace(/^[ \t]*(\*[ \t]*){3,}$/gm, "");
   const strong = (plain.match(/\*\*/g) ?? []).length;
   const single = (plain.replace(/\*\*/g, "").match(/\*/g) ?? []).length;
@@ -261,9 +261,15 @@ export function isSvgFence(language: string, code: string): boolean {
   return (key === "xml" || key === "html") && /^<svg[\s>]/i.test(code.trimStart());
 }
 
-/** The SVG as a data URL for an `<img>`, where its scripts and links never run. */
+/**
+ * The SVG as a data URL for an `<img>`, where its scripts and links never run.
+ * An `<img>` shows no SVG without the SVG namespace, so a root `<svg>` with none gets it.
+ */
 export function svgDataUrl(code: string): string {
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(code.trim())}`;
+  const svg = code
+    .trim()
+    .replace(/<svg\b(?![^>]*\sxmlns=)/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 const SHELL_COMMAND =
@@ -319,7 +325,9 @@ const GUESSES: Array<[string, (code: string) => boolean]> = [
       /^\s*(export )?(interface \w+(<.*>)?( extends [^{\n]+)? \{|type \w+(<.*>)? = [^\n]*[;{|&<[=>'"]|enum \w+ \{)/m.test(
         c,
       ) ||
-      /\b(const|let|function)\b[^\n]*: (string|number|boolean|unknown)\b/.test(c),
+      /^\s*(export )?((const|let) \w+|function \w*\([^)\n]*\)?): (string|number|boolean|unknown)\b/m.test(
+        c,
+      ),
   ],
   [
     "javascript",
@@ -346,7 +354,9 @@ const GUESSES: Array<[string, (code: string) => boolean]> = [
       return (
         lines.length >= 2 &&
         /^[\w.-]+:( |$)/.test(lines[0]!) &&
-        lines.every((l) => /^\s*(- .*|-$|[\w.-]+:( .*)?)$/.test(l))
+        lines.every((l) => /^\s*(- .*|-$|[\w.-]+:( .*)?)$/.test(l)) &&
+        // Prose like "Error: x" then "Hint: y" also has key lines, so YAML needs nesting.
+        lines.some((l) => /^\s+\S/.test(l) || /^\s*- [\w.-]+:( |$)/.test(l))
       );
     },
   ],
