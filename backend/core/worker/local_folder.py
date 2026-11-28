@@ -516,7 +516,7 @@ def check_applied(root: str | os.PathLike[str], run_id: str) -> None:
             folder, the folder cannot be read, or a file does not hold the version.
     """
     with APPLY_LOCK:
-        changes, _made = _load_record(applied_record(run_id), root)
+        changes = _load_record(applied_record(run_id), root)[0]
         try:
             folder = _open_root(root)
         except OSError as error:
@@ -617,11 +617,12 @@ def _changes(original: dict[str, _Blob], version: dict[str, _Blob]) -> list[_Cha
         changes.append(_Change(path, before, after))
     # A path and a path below it can both change only when a folder becomes a file or back.
     # The file-by-file writes cannot do that in place, so Apply refuses it before any write.
-    paths = {change.path for change in changes}
+    # Fold as the disk does, so a file Pkg and a folder pkg/ also count as one path.
+    paths = {_FOLD_BLOCKED(change.path) for change in changes}
     for change in changes:
         parts = change.path.split("/")
         for depth in range(1, len(parts)):
-            if (parent := "/".join(parts[:depth])) in paths:
+            if _FOLD_BLOCKED(parent := "/".join(parts[:depth])) in paths:
                 raise LocalFolderError(
                     f"The version turns {parent} from a folder into a file, or back, which Apply cannot do. "
                     "Download the version instead."

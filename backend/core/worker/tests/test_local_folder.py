@@ -926,3 +926,45 @@ def test_apply_refuses_a_version_that_turns_a_folder_into_a_file(tmp_path: Path,
     assert not (local_state / local_folder.APPLIED_FOLDER).exists() or not any(
         (local_state / local_folder.APPLIED_FOLDER).iterdir()
     )
+
+
+_FILE_TO_FOLDER_OTHER_CASE_PATCH = (
+    "diff --git a/Pkg b/Pkg\n"
+    "deleted file mode 100644\n"
+    "--- a/Pkg\n"
+    "+++ /dev/null\n"
+    "@@ -1 +0,0 @@\n"
+    "-x = 1\n"
+    "diff --git a/pkg/mod.py b/pkg/mod.py\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n"
+    "+++ b/pkg/mod.py\n"
+    "@@ -0,0 +1 @@\n"
+    "+y = 1\n"
+)
+
+
+def test_apply_refuses_a_version_that_turns_a_file_into_a_folder_in_another_case(
+    tmp_path: Path, local_state: Path
+) -> None:
+    """A file Pkg that becomes a folder pkg/ is the same path on a folded disk, so Apply refuses it.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+    """
+    root = _write(tmp_path / "app", {"Pkg": "x = 1\n", "README.md": "hi\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    before = _fingerprint(root)
+
+    with pytest.raises(LocalFolderError, match="turns") as caught:
+        _apply(root, commit, _FILE_TO_FOLDER_OTHER_CASE_PATCH, "run-1")
+
+    assert not isinstance(caught.value, local_folder.LocalFolderConflictError)
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+    assert not (local_state / local_folder.APPLIED_FOLDER).exists() or not any(
+        (local_state / local_folder.APPLIED_FOLDER).iterdir()
+    )
