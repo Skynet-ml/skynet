@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "यह Mac लिंक नहीं है",
     "hosted_link.linked_unknown_account": "आपका खाता",
     "local.not_available": "यह सुविधा केवल {term.appName} Mac ऐप में उपलब्ध है।",
+    "local.folder_not_picked": "{term.appName} केवल वही फ़ोल्डर पढ़ता है जिसे आपने ऐप में चुना है। फ़ोल्डर फिर से चुनें।",
     "models.subscription_local_only": "सदस्यता मॉडल और होस्ट CLI प्रस्तावक केवल {term.appName} Mac ऐप में चलते हैं।",
     "models.managed_unavailable_local": "Mac ऐप प्रबंधित मॉडल का उपयोग नहीं कर सकता। कोई सदस्यता मॉडल या अपनी प्रदाता कुंजी चुनें।",
     "sync.import_local_only_disabled": "इम्पोर्ट केवल होस्टेड {term.appName} खाते में काम करता है, Mac ऐप में नहीं।",

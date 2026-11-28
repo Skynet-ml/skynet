@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "Этот Mac не привязан",
     "hosted_link.linked_unknown_account": "ваш аккаунт",
     "local.not_available": "Эта функция доступна только в приложении {term.appName} для Mac.",
+    "local.folder_not_picked": "{term.appName} читает только папку, которую вы выбрали в приложении. Выберите папку ещё раз.",
     "models.subscription_local_only": "Модели по подписке и локальные CLI-генераторы предложений работают только в приложении {term.appName} для Mac.",
     "models.managed_unavailable_local": "Приложение для Mac не может использовать управляемые модели. Выберите модель по подписке или собственный ключ провайдера.",
     "sync.import_local_only_disabled": "Импорт работает только в облачном аккаунте {term.appName}, а не в приложении для Mac.",

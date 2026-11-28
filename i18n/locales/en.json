@@ -453,6 +453,7 @@
     "hosted_link.page_failed_title": "This Mac is not linked",
     "hosted_link.linked_unknown_account": "your account",
     "local.not_available": "This feature is available only in the {term.appName} Mac app.",
+    "local.folder_not_picked": "{term.appName} reads only a folder that you picked in the app. Pick the folder again.",
     "models.subscription_local_only": "Subscription models and host CLI proposers run only in the {term.appName} Mac app.",
     "models.managed_unavailable_local": "The Mac app cannot use managed models. Pick a subscription model or your own provider key.",
     "sync.import_local_only_disabled": "Import runs only on the hosted {term.appName} account, not in the Mac app.",

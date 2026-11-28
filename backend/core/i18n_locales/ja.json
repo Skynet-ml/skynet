@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "この Mac はリンクされていません",
     "hosted_link.linked_unknown_account": "あなたのアカウント",
     "local.not_available": "この機能は {term.appName} の Mac アプリでのみ使用できます。",
+    "local.folder_not_picked": "{term.appName} はアプリで選んだフォルダーだけを読み取ります。フォルダーをもう一度選んでください。",
     "models.subscription_local_only": "サブスクリプションモデルとホスト CLI プロポーザーは {term.appName} の Mac アプリでのみ実行されます。",
     "models.managed_unavailable_local": "Mac アプリではマネージドモデルを使用できません。サブスクリプションモデルか、ご自身のプロバイダーキーを選択してください。",
     "sync.import_local_only_disabled": "インポートはホスト版の {term.appName} アカウントでのみ動作し、Mac アプリでは動作しません。",

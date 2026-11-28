@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "این Mac پیوند داده نشده است",
     "hosted_link.linked_unknown_account": "حساب شما",
     "local.not_available": "این قابلیت فقط در برنامهٔ {term.appName} برای Mac در دسترس است.",
+    "local.folder_not_picked": "{term.appName} فقط پوشه‌ای را می‌خواند که در برنامه انتخاب کرده‌اید. پوشه را دوباره انتخاب کنید.",
     "models.subscription_local_only": "مدل‌های اشتراکی و پیشنهاددهنده‌های CLI محلی فقط در برنامهٔ {term.appName} برای Mac اجرا می‌شوند.",
     "models.managed_unavailable_local": "برنامهٔ Mac نمی‌تواند از مدل‌های مدیریت‌شده استفاده کند. یک مدل اشتراکی یا کلید ارائه‌دهندهٔ خودتان را انتخاب کنید.",
     "sync.import_local_only_disabled": "وارد کردن فقط در حساب میزبانی‌شده {term.appName} کار می‌کند، نه در برنامه Mac.",

@@ -348,6 +348,7 @@
   "submit.v2.repo.env.unsafe": "Skynet kann diese .env-Datei nicht lesen. Sie ist keine normale Datei in diesem Ordner.",
   "submit.v2.repo.env.too_large": "Diese .env-Datei ist zu groß zum Lesen.",
   "submit.v2.repo.env.unreadable": "Skynet kann diese .env-Datei nicht lesen.",
+  "submit.v2.repo.env.not_picked": "Skynet liest nur einen Ordner, den Sie in der App ausgewählt haben. Wählen Sie den Ordner erneut aus.",
   "submit.v2.repo.env.too_many": "Mit der .env des Ordners erhält dieser Lauf {count} Secrets. Ein Lauf nimmt höchstens {limit}. Entfernen Sie Namen aus der .env oder aus den Secrets des Laufs.",
   "submit.v2.repo.issue.local_path": "Wähle einen Ordner für den Lauf.",
   "submit.v2.run_on.blocked.local_folder": "Ein Ordner auf diesem Mac läuft nur auf diesem Mac. Wähle ein Repository oder starte auf diesem Mac.",

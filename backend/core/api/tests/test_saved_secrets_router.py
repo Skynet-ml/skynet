@@ -7,6 +7,7 @@ replace-by-name, and the decrypt path a repository run uses.
 
 from __future__ import annotations
 
+import json
 import runpy
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...connectors.saved_secrets import SavedSecretStore
+from ...local.picked_folders import PICKED_FOLDERS_FILE
 from ...storage.models import UserSecretModel
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -172,9 +174,18 @@ _SAVED_VALUE = "saved-SENTINEL-8e2c"
 
 
 @pytest.fixture
-def local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Turn local mode on for one test."""
+def local_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Turn local mode on for one test, with the test's ``project`` folder picked in the app.
+
+    Args:
+        monkeypatch: Pytest's patcher, for the local settings.
+        tmp_path: Test directory.
+    """
     monkeypatch.setattr(settings, "local_mode", True)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / PICKED_FOLDERS_FILE).write_text(json.dumps([str(tmp_path / "project")]))
+    monkeypatch.setattr(settings, "local_state_dir", str(state))
 
 
 def _env_folder(tmp_path: Path, text: str) -> str:
@@ -241,8 +252,40 @@ def test_preview_lists_names_and_clashes_without_values(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("local_mode")
 def test_preview_reports_a_folder_without_env(tmp_path: Path) -> None:
     """Report ``missing`` when the folder has no ``.env`` file."""
-    response = _client(_MemStore(), _ALICE).get("/secrets/local-env", params={"path": str(tmp_path)})
+    (tmp_path / "project").mkdir()
+    response = _client(_MemStore(), _ALICE).get("/secrets/local-env", params={"path": str(tmp_path / "project")})
     assert response.json() == {"status": "missing", "entries": [], "skipped": []}
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_preview_and_import_refuse_a_folder_the_user_did_not_pick(tmp_path: Path) -> None:
+    """Read no ``.env`` outside the picked folders, also through a link out of one, and save nothing (SKY-1007)."""
+    _env_folder(tmp_path, "A=1\n")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / ".env").write_text(f"STOLEN={_ENV_VALUE}\n", encoding="utf-8")
+    (tmp_path / "project" / "up").symlink_to(tmp_path)
+    client = _client(_MemStore(), _ALICE)
+    for folder in (other, tmp_path, tmp_path / "project" / "up" / "other"):
+        preview = client.get("/secrets/local-env", params={"path": str(folder)})
+        assert preview.json() == {"status": "not_picked", "entries": [], "skipped": []}, folder
+        imported = client.post("/secrets/local-env/import", json={"path": str(folder)})
+        assert imported.json()["status"] == "not_picked", folder
+        assert "SENTINEL" not in preview.text + imported.text
+    assert client.get("/secrets").json()["secrets"] == []
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_preview_and_import_read_a_folder_below_a_picked_one(tmp_path: Path) -> None:
+    """A folder below the picked one keeps today's behavior (SKY-1007)."""
+    sub = tmp_path / "project" / "service"
+    sub.mkdir(parents=True)
+    (sub / ".env").write_text(f"TOKEN={_ENV_VALUE}\n", encoding="utf-8")
+    client = _client(_MemStore(), _ALICE)
+    preview = client.get("/secrets/local-env", params={"path": str(sub)})
+    assert preview.json()["status"] == "found"
+    imported = client.post("/secrets/local-env/import", json={"path": str(sub)})
+    assert imported.json()["imported"] == ["TOKEN"]
 
 
 @pytest.mark.usefixtures("local_mode")

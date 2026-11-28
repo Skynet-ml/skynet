@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "这台 Mac 尚未关联",
     "hosted_link.linked_unknown_account": "你的账号",
     "local.not_available": "此功能仅在 {term.appName} Mac 应用中可用。",
+    "local.folder_not_picked": "{term.appName} 只读取你在应用中选择的文件夹。请重新选择该文件夹。",
     "models.subscription_local_only": "订阅模型和本机 CLI 提议器仅在 {term.appName} Mac 应用中运行。",
     "models.managed_unavailable_local": "Mac 应用无法使用托管模型。请选择订阅模型或您自己的提供商密钥。",
     "sync.import_local_only_disabled": "导入仅在托管的 {term.appName} 账户中可用，Mac 应用中不可用。",

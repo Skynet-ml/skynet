@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "Este Mac não está associado",
     "hosted_link.linked_unknown_account": "a sua conta",
     "local.not_available": "Esta funcionalidade só está disponível na app {term.appName} para Mac.",
+    "local.folder_not_picked": "O {term.appName} lê apenas uma pasta que você escolheu no app. Escolha a pasta novamente.",
     "models.subscription_local_only": "Os modelos por subscrição e os proponentes CLI locais só funcionam na app {term.appName} para Mac.",
     "models.managed_unavailable_local": "A app para Mac não pode usar modelos geridos. Escolha um modelo por subscrição ou a sua própria chave de fornecedor.",
     "sync.import_local_only_disabled": "A importação funciona apenas na conta {term.appName} hospedada, não no app para Mac.",

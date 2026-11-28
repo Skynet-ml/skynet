@@ -60,6 +60,7 @@ from ...constants import (
 )
 from ...exceptions import ServiceError
 from ...i18n_keys import I18nKey
+from ...local.picked_folders import is_picked
 from ...models import (
     FEEDBACK_OPTIMIZERS,
     BlackboxEngineCatalogResponse,
@@ -78,6 +79,7 @@ from ...models.blackbox import (
     BLACKBOX_MODULE_NAME,
     BLACKBOX_STRATEGY_AUTO,
     BLACKBOX_TARGET_REPO,
+    LOCAL_REPO_PROVIDER,
 )
 from ...models.common import ModelConfig, OptimizationType
 from ...models.unified import METRIC_SIGNATURE, RUN_ENTRY
@@ -839,11 +841,16 @@ def submit_repo_payload(
         An ``OptimizationSubmissionResponse`` for the new or replayed run.
 
     Raises:
-        DomainError: 400 (not a repository target, or the scorer does not
-            load), 402 (no balance), 409 (quota or a failed setup check).
+        DomainError: 400 (not a repository target, a local folder the user
+            did not pick in the app, or the scorer does not load), 402 (no
+            balance), 409 (quota or a failed setup check).
     """
     if payload.target.kind != BLACKBOX_TARGET_REPO or payload.target.repo is None:
         raise DomainError("submission.validation_failed", status=400)
+    repo = payload.target.repo
+    # The request check accepts any existing folder; a run reads only one the user picked (SKY-1007).
+    if repo.provider == LOCAL_REPO_PROVIDER and not is_picked(repo.path or "", settings.local_state_dir):
+        raise DomainError(I18nKey.LOCAL_FOLDER_NOT_PICKED, status=400)
     payload.username = current_user.username
     # The job column holds the chat only after the ownership check, so the
     # stored payload and the replay keys never carry an unchecked id.

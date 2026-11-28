@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "呢部 Mac 未連結",
     "hosted_link.linked_unknown_account": "你嘅帳戶",
     "local.not_available": "呢個功能只喺 {term.appName} Mac 應用程式入面先用到。",
+    "local.folder_not_picked": "{term.appName} 只會讀取你喺 app 入面揀過嘅資料夾。請再揀一次資料夾。",
     "models.subscription_local_only": "訂閱模型同本機 CLI 提議器只會喺 {term.appName} Mac 應用程式入面運行。",
     "models.managed_unavailable_local": "Mac 應用程式唔可以用託管模型。請揀訂閱模型或者你自己嘅供應商金鑰。",
     "sync.import_local_only_disabled": "匯入只喺託管嘅 {term.appName} 帳戶用到，Mac app 用唔到。",

@@ -348,6 +348,7 @@
   "submit.v2.repo.env.unsafe": "Skynet 无法读取此 .env 文件。它不是此文件夹中的普通文件。",
   "submit.v2.repo.env.too_large": "此 .env 文件太大，无法读取。",
   "submit.v2.repo.env.unreadable": "Skynet 无法读取此 .env 文件。",
+  "submit.v2.repo.env.not_picked": "Skynet 只读取你在应用中选择的文件夹。请重新选择该文件夹。",
   "submit.v2.repo.env.too_many": "加上文件夹的 .env，此运行会获得 {count} 个密钥。每个运行最多接受 {limit} 个。请从 .env 或运行的密钥中移除名称。",
   "submit.v2.repo.issue.local_path": "请为运行选择一个文件夹。",
   "submit.v2.run_on.blocked.local_folder": "这台 Mac 上的文件夹只能在这台 Mac 上运行。请选择仓库，或在这台 Mac 上运行。",

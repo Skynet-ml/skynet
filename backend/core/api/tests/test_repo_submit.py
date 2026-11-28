@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +12,7 @@ import pytest
 from ...config import settings
 from ...constants import OPTIMIZATION_TYPE_BLACKBOX
 from ...i18n import t_locale
+from ...local.picked_folders import PICKED_FOLDERS_FILE
 from ...models.blackbox import BLACKBOX_MODULE_NAME
 from ...service_gateway.agents import folder_workspace
 from ..routers import submissions as _sub_mod
@@ -204,6 +206,39 @@ def _local_body(folder: Path, **overrides: Any) -> dict:
     body = repo_payload(**overrides)
     body["target"]["repo"] = {"provider": "local", "path": str(folder), "editable_paths": ["."]}
     return body
+
+
+@pytest.mark.parametrize("picked", [False, True], ids=["not-picked", "picked"])
+def test_a_local_run_needs_a_folder_the_user_picked(
+    client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, picked: bool
+) -> None:
+    """The run submit refuses a local folder off the picked list and asks to pick it again (SKY-1007).
+
+    Args:
+        client_and_store: The API client and its job store.
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Test directory.
+        picked: Whether the run's folder is on the picked list.
+    """
+    client, store = client_and_store
+    folder = tmp_path / "project"
+    folder.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / PICKED_FOLDERS_FILE).write_text(json.dumps([str(folder)] if picked else []))
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", str(state))
+
+    resp = client.post("/blackbox/run", json=_local_body(folder))
+
+    if picked:
+        # The run passes the folder check and stops at a later gate (this body names a managed model).
+        assert resp.json()["code"] == "models.managed_unavailable_local", resp.text
+    else:
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == "local.folder_not_picked"
+        assert "Pick the folder again." in t_locale("en", "local.folder_not_picked")
+        assert store._jobs == {}
 
 
 @pytest.mark.parametrize(

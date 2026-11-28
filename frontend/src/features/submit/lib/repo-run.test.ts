@@ -866,7 +866,8 @@ test("a .env that the run start cannot read stops the run, and a missing one doe
   const state = repoState();
   state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [] };
   const request = repoRunRequest(state, options)!;
-  for (const status of ["unreadable", "too_large", "unsafe"] as const) {
+  // A folder off the desktop app's picked list stops the run too (SKY-1007).
+  for (const status of ["unreadable", "too_large", "unsafe", "not_picked"] as const) {
     let submitted = false;
     let failure: ReturnType<typeof envSubmitFailure> = null;
     try {

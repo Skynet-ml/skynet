@@ -670,6 +670,31 @@ void test("the folder card keeps a run-start .env clash pick when the preview fi
   });
 });
 
+void test("the folder card asks to pick a folder again when the app did not pick it (SKY-1007)", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  const linkedFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!url.includes("/secrets/local-env?")) return linkedFetch(input);
+    return new Response(JSON.stringify({ status: "not_picked", entries: [], skipped: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  await asDesktop(bridge, true, async () => {
+    const { container, unmount } = await mountControlled({ ...repo, localPath: "/Users/me/app" }, []);
+    try {
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.ok((container.textContent ?? "").includes("Pick the folder again."), "no pick-again notice");
+    } finally {
+      await unmount();
+      globalThis.fetch = linkedFetch;
+    }
+  });
+});
+
 void test("the folder card lists .env clashes and a pick goes into the draft (SKY-994)", async () => {
   const bridge: Bridge = { pickFolder: async () => null };
   const linkedFetch = globalThis.fetch;

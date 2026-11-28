@@ -37,6 +37,7 @@ from ...connectors.transport import label
 from ...connectors.vault import ConnectorSecret, ConnectorVault
 from ...local import connector_relay, hosted_link
 from ...local.folder_tree import FolderTreeError, folder_entries
+from ...local.picked_folders import is_picked
 from ...service_gateway.agents.repo_browser import folder_root, read_folder_bytes
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -331,14 +332,18 @@ def local_folder(path: str) -> Path:
 
     Raises:
         DomainError: 404 ``local.not_available`` outside desktop local mode;
-            400 ``connectors.invalid_ref`` for a relative, linked or missing folder.
+            400 ``connectors.invalid_ref`` for a relative, linked or missing folder;
+            400 ``local.folder_not_picked`` for one the user did not pick in the app (SKY-1007).
     """
     if not settings.local_mode:
         raise DomainError("local.not_available", status=404)
     try:
-        return folder_root(path)
+        root = folder_root(path)
     except FolderTreeError:
         raise DomainError("connectors.invalid_ref", status=400) from None
+    if not is_picked(root, settings.local_state_dir):
+        raise DomainError("local.folder_not_picked", status=400)
+    return root
 
 
 def create_connectors_router(*, job_store) -> APIRouter:
