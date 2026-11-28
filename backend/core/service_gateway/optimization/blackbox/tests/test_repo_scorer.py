@@ -65,6 +65,7 @@ from ..repo_scorer import (
     RepoScorer,
     _scrub,
     _StageRelay,
+    _unsafe_path,
 )
 from ..repo_workspace import WORK_DIR, CandidateBox, RepoBoxSource, RepoWorkspace
 from ..rule_judge import (
@@ -3191,8 +3192,14 @@ def test_a_guest_query_parameter_cannot_replace_the_declared_value(echo: _Echo, 
 
 @pytest.mark.parametrize(
     ("path", "body"),
-    [("json?key=${JUDGE_KEY}", b""), ("json?key=%24%7BJUDGE_KEY%7D", b""), ("json", b'{"key": "${JUDGE_KEY}"}')],
-    ids=["url", "encoded-url", "body"],
+    [
+        ("json?key=${JUDGE_KEY}", b""),
+        ("json?key=%24%7BJUDGE_KEY%7D", b""),
+        ("json", b'{"key": "${JUDGE_KEY}"}'),
+        ("v1/${JUDGE_KEY}/x", b""),
+        ("bot%24%7BJUDGE_KEY%7D/send", b""),
+    ],
+    ids=["url", "encoded-url", "body", "path", "encoded-path"],
 )
 def test_a_secret_outside_a_header_is_refused_with_a_reason(echo: _Echo, path: str, body: bytes) -> None:
     """A guest ``${JUDGE_KEY}`` in the url or body to the secret's own host gets a 403, and nothing goes out (SKY-1000)."""
@@ -3210,6 +3217,36 @@ def test_a_secret_outside_a_header_is_refused_with_a_reason(echo: _Echo, path: s
     [(_, call, _)] = sink.calls
     assert call["status"] == "refused"
     assert "judge-secret-value" not in repr(call)
+
+
+def test_a_path_placeholder_that_names_no_run_secret_keeps_the_path_error(echo: _Echo) -> None:
+    """A ``${HOME}`` in the path names no run secret, so it gets the path check's 400 as before (SKY-1000)."""
+    workspace = _Workspace()
+
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="v1/${HOME}/x", method="GET")
+
+    assert answer == {"status": 400, "error": "Service 'judge' got a path outside its url."}
+    assert echo.paths == []
+
+
+def test_a_deeply_encoded_path_is_refused_fast(echo: _Echo) -> None:
+    """A path still encoded after three decode passes is refused in under one second, not in quadratic time (SKY-1000).
+
+    The path check gets 200,000 layers. The relay gets 20,000, because httpx
+    refuses a url as long as 200,000 layers before any check runs.
+    """
+    workspace = _Workspace()
+
+    started = time.monotonic()
+    unsafe = _unsafe_path("%" + "25" * 200_000)
+    path = "%" + "25" * 20_000
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path=path, method="GET")
+
+    assert time.monotonic() - started < 1
+    assert unsafe
+    assert answer["status"] == 403
+    assert "encoded too many times to check" in answer["error"]
+    assert echo.paths == []
 
 
 # The proposer relay's refused paths (test_scoped_relay.py), relative to one service or MCP server.

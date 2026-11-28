@@ -22,7 +22,7 @@ from urllib.parse import quote, quote_plus, unquote, urlsplit
 import httpx
 
 from ..billing.budgets import BudgetError
-from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms, relay_request
+from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, _misplaced_secret, escaped_forms, relay_request
 from ..billing.guest_model_proxy import MCP_PATH, METHOD_HEADER, SERVICE_PATH
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.mcp_broker import _pinned_address, _PinnedTransport
@@ -424,13 +424,14 @@ class McpRelay:
             base, target = httpx.URL(origin), httpx.URL(url)
         except httpx.InvalidURL:
             base = target = None
+        # A run secret in the path gets relay_request's header-only refusal and record, not a path error (SKY-1000).
+        secret_in_path = _misplaced_secret(path, b"", {*self._secrets, *self._bindings, *self._secret_hosts})
         if (
             not _HTTP_METHOD.fullmatch(method)
-            or _unsafe_path(path)
             or base is None
             or target is None
             or (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
-            or not _under(target, base)
+            or (secret_in_path is None and (_unsafe_path(path) or not _under(target, base)))
         ):
             return self._refused(recorder, name, 400, f"{label} got a malformed request or a path outside its url.")
         return self._request(

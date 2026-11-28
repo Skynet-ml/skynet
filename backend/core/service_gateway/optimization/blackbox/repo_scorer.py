@@ -82,7 +82,7 @@ import httpx
 import openascent
 
 from ....billing.budgets import BudgetError, BudgetInsufficientError
-from ....billing.env_connectors import relay_request
+from ....billing.env_connectors import _DECODE_PASSES, _misplaced_secret, relay_request
 from ....billing.mcp_broker import _pinned_address, _PinnedTransport
 from ....billing.model_dispatch import ModelHTTPResult
 from ....billing.model_gateway import _tool_target
@@ -1284,18 +1284,24 @@ def _control_answer(error: BaseException) -> dict[str, Any] | None:
 
 
 def _decoded(path: str) -> str:
-    """Return a path without its query, percent-decoded until nothing changes.
+    """Return a path without its query, percent-decoded up to ``_DECODE_PASSES`` times.
 
-    A server may decode ``%252e`` to ``%2e`` and then to ``.``, so one pass is not enough.
+    A server may decode ``%252e`` to ``%2e`` and then to ``.``, so one pass is
+    not enough. An unbounded loop took time that grows with the square of the
+    length for ``%2525...`` (SKY-1000). A path that still decodes after the
+    cap keeps a ``%``, which :func:`_unsafe_path` refuses.
 
     Args:
         path: A path, with or without a query.
 
     Returns:
-        The fully decoded path.
+        The decoded path.
     """
     path = path.partition("?")[0]
-    while (decoded := unquote(path)) != path:
+    for _ in range(_DECODE_PASSES):
+        decoded = unquote(path)
+        if decoded == path:
+            break
         path = decoded
     return path
 
@@ -1924,11 +1930,11 @@ class _StageRelay:
         # An empty path is the declared url itself: an MCP endpoint may not answer with a slash added.
         url = origin.rstrip("/") + "/" + path.lstrip("/") if path else origin
         base, target = httpx.URL(origin), httpx.URL(url)
+        # A run secret in the path gets relay_request's header-only refusal and record, not a path error (SKY-1000).
+        secret_in_path = _misplaced_secret(path, b"", {*self._secrets, *self._bindings, *self._secret_hosts})
         # The secret headers go with every path, so a service and an MCP server get the same path check.
-        if (
-            (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
-            or _unsafe_path(path)
-            or not _under(target, base)
+        if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port) or (
+            secret_in_path is None and (_unsafe_path(path) or not _under(target, base))
         ):
             return {"status": 400, "error": f"{label} got a path outside its url."}
         overrides = {key.lower() for key in declared}

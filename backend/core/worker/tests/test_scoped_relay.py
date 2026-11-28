@@ -460,8 +460,13 @@ def test_a_proposer_service_gets_its_header_secret_and_plain_query_and_the_box_n
 
 @pytest.mark.parametrize(
     ("path", "body"),
-    [("lookup?key=${MAPS_KEY}", b""), ("lookup", b"key=%24%7BMAPS_KEY%7D")],
-    ids=["url", "form-body"],
+    [
+        ("lookup?key=${MAPS_KEY}", b""),
+        ("lookup", b"key=%24%7BMAPS_KEY%7D"),
+        ("v1/${MAPS_KEY}/x", b""),
+        ("bot%24%7BMAPS_KEY%7D/send", b""),
+    ],
+    ids=["url", "form-body", "path", "encoded-path"],
 )
 def test_a_proposer_secret_outside_a_header_is_refused_with_a_reason(
     monkeypatch: pytest.MonkeyPatch, path: str, body: bytes
