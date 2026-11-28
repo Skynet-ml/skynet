@@ -195,6 +195,28 @@ def _parse_head(head: bytes) -> tuple[list[bytes], list[tuple[bytes, bytes]]]:
     return parts, headers
 
 
+def _strict_response_head(head: bytes) -> bool:
+    """Tell whether a response head has only CRLF line breaks and plain ``name: value`` headers.
+
+    A client that accepts a bare line feed, a folded line or a padded name can
+    read headers or a head end that the proxy's checks did not see.
+
+    Args:
+        head: The response head up to and including the blank line.
+
+    Returns:
+        Whether the head is strict.
+    """
+    lines = head.removesuffix(b"\r\n\r\n").split(b"\r\n")
+    if any(c in line for line in lines for c in b"\r\n\0"):
+        return False
+    for line in lines[1:]:
+        name, sep, _ = line.partition(b":")
+        if not sep or not name or name != name.strip(b" \t"):
+            return False
+    return True
+
+
 def _read_tls_head(reader: BinaryIO) -> bytes | None:
     """Read one request head from the client's TLS stream.
 
@@ -1068,6 +1090,8 @@ class LocalEgressProxy:
             call["bytes_received"] += len(head)
             call["code"] = code = _status_code(head)
             check(head)
+            if guard and not _strict_response_head(head):
+                raise _CutError("the response head had a bare line break or a malformed header, so it was cut")
             if code is None or not 100 <= code < 200 or code == 101:
                 break
             tls.sendall(head)

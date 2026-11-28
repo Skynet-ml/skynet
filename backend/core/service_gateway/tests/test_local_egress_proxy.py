@@ -6,6 +6,8 @@ import base64
 import contextlib
 import datetime
 import gzip
+import http.client
+import io
 import socket
 import ssl
 import threading
@@ -115,6 +117,7 @@ def _answer_for(request: bytes) -> bytes:
     ``/echo`` returns the request, ``/gzip-echo`` returns it marked as gzip, and
     ``/chunked-echo`` returns it in chunks that split the real value. ``/dup-gzip-echo``
     and ``/dup-te-echo`` return it gzipped, behind a repeated encoding header that ends in a plain one.
+    The ``/lf-*`` paths hide the framing behind bare line feeds, which many clients accept.
 
     Args:
         request: The request the host got.
@@ -123,6 +126,16 @@ def _answer_for(request: bytes) -> bytes:
         The response bytes.
     """
     path = request.split(b" ")[1:2]
+    if path == [b"/lf-gzip-echo"]:
+        body = gzip.compress(request)
+        return b"HTTP/1.1 200 OK\r\nX-A: a\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+    if path == [b"/lf-te-echo"]:
+        cut = request.find(VALUE.encode()) + 5
+        chunks = b"".join(b"%x\r\n%s\r\n" % (len(part), part) for part in (request[:cut], request[cut:]))
+        return b"HTTP/1.1 200 OK\r\nX-A: a\nTransfer-Encoding: chunked\r\n\r\n" + chunks + b"0\r\n\r\n"
+    if path == [b"/lf-end-echo"]:
+        body = gzip.compress(request)
+        return b"HTTP/1.1 200 OK\nContent-Encoding: gzip\nContent-Length: %d\n\n" % len(body) + body + b"\r\n\r\n"
     if path == [b"/dup-gzip-echo"]:
         body = gzip.compress(request)
         head = b"Content-Encoding: gzip\r\nContent-Encoding: identity\r\nContent-Length: %d\r\n" % len(body)
@@ -557,6 +570,60 @@ def test_repeated_encoding_headers_cannot_hide_an_echo(proxy: LocalEgressProxy, 
     record = _calls(proxy, 1)[-1]
     assert record["status"] == "failed"
     assert VALUE not in record["reason"]
+
+
+class _BytesSocket:
+    """A socket stand-in that lets ``http.client`` parse bytes the client already got."""
+
+    def __init__(self, data: bytes) -> None:
+        """Keep the bytes.
+
+        Args:
+            data: The response bytes.
+        """
+        self._file = io.BytesIO(data)
+
+    def makefile(self, *_args: object, **_kwargs: object) -> io.BytesIO:
+        """Return the bytes as a file.
+
+        Args:
+            _args: Ignored.
+            _kwargs: Ignored.
+
+        Returns:
+            The file.
+        """
+        return self._file
+
+
+def _lenient_body(response: bytes) -> bytes:
+    """Decode a response as ``http.client`` does, which accepts bare line feeds, then gunzip it.
+
+    Args:
+        response: The response bytes the client got.
+
+    Returns:
+        The decoded body, or empty bytes when the client could not read one.
+    """
+    parsed = http.client.HTTPResponse(_BytesSocket(response))  # type: ignore[arg-type]
+    try:
+        parsed.begin()
+        body = parsed.read()
+    except (http.client.HTTPException, ValueError, OSError):
+        return b""
+    if parsed.getheader("content-encoding") == "gzip":
+        with contextlib.suppress(zlib.error):
+            return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(body)
+    return body
+
+
+@pytest.mark.parametrize("path", ["/lf-gzip-echo", "/lf-te-echo", "/lf-end-echo"])
+def test_bare_line_feeds_in_the_response_head_cannot_hide_an_echo(proxy: LocalEgressProxy, path: str) -> None:
+    """Check that framing hidden behind a bare line feed cannot pass an echo to a lenient client."""
+    response = _via_proxy(proxy, APPROVED, _get(path, header=placeholder("API_KEY")), trust=proxy.ca_pem)
+    assert VALUE.encode() not in _lenient_body(response)
+    assert VALUE.encode() not in response
+    assert _calls(proxy, 1)[-1]["status"] == "failed"
 
 
 def test_stop_keeps_tls_on_a_socket_that_sends_during_shutdown(
