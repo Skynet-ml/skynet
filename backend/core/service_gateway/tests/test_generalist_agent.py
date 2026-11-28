@@ -631,7 +631,7 @@ def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(
     assert "Never set ``repository`` in a local run: it turns the run into a git run." in focus
 
 
-@pytest.mark.parametrize("screen", ["artifact", "metric"])
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check"])
 def test_a_web_run_prompt_has_no_local_folder_text(monkeypatch: pytest.MonkeyPatch, screen: str) -> None:
     """Outside the desktop app no run can use a local folder, so the prompt never names one."""
     monkeypatch.setattr(settings, "local_mode", False)
@@ -641,7 +641,7 @@ def test_a_web_run_prompt_has_no_local_folder_text(monkeypatch: pytest.MonkeyPat
     assert "Never set ``repository`` in a local run" not in focus
 
 
-@pytest.mark.parametrize("screen", ["artifact", "metric"])
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check"])
 def test_the_repository_screens_show_the_local_folder_path(screen: str) -> None:
     """The agent sees which folder a local run reads, beside its provider."""
     state = {"wizard_screen": screen, "repo_provider": "local", "repo_path": "/Users/me/shop"}

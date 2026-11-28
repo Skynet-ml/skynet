@@ -1527,7 +1527,7 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
             "metric_code",
         }
     ),
-    "check": frozenset({"input_fields", "expected_field", "run_code", "metric_code"}),
+    "check": frozenset({"input_fields", "expected_field", "run_code", "metric_code", "repo_provider", "repo_path"}),
     "overview": frozenset().union(*(fields for fields in _SCREEN_FIELDS.values()))
     | frozenset({"job_name", "job_description", "is_private", "max_cost_cents", "run_code", "metric_code"}),
 }
