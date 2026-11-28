@@ -270,13 +270,29 @@ def test_a_folder_that_is_a_link_is_refused(state_dir: Path, source: Path, tmp_p
     assert not (tmp_path / "session").exists()
 
 
-def test_a_folder_the_user_did_not_pick_is_refused_with_no_copy(state_dir: Path, source: Path, tmp_path: Path) -> None:
-    """A folder off the picked list is refused, and no copy or session folder is made (SKY-1013)."""
+def test_a_folder_the_user_did_not_pick_is_refused_with_no_copy(
+    state_dir: Path, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder off the picked list is refused before it is listed or copied (SKY-1013)."""
+    calls: list[str] = []
+    monkeypatch.setattr(fw, "folder_entries", lambda *args, **kwargs: calls.append("list") or ([], False))
+    monkeypatch.setattr(fw, "copy_folder", lambda *args, **kwargs: calls.append("copy") or {})
     pick(state_dir, tmp_path / "elsewhere")
     with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
         open_workspace("chat1", source)
+    assert calls == []
     assert live_workspace("chat1") is None
     assert not session_folder("chat1").exists()
+
+
+def test_an_open_copy_is_not_reused_once_its_folder_is_off_the_picked_list(
+    state_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    """The picked check also runs before an open copy is reused."""
+    open_workspace("chat1", source)
+    pick(state_dir, tmp_path / "elsewhere")
+    with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
+        open_workspace("chat1", source)
 
 
 def test_no_picked_list_refuses_every_folder(state_dir: Path, source: Path) -> None:

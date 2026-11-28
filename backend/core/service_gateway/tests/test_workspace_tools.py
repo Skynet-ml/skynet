@@ -2061,6 +2061,9 @@ async def test_the_shell_tools_refuse_a_folder_the_user_did_not_pick(
     """A folder the user never picked gives every shell tool a short reason, and no copy opens (SKY-1013)."""
     state, _ = _shell_run(monkeypatch, tmp_path)
     _pick(monkeypatch, tmp_path / "state", tmp_path / "other")
+    calls: list[str] = []
+    monkeypatch.setattr(folder_workspace, "folder_entries", lambda *args, **kwargs: calls.append("list") or ([], False))
+    monkeypatch.setattr(folder_workspace, "copy_folder", lambda *args, **kwargs: calls.append("copy") or {})
     turn = _TurnAuthoringFlag()
     tools = _shell_tools(state, turn)
 
@@ -2069,6 +2072,7 @@ async def test_the_shell_tools_refuse_a_folder_the_user_did_not_pick(
 
     assert patched == {"error": folder_workspace.NOT_PICKED}
     assert folder_workspace.NOT_PICKED in str(ran)
+    assert calls == []
     assert turn.wizard_patch == {}
     assert folder_workspace.live_workspace("chat-1") is None
     assert not folder_workspace.session_folder("chat-1").exists()
