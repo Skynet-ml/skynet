@@ -55,6 +55,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import InfrastructureInterruptionError, ServiceError
+from core.i18n_en import t_en
 from core.i18n_keys import I18nKey
 from core.local import folder_tree
 from core.models.blackbox import (
@@ -1689,6 +1690,9 @@ def test_staging_checks_a_local_drafts_base_against_the_folder(local_stack: Path
         )
 
     assert refused.value.code == I18nKey.REPO_GATE_DRAFT_FOLDER_CHANGED
+    assert refused.value.params == {}
+    assert str(refused.value) == t_en(I18nKey.REPO_GATE_DRAFT_FOLDER_CHANGED)
+    assert "branch" not in str(refused.value)
 
 
 def test_a_later_hardening_pass_stages_the_pinned_local_commit(local_stack: Path, tmp_path: Path) -> None:

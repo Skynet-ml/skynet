@@ -291,6 +291,7 @@
     "repo_gate.secret_host_unlisted": "{secret} gizli anahtarının izin verilen ana bilgisayarı yok, ancak depo onu {host} adresine gönderiyor. Çalıştırmada {host} adresini {secret} için izin verilen ana bilgisayarlara ekleyin.",
     "repo_gate.managed_secret_unavailable": "{secret} gizli anahtarı bir {term.appName} anahtarına bağlı, ancak {term.appName} için {host} anahtarı yok. Gizli anahtarı user'a bağlayın veya {term.appName} anahtarı olan şu ana bilgisayarlardan birini kullanın: {known}.",
     "repo_gate.draft_base_moved": "Kurulum ajanı dosyaları {base} commit'inde değiştirdi, ancak çalıştırma {commit} commit'inden başlayacak. Dal ilerledi ve değiştirilen dosyalar yeni commit'lerini geri alır. Ajanın dosyaları yeni commit'te değiştirmesi için çalıştırmayı yeniden kurun.",
+    "repo_gate.draft_folder_changed": "Kurulum ajanı dosyaları klasörün daha eski bir halinde değiştirdi. Klasör bundan sonra değişti ve değiştirilen dosyalar klasörün yeni değişikliklerini geri alır. Ajanın dosyaları güncel klasörde değiştirmesi için çalıştırmayı yeniden kurun.",
     "optimization.retry_no_payload": "Kaynak optimizasyonun yeniden denenecek kayıtlı bir yükü yok.",
     "optimization.retry_wrong_status": "Yalnızca 'failed' veya 'cancelled' durumundaki optimizasyonlar yeniden denenebilir — bu optimizasyon '{status}' durumunda. Bunun yerine kopyalayın.",
     "quota.reached": "{quota, plural, one {1 optimizasyon} other {# optimizasyon}} sınırınıza ulaştınız. Yeni optimizasyonlar oluşturmak için eski optimizasyonları silin.",

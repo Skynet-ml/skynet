@@ -281,6 +281,7 @@
     "repo_gate.secret_host_unlisted": "密鑰 {secret} 冇任何允許主機，但係儲存庫將佢傳去 {host}。請喺運行度將 {host} 加入 {secret} 嘅允許主機。",
     "repo_gate.managed_secret_unavailable": "密鑰 {secret} 綁定咗 {term.appName} 嘅密鑰，但係 {term.appName} 冇 {host} 嘅密鑰。請將密鑰綁定去 user，或者用以下有 {term.appName} 密鑰嘅主機之一：{known}。",
     "repo_gate.draft_base_moved": "設定代理喺 commit {base} 改咗檔案，但係運行會由 commit {commit} 開始。分支已經前進咗，改咗嘅檔案會撤銷佢嘅新 commit。請重新設定運行，等代理喺新 commit 度改檔案。",
+    "repo_gate.draft_folder_changed": "設定代理喺資料夾嘅舊狀態改咗檔案。之後資料夾變咗，改咗嘅檔案會撤銷佢嘅新改動。請重新設定運行，等代理喺而家嘅資料夾度改檔案。",
     "optimization.retry_no_payload": "來源優化冇已儲存嘅 payload 可以重試。",
     "optimization.retry_wrong_status": "只有處於「failed」或「cancelled」狀態嘅優化先可以重試——目前處於「{status}」。請改為複製佢。",
     "quota.concurrent_reached": "你已經有 {limit, plural, other {# 個執行}} 進行緊。請等其中一個完成咗先好開始下一個。",

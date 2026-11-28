@@ -1190,6 +1190,16 @@ def test_moved_drafts_on_a_local_folder_name_the_folder() -> None:
     assert "התיקייה" in t_locale("he", failure.code)
 
 
+@pytest.mark.parametrize(
+    "locale", ["ar", "de", "es", "fa", "fr", "hi", "it", "ja", "ko", "pt", "ru", "tr", "uk", "yue", "zh-Hans"]
+)
+def test_the_folder_message_is_translated_in_every_full_locale(locale: str) -> None:
+    """No full locale falls back to the English folder text (SKY-1003)."""
+    english = t_locale("en", I18nKey.REPO_GATE_DRAFT_FOLDER_CHANGED)
+
+    assert t_locale(locale, I18nKey.REPO_GATE_DRAFT_FOLDER_CHANGED) != english
+
+
 @pytest.mark.parametrize("local", [False, True])
 def test_drafts_on_the_current_state_pass_on_every_source(local: bool) -> None:
     """Drafts on the start commit or with no recorded base pass for git and folder runs (SKY-1003)."""
