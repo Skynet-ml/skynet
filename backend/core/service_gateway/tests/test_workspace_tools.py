@@ -2358,3 +2358,24 @@ async def test_the_stop_button_ends_a_folder_command_through_the_wrapped_tool(
             break
         await asyncio.sleep(0.01)
     assert not running()
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_copy_listing_keeps_the_earlier_deletes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A copy with more files than the listing limit cannot see deletes, so the earlier deletes stay."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "old.py").write_text("old\n", encoding="utf-8")
+    drafted = {**state, "workspace_base": folder_source_id(root), "workspace_deleted": ["old.py"]}
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(drafted, turn)
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    monkeypatch.setattr(folder_workspace, "FOLDER_ENTRIES_MAX", 3)
+
+    adds = "".join(f"*** Add File: extra/{n}.txt\n+{n}\n" for n in range(5))
+    result = await tools["apply_patch"].acall(patch=f"*** Begin Patch\n{adds}*** End Patch")
+
+    assert "*" in result["skipped_files"]
+    assert result.get("wizard_state", {}).get("workspace_deleted", ["old.py"]) == ["old.py"]
+    assert turn.wizard_patch.get("workspace_deleted", ["old.py"]) == ["old.py"]

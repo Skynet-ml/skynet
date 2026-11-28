@@ -79,6 +79,8 @@ class Changes:
     # Tracked draft paths that were never copied files and are gone from the copy now.
     dropped: list[str] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
+    # The listing stopped at its limit, so ``deleted`` and ``dropped`` are not known.
+    truncated: bool = False
 
 
 class _CopyRunner(LocalCommandRunner):
@@ -421,6 +423,7 @@ class FolderWorkspace:
         """
         result = Changes()
         listed, truncated = self._scan()
+        result.truncated = truncated
         if truncated:
             result.skipped["*"] = f"The copy has more than {FOLDER_ENTRIES_MAX} entries; later files were not checked."
         wanted = {rel for rel, digest in listed.items() if self.snapshot.get(rel) != digest}

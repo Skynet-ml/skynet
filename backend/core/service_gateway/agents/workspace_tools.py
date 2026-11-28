@@ -1052,6 +1052,9 @@ def workspace_tools(
                 workspace.write(path, text)
             else:
                 workspace.revert(path)
+        if found.truncated:
+            # A truncated listing cannot tell a delete from an unlisted file, so the earlier deletes stay.
+            gone = sorted(before_deleted)
         fields: dict[str, str] = {}
         all_files = drafts()
         files = {path: text for path, text in all_files.items() if path not in gone}
