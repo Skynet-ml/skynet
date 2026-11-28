@@ -13,6 +13,8 @@ void it("AnalyticsParts.client.test.tsx passes", () => {
     {
       cwd: frontend,
       encoding: "utf8",
+      // A failed assert can leave the popover's handles open and hang the child.
+      timeout: 60_000,
       env: {
         ...process.env,
         NODE_TEST_CONTEXT: undefined,

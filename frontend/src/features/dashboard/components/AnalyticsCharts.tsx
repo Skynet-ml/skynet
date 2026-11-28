@@ -25,14 +25,14 @@ const AXIS_TICK = { fontSize: 10, fill: "var(--muted-foreground)" };
 const AXIS_LINE = { stroke: "var(--border)" };
 const GRID_CLASS = "stroke-muted";
 
-type AxisTitlePosition = "insideBottom" | "insideLeft" | "insideRight";
+type AxisTitlePosition = "insideBottom" | "insideLeft";
 
 function axisTitle(value: string, position: AxisTitlePosition) {
   const vertical = position !== "insideBottom";
   return {
     value,
     position,
-    angle: vertical ? (position === "insideLeft" ? -90 : 90) : undefined,
+    angle: vertical ? -90 : undefined,
     offset: vertical ? 10 : -6,
     fontSize: 10,
     fill: "var(--muted-foreground)",
