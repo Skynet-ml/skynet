@@ -261,14 +261,17 @@ export function isSvgFence(language: string, code: string): boolean {
   return (key === "xml" || key === "html") && /^<svg[\s>]/i.test(code.trimStart());
 }
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 /**
  * The SVG as a data URL for an `<img>`, where its scripts and links never run.
  * An `<img>` shows no SVG without the SVG namespace, so a root `<svg>` with none gets it.
  */
 export function svgDataUrl(code: string): string {
   // encodeURIComponent throws on a lone surrogate, so that one becomes U+FFFD first.
+  // A regex, not toWellFormed(): Firefox before 119 has no such method.
   const svg = code
-    .toWellFormed()
+    .replace(LONE_SURROGATE, "\uFFFD")
     .trim()
     .replace(/<svg\b(?![^>]*\sxmlns=)/i, '<svg xmlns="http://www.w3.org/2000/svg"');
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;

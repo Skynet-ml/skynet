@@ -138,9 +138,18 @@ test("svgDataUrl adds the SVG namespace only when the root has none", () => {
   assert.equal(svg(own), own);
 });
 
-test("svgDataUrl does not throw on a lone surrogate", () => {
-  const url = svgDataUrl("<svg>\ud83d</svg>");
-  assert.ok(url.includes("%EF%BF%BD"), url);
+test("svgDataUrl does not throw on a lone surrogate, also without toWellFormed", () => {
+  // Firefox before 119 has no String.prototype.toWellFormed.
+  const proto = String.prototype as { toWellFormed?: unknown };
+  const saved = proto.toWellFormed;
+  delete proto.toWellFormed;
+  try {
+    const url = svgDataUrl("<svg>\ud83d</svg><svg>\ude00</svg>");
+    assert.equal(url.split("%EF%BF%BD").length - 1, 2, url);
+    assert.ok(svgDataUrl("<svg>\ud83d\ude00</svg>").includes("%F0%9F%98%80"));
+  } finally {
+    proto.toWellFormed = saved;
+  }
 });
 
 test("guessLanguage names an untagged fence only on a strong sign", () => {
