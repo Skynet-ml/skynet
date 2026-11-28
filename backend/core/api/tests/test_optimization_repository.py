@@ -1036,3 +1036,20 @@ def test_undo_with_a_lost_undo_record_is_a_409_and_keeps_the_run_applied(
     assert response.json()["code"] == "optimization.local_folder_undo_missing"
     assert jobs.get_job("local-run")["result"]["details"]["local_apply"] == applied
     assert (folder / "src" / "main.py").read_text() == "x = 2\n"
+
+
+def test_undo_without_a_local_state_folder_is_a_409(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A computer with no local state folder cannot read the Undo record, so Undo refuses with a 409, not a 500.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+
+    response = _client(jobs).post("/optimizations/local-run/repository/undo")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "optimization.local_folder_failed"
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"

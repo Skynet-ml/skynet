@@ -858,15 +858,16 @@ def _save_record(record: Path, root: str | os.PathLike[str], changes: list[_Chan
         ],
     }
     record.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=record.parent, suffix=".json", delete=False) as handle:
-        partial = Path(handle.name)
-        try:
+    descriptor, name = tempfile.mkstemp(dir=record.parent, suffix=".json")
+    partial = Path(name)
+    try:
+        # A full disk can fail at the write, at the flush on close, or at the rename.
+        with os.fdopen(descriptor, "w") as handle:
             json.dump(body, handle)
-        except BaseException:
-            handle.close()
-            partial.unlink(missing_ok=True)
-            raise
-    partial.replace(record)
+        partial.replace(record)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def _load_record(record: Path, root: str | os.PathLike[str]) -> tuple[list[_Change], list[str]]:

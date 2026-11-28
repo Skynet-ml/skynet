@@ -445,6 +445,24 @@ def _record_apply(job_store, optimization_id: str, applied: bool) -> dict[str, A
     return state
 
 
+def _is_applied(optimization_id: str) -> bool:
+    """Check whether the run's Undo record exists, and turn a refusal into an API error.
+
+    Args:
+        optimization_id: The run.
+
+    Returns:
+        True while the Undo record of the run's Apply exists.
+
+    Raises:
+        DomainError: 409 when the run id is not valid or there is no local state folder.
+    """
+    try:
+        return is_applied(optimization_id)
+    except LocalFolderError as error:
+        raise DomainError("optimization.local_folder_failed", status=409, reason=str(error)) from None
+
+
 def _says_applied(job_store, optimization_id: str) -> bool:
     """Check whether the run's saved state says its best version is in the folder.
 
@@ -732,7 +750,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         with APPLY_LOCK:
             # A repeat Apply only saves the row a failed save missed, and only when
             # the files hold the version: a failed rollback keeps the record too.
-            if is_applied(optimization_id):
+            if _is_applied(optimization_id):
                 _change_folder(lambda: check_applied(repo["path"], optimization_id))
             else:
                 _change_folder(
@@ -773,7 +791,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
         repo, _commit = _local_run(job_data, optimization_id)
         with APPLY_LOCK:
-            if is_applied(optimization_id):
+            if _is_applied(optimization_id):
                 _change_folder(lambda: undo_version(repo["path"], optimization_id))
             elif _says_applied(job_store, optimization_id):
                 # Saving "not applied" here would hide that the folder still holds the version.

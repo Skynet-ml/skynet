@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import os
@@ -794,3 +795,102 @@ def test_a_failed_undo_record_write_leaves_no_temporary_file(
     assert list((local_state / local_folder.APPLIED_FOLDER).iterdir()) == []
     assert _fingerprint(root) == before
     assert not local_folder.is_applied("run-1")
+
+
+# The test patches ``os.fdopen`` with the class below, which opens the real one.
+_REAL_FDOPEN = os.fdopen
+
+
+class _FullDiskOnClose:
+    """A file whose close fails as a full disk fails the last buffer flush."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        """Open the real file.
+
+        Args:
+            *args: ``os.fdopen`` arguments.
+            **kwargs: ``os.fdopen`` keywords.
+        """
+        self._file = _REAL_FDOPEN(*args, **kwargs)  # type: ignore[arg-type]
+
+    def write(self, text: str) -> int:
+        """Write to the real file.
+
+        Args:
+            text: The text.
+
+        Returns:
+            The characters written.
+        """
+        return self._file.write(text)
+
+    def __enter__(self) -> _FullDiskOnClose:
+        """Use the file in a ``with`` block.
+
+        Returns:
+            This file.
+        """
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Close the real file, then fail as the flush would.
+
+        Raises:
+            OSError: Always, with ``ENOSPC``.
+        """
+        self._file.close()
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def _fdopen_full_on_record_close(descriptor: int, mode: str = "r", *args: object, **kwargs: object) -> object:
+    """Open a file, and make only the Undo record's text file fail at close.
+
+    Apply reads and writes the folder's files in binary mode, so only the record opens as ``"w"``.
+
+    Args:
+        descriptor: The open file descriptor.
+        mode: The open mode.
+        *args: More ``os.fdopen`` arguments.
+        **kwargs: ``os.fdopen`` keywords.
+
+    Returns:
+        The real file, or a ``_FullDiskOnClose`` for the record.
+    """
+    if mode == "w":
+        return _FullDiskOnClose(descriptor, mode, *args, **kwargs)
+    return _REAL_FDOPEN(descriptor, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("failure", ["close", "rename"])
+def test_a_record_write_that_fails_at_close_or_rename_leaves_no_temporary_file(
+    tmp_path: Path, local_state: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A full disk at the flush on close or at the rename removes the temporary file, and Apply writes nothing.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+        monkeypatch: Makes the close or the rename fail.
+        failure: Which step fails.
+    """
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+    if failure == "close":
+        monkeypatch.setattr(local_folder.os, "fdopen", _fdopen_full_on_record_close)
+    else:
+
+        def full_disk_replace(self: Path, target: Path) -> Path:
+            """Fail as a full disk would.
+
+            Raises:
+                OSError: Always, with ``ENOSPC``.
+            """
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(Path, "replace", full_disk_replace)
+
+    with pytest.raises(LocalFolderError, match="No space left"):
+        _apply(root, commit, _PATCH, "run-1")
+
+    assert list((local_state / local_folder.APPLIED_FOLDER).iterdir()) == []
+    assert _fingerprint(root) == before
