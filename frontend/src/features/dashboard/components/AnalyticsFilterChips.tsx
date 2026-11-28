@@ -5,7 +5,6 @@ import { getStatusLabel } from "@/shared/constants/job-status";
 import { modelDisplayName } from "@/shared/lib/formatters";
 import { msg } from "@/shared/lib/messages";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
-import { TERMS } from "@/shared/lib/terms";
 import type { UseAnalyticsFiltersReturn } from "../hooks/use-analytics-filters";
 
 export function AnalyticsFilterChips({
@@ -26,7 +25,6 @@ export function AnalyticsFilterChips({
     access,
     improvement,
     runtime,
-    dataset,
     setRange,
     setOptimizer,
     setModel,
@@ -36,7 +34,6 @@ export function AnalyticsFilterChips({
     setAccess,
     setImprovement,
     setRuntime,
-    setDataset,
     hasFilters,
     clearAll,
   } = filters;
@@ -115,14 +112,6 @@ export function AnalyticsFilterChips({
           label={`${runtime.label} ${msg("dashboard.analytics.axis_minutes")}`}
           ariaLabel={bucketClearLabel}
           onClear={() => setRuntime(null)}
-        />
-      )}
-      {dataset && (
-        <FilterChip
-          dir="ltr"
-          label={`${dataset.label} ${TERMS.rowPlural}`}
-          ariaLabel={bucketClearLabel}
-          onClear={() => setDataset(null)}
         />
       )}
       {model !== "all" && (

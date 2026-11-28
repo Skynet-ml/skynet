@@ -13,7 +13,6 @@ export type ShareBar = { key: string; name: string; value: number; pct: number }
 export type HistogramBar = {
   label: string;
   count: number;
-  avgImprovement: number | null;
   /** Backend `[lower, upper)` edges (null = open end) so a bar can become a filter. */
   lower: number | null;
   upper: number | null;
@@ -49,11 +48,8 @@ export type ChartData = {
   kpis: null | {
     total: number;
     successRate: number;
-    successCount: number;
-    terminalCount: number;
     runningCount: number;
     avgImprovement: number | null;
-    medianImprovement: number | null;
     bestImprovement: number | null;
     avgRuntimeSeconds: number | null;
     totalRows: number;
@@ -65,7 +61,6 @@ export type ChartData = {
   accessUsage: Array<{ name: string; count: number }>;
   improvementHistogram: HistogramBar[];
   runtimeHistogram: HistogramBar[];
-  datasetBuckets: HistogramBar[];
   timeline: TimelinePoint[];
   timelineGranularity: DashboardAnalyticsGranularity;
   topJobs: DashboardAnalyticsJob[];
@@ -81,7 +76,6 @@ const EMPTY_CHART_DATA: ChartData = {
   accessUsage: [],
   improvementHistogram: [],
   runtimeHistogram: [],
-  datasetBuckets: [],
   timeline: [],
   timelineGranularity: "day",
   topJobs: [],
@@ -109,7 +103,6 @@ function histogram(
   return buckets.map((b) => ({
     label: bucketLabel(b, fmt),
     count: b.count,
-    avgImprovement: b.avg_improvement,
     lower: b.lower,
     upper: b.upper,
   }));
@@ -134,11 +127,8 @@ export function transformChartData(analyticsData: DashboardAnalytics | null): Ch
   const kpis = {
     total: analyticsData.filtered_total,
     successRate: analyticsData.success_rate * 100,
-    successCount: analyticsData.success_count,
-    terminalCount: analyticsData.terminal_count,
     runningCount: analyticsData.running_count,
     avgImprovement: analyticsData.avg_improvement,
-    medianImprovement: analyticsData.median_improvement,
     bestImprovement: analyticsData.best_improvement,
     avgRuntimeSeconds: analyticsData.avg_runtime_seconds,
     totalRows: analyticsData.total_dataset_rows,
@@ -191,7 +181,6 @@ export function transformChartData(analyticsData: DashboardAnalytics | null): Ch
     accessUsage: analyticsData.access_usage.map((a) => ({ name: a.name, count: a.value })),
     improvementHistogram: histogram(analyticsData.improvement_histogram, fmt),
     runtimeHistogram: histogram(analyticsData.runtime_histogram, fmt),
-    datasetBuckets: histogram(analyticsData.dataset_size_buckets, fmt),
     timeline,
     timelineGranularity: analyticsData.timeline_granularity,
     topJobs: analyticsData.top_jobs_by_improvement,

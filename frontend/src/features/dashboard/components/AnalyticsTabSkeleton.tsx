@@ -184,7 +184,6 @@ export function AnalyticsTabSkeleton() {
                     accent="default"
                     label={<TextGhost>{label}</TextGhost>}
                     value={<TextGhost>00</TextGhost>}
-                    detail={i === 1 || i === 2 ? <Skeleton width={72} /> : undefined}
                   />
                 ))}
               </div>
@@ -195,9 +194,6 @@ export function AnalyticsTabSkeleton() {
             <AnalyticsSection title={<SectionTitle />} className="border-border/60">
               <div className="grid gap-6 md:grid-cols-2">
                 <ChartPanel height={240} />
-                <ChartPanel height={240} />
-              </div>
-              <div className="mt-6">
                 <ChartPanel height={240} />
               </div>
             </AnalyticsSection>

@@ -4,6 +4,10 @@ import type { KeyboardEvent, ReactNode } from "react";
 import { AnimatedNumber } from "@/shared/ui/motion";
 import { ProgressBar } from "@/shared/ui/progress-bar";
 import { Segmented } from "@/shared/ui/segmented";
+import { CalendarBlank } from "@/shared/ui/icons";
+import { Button } from "@/shared/ui/primitives/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { modelDisplayName } from "@/shared/lib";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -52,9 +56,12 @@ export function KpiCard({
         compact ? "gap-2 rounded-xl p-3" : "min-h-[9.5rem] gap-4 p-5 sm:p-6",
       )}
     >
-      <div className="flex items-center gap-2">
-        <span className={`size-1.5 rounded-full ${ACCENT_DOT[accent]}`} aria-hidden />
-        <p className="text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className={`size-1.5 shrink-0 rounded-full ${ACCENT_DOT[accent]}`} aria-hidden />
+        <p
+          className="truncate text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70"
+          title={typeof label === "string" ? label : undefined}
+        >
           {label}
         </p>
       </div>
@@ -111,7 +118,7 @@ export function pointsAccent(value: number | null): StatAccent {
   return value > 0 ? "success" : "danger";
 }
 
-/** Sliding segmented control for the date range, matching the wallet usage tab. */
+/** Calendar icon button that opens the date range presets, matching the wallet usage tab. */
 export function RangeControl({
   value,
   onChange,
@@ -119,17 +126,33 @@ export function RangeControl({
   value: AnalyticsRange;
   onChange: (next: AnalyticsRange) => void;
 }) {
+  const tip = msg("usage.range.current", { range: msg(`usage.range.${value}`) });
   return (
-    <Segmented
-      size="sm"
-      label={msg("usage.range.label")}
-      value={value}
-      onChange={onChange}
-      options={RANGE_OPTIONS.map((option) => ({
-        value: option,
-        label: msg(`usage.range.${option}`),
-      }))}
-    />
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label={tip}>
+              <CalendarBlank className="size-[1.05rem] text-primary" aria-hidden="true" />
+            </Button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{tip}</TooltipContent>
+      </Tooltip>
+      <PopoverContent align="start" className="w-80 p-3">
+        <Segmented
+          size="sm"
+          className="w-full"
+          label={msg("usage.range.label")}
+          value={value}
+          onChange={onChange}
+          options={RANGE_OPTIONS.map((option) => ({
+            value: option,
+            label: msg(`usage.range.${option}`),
+          }))}
+        />
+      </PopoverContent>
+    </Popover>
   );
 }
 

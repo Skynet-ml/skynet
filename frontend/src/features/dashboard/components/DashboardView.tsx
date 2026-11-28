@@ -138,7 +138,6 @@ export function DashboardView() {
     access: analyticsFilters.access,
     improvement: analyticsFilters.improvement,
     runtime: analyticsFilters.runtime,
-    dataset: analyticsFilters.dataset,
   });
 
   const queueStatus = useQueueStatus();
