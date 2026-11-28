@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Rückgängig",
   "optimization.blackbox.repo.apply_hint": "Schreiben Sie die beste Version in Ihren Ordner. Rückgängig stellt jede Datei wieder her.",
   "optimization.blackbox.repo.applied": "Die beste Version ist in Ihrem Ordner.",
+  "optimization.blackbox.repo.undo_needed": "Das Anwenden wurde mittendrin abgebrochen. Rückgängig stellt jede Datei wieder her.",
   "optimization.blackbox.repo.apply_failed": "Die beste Version konnte nicht auf den Ordner angewendet werden.",
   "optimization.blackbox.repo.undo_failed": "Der Ordner konnte nicht wiederhergestellt werden.",
   "optimization.blackbox.repo.pr_open": "Pull-Request-Entwurf #{p1}",

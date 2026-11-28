@@ -2589,6 +2589,8 @@ export async function downloadRepositoryArchive(
 export interface LocalApplyState {
   applied: boolean;
   applied_at: string | null;
+  /** A failed Apply left part of the version in the folder, so the page offers Undo. */
+  undo_needed?: boolean;
 }
 
 /**

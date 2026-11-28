@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "撤销",
   "optimization.blackbox.repo.apply_hint": "把最佳版本写入你的文件夹。撤销会恢复每个文件。",
   "optimization.blackbox.repo.applied": "最佳版本已在你的文件夹中。",
+  "optimization.blackbox.repo.undo_needed": "应用中途停止了。撤销会恢复每个文件。",
   "optimization.blackbox.repo.apply_failed": "无法把最佳版本应用到文件夹。",
   "optimization.blackbox.repo.undo_failed": "无法恢复文件夹。",
   "optimization.blackbox.repo.pr_open": "草稿拉取请求 #{p1}",

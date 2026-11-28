@@ -509,11 +509,14 @@ def forget_apply(run_id: str) -> None:
         run_id: The run.
 
     Raises:
-        LocalFolderError: When the run id is not valid or there is no local state folder.
-        OSError: When the record cannot be deleted.
+        LocalFolderError: When the run id is not valid, there is no local
+            state folder, or the record cannot be deleted.
     """
     with APPLY_LOCK:
-        applied_record(run_id).unlink(missing_ok=True)
+        try:
+            applied_record(run_id).unlink(missing_ok=True)
+        except OSError as error:
+            raise LocalFolderError(f"The Undo record could not be deleted: {error.strerror or error}") from None
 
 
 def forget_undone(root: str | os.PathLike[str], run_id: str) -> None:
@@ -529,8 +532,7 @@ def forget_undone(root: str | os.PathLike[str], run_id: str) -> None:
 
     Raises:
         LocalFolderError: When the record is missing, damaged or for another
-            folder, or the folder cannot be read.
-        OSError: When the record cannot be deleted.
+            folder, the folder cannot be read, or the record cannot be deleted.
     """
     with APPLY_LOCK:
         record = applied_record(run_id)
@@ -544,7 +546,10 @@ def forget_undone(root: str | os.PathLike[str], run_id: str) -> None:
         finally:
             os.close(folder)
         if undone:
-            record.unlink(missing_ok=True)
+            try:
+                record.unlink(missing_ok=True)
+            except OSError as error:
+                raise LocalFolderError(f"The Undo record could not be deleted: {error.strerror or error}") from None
 
 
 def check_applied(root: str | os.PathLike[str], run_id: str) -> None:

@@ -3492,6 +3492,7 @@
   "optimization.blackbox.repo.undo": "Undo",
   "optimization.blackbox.repo.apply_hint": "Write the best version into your folder. Undo puts every file back.",
   "optimization.blackbox.repo.applied": "The best version is in your folder.",
+  "optimization.blackbox.repo.undo_needed": "Apply stopped part way. Undo puts every file back.",
   "optimization.blackbox.repo.apply_failed": "The best version couldn't be applied to the folder.",
   "optimization.blackbox.repo.undo_failed": "The folder couldn't be put back.",
   "optimization.blackbox.repo.unchanged": "This version is the repository as it was at the starting commit.",

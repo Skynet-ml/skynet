@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "تراجع",
   "optimization.blackbox.repo.apply_hint": "اكتب أفضل إصدار في مجلدك. التراجع يعيد كل ملف كما كان.",
   "optimization.blackbox.repo.applied": "أفضل إصدار موجود في مجلدك.",
+  "optimization.blackbox.repo.undo_needed": "توقف التطبيق في منتصف الطريق. التراجع يعيد كل ملف كما كان.",
   "optimization.blackbox.repo.apply_failed": "تعذّر تطبيق أفضل إصدار على المجلد.",
   "optimization.blackbox.repo.undo_failed": "تعذّرت إعادة المجلد كما كان.",
   "optimization.blackbox.repo.pr_open": "طلب سحب مسودة #{p1}",

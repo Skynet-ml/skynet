@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Annuler",
   "optimization.blackbox.repo.apply_hint": "Écrivez la meilleure version dans votre dossier. Annuler remet chaque fichier en place.",
   "optimization.blackbox.repo.applied": "La meilleure version est dans votre dossier.",
+  "optimization.blackbox.repo.undo_needed": "L'application s'est arrêtée en cours de route. Annuler remet chaque fichier en place.",
   "optimization.blackbox.repo.apply_failed": "Impossible d'appliquer la meilleure version au dossier.",
   "optimization.blackbox.repo.undo_failed": "Impossible de remettre le dossier en place.",
   "optimization.blackbox.repo.pr_open": "Pull request brouillon #{p1}",

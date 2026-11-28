@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Annulla",
   "optimization.blackbox.repo.apply_hint": "Scrivi la versione migliore nella tua cartella. Annulla ripristina ogni file.",
   "optimization.blackbox.repo.applied": "La versione migliore è nella tua cartella.",
+  "optimization.blackbox.repo.undo_needed": "L'applicazione si è fermata a metà. Annulla ripristina ogni file.",
   "optimization.blackbox.repo.apply_failed": "Impossibile applicare la versione migliore alla cartella.",
   "optimization.blackbox.repo.undo_failed": "Impossibile ripristinare la cartella.",
   "optimization.blackbox.repo.pr_open": "Pull request in bozza #{p1}",

@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Geri al",
   "optimization.blackbox.repo.apply_hint": "En iyi sürümü klasörünüze yazın. Geri al her dosyayı eski haline getirir.",
   "optimization.blackbox.repo.applied": "En iyi sürüm klasörünüzde.",
+  "optimization.blackbox.repo.undo_needed": "Uygulama yarıda kaldı. Geri al her dosyayı eski haline getirir.",
   "optimization.blackbox.repo.apply_failed": "En iyi sürüm klasöre uygulanamadı.",
   "optimization.blackbox.repo.undo_failed": "Klasör eski haline getirilemedi.",
   "optimization.blackbox.repo.pr_open": "Taslak pull request #{p1}",

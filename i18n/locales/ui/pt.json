@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Desfazer",
   "optimization.blackbox.repo.apply_hint": "Escreva a melhor versão na sua pasta. Desfazer restaura cada arquivo.",
   "optimization.blackbox.repo.applied": "A melhor versão está na sua pasta.",
+  "optimization.blackbox.repo.undo_needed": "A aplicação parou a meio. Desfazer restaura cada arquivo.",
   "optimization.blackbox.repo.apply_failed": "Não foi possível aplicar a melhor versão à pasta.",
   "optimization.blackbox.repo.undo_failed": "Não foi possível restaurar a pasta.",
   "optimization.blackbox.repo.pr_open": "Pull request de rascunho #{p1}",

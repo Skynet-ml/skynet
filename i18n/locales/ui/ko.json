@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "실행 취소",
   "optimization.blackbox.repo.apply_hint": "가장 좋은 버전을 폴더에 씁니다. 실행 취소하면 모든 파일이 되돌아갑니다.",
   "optimization.blackbox.repo.applied": "가장 좋은 버전이 폴더에 있습니다.",
+  "optimization.blackbox.repo.undo_needed": "적용이 중간에 멈췄습니다. 실행 취소하면 모든 파일이 되돌아갑니다.",
   "optimization.blackbox.repo.apply_failed": "가장 좋은 버전을 폴더에 적용할 수 없습니다.",
   "optimization.blackbox.repo.undo_failed": "폴더를 되돌릴 수 없습니다.",
   "optimization.blackbox.repo.pr_open": "초안 풀 리퀘스트 #{p1}",

@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Отменить",
   "optimization.blackbox.repo.apply_hint": "Запишите лучшую версию в папку. Отмена вернёт каждый файл.",
   "optimization.blackbox.repo.applied": "Лучшая версия в вашей папке.",
+  "optimization.blackbox.repo.undo_needed": "Применение остановилось на полпути. Отмена вернёт каждый файл.",
   "optimization.blackbox.repo.apply_failed": "Не удалось применить лучшую версию к папке.",
   "optimization.blackbox.repo.undo_failed": "Не удалось вернуть папку в прежнее состояние.",
   "optimization.blackbox.repo.pr_open": "Черновик pull request #{p1}",

@@ -3492,6 +3492,7 @@
   "optimization.blackbox.repo.undo": "שחזור",
   "optimization.blackbox.repo.apply_hint": "כתיבת הגרסה הטובה ביותר לתיקייה שלך. שחזור מחזיר כל קובץ למצבו.",
   "optimization.blackbox.repo.applied": "הגרסה הטובה ביותר נמצאת בתיקייה שלך.",
+  "optimization.blackbox.repo.undo_needed": "ההחלה נעצרה באמצע. שחזור מחזיר כל קובץ למצבו.",
   "optimization.blackbox.repo.apply_failed": "לא הצלחנו להחיל את הגרסה הטובה ביותר על התיקייה.",
   "optimization.blackbox.repo.undo_failed": "לא הצלחנו להחזיר את התיקייה למצבה הקודם.",
   "optimization.blackbox.repo.unchanged": "הגרסה הזו היא המאגר כפי שהיה ב-commit ההתחלתי.",

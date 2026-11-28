@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Deshacer",
   "optimization.blackbox.repo.apply_hint": "Escribe la mejor versión en tu carpeta. Deshacer restaura cada archivo.",
   "optimization.blackbox.repo.applied": "La mejor versión está en tu carpeta.",
+  "optimization.blackbox.repo.undo_needed": "La aplicación se detuvo a medias. Deshacer restaura cada archivo.",
   "optimization.blackbox.repo.apply_failed": "No se pudo aplicar la mejor versión a la carpeta.",
   "optimization.blackbox.repo.undo_failed": "No se pudo restaurar la carpeta.",
   "optimization.blackbox.repo.pr_open": "Pull request en borrador #{p1}",

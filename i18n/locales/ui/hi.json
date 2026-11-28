@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "पूर्ववत करें",
   "optimization.blackbox.repo.apply_hint": "सबसे अच्छा संस्करण अपने फ़ोल्डर में लिखें। पूर्ववत करने से हर फ़ाइल वापस आ जाती है।",
   "optimization.blackbox.repo.applied": "सबसे अच्छा संस्करण आपके फ़ोल्डर में है।",
+  "optimization.blackbox.repo.undo_needed": "लागू करना बीच में रुक गया। पूर्ववत करने से हर फ़ाइल वापस आ जाती है।",
   "optimization.blackbox.repo.apply_failed": "सबसे अच्छा संस्करण फ़ोल्डर पर लागू नहीं हो सका।",
   "optimization.blackbox.repo.undo_failed": "फ़ोल्डर को पहले जैसा नहीं किया जा सका।",
   "optimization.blackbox.repo.pr_open": "ड्राफ़्ट पुल रिक्वेस्ट #{p1}",

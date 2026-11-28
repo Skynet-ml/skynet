@@ -25,7 +25,11 @@ const { BestVersionTab } = await import("./BestVersionTab");
 
 const PATCH = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n";
 
-function render(bestCandidate: string, localDrafts: boolean): string {
+function render(
+  bestCandidate: string,
+  localDrafts: boolean,
+  details: Record<string, unknown> = {},
+): string {
   setClientLocale("en");
   const result = {
     optimizer_name: "gepa",
@@ -33,7 +37,7 @@ function render(bestCandidate: string, localDrafts: boolean): string {
     engine_used: "gepa",
     seed_candidate: "",
     best_candidate: bestCandidate,
-    details: {},
+    details,
   } as unknown as BlackboxRunResult;
   return renderToStaticMarkup(
     <TooltipProvider>
@@ -50,6 +54,8 @@ function render(bestCandidate: string, localDrafts: boolean): string {
 
 // The test loads no message catalog, so the row shows its key; a loaded catalog shows the text.
 const APPLY_HINT = /optimization\.blackbox\.repo\.apply_hint|Write the best version into your folder/;
+const UNDO_NEEDED = /optimization\.blackbox\.repo\.undo_needed|Apply stopped part way/;
+const UNDO_BUTTON = />(optimization\.blackbox\.repo\.undo|Undo)<\/button>/;
 
 void describe("BestVersionTab local Apply", () => {
   void it("offers Apply for a best version with a patch", () => {
@@ -64,6 +70,15 @@ void describe("BestVersionTab local Apply", () => {
     const markup = render("", false);
     // The tab still shows the starting version; only the Apply row is gone.
     assert.match(markup, /blackbox-version-panel/);
+    assert.doesNotMatch(markup, APPLY_HINT);
+  });
+
+  void it("offers Undo, not Apply, when a failed Apply left part of the version in the folder", () => {
+    const markup = render(PATCH, false, {
+      local_apply: { applied: false, applied_at: null, undo_needed: true },
+    });
+    assert.match(markup, UNDO_NEEDED);
+    assert.match(markup, UNDO_BUTTON);
     assert.doesNotMatch(markup, APPLY_HINT);
   });
 });

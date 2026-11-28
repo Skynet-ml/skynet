@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "Скасувати",
   "optimization.blackbox.repo.apply_hint": "Запишіть найкращу версію в папку. Скасування поверне кожен файл.",
   "optimization.blackbox.repo.applied": "Найкраща версія у вашій папці.",
+  "optimization.blackbox.repo.undo_needed": "Застосування зупинилося на півдорозі. Скасування поверне кожен файл.",
   "optimization.blackbox.repo.apply_failed": "Не вдалося застосувати найкращу версію до папки.",
   "optimization.blackbox.repo.undo_failed": "Не вдалося повернути папку до попереднього стану.",
   "optimization.blackbox.repo.pr_open": "Чернетка pull request #{p1}",

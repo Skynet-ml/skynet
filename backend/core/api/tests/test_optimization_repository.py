@@ -1026,7 +1026,7 @@ def test_a_failed_record_delete_after_undo_does_not_block_the_next_apply(
 def test_a_repeat_apply_after_a_failed_rollback_does_not_report_applied(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A kept Undo record with a half-applied folder makes a repeat Apply a 409, and Undo still restores the folder.
+    """A kept Undo record with a half-applied folder makes a repeat Apply a 409, the row asks for Undo, and Undo works.
 
     Args:
         monkeypatch: Pytest monkeypatch.
@@ -1056,22 +1056,65 @@ def test_a_repeat_apply_after_a_failed_rollback_does_not_report_applied(
     failed = client.post("/optimizations/local-run/repository/apply")
     monkeypatch.setattr(local_folder, "_put", real_put)
 
+    undo_needed = {"applied": False, "applied_at": None, "undo_needed": True}
     assert failed.status_code == 409, failed.text
     assert local_folder.is_applied("local-run")
     assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+    # The page reads this state and offers Undo, not only Apply.
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"] == undo_needed
 
     again = client.post("/optimizations/local-run/repository/apply")
 
     assert again.status_code == 409, again.text
     assert again.json()["code"] == "optimization.local_folder_failed"
-    assert "local_apply" not in jobs.get_job("local-run")["result"]["details"]
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"] == undo_needed
 
     undone = client.post("/optimizations/local-run/repository/undo")
 
     assert undone.status_code == 200, undone.text
     assert undone.json() == {"applied": False, "applied_at": None}
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"] == {"applied": False, "applied_at": None}
     assert (folder / "src" / "main.py").read_text() == "x = 1\n"
     assert not (folder / "src" / "cfg.toml").exists()
+
+
+def test_a_record_that_cannot_be_deleted_gives_a_409_not_a_500(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A record delete the disk refuses is a 409 with its reason, after Undo and on the next Apply.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    client = _client(jobs)
+    assert client.post("/optimizations/local-run/repository/apply").status_code == 200
+    record = local_folder.applied_record("local-run")
+    real_unlink = Path.unlink
+
+    def refuse_record(self: Path, missing_ok: bool = False) -> None:
+        """Refuse to delete the Undo record, as a read-only state folder does.
+
+        Args:
+            self: The path to delete.
+            missing_ok: Passed to ``Path.unlink``.
+
+        Raises:
+            PermissionError: For the Undo record.
+        """
+        if self == record:
+            raise PermissionError(13, "Permission denied")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_record)
+    undone = client.post("/optimizations/local-run/repository/undo")
+    applied = client.post("/optimizations/local-run/repository/apply")
+
+    assert undone.status_code == 409, undone.text
+    assert undone.json()["code"] == "optimization.local_folder_failed"
+    assert "Undo record could not be deleted" in undone.json()["params"]["reason"]
+    assert applied.status_code == 409, applied.text
+    assert applied.json()["code"] == "optimization.local_folder_failed"
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
 
 
 def test_apply_without_a_local_state_folder_is_a_409(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

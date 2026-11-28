@@ -397,6 +397,7 @@
   "optimization.blackbox.repo.undo": "元に戻す",
   "optimization.blackbox.repo.apply_hint": "最良のバージョンをフォルダーに書き込みます。元に戻すと各ファイルが復元されます。",
   "optimization.blackbox.repo.applied": "最良のバージョンがフォルダーにあります。",
+  "optimization.blackbox.repo.undo_needed": "適用が途中で止まりました。元に戻すと各ファイルが復元されます。",
   "optimization.blackbox.repo.apply_failed": "最良のバージョンをフォルダーに適用できませんでした。",
   "optimization.blackbox.repo.undo_failed": "フォルダーを元に戻せませんでした。",
   "optimization.blackbox.repo.pr_open": "ドラフトプルリクエスト #{p1}",

@@ -411,7 +411,7 @@ def _change_folder(change: Callable[[], Any]) -> None:
         raise DomainError("optimization.local_folder_failed", status=409, reason=str(error)) from None
 
 
-def _record_apply(job_store, optimization_id: str, applied: bool) -> dict[str, Any]:
+def _record_apply(job_store, optimization_id: str, applied: bool, *, undo_needed: bool = False) -> dict[str, Any]:
     """Save whether the best version is in the folder, and when it was first applied.
 
     The Undo record decides ``applied``; the row only shows it. The caller
@@ -423,17 +423,21 @@ def _record_apply(job_store, optimization_id: str, applied: bool) -> dict[str, A
         job_store: Job-store the run is saved in.
         optimization_id: The run.
         applied: Whether the version is in the folder now.
+        undo_needed: A failed Apply kept the Undo record, so the page must offer Undo.
 
     Returns:
-        ``{"applied", "applied_at"}``, as the run's ``result.details.local_apply`` now holds it.
+        ``{"applied", "applied_at"}``, plus ``undo_needed`` when it is set, as the
+        run's ``result.details.local_apply`` now holds it.
     """
     result = dict(job_store.get_job(optimization_id).get("result") or {})
     details = dict(result.get("details") or {})
     previous = details.get("local_apply") if isinstance(details.get("local_apply"), dict) else {}
     first = previous.get("applied_at") or (datetime.now(UTC).isoformat() if applied else None)
-    state = {"applied": applied, "applied_at": first}
+    state: dict[str, Any] = {"applied": applied, "applied_at": first}
+    if undo_needed:
+        state["undo_needed"] = True
     # An Undo on a run never applied changes nothing, so it saves and logs nothing either.
-    if previous == state or (not applied and not previous):
+    if previous == state or (not applied and not undo_needed and not previous):
         return state
     details["local_apply"] = state
     result["details"] = details
@@ -443,7 +447,11 @@ def _record_apply(job_store, optimization_id: str, applied: bool) -> dict[str, A
         optimization_id,
         level="INFO",
         logger_name="skynet.local_folder",
-        message="Applied the best version to the folder." if applied else "Undid the best version in the folder.",
+        message="Applied the best version to the folder."
+        if applied
+        else "Apply stopped part way, so Undo must put the folder back."
+        if undo_needed
+        else "Undid the best version in the folder.",
     )
     return state
 
@@ -754,23 +762,30 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
             if _is_applied(optimization_id) and not _says_applied(job_store, optimization_id):
                 # A record delete that failed after a saved Undo leaves the record with every file back.
                 _change_folder(lambda: forget_undone(repo["path"], optimization_id))
-            # A repeat Apply only saves the row a failed save missed, and only when
-            # the files hold the version: a failed rollback keeps the record too.
-            if _is_applied(optimization_id):
-                _change_folder(lambda: check_applied(repo["path"], optimization_id))
-            else:
-                _change_folder(
-                    lambda: apply_version(
-                        repo["path"],
-                        commit,
-                        patch,
-                        optimization_id,
-                        drafts=drafts,
-                        readonly_paths=_run_readonly_paths(job_data),
-                        editable_paths=editable,
-                        blocked_paths=[*readonly, *protected, *hidden],
+            try:
+                # A repeat Apply only saves the row a failed save missed, and only when
+                # the files hold the version: a failed rollback keeps the record too.
+                if _is_applied(optimization_id):
+                    _change_folder(lambda: check_applied(repo["path"], optimization_id))
+                else:
+                    _change_folder(
+                        lambda: apply_version(
+                            repo["path"],
+                            commit,
+                            patch,
+                            optimization_id,
+                            drafts=drafts,
+                            readonly_paths=_run_readonly_paths(job_data),
+                            editable_paths=editable,
+                            blocked_paths=[*readonly, *protected, *hidden],
+                        )
                     )
-                )
+            except DomainError:
+                # A kept record that the row does not show can mean part of the version is in
+                # the folder, so the row asks for Undo; the page then offers it.
+                if _is_applied(optimization_id) and not _says_applied(job_store, optimization_id):
+                    _record_apply(job_store, optimization_id, applied=False, undo_needed=True)
+                raise
             return _record_apply(job_store, optimization_id, applied=True)
 
     @router.post(

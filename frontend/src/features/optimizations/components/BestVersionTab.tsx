@@ -466,7 +466,7 @@ export function BestVersionTab({
           {browse && localFolder && optimizationId && canApplyLocal(result.best_candidate, localDrafts) && (
             // The key starts the row again when the run's saved state changes, as from another tab.
             <LocalApplyRow
-              key={`${localApply.applied}-${localApply.applied_at}`}
+              key={`${localApply.applied}-${localApply.applied_at}-${localApply.undo_needed}`}
               optimizationId={optimizationId}
               initial={localApply}
               source={source}
@@ -570,6 +570,7 @@ function readLocalApply(details: Record<string, unknown>): LocalApplyState {
   return {
     applied: raw?.applied === true,
     applied_at: typeof raw?.applied_at === "string" ? raw.applied_at : null,
+    undo_needed: raw?.undo_needed === true,
   };
 }
 
@@ -585,14 +586,14 @@ function LocalApplyRow({
 }) {
   const [state, setState] = useState(initial);
   const [busy, setBusy] = useState(false);
+  // A failed Apply can leave part of the version in the folder; only Undo can take it back.
+  const undo = state.applied || state.undo_needed === true;
   const change = async () => {
     setBusy(true);
     try {
-      setState(
-        await (state.applied ? undoLocalVersion : applyLocalVersion)(optimizationId, source),
-      );
+      setState(await (undo ? undoLocalVersion : applyLocalVersion)(optimizationId, source));
     } catch (err) {
-      const fallback = state.applied
+      const fallback = undo
         ? "optimization.blackbox.repo.undo_failed"
         : "optimization.blackbox.repo.apply_failed";
       toast.error(userErrorMessage(err, msg(fallback)));
@@ -600,27 +601,27 @@ function LocalApplyRow({
       setBusy(false);
     }
   };
-  const Icon = busy ? CircleNotch : state.applied ? ArrowCounterClockwise : FolderOpen;
+  const Icon = busy ? CircleNotch : undo ? ArrowCounterClockwise : FolderOpen;
   return (
     <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-sm">
       <span className="min-w-0 flex-1 text-muted-foreground" dir="auto" aria-live="polite">
         {msg(
           state.applied
             ? "optimization.blackbox.repo.applied"
-            : "optimization.blackbox.repo.apply_hint",
+            : undo
+              ? "optimization.blackbox.repo.undo_needed"
+              : "optimization.blackbox.repo.apply_hint",
         )}
       </span>
       <Button
         type="button"
         size="sm"
-        variant={state.applied ? "outline" : "default"}
+        variant={undo ? "outline" : "default"}
         disabled={busy}
         onClick={change}
       >
         <Icon className={cn("size-4", busy && "animate-spin")} aria-hidden="true" />
-        {msg(
-          state.applied ? "optimization.blackbox.repo.undo" : "optimization.blackbox.repo.apply",
-        )}
+        {msg(undo ? "optimization.blackbox.repo.undo" : "optimization.blackbox.repo.apply")}
       </Button>
     </div>
   );
