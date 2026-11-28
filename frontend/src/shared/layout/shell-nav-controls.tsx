@@ -8,9 +8,11 @@ import { HoverTooltip } from "@/shared/ui/tooltip-button";
 import { msg } from "@/shared/lib/messages";
 import {
   SIDEBAR_STATE_EVENT,
+  lastSidebarCollapsed,
   requestSidebarToggle,
   type SidebarStateDetail,
 } from "@/shared/lib/sidebar-toggle";
+import { BACK_FORWARD_GAP_CSS } from "@/shared/layout/shell-nav-layout";
 
 // The Navigation API reports history position in Chromium (and so in the
 // desktop app). Other browsers lack it, and there both buttons stay enabled.
@@ -23,8 +25,6 @@ function getNavigation(): HistoryNavigation | undefined {
 /**
  * Render the sidebar toggle and the Back and Forward buttons for the header.
  *
- * The mouse Back and Forward buttons also go back and forward.
- *
  * Args:
  *   dir: The UI text direction. In RTL, "back" points right.
  *   sidebarId: The id of the sidebar element, for aria-controls.
@@ -34,13 +34,15 @@ function getNavigation(): HistoryNavigation | undefined {
  */
 export function ShellNavControls({ dir, sidebarId }: { dir: "ltr" | "rtl"; sidebarId: string }) {
   const router = useRouter();
-  const [collapsed, setCollapsed] = React.useState(false);
+  const [collapsed, setCollapsed] = React.useState(lastSidebarCollapsed);
   const [canBack, setCanBack] = React.useState(true);
   const [canForward, setCanForward] = React.useState(true);
 
   React.useEffect(() => {
     const onState = (e: Event) => setCollapsed((e as CustomEvent<SidebarStateDetail>).detail.collapsed);
     window.addEventListener(SIDEBAR_STATE_EVENT, onState);
+    // The sidebar can announce between this render and this effect.
+    setCollapsed(lastSidebarCollapsed());
     return () => window.removeEventListener(SIDEBAR_STATE_EVENT, onState);
   }, []);
 
@@ -65,54 +67,29 @@ export function ShellNavControls({ dir, sidebarId }: { dir: "ltr" | "rtl"; sideb
     };
   }, []);
 
-  React.useEffect(() => {
-    // Chromium navigates on the mouse Back and Forward buttons by itself;
-    // preventDefault stops that so each press moves exactly one step.
-    const onMouseUp = (e: MouseEvent) => {
-      if (e.button === 3) {
-        e.preventDefault();
-        router.back();
-      } else if (e.button === 4) {
-        e.preventDefault();
-        router.forward();
-      }
-    };
-    window.addEventListener("mouseup", onMouseUp);
-    return () => window.removeEventListener("mouseup", onMouseUp);
-  }, [router]);
-
   const BackIcon = dir === "rtl" ? ArrowRight : ArrowLeft;
   const ForwardIcon = dir === "rtl" ? ArrowLeft : ArrowRight;
+  const toggleLabel = msg(collapsed ? "app.sidebar.show" : "app.sidebar.hide");
 
   return (
     <div className="hidden items-center md:flex" dir={dir}>
-      <HoverTooltip label={msg("app.sidebar.toggle")}>
+      <HoverTooltip label={toggleLabel}>
         <Button
           type="button"
           variant="ghost"
           size="icon"
           className="size-8 text-muted-foreground hover:text-foreground cursor-e-resize rtl:cursor-w-resize"
           onClick={requestSidebarToggle}
-          aria-label={msg(collapsed ? "app.sidebar.show" : "app.sidebar.hide")}
+          aria-label={toggleLabel}
           aria-expanded={!collapsed}
           aria-controls={sidebarId}
         >
           <SidebarSimple className="size-4 rtl:-scale-x-100" />
         </Button>
       </HoverTooltip>
-      {/* As in Codex, Back and Forward end 9px before the sidebar edge, 8px
-          apart. A collapsed rail is too narrow, so they then sit 8px after
-          the toggle. The header is the containing block and is always LTR,
-          so the side is set from dir. 73px = 9px inset + 28 + 8 + 28;
-          56px and 40px = the header padding + the 32px toggle + 8px. */}
-      <div
-        className="absolute inset-y-0 flex items-center gap-2"
-        style={
-          dir === "rtl"
-            ? { right: "max(56px, calc(var(--app-sidebar-width, 291px) - 73px))" }
-            : { left: "max(calc(var(--app-header-pad-left, 16px) + 40px), calc(var(--app-sidebar-width, 291px) - 73px))" }
-        }
-      >
+      {/* The gap keeps Back and Forward in the header's flow, so the search
+          and the other header controls never sit under them. */}
+      <div className="flex items-center gap-2" style={{ marginInlineStart: BACK_FORWARD_GAP_CSS }}>
         <HoverTooltip label={msg("app.nav.back")}>
           <Button
             type="button"

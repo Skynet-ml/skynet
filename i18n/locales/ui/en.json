@@ -381,7 +381,6 @@
   "app.shell.menu_close": "Close menu",
   "app.sidebar.show": "Show sidebar",
   "app.sidebar.hide": "Hide sidebar",
-  "app.sidebar.toggle": "Toggle sidebar",
   "app.nav.back": "Back",
   "app.nav.forward": "Forward",
   "app.shell.search.button_aria": "Search everything",

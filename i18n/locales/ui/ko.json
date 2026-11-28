@@ -4631,7 +4631,6 @@
   "blog.back": "모든 글",
   "app.sidebar.show": "사이드바 표시",
   "app.sidebar.hide": "사이드바 숨기기",
-  "app.sidebar.toggle": "사이드바 표시/숨기기",
   "app.nav.back": "뒤로",
   "app.nav.forward": "앞으로"
 }

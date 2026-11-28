@@ -990,18 +990,6 @@ main {
   }
 }
 
-/* The Mac desktop app hides the native title bar (the preload sets the mark).
-   The header drags the window, and its start padding clears the traffic
-   lights: the toggle starts 88px from the edge, as in Codex. */
-html[data-desktop-titlebar] .app-header {
-  padding-left: 88px;
-  --app-header-pad-left: 88px;
-  -webkit-app-region: drag;
-}
-html[data-desktop-titlebar] .app-header :is(button, a, input, [role="button"], [role="combobox"]) {
-  -webkit-app-region: no-drag;
-}
-
 /* Collapse/expand snap: when the Sidebar commits the discrete icon-rail toggle it
    arms html[data-sidebar-snapping], gliding the rail's own width and <main>'s
    reserved margin together over one matched transition instead of jumping in a
