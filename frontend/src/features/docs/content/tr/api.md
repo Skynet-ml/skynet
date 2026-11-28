@@ -49,7 +49,6 @@ Başvuru belgesi `https://api.skynetml.com/openapi.public.json` adresindeki Open
 | `GET /optimizations`                            | Çalıştırmalarınızı listeler.                                          |
 | `GET /optimizations/{optimization_id}`          | Tek bir çalıştırmayı döndürür: durum, ilerleme, günlükler ve sonuç.   |
 | `POST /optimizations/{optimization_id}/cancel`  | Bir çalıştırmayı durdurur.                                            |
-| `POST /serve/{optimization_id}`                 | En iyi sürümü yeni bir girdi üzerinde çalıştırır.                     |
 | `GET /health`                                   | Hizmetin çalışıp çalışmadığını gösterir.                              |
 
 ## Bir çalıştırma başlatma
@@ -164,8 +163,6 @@ Durum `success` olduğunda en iyi sürümü alın:
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-En iyi sürümü yeni bir girdi üzerinde çalıştırmak için `Idempotency-Key` başlığıyla `POST /serve/{optimization_id}` gönderin. Depoda `def serve(input)` içeren bir `serve.py` dosyası olmalıdır. İstek, yanıt ve her puanın ne anlama geldiği için [Sonuçlar](/docs/guides/results) sayfasını okuyun.
 
 ## Limitler
 

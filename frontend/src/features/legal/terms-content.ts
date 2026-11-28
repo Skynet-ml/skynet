@@ -48,7 +48,6 @@ export const TERMS_OF_SERVICE: LegalDocument = {
             "legal.terms.acceptable_use.b2_7",
           ],
         },
-        { kind: "paragraph", key: "legal.terms.acceptable_use.b3" },
         { kind: "paragraph", key: "legal.terms.acceptable_use.b4" },
       ],
     },

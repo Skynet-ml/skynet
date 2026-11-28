@@ -49,7 +49,6 @@ Authorization: Bearer skyd_...
 | `GET /optimizations`                            | 列出你的运行。                               |
 | `GET /optimizations/{optimization_id}`          | 返回一次运行：状态、进度、日志和结果。       |
 | `POST /optimizations/{optimization_id}/cancel`  | 停止一次运行。                               |
-| `POST /serve/{optimization_id}`                 | 在新输入上运行最佳版本。                     |
 | `GET /health`                                   | 显示服务是否正常运行。                       |
 
 ## 启动运行
@@ -164,8 +163,6 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-要在新输入上运行最佳版本，请发送 `POST /serve/{optimization_id}`，并带上 `Idempotency-Key` 请求头。仓库中必须有一个 `serve.py` 文件，其中定义了 `def serve(input)`。关于请求、响应以及每个分数的含义，请阅读[结果](/docs/guides/results)。
 
 ## 限制
 

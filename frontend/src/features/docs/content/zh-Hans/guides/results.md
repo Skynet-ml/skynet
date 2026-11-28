@@ -1,4 +1,4 @@
-运行页面显示运行的进度和结果。本指南说明运行页面上的标签页、各项分数，以及如何导出或部署最佳版本。
+运行页面显示运行的进度和结果。本指南说明运行页面上的标签页、各项分数，以及如何导出最佳版本。
 
 ## 运行页面上的标签页
 
@@ -7,7 +7,6 @@
 | 标签页             | 何时显示                                       | 包含的内容                                         |
 | ------------------ | ---------------------------------------------- | -------------------------------------------------- |
 | **概览**           | 始终                                           | 进度、分数和分数历史                               |
-| **用量**           | 成功的运行，且其仓库有 `serve.py` 文件         | 用于调用最佳版本的表单，以及集成代码               |
 | **产物**           | 有结果的运行                                   | 你的仓库的各个版本，以及最佳版本                   |
 | **数据**           | 已完成且有用例的运行                           | 划分为训练集、验证集和测试集的数据                 |
 | **代码**           | 运行有可显示的代码时                           | 评分器                                             |
@@ -52,60 +51,6 @@ Skynet 根据验证用例选择版本，并在测试用例上报告最终分数�
 ### 新仓库中的分支
 
 当 Skynet 在 GitHub 上为本次运行创建了仓库时，它会把每个候选推送到各自的分支 `skynet/candidate-<version id>`。`skynet/best` 分支始终指向最佳版本。出现更好的版本时，它会随之移动。
-
-## 部署最佳版本
-
-你可以从自己的代码中调用最佳版本。仓库的根目录必须有一个定义了 `serve(input)` 的 `serve.py` 文件：
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input` 是请求中输入字段的 dict。
-- 返回值必须可以序列化为 JSON。dict 会成为 `outputs`。其他任何值会成为 `{"output": value}`。
-- `serve.py` 可以使用 `openascent` 辅助模块中的 `llm` 调用模型。它不会获得运行的密钥。
-
-Skynet 在与运行相同的受保护沙箱中运行最佳版本。**用量** 标签页包含两个部分：
-
-- 一个表单。输入各输入字段并选择 **运行**，即可得到结果。
-- cURL、Python、JavaScript 和 Go 的 **集成代码**。
-
-要调用最佳版本，请在 **设置 → API** 中创建 API 令牌。然后发送请求。`Idempotency-Key` 请求头是必需的：
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-把 `message` 替换为你的运行的输入字段。**用量** 标签页上的 **集成代码** 会为你填好真实的 URL 和字段名称。
-
-响应包含 `outputs`、`input_fields`、`output_fields`、`model_used`、`cents_charged` 和 `budget`。
-
-> [!TIP]
-> 每次调用单独计费，从调用者的余额中扣除。`max_cost_cents` 是可选的。它以美分为单位，记录你对这一次调用接受的最高金额。调用的上限由你的余额决定。如果你再次发送相同的 `Idempotency-Key`，Skynet 不会再次对该调用收费。
-
-关于身份验证和其他端点，请阅读 [API](/docs/api)。
 
 ## 分享结果
 

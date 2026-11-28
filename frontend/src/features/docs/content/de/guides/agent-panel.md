@@ -22,7 +22,7 @@ Während der Agent arbeitet, bleibt das Eingabefeld verfügbar:
 - Eine als **Nicht bestätigt** markierte Nachricht hat den Agenten möglicherweise schon erreicht. Du kannst sie jederzeit bearbeiten oder löschen. Andere Nachrichten in der Warteschlange können vorher fortfahren.
 - **Stoppen** beendet die laufende Runde und pausiert die Warteschlange. Ungelesene Steuerungsnachrichten kehren zurück. Nichts startet automatisch. **Esc** im Eingabefeld bewirkt dasselbe, außer bei geöffnetem Menü oder während einer IME-Texteingabe. Esc schließt zuerst einen Vorschlag oder ein Menü dieses Eingabefelds.
 - Ist die Warteschlange pausiert und läuft keine Runde, sendet **Steuern** diese Nachricht. Danach fährt die Warteschlange der Reihe nach fort. Auch ein normaler Rundenabschluss startet die nächste Nachricht.
-- Nach der Anmeldung steuert **Enter** den Dokumentationsassistenten, sobald er eine sichere Schrittgrenze meldet. Er liest die Nachricht beim nächsten ohnehin geplanten Modellschritt. **Tab** reiht sie immer ein. Vor der Meldung, ohne Anmeldung und in geschützten Chats mit bereitgestellten Programmen reihen Enter und Tab Nachrichten ein. Nach einem Anfragelimit pausiert der Dokumentationsassistent die übrigen Nachrichten.
+- Nach der Anmeldung steuert **Enter** den Dokumentationsassistenten, sobald er eine sichere Schrittgrenze meldet. Er liest die Nachricht beim nächsten ohnehin geplanten Modellschritt. **Tab** reiht sie immer ein. Vor der Meldung und ohne Anmeldung reihen Enter und Tab Nachrichten ein. Nach einem Anfragelimit pausiert der Dokumentationsassistent die übrigen Nachrichten.
 
 ## Was der Agent kann
 

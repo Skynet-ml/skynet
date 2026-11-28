@@ -237,14 +237,14 @@ def test_recent_forbidden_for_non_admin() -> None:
     assert client.get("/telemetry/events/recent").status_code == 403
 
 
-def test_north_star_returns_three_zero_filled_series_for_admin() -> None:
-    """An admin gets the three series, one row per requested week, newest first."""
+def test_north_star_returns_two_zero_filled_series_for_admin() -> None:
+    """An admin gets the two series, one row per requested week, newest first."""
     client, _ = _client(admin=_ADMIN)
     resp = client.get("/telemetry/metrics/north-star", params={"weeks": 4})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["weeks"] == 4
-    for series, key in (("first_lifts", "signup_week"), ("lifted_users", "week"), ("lifted_in_use", "week")):
+    for series, key in (("first_lifts", "signup_week"), ("lifted_users", "week")):
         assert isinstance(body[series], list)
         assert len(body[series]) == 4
         weeks = [row[key] for row in body[series]]
@@ -261,7 +261,7 @@ def test_north_star_defaults_to_twelve_weeks() -> None:
     client, _ = _client(admin=_ADMIN)
     body = client.get("/telemetry/metrics/north-star").json()
     assert body["weeks"] == 12
-    assert len(body["lifted_in_use"]) == 12
+    assert len(body["lifted_users"]) == 12
 
 
 def test_north_star_forbidden_for_non_admin() -> None:

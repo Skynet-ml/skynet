@@ -3,7 +3,7 @@
 Job state lives in ``world.s["jobs"]`` keyed by optimization id. Lifecycle
 handlers mutate a job in place; ``submit_*`` and ``clone`` create new pending
 jobs. Reads project the stored job through :func:`_common.job_summary` or return
-the stored result/grid/serve blocks.
+the stored result/grid blocks.
 """
 
 from __future__ import annotations
@@ -199,51 +199,6 @@ def get_pair_test_results(w: World, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@tool("serve_info_serve")
-def serve_info(w: World, args: dict[str, Any]) -> dict[str, Any]:
-    """Describe an optimized program without running it.
-
-    Raises:
-        ToolError: 409 when the optimization is not a served success.
-    """
-    job = get_job(w, args.get("optimization_id"))
-    serve = job.get("serve")
-    if not serve:
-        raise ToolError(
-            409,
-            f"Optimization {job['optimization_id']} has no served program (status: {job['status']})",
-        )
-    return {"optimization_id": job["optimization_id"], **serve}
-
-
-@tool("serve_pair_info_serve")
-def serve_pair_info(w: World, args: dict[str, Any]) -> dict[str, Any]:
-    """Describe the program for one grid-search pair without running it.
-
-    Raises:
-        ToolError: 409 when not a grid search or the pair produced no program.
-    """
-    job = get_job(w, args.get("optimization_id"))
-    if job["optimization_type"] != "grid_search":
-        raise ToolError(
-            409, f"Optimization {job['optimization_id']} is not a grid search"
-        )
-    pair = _pair(job, args.get("pair_index"))
-    if pair.get("error"):
-        raise ToolError(409, f"Pair {pair['pair_index']} produced no program")
-    serve = job.get("serve") or {}
-    return {
-        "optimization_id": job["optimization_id"],
-        "pair_index": pair["pair_index"],
-        "input_fields": serve.get("input_fields", []),
-        "output_fields": serve.get("output_fields", []),
-        "instructions": serve.get("instructions", ""),
-        "demo_count": serve.get("demo_count", 0),
-        "sample_inputs": serve.get("sample_inputs", {}),
-        "model_name": pair["generation_model"],
-    }
-
-
 @tool("cancel_job_optimizations", mutates=True)
 def cancel_job(w: World, args: dict[str, Any]) -> dict[str, Any]:
     """Cooperatively cancel an active optimization.
@@ -410,7 +365,6 @@ def clone_job(w: World, args: dict[str, Any]) -> dict[str, Any]:
             metric_improvement=None,
             result=None,
             grid_result=None,
-            serve=None,
             logs=[
                 {
                     "timestamp": w.s["now"],
@@ -577,7 +531,6 @@ def _reset_to_pending(w: World, job: dict[str, Any]) -> None:
         metric_improvement=None,
         result=None,
         grid_result=None,
-        serve=None,
         logs=[
             {
                 "timestamp": w.s["now"],

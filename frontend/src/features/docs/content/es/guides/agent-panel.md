@@ -22,7 +22,7 @@ Mientras el agente trabaja, puedes seguir escribiendo:
 - Un mensaje marcado como **No confirmado** puede haber llegado ya al agente. Puedes editarlo o eliminarlo en cualquier momento. Otros mensajes en cola pueden continuar antes.
 - **Detener** para el turno y pausa la cola. Las instrucciones no leídas vuelven a la bandeja. Nada empieza automáticamente. **Esc** en el campo hace lo mismo, salvo con un menú abierto o durante la composición con un IME. Esc primero cierra una sugerencia o un menú de este campo.
 - Cuando la cola está pausada y no hay un turno activo, **Orientar** envía ese mensaje. Después la cola continúa en orden. Un turno que termina normalmente también inicia el siguiente mensaje.
-- Con la sesión iniciada, **Enter** dirige al asistente de documentación cuando anuncia un límite de paso seguro. Lee el mensaje en el siguiente paso del modelo ya previsto. **Tab** siempre añade a la cola. Antes del aviso, sin iniciar sesión y en el chat protegido de programas publicados, Enter y Tab añaden mensajes a la cola. El asistente de documentación pausa los restantes al alcanzar un límite de solicitudes.
+- Con la sesión iniciada, **Enter** dirige al asistente de documentación cuando anuncia un límite de paso seguro. Lee el mensaje en el siguiente paso del modelo ya previsto. **Tab** siempre añade a la cola. Antes del aviso y sin iniciar sesión, Enter y Tab añaden mensajes a la cola. El asistente de documentación pausa los restantes al alcanzar un límite de solicitudes.
 
 ## Lo que puede hacer el agente
 

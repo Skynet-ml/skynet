@@ -1007,21 +1007,6 @@ def _run_result(
     }
 
 
-def _serve_block(job: dict[str, Any], demos: list[dict]) -> dict[str, Any]:
-    """Build the serve-info block a served success job exposes."""
-    inputs = list(job["column_mapping"]["inputs"].keys())
-    outputs = list(job["column_mapping"]["outputs"].keys())
-    sample = {inputs[0]: "השירות היה מצוין ומהיר"} if inputs else {}
-    return {
-        "input_fields": inputs,
-        "output_fields": outputs,
-        "instructions": "סווג את הקלט לפי התווית הנכונה, בהתבסס על הדוגמאות.",
-        "demo_count": len(demos),
-        "sample_inputs": sample,
-        "model_name": job.get("model_name") or GPT4O_MINI,
-    }
-
-
 def _log(
     ts: str,
     level: str,
@@ -1096,7 +1081,6 @@ _JOB_DEFAULTS: dict[str, Any] = {
     "logs": None,
     "result": None,
     "grid_result": None,
-    "serve": None,
     "payload": None,
     "cost_cents": 0,
 }
@@ -1230,9 +1214,6 @@ def _jobs() -> dict[str, Any]:
         cost_cents=80,
     )
     j1["result"] = _run_result(j1, b1, o1, 740.0, 120000)
-    j1["serve"] = _serve_block(
-        j1, j1["result"]["program_artifact"]["optimized_prompt"]["demos"]
-    )
     jobs.append(j1)
 
     j2 = make_job(
@@ -1265,9 +1246,6 @@ def _jobs() -> dict[str, Any]:
     )
     b2, o2 = _binary_examples(10, 6, 8, 0, "חיובי", "שלילי")
     j2["result"] = _run_result(j2, b2, o2, 770.0, 118000)
-    j2["serve"] = _serve_block(
-        j2, j2["result"]["program_artifact"]["optimized_prompt"]["demos"]
-    )
     jobs.append(j2)
 
     b3, o3 = _binary_examples(12, 7, 9, 0, "חיובי", "שלילי")
@@ -1303,9 +1281,6 @@ def _jobs() -> dict[str, Any]:
         cost_cents=50,
     )
     j3["result"] = _run_result(j3, b3, o3, 1190.0, 205000)
-    j3["serve"] = _serve_block(
-        j3, j3["result"]["program_artifact"]["optimized_prompt"]["demos"]
-    )
     jobs.append(j3)
 
     j4 = make_job(
@@ -1624,9 +1599,6 @@ def _jobs() -> dict[str, Any]:
     )
     b13, o13 = _binary_examples(10, 7, 6, 0, "חיובי", "שלילי")
     j13["result"] = _run_result(j13, b13, o13, 650.0, 90000)
-    j13["serve"] = _serve_block(
-        j13, j13["result"]["program_artifact"]["optimized_prompt"]["demos"]
-    )
     jobs.append(j13)
 
     j14 = make_job(
@@ -1790,9 +1762,6 @@ def _jobs() -> dict[str, Any]:
         cost_cents=70,
     )
     j16["result"] = _run_result(j16, b16, o16, 890.0, 140000)
-    j16["serve"] = _serve_block(
-        j16, j16["result"]["program_artifact"]["optimized_prompt"]["demos"]
-    )
     jobs.append(j16)
 
     j17 = make_job(
@@ -2017,14 +1986,6 @@ def _grid_bakeoff() -> dict[str, Any]:
             {"model": GPT4O, "input_tokens": 20000, "output_tokens": 12000},
         ],
     }
-    job["serve"] = {
-        "input_fields": ["text"],
-        "output_fields": ["label"],
-        "instructions": "סווג את הקלט לפי התווית הנכונה.",
-        "demo_count": 3,
-        "sample_inputs": {"text": "השירות היה מצוין ומהיר"},
-        "model_name": best["generation_model"],
-    }
     return job
 
 
@@ -2128,14 +2089,6 @@ def _grid_reasoning() -> dict[str, Any]:
         "usage_by_model": [
             {"model": GPT4O, "input_tokens": 52000, "output_tokens": 24000}
         ],
-    }
-    job["serve"] = {
-        "input_fields": ["text"],
-        "output_fields": ["label"],
-        "instructions": "סווג את הקלט לפי התווית הנכונה.",
-        "demo_count": 2,
-        "sample_inputs": {"text": "השירות היה מצוין ומהיר"},
-        "model_name": best["generation_model"],
     }
     return job
 

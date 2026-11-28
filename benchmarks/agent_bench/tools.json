@@ -920,7 +920,7 @@
        }
       },
       "type": "object",
-      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields. This\nis distinct from the ``ServeResponse.input_fields`` / ``output_fields`` lists,\nwhich live at a different layer (inference response) and carry only field\n*names*, not column bindings. The two shapes are intentionally different."
+      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields."
      },
      "staged_dataset_id": {
       "anyOf": [
@@ -1173,52 +1173,6 @@
    }
   },
   {
-   "name": "request_user_inference",
-   "description": "Signal the chat UI to render an inline inference-input card.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "optimization_id": {
-      "type": "string"
-     },
-     "prompt": {
-      "type": "string",
-      "maxLength": 400,
-      "description": "Short Hebrew sentence explaining why inference is being offered.",
-      "default": ""
-     }
-    },
-    "required": [
-     "optimization_id"
-    ]
-   }
-  },
-  {
-   "name": "request_user_pair_inference",
-   "description": "Signal the chat UI to render an inline inference card for one pair.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "optimization_id": {
-      "type": "string"
-     },
-     "pair_index": {
-      "type": "integer"
-     },
-     "prompt": {
-      "type": "string",
-      "maxLength": 400,
-      "description": "Short Hebrew sentence explaining why inference is being offered.",
-      "default": ""
-     }
-    },
-    "required": [
-     "optimization_id",
-     "pair_index"
-    ]
-   }
-  },
-  {
    "name": "restart_job_optimizations",
    "description": "Reset a terminal optimization in place and re-run it from scratch.",
    "parameters": {
@@ -1260,40 +1214,6 @@
     },
     "required": [
      "optimization_id"
-    ]
-   }
-  },
-  {
-   "name": "serve_info_serve",
-   "description": "Describe an optimized program without running it.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "optimization_id": {
-      "type": "string"
-     }
-    },
-    "required": [
-     "optimization_id"
-    ]
-   }
-  },
-  {
-   "name": "serve_pair_info_serve",
-   "description": "Describe the program for one grid-search pair without running it.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "optimization_id": {
-      "type": "string"
-     },
-     "pair_index": {
-      "type": "integer"
-     }
-    },
-    "required": [
-     "optimization_id",
-     "pair_index"
     ]
    }
   },
@@ -2879,7 +2799,7 @@
        }
       },
       "type": "object",
-      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields. This\nis distinct from the ``ServeResponse.input_fields`` / ``output_fields`` lists,\nwhich live at a different layer (inference response) and carry only field\n*names*, not column bindings. The two shapes are intentionally different."
+      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields."
      },
      "column_order": {
       "anyOf": [
@@ -3921,7 +3841,7 @@
        }
       },
       "type": "object",
-      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields. This\nis distinct from the ``ServeResponse.input_fields`` / ``output_fields`` lists,\nwhich live at a different layer (inference response) and carry only field\n*names*, not column bindings. The two shapes are intentionally different."
+      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields."
      },
      "column_order": {
       "anyOf": [
@@ -4887,7 +4807,7 @@
        }
       },
       "type": "object",
-      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields. This\nis distinct from the ``ServeResponse.input_fields`` / ``output_fields`` lists,\nwhich live at a different layer (inference response) and carry only field\n*names*, not column bindings. The two shapes are intentionally different."
+      "description": "Describe how dataframe columns map onto DSPy signature fields.\n\n``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``\n— because a single signature can have multiple input or output fields."
      },
      "sample_row": {
       "additionalProperties": true,
@@ -4981,11 +4901,7 @@
    "rename_job_optimizations",
    "request_user_dataset_datasets_request_upload_post",
    "request_user_dataset_from_library",
-   "request_user_inference",
-   "request_user_pair_inference",
    "retry_job_optimizations",
-   "serve_info_serve",
-   "serve_pair_info_serve",
    "set_column_roles_datasets_column_roles_post",
    "stage_sample_dataset_datasets_samples",
    "toggle_pin_job_optimizations",

@@ -267,13 +267,6 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     severity: "info",
     icon: ChartBar,
   },
-  request_user_inference: {
-    title: () => msg("auto.features.agent.panel.lib.tool.meta.literal.70"),
-    description: () => msg("auto.features.agent.panel.lib.tool.meta.literal.71"),
-    confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.72"),
-    severity: "info",
-    icon: Sparkle,
-  },
   get_wallet_for_agent: {
     title: () => msg("auto.features.agent.panel.components.walletcard.title"),
     description: () => msg("auto.features.agent.panel.lib.tool.meta.literal.80"),
@@ -435,7 +428,6 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   optimizer_catalog_optimizers_get: () => msg("agent.tool.optimizers.title"),
   list_github_repositories_connectors_github_repos_get: () => msg("agent.tool.github_repos.title"),
   list_host_repositories_connectors: () => msg("agent.tool.host_repos.any_title"),
-  serve_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.74"),
   request_user_dataset_datasets_request_upload_post: () =>
     msg("auto.features.agent.panel.lib.tool.meta.literal.76"),
   list_settings: () => msg("agent.tool.list_settings.title"),
@@ -488,7 +480,6 @@ export const TOOL_ICONS: Record<string, Icon> = {
   optimizer_catalog_optimizers_get: Target,
   list_github_repositories_connectors_github_repos_get: GithubLogo,
   list_host_repositories_connectors: GitBranch,
-  serve_info_serve: Info,
   request_user_dataset_datasets_request_upload_post: UploadSimple,
   list_settings: ListBullets,
   get_setting: GearSix,

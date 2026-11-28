@@ -107,7 +107,6 @@ export function AdminMetricsView({
   const signups = state.kind === "ready" ? signupWeekRows(state.data) : [];
   const activity = state.kind === "ready" ? activityWeekRows(state.data) : [];
   const latestSignups = signups[0];
-  const latestActivity = activity[0];
   const hasSignups = signups.some((row) => row.signups > 0);
 
   return (
@@ -187,13 +186,6 @@ export function AdminMetricsView({
                 signups: formatCount(latestSignups.signups),
               })}
             />
-            <Headline
-              testId="admin-metrics-in-use"
-              label={msg("settings.admin.activity.in_use")}
-              help={msg("settings.admin.activity.in_use_help")}
-              value={latestActivity?.in_use ?? 0}
-              detail={msg("settings.admin.activity.in_use_detail")}
-            />
           </div>
 
           <div>
@@ -268,12 +260,6 @@ export function AdminMetricsView({
                   width: 120,
                   render: (row) => formatCount(row.improved_again),
                 },
-                {
-                  key: "in_use",
-                  label: msg("settings.admin.activity.col.in_use"),
-                  width: 120,
-                  render: (row) => formatCount(row.in_use),
-                },
               ]}
             />
           </div>
@@ -283,7 +269,7 @@ export function AdminMetricsView({
   );
 }
 
-/** Admin-tab card: weekly activation by signup week, and improved runs and programs in use by activity week. */
+/** Admin-tab card: weekly activation by signup week, and improved runs by activity week. */
 export function AdminMetricsCard({
   enabled = true,
   compact = false,

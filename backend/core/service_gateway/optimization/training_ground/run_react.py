@@ -33,12 +33,12 @@ description — it is DSPy's fixed loop-exit action."""
 
 # A protected settings action (email codes, passkeys, linked sign-ins) must
 # never run without a person who confirms it. Optimization rollouts call tools
-# unattended, and a served react chat can rename tools or run in yolo, so
-# neither roster lists these tools (SKY-266).
+# unattended, and a react chat can rename tools or run in yolo, so neither
+# roster lists these tools (SKY-266).
 HUMAN_CONFIRM_ONLY_TOOLS: frozenset[str] = frozenset({"change_protected_setting"})
 
 # The guest holds the tool relay token in this module, not in os.environ: a
-# child process that copies os.environ (a proposer, git, a served program)
+# child process that copies os.environ (a proposer, git, a user program)
 # would hold it in a readable start environment (SKY-880).
 _tool_relay_token: str | None = None
 
@@ -227,8 +227,7 @@ def _dataset_snapshot_tools(
         {"name": str, "description": str, "args": {<arg>: {<schema>}}}
 
     Each spec becomes a ``dspy.Tool`` whose ``name``/``desc``/``args``
-    are read for the seed instructions, schema-hash snapshot, and overlay. The
-    serve path uses this to reconstruct the surface a run was optimized against.
+    are read for the seed instructions, schema-hash snapshot, and overlay.
 
     Args:
         dataset: Raw dataset rows; scanned for the snapshot sidecar.
@@ -279,8 +278,8 @@ def _find_snapshot_specs(
 def _snapshot_tool(*, name: str, desc: str, args: dict[str, Any]) -> dspy.Tool:
     """Construct a ``dspy.Tool`` carrying a snapshot spec's schema.
 
-    The serve path reconstructs the roster from these specs; the callable body
-    is a placeholder because serve re-binds live MCP callables when it executes.
+    The callable body is a placeholder that returns ``None`` when a node calls
+    it. Nothing rebinds it to a live MCP callable.
 
     Args:
         name: Tool name.
@@ -292,7 +291,7 @@ def _snapshot_tool(*, name: str, desc: str, args: dict[str, Any]) -> dspy.Tool:
     """
 
     def _noop(**_kwargs: Any) -> None:
-        """Placeholder body — serve re-binds live callables before executing."""
+        """Return ``None``; a snapshot carries no live MCP callable."""
 
     _noop.__name__ = name
     _noop.__doc__ = desc
@@ -313,8 +312,7 @@ def resolve_react_tools(
     - ``live_mcp`` lists the live MCP roster via :func:`_list_live_tools`,
       optionally filtering and reordering by ``tool_source.tool_filter``.
     - ``dataset_snapshot`` rebuilds the roster from the dataset's reserved
-      ``__tool_snapshot__`` sidecar (run path) or the source's own persisted
-      ``tool_snapshot`` specs (serve path) via :func:`_dataset_snapshot_tools`.
+      ``__tool_snapshot__`` sidecar via :func:`_dataset_snapshot_tools`.
 
     The schema-hash map is computed with :func:`hash_tool_schema` over whatever
     roster was resolved, so it stays 1:1 with the tools the seed program sees.
@@ -322,8 +320,7 @@ def resolve_react_tools(
     Args:
         tool_source: A ``ToolSource``-shaped object or a persisted mapping
             (``kind`` plus optional ``mcp_url``/``mcp_auth_header``/
-            ``tool_filter``/``tool_snapshot``); read field-tolerantly via
-            :func:`_ts` so the run and serve paths share one resolver.
+            ``tool_filter``); read field-tolerantly via :func:`_ts`.
         signature_cls: The resolved signature (unused today; accepted so the
             call site stays stable as the snapshot path grows).
         settings: Runtime settings — supplies the default MCP URL.
@@ -344,7 +341,7 @@ def resolve_react_tools(
         tools = _list_live_tools(mcp_url, _ts(tool_source, "mcp_auth_header"))
         tools = _apply_tool_filter(tools, _ts(tool_source, "tool_filter"))
     elif kind == "dataset_snapshot":
-        tools = _dataset_snapshot_tools(_snapshot_source(tool_source, dataset))
+        tools = _dataset_snapshot_tools(dataset)
         tools = _apply_tool_filter(tools, _ts(tool_source, "tool_filter"))
         if not tools:
             raise ValueError(
@@ -360,9 +357,8 @@ def resolve_react_tools(
 def _ts(tool_source: Any, key: str, default: Any = None) -> Any:
     """Read ``key`` off a tool source that may be an object or a mapping.
 
-    The run path passes a ``ToolSource`` model (attribute access); the serve
-    path re-sources from a persisted dict (mapping access). Reads through
-    both so the same resolver serves either shape.
+    The run path passes a ``ToolSource`` model (attribute access); a plain
+    mapping also works (mapping access).
 
     Args:
         tool_source: A ``ToolSource``-shaped object or a plain mapping.
@@ -375,31 +371,6 @@ def _ts(tool_source: Any, key: str, default: Any = None) -> Any:
     if isinstance(tool_source, Mapping):
         return tool_source.get(key, default)
     return getattr(tool_source, key, default)
-
-
-def _snapshot_source(
-    tool_source: Any, dataset: Sequence[Mapping[str, Any]] | None
-) -> Sequence[Mapping[str, Any]] | None:
-    """Pick the snapshot-spec carrier for a ``dataset_snapshot`` source.
-
-    Serve persists the snapshot specs on the source itself under
-    ``tool_snapshot``; the run path carries them on the dataset's
-    ``__tool_snapshot__`` sidecar. When the source carries them, wrap the
-    specs in a synthetic single-row sidecar so :func:`_dataset_snapshot_tools`
-    can read them without the original dataset.
-
-    Args:
-        tool_source: The ``dataset_snapshot`` tool source (object or mapping).
-        dataset: Raw dataset rows for the run path.
-
-    Returns:
-        A row sequence carrying the snapshot sidecar, or ``dataset`` when the
-        source has no persisted ``tool_snapshot``.
-    """
-    snapshot = _ts(tool_source, "tool_snapshot")
-    if snapshot:
-        return [{"__tool_snapshot__": snapshot}]
-    return dataset
 
 
 def _apply_tool_filter(tools: list[dspy.Tool], tool_filter: list[str] | None) -> list[dspy.Tool]:

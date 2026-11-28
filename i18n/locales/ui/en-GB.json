@@ -22,7 +22,6 @@
   "auto.app.submit.layout.template.1": "Start a new optimisation of your code — choose {p1}, upload {p2}, and improve performance",
   "auto.features.agent.panel.lib.tool.meta.literal.23": "Analyse",
   "auto.features.agent.panel.lib.tool.meta.literal.64": "Shows live log lines from the optimiser while it runs, to explain progress and spot issues.",
-  "auto.features.agent.panel.lib.tool.meta.literal.70": "Run the optimised program",
   "auto.features.agent.panel.lib.tool.meta.template.12": "The {p1} will be marked as a favourite and placed at the top of the list.",
   "auto.features.agent.panel.lib.tool.meta.template.15": "Analyse {p1}",
   "auto.features.agent.panel.lib.tool.meta.template.16": "The agent will analyse the structure of the {p1} to identify the columns and their types.",

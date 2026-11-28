@@ -61,7 +61,7 @@ test("dashboard analytics uses the selected source and keeps date filters", asyn
   }
 });
 
-test("continuous and serving requests stay with their run's source", async () => {
+test("continuous requests stay with their run's source", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -89,9 +89,6 @@ test("continuous and serving requests stay with their run's source", async () =>
       await api.reviewContinuousCycle("plan", "cycle", true, source);
       await api.reviewContinuousCycle("plan", "cycle", false, source);
       await api.deleteContinuous("plan", source);
-      await api.getServeInfo("run", source);
-      await api.setServingEnabled("run", true, source);
-      await api.serveProgram("run", { question: "synthetic" }, "call-key", source);
       const prefix = `https://desktop.test${source === "hosted" ? "/local/hosted" : ""}`;
       assert.deepEqual(calls.map(({ url, init }) => [url.slice(prefix.length), init?.method ?? "GET"]), [
         ["/optimizations/run/continuous", "GET"],
@@ -102,13 +99,8 @@ test("continuous and serving requests stay with their run's source", async () =>
         ["/continuous/plan/cycles/cycle/approve", "POST"],
         ["/continuous/plan/cycles/cycle/reject", "POST"],
         ["/continuous/plan", "DELETE"],
-        ["/serve/run/info", "GET"],
-        ["/serve/run/enabled", "PUT"],
-        ["/serve/run", "POST"],
       ]);
       assert.ok(calls.every(({ url }) => url.startsWith(prefix)));
-      assert.equal(new Headers(calls.at(-1)?.init?.headers).get("Idempotency-Key"), "call-key");
-      assert.deepEqual(JSON.parse(String(calls.at(-1)?.init?.body)), { inputs: { question: "synthetic" } });
     }
   } finally {
     globalThis.fetch = originalFetch;

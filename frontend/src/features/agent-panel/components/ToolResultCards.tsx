@@ -1015,59 +1015,6 @@ function monoPairs(pairs: Array<[string, string]>): Array<[React.ReactNode, Reac
   ]);
 }
 
-/** ``serve_info``: whether serving is on, and the endpoint, model and optimizer. */
-export function ServeInfoCard({ call }: { call: AgentToolCall }) {
-  const r = useResult(call, resultObject);
-  const on = r?.serving_enabled !== false;
-  const str = (v: unknown) => (typeof v === "string" ? v : "");
-  const endpoint = str(r?.endpoint_url);
-  const pairs: Array<[React.ReactNode, React.ReactNode]> = [];
-  if (endpoint)
-    pairs.push([
-      msg("agent.tool.serve.endpoint"),
-      <code key="e" dir="ltr" className="font-mono text-[0.6875rem]">
-        {endpoint}
-      </code>,
-    ]);
-  if (str(r?.model_name))
-    pairs.push([
-      TERMS.model,
-      <span key="m" dir="ltr">
-        {modelDisplayName(str(r?.model_name))}
-      </span>,
-    ]);
-  if (str(r?.optimizer_name))
-    pairs.push([
-      TERMS.optimizer,
-      <span key="o" dir="ltr">
-        {str(r?.optimizer_name)}
-      </span>,
-    ]);
-  if (str(r?.module_name))
-    pairs.push([
-      TERMS.module,
-      <span key="d" dir="ltr">
-        {str(r?.module_name)}
-      </span>,
-    ]);
-  return (
-    <ResultStep
-      call={call}
-      ok={r !== null}
-      detail={
-        r ? (
-          <span className="inline-flex items-center gap-1.5">
-            <StatusDot status={on ? "success" : "cancelled"} size="sm" />
-            {msg(on ? "serve_tab.status.on" : "serve_tab.status.off")}
-          </span>
-        ) : undefined
-      }
-    >
-      {pairs.length > 0 ? <Pairs pairs={pairs} /> : null}
-    </ResultStep>
-  );
-}
-
 /** ``list_settings``: how many settings areas. Opens to each area's key, tab and summary. */
 export function SettingsListCard({ call }: { call: AgentToolCall }) {
   const rows = useResult(call, settingRows);

@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from bench.handlers._common import get_job, push_card
+from bench.handlers._common import push_card
 from bench.world import ToolError, World, tool
 
 WIZARD_KEYS = (
@@ -88,35 +88,6 @@ def validate_code(w: World, args: dict[str, Any]) -> dict[str, Any]:
 def request_code_authoring(w: World, args: dict[str, Any]) -> dict[str, Any]:
     """Signal the chat UI to render an inline code-authoring card."""
     return push_card(w, "code_authoring", {"goal": args.get("goal", "")})
-
-
-@tool("request_user_inference")
-def request_user_inference(w: World, args: dict[str, Any]) -> dict[str, Any]:
-    """Signal the chat UI to render an inline inference-input card.
-
-    Raises:
-        ToolError: 404 when the optimization is not accessible.
-    """
-    job = get_job(w, args.get("optimization_id"))
-    return push_card(w, "inference", {"optimization_id": job["optimization_id"], "prompt": args.get("prompt", "")})
-
-
-@tool("request_user_pair_inference")
-def request_user_pair_inference(w: World, args: dict[str, Any]) -> dict[str, Any]:
-    """Signal the chat UI to render an inline inference card for one grid pair.
-
-    Raises:
-        ToolError: 404 when inaccessible, 409 when not a grid search, 422 when
-            ``pair_index`` is out of range.
-    """
-    job = get_job(w, args.get("optimization_id"))
-    if job["optimization_type"] != "grid_search":
-        raise ToolError(409, f"Optimization {job['optimization_id']} is not a grid search")
-    pairs = (job.get("grid_result") or {}).get("pair_results") or []
-    pair_index = args.get("pair_index")
-    if not isinstance(pair_index, int) or not 0 <= pair_index < len(pairs):
-        raise ToolError(422, f"pair_index {pair_index} is out of range (0-{len(pairs) - 1})")
-    return push_card(w, "pair_inference", {"optimization_id": job["optimization_id"], "pair_index": pair_index, "prompt": args.get("prompt", "")})
 
 
 def _signature_fields(code: str) -> dict[str, list[str]]:

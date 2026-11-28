@@ -1,4 +1,4 @@
-Çalıştırma sayfası bir çalıştırmanın ilerlemesini ve sonuçlarını gösterir. Bu kılavuz çalıştırma sayfasındaki sekmeleri, puanları ve en iyi sürümün nasıl dışa aktarılacağını veya sunulacağını açıklar.
+Çalıştırma sayfası bir çalıştırmanın ilerlemesini ve sonuçlarını gösterir. Bu kılavuz çalıştırma sayfasındaki sekmeleri, puanları ve en iyi sürümün nasıl dışa aktarılacağını açıklar.
 
 ## Çalıştırma sayfasındaki sekmeler
 
@@ -7,7 +7,6 @@
 | Sekme                      | Ne zaman görünür                                              | Ne içerir                                                                  |
 | -------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | **Genel bakış**            | Her zaman                                                     | İlerleme, puanlar ve puan geçmişi                                          |
-| **Kullanım**               | Deposunda `serve.py` dosyası olan başarılı bir çalıştırma     | En iyi sürümü çağırmak için bir form ve entegrasyon kodu                   |
 | **Yapay nesne**            | Sonucu olan bir çalıştırma                                    | Deponuzun sürümleri ve en iyi sürüm                                        |
 | **Veri**                   | Vakaları olan bitmiş bir çalıştırma                           | Eğitim, doğrulama ve test kümelerine bölünmüş veri                         |
 | **Kod**                    | Çalıştırmanın gösterilecek kodu olduğunda                     | Puanlayıcı                                                                 |
@@ -52,60 +51,6 @@ Bir sürümü başka bir sürümle karşılaştırabilirsiniz. Sekme bir sürüm
 ### Yeni bir depodaki dallar
 
 Skynet depoyu çalıştırma için GitHub'da oluşturduysa her adayı kendi dalına, `skynet/candidate-<version id>` dalına gönderir. `skynet/best` dalı her zaman en iyi sürümü gösterir. Daha iyi bir sürüm çıktığında bu dal yer değiştirir.
-
-## En iyi sürümü sunun
-
-En iyi sürümü kendi kodunuzdan çağırabilirsiniz. Deponun kökünde `serve(input)` tanımlayan bir `serve.py` dosyası olmalıdır:
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input`, istekteki girdi alanlarının dict'idir.
-- Dönüş değeri JSON'a serileştirilebilir olmalıdır. Bir dict `outputs` olur. Başka herhangi bir değer `{"output": value}` olur.
-- `serve.py`, `openascent` yardımcı modülündeki `llm` ile bir model çağırabilir. Çalıştırmanın gizli değerlerini almaz.
-
-Skynet en iyi sürümü, çalıştırmayla aynı korumalı sandbox içinde çalıştırır. **Kullanım** sekmesinin iki bölümü vardır:
-
-- Bir form. Girdi alanlarını doldurun ve bir sonuç almak için **Çalıştır** seçeneğini seçin.
-- cURL, Python, JavaScript ve Go ile **Entegrasyon kodu**.
-
-En iyi sürümü çağırmak için **Ayarlar → API** içinde bir API token'ı oluşturun. Ardından bir istek gönderin. `Idempotency-Key` başlığı zorunludur:
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-`message` yerine çalıştırmanızın girdi alanlarını yazın. **Kullanım** sekmesindeki **Entegrasyon kodu**, gerçek URL'yi ve alan adlarını sizin için doldurur.
-
-Yanıt `outputs`, `input_fields`, `output_fields`, `model_used`, `cents_charged` ve `budget` değerlerini içerir.
-
-> [!TIP]
-> Her çağrı ayrı olarak, çağıranın bakiyesinden faturalandırılır. `max_cost_cents` isteğe bağlıdır. Bu tek çağrı için kabul ettiğiniz en yüksek tutarı sent cinsinden kaydeder. Çağrıyı bakiyeniz sınırlar. Aynı `Idempotency-Key` değerini yeniden gönderirseniz Skynet çağrıyı yeniden ücretlendirmez.
-
-Kimlik doğrulama ve diğer uç noktalar için [API](/docs/api) sayfasını okuyun.
 
 ## Sonuçları paylaşın
 

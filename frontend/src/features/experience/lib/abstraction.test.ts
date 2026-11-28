@@ -48,7 +48,7 @@ test("only Expert opens disclosures by default", () => {
 test("run-page tabs: Guided drops Logs, Data, Code and Config but keeps the rest", () => {
   const guided = detailTabGate("guided");
   for (const tab of ["logs", "data", "code", "config"]) assert.equal(guided(tab), false, tab);
-  for (const tab of ["overview", "artifact", "playground", "usage", "unknown-tab"]) {
+  for (const tab of ["overview", "artifact", "usage", "unknown-tab"]) {
     assert.equal(guided(tab), true, tab);
   }
   const expert = detailTabGate("expert");

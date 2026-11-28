@@ -1,7 +1,7 @@
 """Admin dashboard: the figures an owner needs to run Skynet day to day. [INTERNAL]
 
 ``GET /admin/dashboard`` rolls signups, activation, active users, runs,
-failure reasons, money, served programs and product events over a trailing
+failure reasons, money and product events over a trailing
 window. It is admin-only; internal and test accounts (``users.is_internal``)
 are excluded from every per-user figure.
 
@@ -20,11 +20,9 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from ...constants import PAYLOAD_OVERVIEW_NAME
 from ...models.common import OptimizationStatus
 from ...storage.models import AgentFeedbackReportModel, JobModel, TelemetryEventModel, UserModel, WalletLedgerModel
 from ..auth import AuthenticatedUser, get_authenticated_user, require_admin_user
-from .serve import SERVE_INFERENCE_EVENT
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
@@ -47,8 +45,6 @@ class AdminDashboardTotals(BaseModel):
     runs_failed: int
     revenue_cents: int
     usage_cents: int
-    serve_calls: int
-    serve_errors: int
 
 
 class AdminDashboardDay(BaseModel):
@@ -71,16 +67,6 @@ class AdminFailureReason(BaseModel):
     count: int
 
 
-class AdminTopProgram(BaseModel):
-    """A served program ranked by calls in the window."""
-
-    optimization_id: str
-    name: str | None
-    owner: str | None
-    calls: int
-    errors: int
-
-
 class AdminEventCount(BaseModel):
     """A product event name with its count and distinct signed-in users."""
 
@@ -96,7 +82,6 @@ class AdminDashboardResponse(BaseModel):
     totals: AdminDashboardTotals
     daily: list[AdminDashboardDay]
     failure_reasons: list[AdminFailureReason]
-    top_programs: list[AdminTopProgram]
     top_events: list[AdminEventCount]
 
 
@@ -211,41 +196,6 @@ def read_dashboard(session: Session, *, days: int, now: datetime) -> AdminDashbo
         props = properties if isinstance(properties, dict) else {}
         reasons[(str(props.get("failure_stage") or "unknown"), props.get("error_class"))] += 1
 
-    calls: Counter[str] = Counter()
-    errors: Counter[str] = Counter()
-    for properties in session.scalars(
-        select(TelemetryEventModel.properties).where(
-            TelemetryEventModel.received_at >= cutoff, TelemetryEventModel.event_name == SERVE_INFERENCE_EVENT
-        )
-    ):
-        props = properties if isinstance(properties, dict) else {}
-        optimization_id = props.get("optimization_id")
-        if not isinstance(optimization_id, str):
-            continue
-        calls[optimization_id] += 1
-        if props.get("status") == "error":
-            errors[optimization_id] += 1
-    owners: dict[str, tuple[str | None, str | None]] = {}
-    if calls:
-        for optimization_id, username, overview in session.execute(
-            select(JobModel.optimization_id, JobModel.username, JobModel.payload_overview).where(
-                JobModel.optimization_id.in_(list(calls))
-            )
-        ):
-            name = overview.get(PAYLOAD_OVERVIEW_NAME) if isinstance(overview, dict) else None
-            owners[optimization_id] = (username, name if isinstance(name, str) else None)
-    programs = [
-        AdminTopProgram(
-            optimization_id=optimization_id,
-            name=owners.get(optimization_id, (None, None))[1],
-            owner=owners.get(optimization_id, (None, None))[0],
-            calls=count,
-            errors=errors[optimization_id],
-        )
-        for optimization_id, count in calls.most_common()
-        if owners.get(optimization_id, (None, None))[0] not in internal
-    ]
-
     event_rows = session.execute(
         select(
             TelemetryEventModel.event_name,
@@ -273,8 +223,6 @@ def read_dashboard(session: Session, *, days: int, now: datetime) -> AdminDashbo
             runs_failed=sum(failed.values()),
             revenue_cents=revenue,
             usage_cents=usage,
-            serve_calls=sum(program.calls for program in programs),
-            serve_errors=sum(program.errors for program in programs),
         ),
         daily=[
             AdminDashboardDay(
@@ -292,7 +240,6 @@ def read_dashboard(session: Session, *, days: int, now: datetime) -> AdminDashbo
             AdminFailureReason(stage=stage, error_class=error_class, count=count)
             for (stage, error_class), count in reasons.most_common(TOP_LIMIT)
         ],
-        top_programs=programs[:TOP_LIMIT],
         top_events=[
             AdminEventCount(name=name, count=int(count), users=int(users)) for name, count, users in event_rows
         ],
@@ -332,7 +279,7 @@ def create_admin_dashboard_router(*, job_store) -> APIRouter:
     @router.get(
         "/admin/dashboard",
         response_model=AdminDashboardResponse,
-        summary="Admin: signups, activation, runs, money, programs and events over a window",
+        summary="Admin: signups, activation, runs, money and events over a window",
     )
     def get_dashboard(
         current_user: AuthenticatedUserDep,

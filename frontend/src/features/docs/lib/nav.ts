@@ -236,7 +236,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Read the results",
-      "The run page tabs, the scores, and how to export or serve the winner.",
+      "The run page tabs, the scores, and how to export the winner.",
     ],
     "guides/sharing": [
       "Share and publish",
@@ -291,7 +291,7 @@ const PAGE_TEXT: Record<
     "guides/submit": ["הפעלת ריצה עם האשף", "כל שלב באשף ההגשה, מהמשימה ועד בדיקת החוזה."],
     "guides/results": [
       "קריאת התוצאות",
-      "לשוניות דף הריצה, הציונים, ואיך לייצא או להגיש את הגרסה המנצחת.",
+      "לשוניות דף הריצה, הציונים, ואיך לייצא את הגרסה המנצחת.",
     ],
     "guides/sharing": ["שיתוף ופרסום", "נראות ריצות, קישורי שיתוף, תפקידים וגלריית Explore."],
     "guides/tagger": [
@@ -346,7 +346,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "قراءة النتائج",
-      "علامات تبويب صفحة التشغيل، والدرجات، وكيفية تصدير النسخة الفائزة أو تقديمها.",
+      "علامات تبويب صفحة التشغيل، والدرجات، وكيفية تصدير النسخة الفائزة.",
     ],
     "guides/sharing": [
       "المشاركة والنشر",
@@ -413,7 +413,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Ergebnisse lesen",
-      "Die Tabs der Durchlaufseite, die Scores und wie Sie den Gewinner exportieren oder bereitstellen.",
+      "Die Tabs der Durchlaufseite, die Scores und wie Sie den Gewinner exportieren.",
     ],
     "guides/sharing": [
       "Teilen und veröffentlichen",
@@ -489,7 +489,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Leer los resultados",
-      "Las pestañas de la página de ejecución, las puntuaciones y cómo exportar o servir la versión ganadora.",
+      "Las pestañas de la página de ejecución, las puntuaciones y cómo exportar la versión ganadora.",
     ],
     "guides/sharing": [
       "Compartir y publicar",
@@ -559,7 +559,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "خواندن نتایج",
-      "زبانه‌های صفحهٔ اجرا، امتیازها و روش خروجی گرفتن یا ارائهٔ نسخهٔ برنده.",
+      "زبانه‌های صفحهٔ اجرا، امتیازها و روش خروجی گرفتن از نسخهٔ برنده.",
     ],
     "guides/sharing": [
       "اشتراک‌گذاری و انتشار",
@@ -632,7 +632,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Lire les résultats",
-      "Les onglets de la page d'exécution, les scores et comment exporter ou servir la version gagnante.",
+      "Les onglets de la page d'exécution, les scores et comment exporter la version gagnante.",
     ],
     "guides/sharing": [
       "Partager et publier",
@@ -702,7 +702,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "परिणाम पढ़ें",
-      "रन पेज के टैब, स्कोर, और विजेता को एक्सपोर्ट या सर्व करने का तरीका।",
+      "रन पेज के टैब, स्कोर, और विजेता को एक्सपोर्ट करने का तरीका।",
     ],
     "guides/sharing": [
       "साझा करें और प्रकाशित करें",
@@ -769,7 +769,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Leggere i risultati",
-      "Le schede della pagina dell'esecuzione, i punteggi e come esportare o servire la versione vincente.",
+      "Le schede della pagina dell'esecuzione, i punteggi e come esportare la versione vincente.",
     ],
     "guides/sharing": [
       "Condividere e pubblicare",
@@ -830,7 +830,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "結果を読む",
-      "実行ページのタブ、スコア、最良の結果をエクスポートまたは提供する方法。",
+      "実行ページのタブ、スコア、最良の結果をエクスポートする方法。",
     ],
     "guides/sharing": ["共有と公開", "実行の公開範囲、共有リンク、ロール、探索ギャラリー。"],
     "guides/tagger": [
@@ -880,7 +880,7 @@ const PAGE_TEXT: Record<
       "CSV, JSON 또는 Excel 파일을 업로드하고 열을 확인한 뒤 행을 편집합니다.",
     ],
     "guides/submit": ["마법사로 실행 시작", "작업부터 계약 검사까지 제출 마법사의 각 단계."],
-    "guides/results": ["결과 읽기", "실행 페이지 탭, 점수, 최고 버전을 내보내거나 서빙하는 방법."],
+    "guides/results": ["결과 읽기", "실행 페이지 탭, 점수, 최고 버전을 내보내는 방법."],
     "guides/sharing": ["공유 및 게시", "실행 공개 범위, 공유 링크, 역할, 탐색 갤러리."],
     "guides/tagger": [
       "태거로 데이터 라벨링",
@@ -940,7 +940,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Ler os resultados",
-      "As abas da página da execução, as pontuações e como exportar ou servir a versão vencedora.",
+      "As abas da página da execução, as pontuações e como exportar a versão vencedora.",
     ],
     "guides/sharing": [
       "Compartilhar e publicar",
@@ -1010,7 +1010,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Чтение результатов",
-      "Вкладки страницы запуска, оценки и как экспортировать или развернуть лучший вариант.",
+      "Вкладки страницы запуска, оценки и как экспортировать лучший вариант.",
     ],
     "guides/sharing": [
       "Общий доступ и публикация",
@@ -1083,7 +1083,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Sonuçları okuma",
-      "Çalıştırma sayfasının sekmeleri, puanlar ve kazananı dışa aktarma veya sunma yolu.",
+      "Çalıştırma sayfasının sekmeleri, puanlar ve kazananı dışa aktarma yolu.",
     ],
     "guides/sharing": [
       "Paylaşma ve yayınlama",
@@ -1153,7 +1153,7 @@ const PAGE_TEXT: Record<
     ],
     "guides/results": [
       "Читання результатів",
-      "Вкладки сторінки запуску, оцінки та як експортувати або розгорнути найкращий варіант.",
+      "Вкладки сторінки запуску, оцінки та як експортувати найкращий варіант.",
     ],
     "guides/sharing": [
       "Спільний доступ і публікація",
@@ -1203,7 +1203,7 @@ const PAGE_TEXT: Record<
     "concepts/billing": ["預算同收費", "結餘、運行預算、費用，同埋用自己金鑰 (BYOK) 嘅模型路由。"],
     "guides/datasets": ["準備數據集", "上載 CSV、JSON 或者 Excel 檔案，檢查欄位，再編輯資料列。"],
     "guides/submit": ["用精靈開始運行", "提交精靈嘅每一步，由任務到合約檢查。"],
-    "guides/results": ["睇結果", "運行頁面嘅分頁、分數，同埋點樣匯出或者提供最佳版本。"],
+    "guides/results": ["睇結果", "運行頁面嘅分頁、分數，同埋點樣匯出最佳版本。"],
     "guides/sharing": ["分享同發佈", "運行嘅瀏覽權限、分享連結、角色，同埋探索圖庫。"],
     "guides/tagger": [
       "用標註工具標註數據",
@@ -1237,7 +1237,7 @@ const PAGE_TEXT: Record<
     "concepts/billing": ["预算与计费", "余额、运行预算、费用，以及自带密钥 (BYOK) 的模型路由。"],
     "guides/datasets": ["准备数据集", "上传 CSV、JSON 或 Excel 文件，检查列，并编辑行。"],
     "guides/submit": ["使用向导启动运行", "提交向导的每一步，从任务到契约检查。"],
-    "guides/results": ["查看结果", "运行页面的各个标签页、分数，以及如何导出或部署最佳版本。"],
+    "guides/results": ["查看结果", "运行页面的各个标签页、分数，以及如何导出最佳版本。"],
     "guides/sharing": ["分享与发布", "运行可见性、分享链接、角色，以及探索画廊。"],
     "guides/tagger": [
       "使用标注工具标注数据",

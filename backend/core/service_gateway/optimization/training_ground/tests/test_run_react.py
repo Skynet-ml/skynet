@@ -1,7 +1,7 @@
 """Unit tests for the react tool roster helpers.
 
 Covers the ``dataset_snapshot`` branch of ``resolve_react_tools`` (roster
-rebuild from the reserved sidecar / persisted specs).
+rebuild from the reserved dataset sidecar).
 """
 
 from __future__ import annotations
@@ -73,25 +73,3 @@ def test_resolve_react_tools_unknown_kind_raises() -> None:
     bad_source = SimpleNamespace(kind="carrier_pigeon", tool_filter=None)
     with pytest.raises(ValueError, match=r"Unknown tool_source\.kind"):
         resolve_react_tools(bad_source, signature_cls=object, settings=settings)
-
-
-def test_resolve_react_tools_accepts_persisted_dict_snapshot() -> None:
-    """A persisted dict tool_source (serve path) rebuilds the roster without a dataset."""
-    persisted = {
-        "kind": "dataset_snapshot",
-        "tool_filter": ["search"],
-        "tool_snapshot": [
-            {
-                "name": "search",
-                "description": "Search the web.",
-                "args": {"q": {"type": "string"}},
-            },
-            {"name": "lookup", "description": "Look up an id.", "args": {}},
-        ],
-    }
-
-    tools, hashes = resolve_react_tools(persisted, signature_cls=object, settings=settings, dataset=None)
-
-    assert [tool.name for tool in tools] == ["search"]
-    assert set(hashes) == {"search"}
-    assert hashes["search"] == hash_tool_schema(tools[0])

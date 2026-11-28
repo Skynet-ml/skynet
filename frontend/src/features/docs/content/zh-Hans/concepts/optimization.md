@@ -22,7 +22,7 @@ def score(repo_path, case, output=None):
 - `repo_path` 是一个只包含你的指标文件的文件夹。
 - `score` 返回一个对象：`"score"` 下的一个数字，以及一个可选的 `"feedback"` 字符串。
 
-仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口在自己的沙箱中调用它。运行结束后，Skynet 也用它来部署最好的版本。
+仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口在自己的沙箱中调用它。
 
 评分器在另一个独立的沙箱中运行。该沙箱只包含你的指标文件，不包含版本代码，所以评分器不能导入 `serve.py`。它只能通过 `output`，或通过对 `[target.<name>]` 阶段的 `call()` 看到版本。用 `from openascent import call` 导入 `call`。如果既没有 `[run]` 入口，也没有 `[target.<name>]` 阶段，Skynet 会拒绝该 `ascent.toml` 文件。
 

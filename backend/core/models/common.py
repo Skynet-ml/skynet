@@ -40,10 +40,7 @@ class ColumnMapping(BaseModel):
     """Describe how dataframe columns map onto DSPy signature fields.
 
     ``inputs`` / ``outputs`` are plural mappings — ``{signature_field: column_name}``
-    — because a single signature can have multiple input or output fields. This
-    is distinct from the ``ServeResponse.input_fields`` / ``output_fields`` lists,
-    which live at a different layer (inference response) and carry only field
-    *names*, not column bindings. The two shapes are intentionally different.
+    — because a single signature can have multiple input or output fields.
     """
 
     inputs: dict[str, str] = Field(default_factory=dict)

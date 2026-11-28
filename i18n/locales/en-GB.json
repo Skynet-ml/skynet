@@ -36,7 +36,6 @@
     "optimization.repo_archive_failed": "The repository couldn't be packed: {reason}",
     "optimization.not_found": "Optimisation not found: '{optimization_id}'.",
     "optimization.agent_run_not_found": "Agent run {run_id} not found for optimisation '{optimization_id}'.",
-    "optimization.not_success_status_for_serve": "Optimisation is in state '{status}' — only successfully completed optimisations can be served.",
     "optimization.pair_not_rerunnable": "Cannot re-run a pair while the optimisation is in state '{status}'.",
     "optimization.pause_not_pausable": "An optimisation can be paused only after its first checkpoint is saved — try again in a moment.",
     "optimization.pause_wrong_status": "Only running optimisations can be paused — this one is in '{status}'.",
@@ -47,13 +46,9 @@
     "optimization.retry_no_payload": "Source optimisation has no saved payload to retry.",
     "optimization.retry_wrong_status": "Only optimisations in the 'failed' or 'cancelled' states can be retried — this one is in '{status}'. Clone it instead.",
     "quota.reached": "You've reached your limit of {quota, plural, one {1 optimisation} other {# optimisations}}. Delete old optimisations to create new ones.",
-    "serve.chat_not_react": "Live chat is available only for optimisations that use a ReAct module.",
     "submission.validation_failed": "Payload validation failed. Check the optimiser, module, and column mapping.",
     "submit.no_models_available": "No models available in the catalogue — configure a provider API key first.",
     "wizard.module_unknown": "'{name}' is not a recognised DSPy module. Use the aliases 'predict' or 'cot', or a fully qualified dotted path like 'dspy.Predict'.",
-    "wizard.optimizer_unknown": "'{name}' is not a recognised optimiser. Call get_registry_snapshot for registered names, or use the alias 'gepa' or a fully qualified dotted path like 'dspy.teleprompt.GEPA'.",
-    "budget.idempotency_required": "Send a unique Idempotency-Key for this request.",
-    "serve.caller_tool_connection_required": "This run uses an owner-bound tool connection. Connect the tool to your account before invoking it.",
-    "serve.protected_interaction_failed": "The sandboxed request failed: {error}"
+    "wizard.optimizer_unknown": "'{name}' is not a recognised optimiser. Call get_registry_snapshot for registered names, or use the alias 'gepa' or a fully qualified dotted path like 'dspy.teleprompt.GEPA'."
   }
 }

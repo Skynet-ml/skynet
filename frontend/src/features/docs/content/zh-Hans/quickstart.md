@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` 包含一个用例的输入列。`case["expected"]` 包含输出列，以列名作为键。仓库中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口调用它，`output` 就是它的返回值。评分器在一个只包含你的指标文件、不包含版本代码的独立沙箱中运行，所以它不能导入 `serve.py`。运行结束后，Skynet 用同一个函数来部署最好的版本。
+`case["input"]` 包含一个用例的输入列。`case["expected"]` 包含输出列，以列名作为键。仓库中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口调用它，`output` 就是它的返回值。评分器在一个只包含你的指标文件、不包含版本代码的独立沙箱中运行，所以它不能导入 `serve.py`。
 
 然后运行检查。检查会在沙箱中，在起始版本上运行你的安装步骤、`[run]` 入口和评分器。只有检查通过后，你才能开始运行。
 

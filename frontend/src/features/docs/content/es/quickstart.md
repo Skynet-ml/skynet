@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` contiene las columnas de entrada de un caso. `case["expected"]` contiene la columna de salida, con su nombre de columna como clave. El repositorio tiene un archivo `serve.py` con `def serve(input)`. La entrada `[run]` lo llama, y `output` es su valor devuelto. El evaluador se ejecuta en una caja de sandbox separada con solo tus archivos de métrica y sin código de la versión, así que no puede importar `serve.py`. Skynet usa la misma función para servir la mejor versión después de la ejecución.
+`case["input"]` contiene las columnas de entrada de un caso. `case["expected"]` contiene la columna de salida, con su nombre de columna como clave. El repositorio tiene un archivo `serve.py` con `def serve(input)`. La entrada `[run]` lo llama, y `output` es su valor devuelto. El evaluador se ejecuta en una caja de sandbox separada con solo tus archivos de métrica y sin código de la versión, así que no puede importar `serve.py`.
 
 Después ejecuta la comprobación. La comprobación ejecuta tu configuración, la entrada `[run]` y tu evaluador sobre la versión inicial en el sandbox. Solo puedes iniciar la ejecución cuando la comprobación pasa.
 

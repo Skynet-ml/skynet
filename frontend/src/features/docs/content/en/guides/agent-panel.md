@@ -22,7 +22,7 @@ While the agent works, the composer stays available:
 - A message marked **Not confirmed** may already have reached the agent. You can edit or delete it at any time. Other queued messages can continue first.
 - **Stop** pauses the queue and stops the current turn. Unread steers return to the tray. Nothing starts automatically. **Esc** in the composer does the same. It first dismisses a composer suggestion or menu, and does not stop during IME composition.
 - When the queue is paused and no turn runs, **Steer** sends that message. The queue then continues in order. A normal turn completion also starts the next queued message.
-- When signed in, the docs assistant accepts **Enter** as steering after it announces a safe step boundary. It reads the message at the next existing model step. **Tab** always queues. Before that announcement, when signed out, and in protected served chat, Enter and Tab both queue. The docs assistant pauses remaining messages after a rate limit.
+- When signed in, the docs assistant accepts **Enter** as steering after it announces a safe step boundary. It reads the message at the next existing model step. **Tab** always queues. Before that announcement and when signed out, Enter and Tab both queue. The docs assistant pauses remaining messages after a rate limit.
 
 ## What the agent can do
 

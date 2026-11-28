@@ -75,12 +75,12 @@ from .optimizations import (
     PaginatedJobsResponse,
 )
 from .results import LMActivity, LMStageStats
-from .serve import ServeInfoResponse, ServeRequest, ServeResponse, WorkflowNodeTrace
 from .submissions import (
     OptimizationSubmissionResponse,
     ToolSource,
     WorkflowDryRunRequest,
     WorkflowDryRunResponse,
+    WorkflowNodeTrace,
 )
 from .telemetry import JobLogEntry, ProgressEvent
 from .unified import (
@@ -181,9 +181,6 @@ __all__ = [
     "ProfileDatasetResponse",
     "ProgressEvent",
     "QueueStatusResponse",
-    "ServeInfoResponse",
-    "ServeRequest",
-    "ServeResponse",
     "SplitCounts",
     "SplitFractions",
     "SplitPlan",

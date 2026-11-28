@@ -132,7 +132,7 @@ All 18 seeded jobs are owned by `dana` unless noted. Metrics are
 
 | id (`_oid`) | name | type | status | model | metrics | flags / notes |
 |----|------|------|--------|-------|---------|---------------|
-| 1 | support-tickets v2 | run | success | gpt-4o-mini | 0.60 → 0.80 | pinned; has result + serve + 10 per-example rows |
+| 1 | support-tickets v2 | run | success | gpt-4o-mini | 0.60 → 0.80 | pinned; has result + 10 per-example rows |
 | 2 | support-tickets v2 (copy) | run | success | gpt-4o-mini | 0.62 → 0.79 | near-duplicate name; optimizer `dspy.teleprompt.MIPROv2` |
 | 3 | ניתוח רגש בעברית | run | success | claude-haiku-4.5 | 0.5833 → 0.75 | Hebrew name; module `predict` |
 | 4 | email-triage nightly | run | **failed** | gpt-4o-mini | — | metric `KeyError: 'label'` (missing column); diagnosable in logs; retryable |
@@ -154,7 +154,7 @@ All 18 seeded jobs are owned by `dana` unless noted. Metrics are
 Status coverage: pending, validating, running, success, failed, cancelled, paused,
 stopped — all 8. Type coverage: run, grid_search, blackbox.
 
-Jobs with stored `result` (→ `get_test_results`, `serve_info`): 1, 2, 3, 13, 16.
+Jobs with stored `result` (→ `get_test_results`): 1, 2, 3, 13, 16.
 Grid jobs with `grid_result` (→ `get_grid_search_result`, pair reads): 11, 12.
 Blackbox job with `blackbox_result`: 14.
 
@@ -249,9 +249,9 @@ gold set" (dana), `tag_0003` "noa triage set" (noa, `shared_with={dana: viewer}`
 
 ## 6. Tools
 
-All 49 tools, grouped by handler module. "M" = registered `mutates=True`.
+All 45 tools, grouped by handler module. "M" = registered `mutates=True`.
 
-### `jobs.py` — optimizations (23)
+### `jobs.py` — optimizations (21)
 
 | tool | M | behavior | key errors |
 |------|---|----------|------------|
@@ -262,8 +262,6 @@ All 49 tools, grouped by handler module. "M" = registered `mutates=True`.
 | `get_test_results_optimizations` | | stored per-example baseline/optimized scores | 409 (no results) |
 | `get_grid_search_result_optimizations` | | all pair results + `best_pair` | 409 (not grid / none) |
 | `get_pair_test_results_optimizations` | | per-example results for one pair | 409, 422 (pair range) |
-| `serve_info_serve` | | describe optimized program (no run) | 409 (not served) |
-| `serve_pair_info_serve` | | describe one pair's program | 409 |
 | `cancel_job_optimizations` | M | active → cancelled (resumable) | 409, 403 |
 | `pause_job_optimizations` | M | running → paused | 409, 403 |
 | `resume_job_optimizations` | M | paused/stopped+resumable → running | 409, 403 |
@@ -312,15 +310,13 @@ filters. Averages use only successful runs' improvements.
 | `request_user_dataset_datasets_request_upload_post` | | append a dataset-upload UI card |
 | `request_user_dataset_from_library` | | append a saved-dataset picker card |
 
-### `wizard.py` — wizard, code validation, request cards (5)
+### `wizard.py` — wizard, code validation, request cards (3)
 
 | tool | M | behavior |
 |------|---|----------|
 | `update_wizard_state` | | returns a `wizard_state` patch of the given fields (422 on unknown field); the world merges it |
 | `validate_code_validate_code_post` | | **AST-only** static check of `signature_code` (input/output fields) and `metric_code` (function present); never executes code |
 | `request_code_authoring` | | append a code-authoring UI card |
-| `request_user_inference` | | append an inference card (404 if job inaccessible) |
-| `request_user_pair_inference` | | append a pair-inference card (404 / 409 not grid / 422 pair range) |
 
 ### `blackbox.py` — black-box optimization (3)
 
@@ -400,8 +396,8 @@ world.s["jobs"][job["optimization_id"]] = job
 `make_job` starts from `_JOB_DEFAULTS` (a successful single `run` owned by dana on
 gpt-4o-mini) and applies overrides. It auto-fills `metric_improvement` from the
 two metrics unless you pass `metric_improvement` explicitly, and defaults
-`column_mapping` to `text → label`. To attach results/serve blocks, set
-`job["result"]`, `job["grid_result"]`, `job["serve"]`, or `job["blackbox_result"]`
+`column_mapping` to `text → label`. To attach result blocks, set
+`job["result"]`, `job["grid_result"]`, or `job["blackbox_result"]`
 after building.
 
 ### Shape existing state directly

@@ -49,7 +49,6 @@ La référence lit le document OpenAPI à l'adresse `https://api.skynetml.com/op
 | `GET /optimizations`                            | Liste vos exécutions.                                             |
 | `GET /optimizations/{optimization_id}`          | Renvoie une exécution : statut, progression, journaux et résultat. |
 | `POST /optimizations/{optimization_id}/cancel`  | Arrête une exécution.                                             |
-| `POST /serve/{optimization_id}`                 | Exécute la meilleure version sur une nouvelle entrée.             |
 | `GET /health`                                   | Indique si le service est disponible.                             |
 
 ## Lancer une exécution
@@ -164,8 +163,6 @@ Quand le statut est `success`, récupérez la meilleure version :
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-Pour exécuter la meilleure version sur une nouvelle entrée, envoyez `POST /serve/{optimization_id}` avec un en-tête `Idempotency-Key`. Le dépôt doit contenir un fichier `serve.py` avec `def serve(input)`. Lisez [Résultats](/docs/guides/results) pour la requête, la réponse et la signification de chaque score.
 
 ## Limites
 

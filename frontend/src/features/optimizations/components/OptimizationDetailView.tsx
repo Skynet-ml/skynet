@@ -24,7 +24,6 @@ import {
   Cube,
   Coins,
   Repeat,
-  PaperPlaneTilt,
 } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 
@@ -90,7 +89,6 @@ import { RunCostChip } from "./RunCostChip";
 import { BestVersionTab } from "./BestVersionTab";
 import { UsageTab } from "./UsageTab";
 import { ContinuousTab } from "./ContinuousTab";
-import { ServeTab } from "./ServeTab";
 import { linkifyMessage } from "@/shared/lib/linkify";
 import { useStreamWithPollFallback } from "@/shared/hooks/use-stream-with-poll-fallback";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
@@ -860,17 +858,6 @@ export function OptimizationDetailView({
   const showContinuousTab =
     !skipNetwork && jobIsBlackbox && (job.status === "success" || endedRunHasPlan);
 
-  // Serving a repository run is opt-in and billed per call, so only its owner
-  // (or an owner-tier grant) sees the tab, and only once the run succeeded.
-  const showServeTab =
-    !skipNetwork &&
-    jobIsBlackbox &&
-    // Same check as the backend's is_repo_payload: old text and agent
-    // blackbox runs have no serve.py to run.
-    (payload?.payload?.target as { kind?: string } | undefined)?.kind === "repo" &&
-    job.status === "success" &&
-    effectiveRole == null;
-
   return (
     <div className="space-y-6 pb-12">
       {sharedTier && <RunAccessBanner tier={sharedTier} owner={sharedByOwner} />}
@@ -1135,21 +1122,18 @@ export function OptimizationDetailView({
                   Number(showCodeTab) +
                   Number(showLogsTab) +
                   Number(showUsageTab) +
-                  Number(showServeTab) +
                   Number(showContinuousTab),
                 phoneTabs:
                   1 +
                   Number(showBestVersionTab) +
                   Number(showLogsTab) +
-                  Number(showUsageTab) +
-                  Number(showServeTab),
+                  Number(showUsageTab),
                 tabIds: [
                   "overview",
                   ...(showBestVersionTab ? ["best"] : []),
                   ...(showCodeTab ? ["code"] : []),
                   ...(showLogsTab ? ["logs"] : []),
                   ...(showUsageTab ? ["usage"] : []),
-                  ...(showServeTab ? ["playground"] : []),
                   ...(showContinuousTab ? ["continuous"] : []),
                   ...(showConfigTab ? ["config"] : []),
                 ],
@@ -1188,12 +1172,6 @@ export function OptimizationDetailView({
                   <Coins className="size-3.5" />
                   {msg("usage_tab.title")}
                   {pingActive && <PingDot className="ms-1" />}
-                </TabsTrigger>
-              )}
-              {showServeTab && (
-                <TabsTrigger value="playground" className={tabCls}>
-                  <PaperPlaneTilt className="size-3.5" />
-                  {msg("serve_tab.title")}
                 </TabsTrigger>
               )}
               {!isPhone && showContinuousTab && (
@@ -1254,16 +1232,6 @@ export function OptimizationDetailView({
             {showUsageTab && (
               <TabsContent value="usage" className="mt-4">
                 <UsageTab job={job} />
-              </TabsContent>
-            )}
-
-            {showServeTab && (
-              <TabsContent value="playground">
-                <ServeTab
-                  key={`${source}:${job.optimization_id}`}
-                  optimizationId={job.optimization_id}
-                  source={source}
-                />
               </TabsContent>
             )}
 

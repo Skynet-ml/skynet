@@ -142,7 +142,6 @@ from .routers.optimizations_meta import create_optimizations_meta_router
 from .routers.registry import create_registry_router
 from .routers.saved_secrets import create_saved_secrets_router
 from .routers.scorer_dependencies import create_scorer_dependencies_router
-from .routers.serve import create_serve_router
 from .routers.setup_billing import create_setup_billing_router
 from .routers.setup_draft import create_setup_draft_router
 from .routers.share import create_share_router
@@ -169,7 +168,7 @@ _SCALAR_STATIC_DIR = Path(__file__).parent / "static" / "scalar"
 # applied only to the copy served at /openapi.public.json, which is what
 # Scalar fetches. The cut is aimed at developers integrating with Skynet:
 # discover the available optimizers/modules/models, submit a job, poll
-# status, fetch the artifact, run inference. Anything not on this list is
+# status, fetch the artifact. Anything not on this list is
 # treated as internal (dashboard plumbing, SSE streams, analytics
 # aggregations, per-pair readers, admin tooling) and auto-hidden from the
 # docs without any further action.
@@ -200,9 +199,6 @@ _SCALAR_PUBLIC_PATHS = frozenset(
         "/optimizations/{optimization_id}/retry",
         "/optimizations/{optimization_id}/restart",
         "/optimizations/{optimization_id}/resume",
-        # Inference on a finished optimization
-        "/serve/{optimization_id}",
-        "/serve/{optimization_id}/info",
     }
 )
 
@@ -524,7 +520,6 @@ _OPENAPI_TAGS = [
             "Submit, list, inspect, and manage optimization runs. Every run optimizes the code in a repository."
         ),
     },
-    {"name": "Inference", "description": "Run the optimized artifact of a finished run."},
     {"name": "Analytics", "description": "Aggregate stats across jobs, optimizers, and models."},
     {"name": "Models", "description": "Model catalog and provider discovery."},
     {"name": "Registry", "description": "Optimizers and modules you can reference by name in a submission."},
@@ -1415,7 +1410,6 @@ def create_app(
         create_optimizations_router(job_store=job_store, get_worker_ref=lambda: worker),
         tags=["Optimizations"],
     )
-    app.include_router(create_serve_router(job_store=job_store), tags=["Inference"])
     app.include_router(create_share_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(
         create_dashboard_router(job_store=job_store),

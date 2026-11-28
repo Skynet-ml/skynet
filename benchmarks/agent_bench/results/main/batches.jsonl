@@ -1,7 +1,0 @@
-{"harness": "codex", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 2103, "billed_usd": 0.453841}
-{"harness": "pi", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 732, "billed_usd": 0.350102}
-{"harness": "opencode", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 889, "billed_usd": 0.421623}
-{"harness": "dspy-reactv2", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 1352, "billed_usd": 1.059386}
-{"harness": "dspy-react", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 1466, "billed_usd": 0.634526}
-{"harness": "dspy-react", "model": "deepseek/deepseek-v4.1-flash", "attempts": 1, "wall_seconds": 472, "billed_usd": 0.007648}
-{"harness": "dspy-reactv2-fixed", "model": "deepseek/deepseek-v4.1-flash", "attempts": 72, "wall_seconds": 1138, "billed_usd": 0.245605}

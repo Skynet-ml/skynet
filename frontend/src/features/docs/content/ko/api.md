@@ -49,7 +49,6 @@ Authorization: Bearer skyd_...
 | `GET /optimizations`                            | 내 실행을 나열합니다.                                        |
 | `GET /optimizations/{optimization_id}`          | 실행 하나의 상태, 진행 상황, 로그, 결과를 반환합니다.        |
 | `POST /optimizations/{optimization_id}/cancel`  | 실행을 중지합니다.                                           |
-| `POST /serve/{optimization_id}`                 | 새 입력에서 최고 버전을 실행합니다.                          |
 | `GET /health`                                   | 서비스가 작동 중인지 보여 줍니다.                            |
 
 ## 실행 시작하기
@@ -164,8 +163,6 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-새 입력에서 최고 버전을 실행하려면 `Idempotency-Key` 헤더와 함께 `POST /serve/{optimization_id}`를 보냅니다. 리포지토리에는 `def serve(input)`이 있는 `serve.py` 파일이 있어야 합니다. 요청, 응답, 각 점수의 의미는 [결과 읽기](/docs/guides/results)를 읽어 보세요.
 
 ## 제한
 

@@ -47,7 +47,6 @@ _SESSION_TOKEN_SECONDS = 60
 _EXCLUDED_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", r"^/optimize$"),
     ("POST", r"^/optimizations/\{optimization_id\}/(clone|retry|resume|restart)$"),
-    ("POST", r"^/serve/.*$"),
     ("POST", r"^/agent/(protected-settings|open-page)$"),
     ("POST", r"^/settings/user-preferences$"),
     ("POST", r"^/wizard/update$"),

@@ -1,11 +1,7 @@
 """Tool-schema overlay, drift detection, and fresh-program assembly.
 
-Shared by both the training-ground runtime (``registry.py``, which
-re-exports every symbol here for back-compat) and the ``/serve`` path in
-``core/api``. Pulling these helpers out of ``training_ground/registry.py``
-lets the API re-source a persisted ReAct program without importing the
-training-ground package — the serve path only needs the overlay + drift
-machinery, not the bundle loader.
+Used by the training-ground runtime (``registry.py``, which re-exports
+every symbol here for back-compat).
 """
 
 from __future__ import annotations
@@ -133,7 +129,7 @@ def _apply_tool_name_overrides(
 ) -> None:
     """Rename re-sourced canonical tools to their GEPA-proposed display names, in place.
 
-    Mirrors the rollout-time rename so the served agent sees the same roster GEPA
+    Mirrors the rollout-time rename so the rebuilt agent sees the same roster GEPA
     optimized. Must run AFTER drift-check + desc/arg overlays (those key on the
     canonical names that the recorded schema hashes use), and BEFORE ``ReActV2``
     is built (it re-keys its tool map by ``tool.name``). Collisions — two
@@ -159,7 +155,7 @@ def _apply_tool_name_overrides(
         owners = claimants[name]
         if len(owners) > 1 or name in live_names:
             logger.warning(
-                "Proposed tool name %r collides on serve; keeping canonical %r.",
+                "Proposed tool name %r collides with another tool; keeping canonical %r.",
                 name,
                 canonical,
             )
@@ -220,10 +216,9 @@ def _assert_tool_set_matches(
 
     ``strict`` additionally requires exact set equality: a recorded tool absent
     from the live roster (removed from the surface) or a live tool the snapshot
-    never recorded (added to the surface) is also drift. The served react
-    surfaces — serve-info materialisation and the live chat driver — use strict
-    mode so a run only serves against the exact tool surface it was optimised
-    against; anything else fails hard rather than silently mis-prompting.
+    never recorded (added to the surface) is also drift, so a program only runs
+    against the exact tool surface it was optimised against; anything else
+    fails hard rather than silently mis-prompting.
 
     Args:
         expected_hashes: ``{tool_name: schema_hash}`` recorded at training time.
@@ -268,6 +263,6 @@ __all__ = [
     "snapshot_tool_schema_hashes",
 ]
 
-# ``_apply_tool_name_overrides`` is shared with the /serve helper but kept
-# underscore-prefixed (internal overlay machinery, like
-# ``_apply_bundle_tool_overrides``) and intentionally absent from ``__all__``.
+# ``_apply_tool_name_overrides`` is kept underscore-prefixed (internal overlay
+# machinery, like ``_apply_bundle_tool_overrides``) and intentionally absent
+# from ``__all__``.

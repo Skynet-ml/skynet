@@ -1,4 +1,4 @@
-"""Run the optimizer, setup checks and interactions inside a credential-free managed sandbox."""
+"""Run the optimizer and setup checks inside a credential-free managed sandbox."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from core.service_gateway.optimization.blackbox.sandbox_runtime import (
     sandbox_runtime_context,
 )
 from core.service_gateway.optimization.training_ground.run_react import use_tool_relay_token
-from core.worker.interaction import run_interaction
 from core.worker.preflight import run_dspy_preflight
 from core.worker.sandbox_protocol import SANDBOX_PROTOCOL
 from core.worker.subprocess_runner import run_service_in_subprocess
@@ -171,7 +170,6 @@ def main() -> None:
     # parent gives package setup its own copy (SKY-880).
     document["payload"].pop("_skynet_packages_route", None)
     preflight = document["payload"].pop("_preflight", None)
-    interaction = document["payload"].pop("_interaction", None)
     directory = Path(document["payload"].get("_gepa_log_dir") or "checkpoints")
     for relative, encoded in document.get("checkpoints", {}).items():
         if not _CHECKPOINT_PATH.fullmatch(relative):
@@ -198,10 +196,7 @@ def main() -> None:
     )
     try:
         with runtime_scope:
-            if interaction is not None:
-                result = run_interaction(document["payload"], interaction, events.put)
-                events.put({"type": "interaction_result", "result": result})
-            elif preflight is not None:
+            if preflight is not None:
                 result = _run_preflight(document["payload"], preflight, events)
                 events.put({"type": "preflight_result", "result": result})
             else:

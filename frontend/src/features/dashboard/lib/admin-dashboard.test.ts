@@ -4,7 +4,6 @@ import type { AdminDashboardTotals } from "@/shared/lib/api";
 import {
   failureRows,
   growthSeries,
-  programRows,
   runSeries,
   successRate,
 } from "./admin-dashboard.ts";
@@ -18,8 +17,6 @@ const ZERO: AdminDashboardTotals = {
   runs_failed: 0,
   revenue_cents: 0,
   usage_cents: 0,
-  serve_calls: 0,
-  serve_errors: 0,
 };
 
 const DAY = {
@@ -64,13 +61,4 @@ test("failure rows carry a share of all listed failures", () => {
       ["validation:", "", 25],
     ],
   );
-});
-
-test("program rows fall back to a short id and compute an error rate", () => {
-  const [row] = programRows([
-    { optimization_id: "abcdef123456", name: null, owner: null, calls: 8, errors: 2 },
-  ]);
-  assert.equal(row?.name, "abcdef12");
-  assert.equal(row?.owner, "");
-  assert.equal(row?.error_rate, 25);
 });

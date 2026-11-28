@@ -3589,7 +3589,7 @@ _METRIC_EDIT = (
 
 
 def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Serving and download read the stored versions, so a metric edit never stays in them (SKY-353).
+    """Download reads the stored versions, so a metric edit never stays in them (SKY-353).
 
     Args:
         monkeypatch: Pytest monkeypatch.

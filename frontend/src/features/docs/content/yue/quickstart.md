@@ -73,7 +73,7 @@ def score(repo_path, case, output=None):
     return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`case["input"]` 裝住一個案例嘅輸入欄。`case["expected"]` 裝住輸出欄，用欄名做 key。倉庫有一個 `serve.py` 檔案，入面有 `def serve(input)`。`[run]` 入口會呼叫佢，`output` 就係佢嘅回傳值。評分器喺一個只裝住你啲指標檔案、冇版本程式碼嘅獨立沙盒入面運行，所以佢唔可以匯入 `serve.py`。運行完之後，Skynet 會用同一個函數嚟提供最好嗰個版本。
+`case["input"]` 裝住一個案例嘅輸入欄。`case["expected"]` 裝住輸出欄，用欄名做 key。倉庫有一個 `serve.py` 檔案，入面有 `def serve(input)`。`[run]` 入口會呼叫佢，`output` 就係佢嘅回傳值。評分器喺一個只裝住你啲指標檔案、冇版本程式碼嘅獨立沙盒入面運行，所以佢唔可以匯入 `serve.py`。
 
 然後運行檢查。檢查會喺沙盒入面，喺起始版本上運行你嘅安裝步驟、`[run]` 入口同評分器。檢查通過之後，你先可以開始運行。
 

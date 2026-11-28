@@ -24,7 +24,6 @@ const {
   RepoFileCard,
   RepoFolderCard,
   RunLifecycleCard,
-  ServeInfoCard,
   SettingValuesCard,
   SetupCheckCard,
   ToolCardBoundary,
@@ -598,16 +597,6 @@ void describe("tool result cards", () => {
     assert.doesNotMatch(made, FAILED);
     assert.match(made, /href="https:\/\/github\.com\/o\/r"/);
     assert.match(made, /<code[^>]*>0123456<\/code>/);
-  });
-
-  void it("serving shows off only when serving_enabled is false; a missing field is on", () => {
-    const view = (result: Record<string, unknown>) =>
-      renderOpen(<ServeInfoCard call={call("serve_info", result)} />);
-    assert.match(view({ serving_enabled: true }), /serve_tab\.status\.on/);
-    assert.match(view({}), /serve_tab\.status\.on/);
-    const off = view({ serving_enabled: false });
-    assert.match(off, /serve_tab\.status\.off/);
-    assert.doesNotMatch(off, /serve_tab\.status\.on/);
   });
 
   void it("a run list shows shown of total only when more runs match; a name falls back to the id", () => {

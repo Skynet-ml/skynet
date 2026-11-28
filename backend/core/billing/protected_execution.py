@@ -146,7 +146,7 @@ def run_call_recorder(gateway: ModelGateway, owner_id: str) -> CallRecorder | No
 
     Returns:
         A recorder for the run with no candidate or role yet, or None for
-        setup and interaction phases, which have no run record.
+        setup phases, which have no run record.
     """
     if gateway.runtime.phase != "run":
         return None
@@ -175,7 +175,7 @@ def bind_protected_sandbox(
         settings: Trusted Vercel account and deployment image configuration,
             or the local Docker image in local mode.
         owner_id: Stable job or setup identity used for cleanup after interruption.
-        lifetime_seconds: Optional shorter ceiling for one bounded interaction.
+        lifetime_seconds: Optional shorter ceiling for one bounded setup check.
         guest_lifetime_seconds: Optional shorter ceiling for the guest's boxes
             alone, such as a per-run deadline; the parent's own boxes keep the
             full lifetime.

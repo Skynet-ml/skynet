@@ -108,10 +108,6 @@ Ihr Repository-Code und Ihr Scorer laufen in einer Sandbox. Skynet misst die San
 
 Sandbox-Rechenzeit ist Teil des Ausgabenlimits des Durchlaufs, auch wenn die Modellaufrufe Ihren eigenen Schlüssel verwenden. Sandbox-Nutzung in Einrichtungsprüfungen wird von Ihrem Guthaben bezahlt, außer die Einrichtung zählt zum Limit.
 
-## Bereitstellung (Serving)
-
-Jeder Aufruf des Serve-Endpunkts eines abgeschlossenen Durchlaufs wird einzeln abgerechnet. Der Aufrufer zahlt aus seinem eigenen Guthaben. Mit `max_cost_cents` in der Anfrage können Sie festhalten, wie viel Sie für einen Aufruf höchstens akzeptieren. Ihr Guthaben begrenzt den Aufruf. Lesen Sie [Ergebnisse](/docs/guides/results).
-
 ## Tarife
 
 Es gibt zwei Tarife: Free und Pro. Pro erhöht einige Limits, etwa für gleichzeitige Durchläufe und Speicher. Schlägt eine Pro-Verlängerung fehl, behält das Konto die Pro-Limits 7 Tage lang. Danach gelten die Free-Limits, bis die Zahlung erfolgreich ist. Siehe [Limits](/docs/limits).

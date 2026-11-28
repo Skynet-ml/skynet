@@ -360,7 +360,7 @@ def activate_job_lm_budget(max_concurrency: int) -> None:
     Excess callers block in ``MeteredLM.forward`` until a permit frees; the
     per-call timeout still bounds each held permit, so the gate cannot wedge
     a run. Only the sync path is gated: optimizers evaluate on threads, and
-    the async agent/serve surfaces run in the API process where no budget is
+    the async agent surfaces run in the API process where no budget is
     installed.
 
     Args:

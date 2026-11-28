@@ -5,7 +5,7 @@ minimax-class models occasionally break the ReActV2 turn protocol — leaking a
 final message — so neither the chat nor the JSON adapter can parse the turn and
 ``AdapterParseError`` is raised. Stock ``ReActV2`` abandons the loop on the
 first such failure; during a GEPA rollout that pins the example's reward at the
-failure score, and at serve time it degrades to a forced-submit reply.
+failure score, and outside a rollout it degrades to a forced-submit reply.
 
 This module wraps the loop's single inner predictor so a parse failure is
 retried a few times, each with a fresh ``rollout_id`` that bypasses the LM
@@ -15,10 +15,8 @@ original error is re-raised, so the stock forced-submit fallback still runs
 exactly as before — the retry only ever adds attempts, never changes terminal
 behavior.
 
-The two serve builders (``_helpers``, ``tool_overlay``) drive the program
-through the synchronous ``Predict.forward`` — serve via ``dspy.streamify``'s asyncify path,
-which runs the sync loop in a worker thread — so overriding ``forward`` covers
-every site.
+Callers drive the program through the synchronous ``Predict.forward``, so
+overriding ``forward`` covers every site.
 
 The same override is where the loop's prompt layout is fixed: when no adapter
 is configured (the text tool protocol, the platform default) each turn runs

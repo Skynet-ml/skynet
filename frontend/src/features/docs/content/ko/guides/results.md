@@ -1,4 +1,4 @@
-실행 페이지는 실행의 진행 상황과 결과를 보여 줍니다. 이 가이드는 실행 페이지의 탭, 점수, 그리고 최고 버전을 내보내거나 서빙하는 방법을 설명합니다.
+실행 페이지는 실행의 진행 상황과 결과를 보여 줍니다. 이 가이드는 실행 페이지의 탭, 점수, 그리고 최고 버전을 내보내는 방법을 설명합니다.
 
 ## 실행 페이지의 탭
 
@@ -7,7 +7,6 @@
 | 탭                    | 표시되는 경우                                         | 내용                                                         |
 | --------------------- | ----------------------------------------------------- | ------------------------------------------------------------ |
 | **개요**              | 항상                                                  | 진행 상황, 점수, 점수 기록                                   |
-| **사용량**            | 리포지토리에 `serve.py` 파일이 있는 성공한 실행       | 최고 버전을 호출하는 양식과 통합 코드                        |
 | **아티팩트**          | 결과가 있는 실행                                      | 리포지토리의 버전들과 최고 버전                              |
 | **데이터**            | 케이스가 있는 완료된 실행                             | 학습, 검증, 테스트 세트로 나눈 데이터                        |
 | **코드**              | 실행에 보여 줄 코드가 있을 때                         | 채점기                                                       |
@@ -52,60 +51,6 @@ Skynet은 검증 케이스에서 버전을 선택합니다. 최종 점수는 테
 ### 새 리포지토리의 브랜치
 
 Skynet이 실행을 위해 GitHub에 리포지토리를 만들었다면, 각 후보를 별도 브랜치 `skynet/candidate-<version id>`에 푸시합니다. `skynet/best` 브랜치는 항상 가장 좋은 버전을 가리킵니다. 더 좋은 버전이 나오면 이 브랜치가 이동합니다.
-
-## 최고 버전 서빙하기
-
-최고 버전을 내 코드에서 호출할 수 있습니다. 리포지토리 루트에는 `serve(input)`을 정의하는 `serve.py` 파일이 있어야 합니다.
-
-```python tab="serve.py"
-def serve(input):
-    return {"label": classify(input["message"])}
-```
-
-- `input`은 요청의 입력 필드 dict입니다.
-- 반환값은 JSON으로 직렬화할 수 있어야 합니다. dict는 `outputs`가 됩니다. 다른 값은 `{"output": value}`가 됩니다.
-- `serve.py`는 `openascent` 도우미 모듈의 `llm`으로 모델을 호출할 수 있습니다. 실행의 시크릿은 받지 않습니다.
-
-Skynet은 실행과 같은 보호된 샌드박스에서 최고 버전을 실행합니다. **사용량** 탭에는 두 부분이 있습니다.
-
-- 양식. 입력 필드를 채우고 **실행**을 선택하면 결과를 받습니다.
-- cURL, Python, JavaScript, Go로 된 **통합 코드**.
-
-최고 버전을 호출하려면 **설정 → API**에서 API 토큰을 만드세요. 그런 다음 요청을 보냅니다. `Idempotency-Key` 헤더는 필수입니다.
-
-```bash tab="cURL"
-export APP_API_TOKEN=skyd_...
-curl -X POST "$API_URL/serve/<optimization_id>" \
-  -H "Authorization: Bearer $APP_API_TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
-```
-
-```python tab="Python"
-import os
-import uuid
-import requests
-
-response = requests.post(
-    f"{os.environ['API_URL']}/serve/<optimization_id>",
-    headers={
-        "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
-        "Idempotency-Key": str(uuid.uuid4()),
-    },
-    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
-)
-print(response.json()["outputs"])
-```
-
-`message`를 실행의 입력 필드로 바꾸세요. **사용량** 탭의 **통합 코드**에는 실제 URL과 필드 이름이 채워져 있습니다.
-
-응답에는 `outputs`, `input_fields`, `output_fields`, `model_used`, `cents_charged`, `budget`이 들어 있습니다.
-
-> [!TIP]
-> 각 호출은 호출자의 잔액에서 따로 청구됩니다. `max_cost_cents`는 선택 사항입니다. 이 호출 한 번에 허용하는 최대 금액을 센트 단위로 기록합니다. 호출은 잔액으로 제한됩니다. 같은 `Idempotency-Key`를 다시 보내면 Skynet은 그 호출을 다시 청구하지 않습니다.
-
-인증과 다른 엔드포인트는 [API](/docs/api)를 읽어 보세요.
 
 ## 결과 공유하기
 

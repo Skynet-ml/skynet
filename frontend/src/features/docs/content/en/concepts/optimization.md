@@ -22,7 +22,7 @@ def score(repo_path, case, output=None):
 - `repo_path` is a folder that holds only your metric files.
 - `score` returns one object: a number under `"score"`, and an optional `"feedback"` string.
 
-The repository has a `serve.py` file at its root with `def serve(input)`. The `[run]` entry calls it in its own sandbox box. Skynet uses it to serve the best version after the run.
+The repository has a `serve.py` file at its root with `def serve(input)`. The `[run]` entry calls it in its own sandbox box.
 
 The scorer runs in a separate sandbox box. That box holds only your metric files and no version code, so the scorer cannot import `serve.py`. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from openascent import call`. Without a `[run]` entry or a `[target.<name>]` stage, Skynet refuses the `ascent.toml` file.
 

@@ -53,8 +53,6 @@ def _success_cases() -> list[tuple[str, dict[str, Any]]]:
             "get_pair_test_results_optimizations",
             {"optimization_id": _oid(11), "pair_index": 3},
         ),
-        ("serve_info_serve", {"optimization_id": _oid(1)}),
-        ("serve_pair_info_serve", {"optimization_id": _oid(11), "pair_index": 3}),
         ("cancel_job_optimizations", {"optimization_id": _oid(7)}),
         ("pause_job_optimizations", {"optimization_id": _oid(7)}),
         ("resume_job_optimizations", {"optimization_id": _oid(8)}),
@@ -143,14 +141,6 @@ def _success_cases() -> list[tuple[str, dict[str, Any]]]:
             },
         ),
         ("request_code_authoring", {"goal": "write a metric"}),
-        (
-            "request_user_inference",
-            {"optimization_id": _oid(1), "prompt": "classify this"},
-        ),
-        (
-            "request_user_pair_inference",
-            {"optimization_id": _oid(11), "pair_index": 3, "prompt": "run"},
-        ),
         ("blackbox_engines_blackbox_engines_get", {"target": "prompt"}),
         (
             "blackbox_scorer_dry_run_blackbox_scorer_dry_run_post",
@@ -307,12 +297,6 @@ def _error_cases() -> list[tuple[str, dict[str, Any], int, str]]:
             {"sample_id": "nope"},
             404,
             "unknown sample",
-        ),
-        (
-            "request_user_pair_inference",
-            {"optimization_id": _oid(1), "pair_index": 0},
-            409,
-            "pair inference on non-grid",
         ),
     ]
 

@@ -401,7 +401,6 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
                         EVENT_TERMINAL,
                         EVENT_ERROR,
                         "preflight_result",
-                        "interaction_result",
                     }
                     event_queue.put(event)
 

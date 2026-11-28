@@ -123,7 +123,6 @@ def test_dashboard_empty_window_is_zero_filled() -> None:
     assert len(body["daily"]) == 7
     assert body["daily"][-1]["day"] == datetime.now(UTC).date().isoformat()
     assert body["failure_reasons"] == []
-    assert body["top_programs"] == []
     assert body["top_events"] == []
 
 
@@ -148,9 +147,6 @@ def test_dashboard_aggregates_and_excludes_internal_accounts() -> None:
                 _event("page_view", None, now),
                 _event("run_failed", "new@x.io", now, failure_stage="evaluate", error_class="ValueError"),
                 _event("run_failed", "staff@x.io", now, failure_stage="sandbox", error_class="OSError"),
-                _event("serve_inference", "new@x.io", now, optimization_id="j1", status="ok"),
-                _event("serve_inference", "new@x.io", now, optimization_id="j1", status="error"),
-                _event("serve_inference", "staff@x.io", now, optimization_id="j5", status="ok"),
                 WalletLedgerModel(username="new@x.io", delta_cents=500, kind="topup", created_at=now),
                 WalletLedgerModel(username="new@x.io", delta_cents=-120, kind="run", created_at=now),
                 WalletLedgerModel(username="new@x.io", delta_cents=-50, kind="refund", created_at=now),
@@ -178,16 +174,11 @@ def test_dashboard_aggregates_and_excludes_internal_accounts() -> None:
         "runs_failed": 1,
         "revenue_cents": 500,
         "usage_cents": 120,
-        "serve_calls": 2,
-        "serve_errors": 1,
     }
     today = body["daily"][-1]
     assert today["signups"] == 1
     assert (today["runs_succeeded"], today["runs_failed"], today["runs_other"]) == (1, 1, 1)
     assert body["failure_reasons"] == [{"stage": "evaluate", "error_class": "ValueError", "count": 1}]
-    assert body["top_programs"] == [
-        {"optimization_id": "j1", "name": "Triage", "owner": "new@x.io", "calls": 2, "errors": 1}
-    ]
     events = {row["name"]: row for row in body["top_events"]}
     assert events["page_view"] == {"name": "page_view", "count": 2, "users": 1}
 

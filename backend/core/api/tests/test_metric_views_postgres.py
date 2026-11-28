@@ -32,7 +32,9 @@ pytestmark = pytest.mark.skipif(
     reason="Set APP_BUDGET_TEST_DB_URL to an explicitly disposable PostgreSQL database.",
 )
 
-_MIGRATION = Path(__file__).resolve().parents[3] / "alembic" / "versions" / "d1e2f3a4b5c6_add_metric_views.py"
+_VERSIONS = Path(__file__).resolve().parents[3] / "alembic" / "versions"
+_MIGRATION = _VERSIONS / "d1e2f3a4b5c6_add_metric_views.py"
+_DROP_IN_USE_MIGRATION = _VERSIONS / "6db6fa226aca_drop_lifted_in_use_view.py"
 
 WEEK_1 = date(2026, 9, 7)
 WEEK_2 = date(2026, 9, 14)
@@ -69,13 +71,16 @@ def database() -> Iterator[Engine]:
         admin.dispose()
 
 
-def _migration() -> ModuleType:
-    """Load the metric-views migration module from its file.
+def _migration(path: Path = _MIGRATION) -> ModuleType:
+    """Load a migration module from its file.
+
+    Args:
+        path: The migration file, the metric-views migration by default.
 
     Returns:
         The executed migration module.
     """
-    spec = importlib.util.spec_from_file_location("metric_views_migration_fixture", _MIGRATION)
+    spec = importlib.util.spec_from_file_location(f"migration_fixture_{path.stem}", path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -83,14 +88,15 @@ def _migration() -> ModuleType:
     return module
 
 
-def _run_migration(engine: Engine, step: str) -> None:
-    """Run the migration's ``upgrade`` or ``downgrade`` on ``engine``.
+def _run_migration(engine: Engine, step: str, path: Path = _MIGRATION) -> None:
+    """Run a migration's ``upgrade`` or ``downgrade`` on ``engine``.
 
     Args:
         engine: The per-test schema engine.
         step: ``"upgrade"`` or ``"downgrade"``.
+        path: The migration file, the metric-views migration by default.
     """
-    migration = _migration()
+    migration = _migration(path)
     with engine.begin() as connection, Operations.context(MigrationContext.configure(connection)):
         getattr(migration, step)()
 
@@ -140,35 +146,12 @@ def _run(session: Session, username: str, at: datetime, **overrides: Any) -> Non
     )
 
 
-def _serve(session: Session, owner: str, channel: str, *days: datetime) -> None:
-    """Add a job for ``owner`` and one ``serve_inference`` event per time in ``days``.
-
-    Args:
-        session: Open ORM session.
-        owner: Job owner.
-        channel: Serve channel recorded on each call.
-        *days: Receive time of each call.
-    """
-    job_id = str(uuid4())
-    session.add(JobModel(optimization_id=job_id, username=owner, status="success"))
-    for at in days:
-        session.add(
-            TelemetryEventModel(
-                event_name="serve_inference",
-                received_at=at,
-                username="caller@example.com",
-                properties={"optimization_id": job_id, "channel": channel, "route": "serve", "status": "ok"},
-            )
-        )
-
-
 def _seed(engine: Engine) -> None:
     """Seed the two-week story every assertion below reads.
 
     Args:
         engine: The per-test schema engine.
     """
-    day = timedelta(days=1)
     hour = timedelta(hours=1)
     with Session(engine) as session:
         for name in ("good", "low", "few", "sample", "late", "second", "internal"):
@@ -184,12 +167,6 @@ def _seed(engine: Engine) -> None:
         _run(session, "internal@example.com", SIGNUP_1 + hour)
         _run(session, "good@example.com", SIGNUP_2)
         _run(session, "fresh@example.com", SIGNUP_2 + 5 * hour)
-        _serve(session, "good@example.com", "api_token", SIGNUP_2, SIGNUP_2 + day)
-        _serve(session, "fresh@example.com", "share_link", SIGNUP_2 + hour, SIGNUP_2 + day)
-        _serve(session, "late@example.com", "api_token", SIGNUP_2, SIGNUP_2 + hour)
-        _serve(session, "second@example.com", "ui", SIGNUP_2, SIGNUP_2 + day)
-        _serve(session, "low@example.com", "api_token", SIGNUP_2, SIGNUP_2 + day)
-        _serve(session, "internal@example.com", "api_token", SIGNUP_2, SIGNUP_2 + day)
         session.commit()
 
 
@@ -207,7 +184,6 @@ def _read(engine: Engine) -> dict[str, dict[date, dict[str, Any]]]:
     return {
         "first_lifts": {row["signup_week"]: row for row in body["first_lifts"]},
         "lifted_users": {row["week"]: row for row in body["lifted_users"]},
-        "lifted_in_use": {row["week"]: row for row in body["lifted_in_use"]},
     }
 
 
@@ -229,15 +205,6 @@ def test_lifted_users_split_new_and_returning_across_weeks(database: Engine) -> 
     assert lifted[WEEK_2] == {"week": WEEK_2, "new_lifted": 1, "returning_lifted": 1}
 
 
-def test_lifted_in_use_needs_external_calls_on_two_distinct_days(database: Engine) -> None:
-    """API-token and share-link calls on 2 days count; same-day, ui-only, unlifted and internal owners do not."""
-    _seed(database)
-    _run_migration(database, "upgrade")
-    in_use = _read(database)["lifted_in_use"]
-    assert in_use[WEEK_2] == {"week": WEEK_2, "users_in_use": 2}
-    assert in_use[WEEK_1] == {"week": WEEK_1, "users_in_use": 0}
-
-
 def test_series_are_newest_first_and_zero_filled(database: Engine) -> None:
     """Every series has one row per requested week, newest first, including empty weeks."""
     _run_migration(database, "upgrade")
@@ -246,11 +213,10 @@ def test_series_are_newest_first_and_zero_filled(database: Engine) -> None:
     weeks = [WEEK_2, WEEK_1, WEEK_1 - timedelta(weeks=1)]
     assert [row.signup_week for row in body.first_lifts] == weeks
     assert [row.week for row in body.lifted_users] == weeks
-    assert [row.users_in_use for row in body.lifted_in_use] == [0, 0, 0]
 
 
 def test_migration_downgrade_drops_the_views(database: Engine) -> None:
-    """Upgrade creates all three views and downgrade removes them."""
+    """Upgrade creates every router view and downgrade removes them."""
     _run_migration(database, "upgrade")
     assert _view_names(database) == set(METRIC_VIEW_DDL)
     _run_migration(database, "downgrade")
@@ -263,3 +229,15 @@ def test_read_creates_missing_views_on_an_unmigrated_database(database: Engine) 
     assert _view_names(database) == set()
     assert _read(database)["first_lifts"][WEEK_1]["first_lifts"] == 1
     assert _view_names(database) == set(METRIC_VIEW_DDL)
+
+
+def test_drop_in_use_migration_drops_and_restores_the_view(database: Engine) -> None:
+    """The later migration drops the lifted-in-use view and its downgrade restores it."""
+    exists = "SELECT to_regclass('metric_lifted_in_use_weekly')"
+    _run_migration(database, "upgrade")
+    _run_migration(database, "upgrade", _DROP_IN_USE_MIGRATION)
+    with database.connect() as connection:
+        assert connection.execute(text(exists)).scalar() is None
+    _run_migration(database, "downgrade", _DROP_IN_USE_MIGRATION)
+    with database.connect() as connection:
+        assert connection.execute(text(exists)).scalar() is not None

@@ -37,7 +37,6 @@ import {
   RepoFileCard,
   RepoFolderCard,
   RunLifecycleCard,
-  ServeInfoCard,
   SettingsListCard,
   SettingValuesCard,
   SetupCheckCard,
@@ -111,7 +110,6 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   search_code: "search",
   search_commits: "search",
   profile_datasets_profile_post: "read",
-  serve_info_serve: "read",
   blackbox_engines_blackbox_engines_get: "read",
 };
 
@@ -633,9 +631,6 @@ const RENDERERS: Record<string, ToolRenderer> = {
   },
   get_registry_snapshot_registry_get: {
     card: (call) => <RegistryCard call={call} />,
-  },
-  serve_info_serve: {
-    card: (call) => <ServeInfoCard call={call} />,
   },
 
   list_settings: { card: (call) => <SettingsListCard call={call} /> },

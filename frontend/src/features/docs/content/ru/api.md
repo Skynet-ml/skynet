@@ -49,7 +49,6 @@ Authorization: Bearer skyd_...
 | `GET /optimizations`                            | Возвращает список ваших запусков.                             |
 | `GET /optimizations/{optimization_id}`          | Возвращает один запуск: статус, прогресс, логи и результат.   |
 | `POST /optimizations/{optimization_id}/cancel`  | Останавливает запуск.                                         |
-| `POST /serve/{optimization_id}`                 | Выполняет лучшую версию на новом входе.                       |
 | `GET /health`                                   | Показывает, работает ли сервис.                               |
 
 ## Начать запуск
@@ -164,8 +163,6 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
-
-Чтобы выполнить лучшую версию на новом входе, отправьте `POST /serve/{optimization_id}` с заголовком `Idempotency-Key`. В репозитории должен быть файл `serve.py` с `def serve(input)`. Запрос, ответ и значение каждой оценки описаны в разделе [Чтение результатов](/docs/guides/results).
 
 ## Лимиты
 

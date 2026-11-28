@@ -108,10 +108,6 @@ Depo kodunuz ve puanlayıcınız bir sandbox içinde çalışır. Skynet sandbox
 
 Sandbox işlem gücü, model çağrıları kendi anahtarınızı kullandığında da çalıştırmanın harcama limitine dahildir. Kurulum kontrollerindeki sandbox kullanımı, kurulum limite dahil edilmedikçe bakiyenizden ödenir.
 
-## Sunum
-
-Tamamlanmış bir çalıştırmanın sunum uç noktasına yapılan her çağrı ayrı faturalandırılır. Çağıran, kendi bakiyesinden öder. Bir çağrı için kabul ettiğiniz en yüksek tutarı kaydetmek için istekte `max_cost_cents` ayarlayabilirsiniz. Çağrıyı bakiyeniz sınırlar. [Sonuçlar](/docs/guides/results) sayfasını okuyun.
-
 ## Planlar
 
 İki plan vardır: Free ve Pro. Pro, eşzamanlı çalıştırmalar ve depolama gibi bazı limitleri yükseltir. Bir Pro yenilemesi başarısız olursa hesap 7 gün boyunca Pro limitlerini korur. Bundan sonra ödeme başarılı olana kadar Free limitlerini kullanır. Bkz. [Limitler](/docs/limits).

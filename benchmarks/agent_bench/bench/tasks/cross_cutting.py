@@ -1,7 +1,7 @@
 """Benchmark tasks for the ``cross`` category: skills the other categories miss.
 
 The five category modules cover run setup, run insight, run lifecycle, black-box
-serving and account robustness. This module fills the remaining gaps so the
+mode and account robustness. This module fills the remaining gaps so the
 benchmark is not blind to them: resolving a pronoun from earlier turns, a black-box
 scorer check that *passes* and is followed by a launch, handing code writing to
 the authoring card, and filtering the model catalog by capability.
@@ -189,7 +189,7 @@ TASKS: list[Task] = [
         ],
         oracle=_oracle_blackbox_launch,
         skills=["blackbox", "validate-then-act", "model-resolution"],
-        notes="The positive twin of bbserve-scorer-dryrun-refuse: the scorer is valid, so stopping after the check is wrong.",
+        notes="The positive twin of blackbox-scorer-dryrun-refuse: the scorer is valid, so stopping after the check is wrong.",
     ),
     Task(
         id="cross-open-code-authoring",

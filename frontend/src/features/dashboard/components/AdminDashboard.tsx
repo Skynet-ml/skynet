@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -22,7 +21,6 @@ import {
   ADMIN_RANGES,
   failureRows,
   growthSeries,
-  programRows,
   runSeries,
   successRate,
   type AdminRange,
@@ -120,7 +118,6 @@ function DashboardBody({ data, compact }: { data: AdminDashboardResponse; compac
   const growth = useMemo(() => growthSeries(data.daily, formatDay), [data.daily]);
   const runs = useMemo(() => runSeries(data.daily, formatDay), [data.daily]);
   const failures = useMemo(() => failureRows(data.failure_reasons), [data.failure_reasons]);
-  const programs = useMemo(() => programRows(data.top_programs), [data.top_programs]);
   const events = useMemo(
     () => data.top_events.map((event) => ({ ...event, id: event.name })),
     [data.top_events],
@@ -172,16 +169,6 @@ function DashboardBody({ data, compact }: { data: AdminDashboardResponse; compac
         usage: formatMoney(totals.usage_cents),
       }),
       accent: "default",
-    },
-    {
-      label: msg("dashboard.admin.kpi.serve"),
-      help: msg("dashboard.admin.kpi.serve_help"),
-      value: <AnimatedNumber value={totals.serve_calls} />,
-      detail:
-        totals.serve_calls > 0
-          ? msg("dashboard.admin.kpi.serve_detail", { errors: formatCount(totals.serve_errors) })
-          : undefined,
-      accent: totals.serve_errors > 0 ? "danger" : "default",
     },
   ];
   // The compact view sits in the narrow settings panel, where side-by-side panels get cramped.
@@ -292,92 +279,40 @@ function DashboardBody({ data, compact }: { data: AdminDashboardResponse; compac
           className="border-border/60"
           compact={compact}
         >
-          <div className={splitClass}>
-            <div className="min-w-0">
-              <PanelIntro
-                title={msg("dashboard.admin.section.programs")}
-                help={msg("dashboard.admin.kpi.serve_help")}
-                compact={compact}
-              />
-              <SortableTable
-                rows={programs}
-                rowKey={(row) => row.id}
-                exportName="top-programs"
-                initialSort="calls"
-                initialDir="desc"
-                columns={[
-                  {
-                    key: "name",
-                    label: msg("dashboard.admin.col.program"),
-                    width: 180,
-                    className: "max-w-[14rem] truncate",
-                    render: (row) => (
-                      <Link
-                        href={`/optimizations/${row.id}`}
-                        title={row.name}
-                        className="underline-offset-2 hover:underline"
-                      >
-                        {row.name}
-                      </Link>
-                    ),
-                  },
-                  {
-                    key: "owner",
-                    label: msg("dashboard.admin.col.owner"),
-                    width: 160,
-                    filter: true,
-                    dir: "ltr",
-                  },
-                  {
-                    key: "calls",
-                    label: msg("dashboard.admin.col.calls"),
-                    width: 80,
-                    render: (row) => formatCount(row.calls),
-                  },
-                  {
-                    key: "error_rate",
-                    label: msg("dashboard.admin.col.error_rate"),
-                    width: 90,
-                    render: (row) => `${row.error_rate}%`,
-                  },
-                ]}
-              />
-            </div>
-            <div className="min-w-0">
-              <PanelIntro
-                title={msg("dashboard.admin.section.events")}
-                help={msg("dashboard.admin.events_help")}
-                compact={compact}
-              />
-              <SortableTable
-                rows={events}
-                rowKey={(row) => row.id}
-                exportName="product-events"
-                initialSort="count"
-                initialDir="desc"
-                columns={[
-                  {
-                    key: "name",
-                    label: msg("dashboard.admin.col.event"),
-                    width: 200,
-                    dir: "ltr",
-                    className: "font-mono text-xs",
-                  },
-                  {
-                    key: "count",
-                    label: msg("dashboard.admin.col.events"),
-                    width: 90,
-                    render: (row) => formatCount(row.count),
-                  },
-                  {
-                    key: "users",
-                    label: msg("dashboard.admin.col.users"),
-                    width: 90,
-                    render: (row) => formatCount(row.users),
-                  },
-                ]}
-              />
-            </div>
+          <div className="min-w-0">
+            <PanelIntro
+              title={msg("dashboard.admin.section.events")}
+              help={msg("dashboard.admin.events_help")}
+              compact={compact}
+            />
+            <SortableTable
+              rows={events}
+              rowKey={(row) => row.id}
+              exportName="product-events"
+              initialSort="count"
+              initialDir="desc"
+              columns={[
+                {
+                  key: "name",
+                  label: msg("dashboard.admin.col.event"),
+                  width: 200,
+                  dir: "ltr",
+                  className: "font-mono text-xs",
+                },
+                {
+                  key: "count",
+                  label: msg("dashboard.admin.col.events"),
+                  width: 90,
+                  render: (row) => formatCount(row.count),
+                },
+                {
+                  key: "users",
+                  label: msg("dashboard.admin.col.users"),
+                  width: 90,
+                  render: (row) => formatCount(row.users),
+                },
+              ]}
+            />
           </div>
         </AnalyticsSection>
       </StaggerItem>
@@ -387,7 +322,7 @@ function DashboardBody({ data, compact }: { data: AdminDashboardResponse; compac
 
 /**
  * Admin-only dashboard: signups, activation, active users, runs and why they
- * fail, money, served programs and product events. A 403 from
+ * fail, money and product events. A 403 from
  * the backend hides it, so a stale admin flag never shows a broken panel.
  * `compact` draws the same sections smaller, with definitions on hover only.
  */

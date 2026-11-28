@@ -22,7 +22,7 @@ def score(repo_path, case, output=None):
 - `repo_path` ist ein Ordner, der nur Ihre Metrikdateien enthält.
 - `score` gibt ein Objekt zurück: eine Zahl unter `"score"` und einen optionalen `"feedback"`-String.
 
-Das Repository hat im Stammverzeichnis eine Datei `serve.py` mit `def serve(input)`. Der `[run]`-Eintrag ruft sie in einer eigenen Sandbox-Box auf. Skynet stellt damit nach dem Durchlauf die beste Version bereit.
+Das Repository hat im Stammverzeichnis eine Datei `serve.py` mit `def serve(input)`. Der `[run]`-Eintrag ruft sie in einer eigenen Sandbox-Box auf.
 
 Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält nur Ihre Metrikdateien und keinen Code der Version, daher kann der Scorer `serve.py` nicht importieren. Er sieht die Version nur über `output` oder über `call()` an eine Stufe `[target.<name>]`. Importieren Sie `call` mit `from openascent import call`. Ohne `[run]`-Eintrag oder Stufe `[target.<name>]` lehnt Skynet die Datei `ascent.toml` ab.
 
