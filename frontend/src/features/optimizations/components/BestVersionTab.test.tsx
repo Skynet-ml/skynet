@@ -21,7 +21,9 @@ registerHooks({
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
 
-const { BestVersionTab, reportLocalApplyFailure } = await import("./BestVersionTab");
+const { BestVersionTab, hasLocalDrafts, reportLocalApplyFailure } = await import(
+  "./BestVersionTab"
+);
 const { ApiError } = await import("@/shared/lib/api");
 
 const PATCH = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n";
@@ -81,6 +83,15 @@ void describe("BestVersionTab local Apply", () => {
     assert.match(markup, UNDO_NEEDED);
     assert.match(markup, UNDO_BUTTON);
     assert.doesNotMatch(markup, APPLY_HINT);
+  });
+});
+
+void describe("hasLocalDrafts", () => {
+  void it("counts a setup that only deleted files, so Apply shows under a baseline best", () => {
+    assert.equal(hasLocalDrafts({ provider: "local", draft_deleted: ["old.py"] }), true);
+    assert.equal(hasLocalDrafts({ provider: "local", draft_files: { "a.py": "x = 2\n" } }), true);
+    assert.equal(hasLocalDrafts({ provider: "local", draft_files: {}, draft_deleted: [] }), false);
+    assert.equal(hasLocalDrafts(undefined), false);
   });
 });
 
