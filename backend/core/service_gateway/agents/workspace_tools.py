@@ -9,6 +9,12 @@ run request carries the repository files as draft files, which the trusted
 parent writes over the checkout; the user's repository stays unchanged.
 :data:`METRIC_GUIDE` is the part of the screen's prompt that says how to write
 those files.
+
+In the Mac app, a local-folder run's agent also gets ``exec_command``,
+``write_stdin`` and ``apply_patch`` (SKY-997). They work on a private copy of
+the folder (:mod:`.folder_workspace`); after each call the files that changed
+in the copy become draft files, and the deleted ones go into
+``workspace_deleted``. The user's folder stays unchanged.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ import dspy
 
 from ...api.errors import DomainError
 from ...brand import APP_NAME
+from ...config import settings
 from ...connectors import github, repo_hosts
 from ...connectors.github_repo import RepoRateLimitError, rate_limit_message
 from ...connectors.transport import label
@@ -38,6 +45,10 @@ from ...models.blackbox import (
     clean_draft_path,
 )
 from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, parse_constraints, rule_file_settings
+from .apply_patch import APPLY_PATCH_TOOL, PatchError, apply_patch
+from .attachment_sandbox import EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL
+from .folder_workspace import FolderWorkspace, open_workspace
+from .local_egress_proxy import SetupSecret
 from .repo_browser import (
     LocalFolderBrowser,
     RepoBrowser,
@@ -59,6 +70,13 @@ WORKSPACE_FILES = {"metric.py": "metric_code", "ascent.toml": "ascent_toml"}
 DRAFT_FILES_FIELD = "workspace_files"
 # The commit the drafts were read at; the run request sends it as ``draft_base``.
 DRAFT_BASE_FIELD = "workspace_base"
+# The copied files the shell tools deleted; the list is whole each time, never merged.
+DRAFT_DELETED_FIELD = "workspace_deleted"
+FOLDER_SHELL_TOOLS = frozenset({EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL, APPLY_PATCH_TOOL})
+FOLDER_CHANGED = (
+    "The folder changed after the draft files were written, so the run would refuse them. "
+    "Ask the user to discard the changed files in the editor, then read the folder again."
+)
 # The editor keeps a root run.py as a text run's program, so a repository file there would not reach the run.
 UNWRITABLE_PATHS = frozenset({"run.py"})
 # The prompt shows this file and a test parses it, so the agent never copies an example the parser refuses.
@@ -249,10 +267,7 @@ def open_folder(state: dict[str, Any]) -> tuple[RepoBrowser | None, str]:
     base = str(state.get(DRAFT_BASE_FIELD) or "")
     if base and has_drafts(state) and base != browser.branch:
         # A disk folder has no old state to read, and a draft copied from it would undo the newer change.
-        return None, (
-            "The folder changed after the draft files were written, so the run would refuse them. "
-            "Ask the user to discard the changed files in the editor, then read the folder again."
-        )
+        return None, FOLDER_CHANGED
     browser.preload_key_files()
     return browser, ""
 
@@ -586,6 +601,8 @@ def workspace_tools(
     turn: _TurnAuthoringFlag,
     *,
     github_token: Callable[[], str | None] | None,
+    session_key: str | None = None,
+    setup_secrets: Callable[[], list[SetupSecret]] | None = None,
 ) -> list[dspy.Tool]:
     """Build the Metric screen's tools that read the repository and write the run's files.
 
@@ -598,9 +615,15 @@ def workspace_tools(
             ``wizard_patch``, so Continue judges the screen with it.
         github_token: Returns the caller's token for the run's repository
             host, or ``None``.
+        session_key: The setup chat's id, which names its folder copy; the
+            shell tools need it.
+        setup_secrets: Returns the saved secrets that the copy's commands get
+            as placeholders.
 
     Returns:
-        The four tools, unwrapped, on the Metric and Check screens; empty on any other screen.
+        The four tools, unwrapped, on the Metric and Check screens, plus
+        :data:`FOLDER_SHELL_TOOLS` for a local-folder run in the Mac app;
+        empty on any other screen.
     """
     # The Check screen fixes metric.py after a failed check, and only these tools write it.
     if state.get("wizard_screen") not in ("metric", "check"):
@@ -764,7 +787,7 @@ def workspace_tools(
                 return dict(current)
             if refusal := dropped_rule_files(current, text):
                 return {"error": refusal}
-        return save(clean, field, text)
+        return mirrored(clean, save(clean, field, text), text)
 
     def read_repo_toml(browser: RepoBrowser) -> RepoRead:
         """Read the repository's ``ascent.toml`` for the guard, outside the agent's read limit.
@@ -885,7 +908,283 @@ def workspace_tools(
             return {"error": "The edit leaves the file empty: send the whole file text instead."}
         if field == "ascent_toml" and (refusal := dropped_rule_files(guarded, edited)):
             return {"error": refusal}
-        return save(clean, field, edited)
+        return mirrored(clean, save(clean, field, edited), edited)
+
+    shell_on = bool(
+        settings.local_mode
+        and session_key
+        and state.get("repo_provider") == LOCAL_PROVIDER
+        and str(state.get("repo_path") or "").strip()
+    )
+    shell: list[FolderWorkspace | str] = []
+    shell_lock = asyncio.Lock()
+    # Pi may run tool calls at the same time; one sync at a time keeps the turn's patch whole.
+    sync_lock = asyncio.Lock()
+
+    def mirrored(path: str, result: dict[str, Any], text: str) -> dict[str, Any]:
+        """Write a saved file into the folder copy too, so the next command sees it.
+
+        Args:
+            path: The clean file path.
+            result: The :func:`save` result.
+            text: The whole file text.
+
+        Returns:
+            ``result``, unchanged.
+        """
+        if "error" not in result and shell and isinstance(shell[0], FolderWorkspace):
+            shell[0].write(path, text)
+        return result
+
+    def draft_texts(current: dict[str, Any]) -> dict[str, str]:
+        """Return every file the run request sends in place of the folder's file.
+
+        Args:
+            current: The wizard snapshot with this turn's writes merged in.
+
+        Returns:
+            Path to text: the draft files, plus ``metric.py`` and ``ascent.toml`` when they hold text.
+        """
+        files = drafts()
+        for path, field in WORKSPACE_FILES.items():
+            if text := str(current.get(field) or ""):
+                files[path] = text
+        return files
+
+    def deleted_drafts(current: dict[str, Any]) -> list[str]:
+        """Return the copied files the draft deletes.
+
+        Args:
+            current: The wizard snapshot with this turn's writes merged in.
+
+        Returns:
+            The paths.
+        """
+        found = current.get(DRAFT_DELETED_FIELD)
+        return [str(path) for path in found] if isinstance(found, list) else []
+
+    def open_shell() -> FolderWorkspace | str:
+        """Open the chat's folder copy and put the current draft into it.
+
+        Returns:
+            The workspace, or the reason the shell tools cannot run.
+        """
+        current = cast(dict[str, Any], {**state, **turn.wizard_patch})
+        try:
+            workspace, _ = open_workspace(cast(str, session_key), str(current["repo_path"]).strip(), setup_secrets)
+        except FolderTreeError as error:
+            return str(error)
+        except (OSError, ValueError) as exc:  # a folder that cannot be copied leaves the agent without the shell
+            logger.info("Setup agent cannot copy the local folder: %s", type(exc).__name__)
+            return "The folder cannot be copied."
+        base = str(current.get(DRAFT_BASE_FIELD) or "")
+        if base and has_drafts(current) and base != workspace.base:
+            return FOLDER_CHANGED
+        workspace.reset(draft_texts(current), deleted_drafts(current))
+        return workspace
+
+    async def folder_shell() -> FolderWorkspace | str:
+        """Open the folder copy once a turn.
+
+        Returns:
+            The :func:`open_shell` result.
+        """
+        async with shell_lock:
+            if not shell:
+                shell.append(await asyncio.to_thread(open_shell))
+            return shell[0]
+
+    def sync(workspace: FolderWorkspace) -> dict[str, Any]:
+        """Turn the copy's changes into this turn's draft, as the write tool would.
+
+        Args:
+            workspace: The open copy.
+
+        Returns:
+            ``wizard_state`` with the fields that changed, ``skipped_files``
+            with each changed file that cannot be a draft and its reason, and
+            ``ascent_toml_diagnostics`` as :func:`save` gives them.
+        """
+        current = cast(dict[str, Any], {**state, **turn.wizard_patch})
+        found = workspace.changes(draft_texts(current))
+        skipped = dict(found.skipped)
+        fields: dict[str, str] = {}
+        files = drafts()
+        changed: dict[str, str] = {}
+        for path, text in found.files.items():
+            field = WORKSPACE_FILES.get(path)
+            if path in UNWRITABLE_PATHS:
+                skipped[path] = f"{path} cannot be written in a {noun} run. Write the metric in metric.py."
+            elif field is None:
+                if files.get(path) != text:
+                    changed[path] = text
+            elif str(current.get(field) or "") != text:
+                fields[field] = text
+        if "ascent_toml" in fields:
+            before = str(current.get("ascent_toml") or "") or workspace.source_text("ascent.toml")
+            refusal = (
+                "The folder's ascent.toml cannot be read, so the change cannot be checked. Ask the user."
+                if before is None
+                else dropped_rule_files(before, fields["ascent_toml"])
+            )
+            if refusal:
+                skipped["ascent.toml"] = f"{refusal} The copy holds the earlier ascent.toml again."
+                # The copy goes back, so the next command does not run against a file the draft refused.
+                workspace.write("ascent.toml", before or "")
+                del fields["ascent_toml"]
+        room = DRAFT_FILES_MAX - len(WORKSPACE_FILES) - len(files)
+        for path in sorted(changed):
+            if path not in files:
+                if room <= 0:
+                    skipped[path] = "The run already has as many changed files as it can take."
+                    del changed[path]
+                room -= 1
+        sent = {**files, **changed, "ascent.toml": fields.get("ascent_toml", str(current.get("ascent_toml") or ""))}
+        if sum(len(body.encode("utf-8", "surrogatepass")) for body in sent.values()) > DRAFT_FILES_TOTAL_BYTES:
+            for path in changed:
+                skipped[path] = f"The changed files are larger than {DRAFT_FILES_TOTAL_BYTES} bytes together."
+            changed = {}
+            fields.pop("ascent_toml", None)
+        patch: dict[str, Any] = dict(fields)
+        if changed:
+            turn.wizard_patch[DRAFT_FILES_FIELD] = {**files, **changed}
+            patch[DRAFT_FILES_FIELD] = changed
+        if found.deleted != deleted_drafts(current):
+            patch[DRAFT_DELETED_FIELD] = found.deleted
+        if changed or "ascent_toml" in fields or DRAFT_DELETED_FIELD in patch:
+            patch[DRAFT_BASE_FIELD] = workspace.base
+        turn.wizard_patch.update({key: value for key, value in patch.items() if key != DRAFT_FILES_FIELD})
+        result: dict[str, Any] = {}
+        if patch:
+            result["wizard_state"] = patch
+        if skipped:
+            result["skipped_files"] = skipped
+        diagnostics, hidden = ascent_toml_diagnostics(fields["ascent_toml"]) if "ascent_toml" in fields else ([], 0)
+        if diagnostics:
+            capped = model_diagnostics(diagnostics, hidden)
+            result["ascent_toml_diagnostics"] = capped["diagnostics"]
+            if "diagnostics_omitted" in capped:
+                result["ascent_toml_diagnostics_omitted"] = capped["diagnostics_omitted"]
+        return result
+
+    async def in_copy(call: Callable[[FolderWorkspace], str]) -> dict[str, Any]:
+        """Run one shell call in the folder copy, then sync the draft.
+
+        Args:
+            call: The blocking call, run off the event loop.
+
+        Returns:
+            ``{"output": ...}`` with the :func:`sync` result, or ``{"error": ...}``.
+
+        Raises:
+            asyncio.CancelledError: When the turn stops; the copy's commands end first.
+        """
+        workspace = await folder_shell()
+        if isinstance(workspace, str):
+            return {"error": workspace}
+        try:
+            output = await asyncio.to_thread(call, workspace)
+        except asyncio.CancelledError:
+            # The worker thread cannot be cancelled; ending the commands lets it return.
+            workspace.stop_commands()
+            raise
+        except PatchError as error:
+            return {"error": str(error)}
+        async with sync_lock:
+            return {"output": output, **await asyncio.to_thread(sync, workspace)}
+
+    async def exec_command(
+        cmd: str, workdir: str | None = None, yield_time_ms: int | None = None, max_output_tokens: int | None = None
+    ) -> dict[str, Any]:
+        """Run a shell command in the copy of the folder.
+
+        Args:
+            cmd: The shell command.
+            workdir: The directory to run in, relative to the folder.
+            yield_time_ms: The longest wait for output.
+            max_output_tokens: The token budget of the output.
+
+        Returns:
+            The :func:`in_copy` result.
+        """
+        return await in_copy(lambda workspace: workspace.exec_command(cmd, workdir, yield_time_ms, max_output_tokens))
+
+    async def write_stdin(
+        session_id: int,
+        chars: str | None = None,
+        yield_time_ms: int | None = None,
+        max_output_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Send input to a running command, or read its newer output.
+
+        Args:
+            session_id: The session id from an earlier result.
+            chars: The input to send; empty only reads the output.
+            yield_time_ms: The longest wait for output.
+            max_output_tokens: The token budget of the output.
+
+        Returns:
+            The :func:`in_copy` result.
+        """
+        return await in_copy(
+            lambda workspace: workspace.write_stdin(session_id, chars, yield_time_ms, max_output_tokens)
+        )
+
+    async def apply_patch_tool(patch: str) -> dict[str, Any]:
+        """Apply one patch to the copy of the folder.
+
+        Args:
+            patch: The patch text.
+
+        Returns:
+            The :func:`in_copy` result; ``{"error": ...}`` for a bad patch, which changes nothing.
+        """
+        return await in_copy(lambda workspace: "\n".join(apply_patch(workspace.folder, patch)))
+
+    shell_tools = [
+        dspy.Tool(
+            exec_command,
+            name=EXEC_COMMAND_TOOL,
+            desc=(
+                "Run a shell command in a private copy of the run's folder; the user's folder never changes. It "
+                "waits up to yield_time_ms (10000 by default, 30000 at most) for output. A command that still "
+                "runs returns a session ID for write_stdin. Each file the command changes becomes a draft file "
+                "in the editor, as with write_workspace_file; skipped_files says which changed files cannot."
+            ),
+            arg_desc={
+                "cmd": "The shell command.",
+                "workdir": "The directory to run in, relative to the folder; the folder's root by default.",
+                "yield_time_ms": "How long to wait for output, in milliseconds.",
+                "max_output_tokens": "The most output tokens to return; the start and the end stay.",
+            },
+        ),
+        dspy.Tool(
+            write_stdin,
+            name=WRITE_STDIN_TOOL,
+            desc=(
+                "Send chars to a running command from exec_command, or pass empty chars to wait for and read "
+                "its newer output."
+            ),
+            arg_desc={
+                "session_id": "The session ID from an exec_command result.",
+                "chars": "The input to send; empty only reads output.",
+                "yield_time_ms": "How long to wait for output, in milliseconds.",
+                "max_output_tokens": "The most output tokens to return; the start and the end stay.",
+            },
+        ),
+        dspy.Tool(
+            apply_patch_tool,
+            name=APPLY_PATCH_TOOL,
+            desc=(
+                "Change files in the copy of the run's folder with one patch: '*** Begin Patch', then "
+                "'*** Add File: <path>' (each line starts with +), '*** Delete File: <path>' or "
+                "'*** Update File: <path>' (an optional '*** Move to: <path>', then @@ hunks with ' ', - and + "
+                "lines), then '*** End Patch'. Paths are relative to the folder. A hunk that does not match "
+                "changes nothing and returns the reason. The changed files become draft files."
+            ),
+            arg_desc={"patch": "The whole patch text."},
+        ),
+    ]
 
     file_arg = f"metric.py, or the path of any file of the {noun}, relative to its root, for example ascent.toml."
     return [
@@ -934,13 +1233,17 @@ def workspace_tools(
                 "new_text": "The text that replaces it.",
             },
         ),
+        *(shell_tools if shell_on else []),
     ]
 
 
 __all__ = [
     "ASCENT_TOML_EXAMPLE",
+    "DRAFT_DELETED_FIELD",
     "DRAFT_FILES_FIELD",
     "EDIT_FILE_TOOL",
+    "FOLDER_CHANGED",
+    "FOLDER_SHELL_TOOLS",
     "LIST_REPO_TOOL",
     "METRIC_GUIDE",
     "READ_REPO_TOOL",

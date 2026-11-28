@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import os
+import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,8 +24,9 @@ from core.connectors.github_repo import RepoRateLimitError
 from core.local import folder_tree
 from core.local.folder_tree import folder_source_id
 from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
+from core.service_gateway.agents import folder_workspace, pi_react, repo_browser, workspace_tools
 from core.service_gateway.agents import generalist as generalist_module
-from core.service_gateway.agents import pi_react, repo_browser, workspace_tools
+from core.service_gateway.agents.feedback import FeedbackTarget
 from core.service_gateway.agents.generalist import (
     REPO_COLUMN_MAPPING,
     SCREEN_FOCUS,
@@ -41,6 +43,8 @@ from core.service_gateway.agents.generalist import (
 from core.service_gateway.agents.workspace_tools import (
     ASCENT_TOML_EXAMPLE,
     EDIT_FILE_TOOL,
+    FOLDER_CHANGED,
+    FOLDER_SHELL_TOOLS,
     LIST_REPO_TOOL,
     METRIC_GUIDE,
     READ_REPO_TOOL,
@@ -1890,3 +1894,258 @@ def test_open_folder_refuses_a_folder_larger_than_the_agent_can_read_before_any_
     assert "more than the setup agent can read" in reason
     assert "for a run" not in reason
     assert digests == []
+
+
+on_mac = pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(), reason="needs macOS sandbox-exec"
+)
+
+
+def _shell_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[dict[str, Any], Path]:
+    """Make a local folder run whose folder copies go to a test state folder.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        tmp_path: The test's folder.
+
+    Returns:
+        The Metric screen state and the user's folder.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    state = _local_folder(monkeypatch, root)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
+    monkeypatch.setattr(folder_workspace, "_WORKSPACES", {})
+    monkeypatch.setattr(folder_workspace, "_swept", [])
+    return state, root
+
+
+def _shell_tools(state: dict[str, Any], turn: _TurnAuthoringFlag, key: str | None = "chat-1") -> dict[str, dspy.Tool]:
+    """Build the workspace tools for one chat, by name.
+
+    Args:
+        state: The wizard state.
+        turn: The turn's shared flag.
+        key: The chat id.
+
+    Returns:
+        The tools by name.
+    """
+    tools = build_workspace_tools(WizardState(**state), turn, github_token=None, session_key=key)
+    return {tool.name: tool for tool in tools}
+
+
+@pytest.fixture
+def close_copies() -> Any:
+    """Delete every folder copy a test opened.
+
+    Yields:
+        Nothing.
+    """
+    yield
+    for key in list(folder_workspace._WORKSPACES):
+        folder_workspace.close_workspace(key)
+
+
+def test_the_shell_tools_show_only_for_a_local_folder_in_the_desktop_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Outside local mode, without a chat id, or on a git run, the agent gets no shell tools."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    assert set(_shell_tools(state, _TurnAuthoringFlag())) >= FOLDER_SHELL_TOOLS
+    assert not FOLDER_SHELL_TOOLS & set(_shell_tools(state, _TurnAuthoringFlag(), key=None))
+    assert not FOLDER_SHELL_TOOLS & set(_shell_tools(_REPO_METRIC, _TurnAuthoringFlag()))
+    monkeypatch.setattr(settings, "local_mode", False)
+    assert not FOLDER_SHELL_TOOLS & set(_shell_tools(state, _TurnAuthoringFlag()))
+
+
+@pytest.mark.asyncio
+async def test_an_apply_patch_edit_becomes_a_draft_and_the_folder_stays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A patch edit and a delete reach the turn's draft and the editor; the user's file keeps its text."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    result = await tools["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Update File: src/app.py\n@@\n-x = 1\n+x = 2\n"
+        "*** Delete File: README.md\n*** End Patch"
+    )
+
+    snapshot = folder_source_id(root)
+    assert result == {
+        "output": "M src/app.py\nD README.md",
+        "wizard_state": {
+            "workspace_files": {"src/app.py": "x = 2\n"},
+            "workspace_deleted": ["README.md"],
+            "workspace_base": snapshot,
+        },
+    }
+    assert turn.wizard_patch == {
+        "workspace_files": {"src/app.py": "x = 2\n"},
+        "workspace_deleted": ["README.md"],
+        "workspace_base": snapshot,
+    }
+    assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert (root / "README.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_bad_patch_returns_the_reason_and_changes_no_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A hunk that does not match gives an error, and the turn's draft stays empty."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Update File: src/app.py\n@@\n-not here\n+x\n*** End Patch"
+    )
+
+    assert list(result) == ["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_a_write_reaches_the_copy_and_a_later_patch_builds_on_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The copy starts from the drafts, and a write after it opens goes into it too."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    drafted = {
+        **state,
+        "workspace_base": folder_source_id(tmp_path / "project"),
+        "workspace_files": {"src/app.py": "x = 5\n"},
+    }
+    tools = _shell_tools(drafted, turn)
+
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: notes.txt\n+n\n*** End Patch")
+    await tools[WRITE_FILE_TOOL].acall(path="README.md", text="# Draft\n")
+    result = await tools["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Update File: README.md\n@@\n-# Draft\n+# Draft 2\n"
+        "*** Update File: src/app.py\n@@\n-x = 5\n+x = 6\n*** End Patch"
+    )
+
+    assert result["wizard_state"]["workspace_files"] == {"README.md": "# Draft 2\n", "src/app.py": "x = 6\n"}
+    assert turn.wizard_patch["workspace_files"] == {
+        "src/app.py": "x = 6\n",
+        "notes.txt": "n\n",
+        "README.md": "# Draft 2\n",
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_shell_refuses_drafts_of_an_older_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """Drafts based on another folder state get the same refusal the read tools give."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    drafted = {**state, "workspace_base": "b" * 40, "workspace_files": {"src/app.py": "x = 2\n"}}
+
+    result = await _shell_tools(drafted, _TurnAuthoringFlag())["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch"
+    )
+
+    assert result == {"error": FOLDER_CHANGED}
+
+
+@pytest.mark.asyncio
+async def test_a_patch_that_drops_a_rules_file_from_ascent_toml_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The rules-file guard of the write tool holds for shell edits too, and the copy gets its file back."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "ascent.toml").write_text(ASCENT_TOML_EXAMPLE, encoding="utf-8")
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+    removed = [line for line in ASCENT_TOML_EXAMPLE.splitlines() if line.startswith("instructions = ")]
+    assert removed
+
+    result = await tools["apply_patch"].acall(
+        patch=f"*** Begin Patch\n*** Update File: ascent.toml\n@@\n-{removed[0]}\n*** End Patch"
+    )
+
+    assert "drops instructions" in result["skipped_files"]["ascent.toml"]
+    assert "ascent_toml" not in turn.wizard_patch
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert (workspace.folder / "ascent.toml").read_text(encoding="utf-8") == ASCENT_TOML_EXAMPLE
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_shell_edit_becomes_a_draft_and_the_folder_stays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file a command writes reaches the turn's draft, and the command cannot write the user's folder."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    result = await tools["exec_command"].acall(
+        cmd=f"echo 'x = 3' > src/app.py && mkdir -p node_modules/a && echo j > node_modules/a/i.js; "
+        f"echo bad > {root}/README.md; echo done"
+    )
+
+    assert "done" in result["output"]
+    assert result["wizard_state"]["workspace_files"] == {"src/app.py": "x = 3\n"}
+    assert turn.wizard_patch["workspace_files"] == {"src/app.py": "x = 3\n"}
+    assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert (root / "README.md").read_text(encoding="utf-8") == "# Shop\n"
+
+
+@pytest.mark.asyncio
+async def test_a_setup_turn_runs_the_folder_shell_in_ask_mode_with_no_card(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """In ask mode a patch runs at once and reaches the editor; the attachment shell tools are left out."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    state, root = _shell_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(generalist_module, "saved_setup_secrets", lambda *_args: [])
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield the fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession(["update_wizard_state"])
+
+    def attachment_shell(**_kwargs: Any) -> str:
+        """Fail the test when the attachment shell runs."""
+        raise AssertionError("the attachment shell ran in place of the folder shell")
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    monkeypatch.setattr(dspy.Tool, "from_mcp_tool", staticmethod(_mcp_tool))
+    patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-x = 1\n+x = 2\n*** End Patch"
+    lm = _ScriptedLM(
+        [("apply_patch", {"patch": patch}), ("submit", {"assistant_message": "x is 2 now. Run the check?"})]
+    )
+    events: list[dict] = []
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(**state),
+        chat_history=[],
+        user_message="Set x to 2.",
+        trust_mode="ask",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        lm=lm,
+        reply_language="English",
+        feedback_target=FeedbackTarget(cast(Any, None), "alice", "chat-1", None),
+        file_tools=[dspy.Tool(attachment_shell, name="exec_command", desc="x", args={}, arg_types={}, arg_desc={})],
+    )
+
+    assert reply == "x is 2 now. Run the check?"
+    names = [t["function"]["name"] for t in lm.requests[0]["tools"]]
+    assert names.count("exec_command") == 1
+    assert {"apply_patch", "write_stdin"} <= set(names)
+    assert not [e for e in events if e["event"].startswith("approval")]
+    end = next(e for e in events if e["event"] == "tool_end" and e["data"]["tool"] == "apply_patch")
+    assert end["data"]["result"]["wizard_state"]["workspace_files"] == {"src/app.py": "x = 2\n"}
+    assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"

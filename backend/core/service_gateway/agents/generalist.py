@@ -84,6 +84,7 @@ from .code import _agent_error_payload, _format_agent_error, _reply_language, _r
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
 from .feedback import FeedbackTarget, send_feedback_tool
+from .folder_workspace import live_workspace, saved_setup_secrets
 from .github_mcp import github_repo_tools, tool_from_mcp
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
@@ -92,6 +93,7 @@ from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
 from .workspace_tools import (
     EDIT_FILE_TOOL,
+    FOLDER_SHELL_TOOLS,
     LIST_REPO_TOOL,
     METRIC_GUIDE,
     READ_REPO_TOOL,
@@ -982,6 +984,19 @@ class _ApprovalGatedTool:
         if not named or not isinstance(patch, dict) or "job_name" not in patch:
             return serialized
         return {**serialized, "wizard_state": {k: v for k, v in patch.items() if k != "job_name"}}
+
+
+def _never_ask(tool_name: str, trust_mode: TrustMode) -> bool:
+    """Ask for no approval, the policy of the folder shell's tools.
+
+    Args:
+        tool_name: The tool's name.
+        trust_mode: The caller's trust level.
+
+    Returns:
+        Always False.
+    """
+    return False
 
 
 def _wrap_tool_with_approval(
@@ -3839,6 +3854,30 @@ async def _drive_generalist_agent(
             for spec in listing.tools
             if spec.name in allowed_names
         ]
+        # A chat with no wizard screen still gets ``ask_user``; a screen chat
+        # has it among its own tools.
+        own_tools = (
+            [
+                *screen_nav_tools(wizard_state, authoring_flag),
+                *workspace_tools(
+                    wizard_state,
+                    authoring_flag,
+                    github_token=github_token,
+                    session_key=feedback_target.conversation_id if feedback_target else None,
+                    setup_secrets=(
+                        partial(saved_setup_secrets, feedback_target.engine, feedback_target.username)
+                        if feedback_target
+                        else None
+                    ),
+                ),
+            ]
+            if screen is not None
+            else [ask_user_tool(authoring_flag)]
+        )
+        folder_shell = any(tool.name in FOLDER_SHELL_TOOLS for tool in own_tools)
+        # The folder shell has the attachment shell's tool names, and its commands run in the folder copy.
+        if folder_shell:
+            file_tools = None
         dspy_tools += [
             _wrap_tool_with_approval(
                 tool,
@@ -3871,16 +3910,6 @@ async def _drive_generalist_agent(
                     approval_owner=approval_owner,
                 )
             )
-        # A chat with no wizard screen still gets ``ask_user``; a screen chat
-        # has it among its own tools.
-        own_tools = (
-            [
-                *screen_nav_tools(wizard_state, authoring_flag),
-                *workspace_tools(wizard_state, authoring_flag, github_token=github_token),
-            ]
-            if screen is not None
-            else [ask_user_tool(authoring_flag)]
-        )
         dspy_tools += [
             _wrap_tool_with_approval(
                 tool,
@@ -3890,6 +3919,8 @@ async def _drive_generalist_agent(
                 outer_loop=outer_loop,
                 wizard_state=wizard_state,
                 authoring_flag=authoring_flag,
+                # The folder shell writes only a private copy of the folder, so its commands need no card (SKY-997).
+                needs_approval=_never_ask if tool.name in FOLDER_SHELL_TOOLS else None,
                 approval_owner=approval_owner,
             )
             for tool in own_tools
@@ -3947,17 +3978,23 @@ async def _drive_generalist_agent(
         }
         if images:
             inputs[_IMAGES_FIELD] = [dspy.Image(url=uri) for uri in images]
-        reply_text = await run_react_turn_on_pi(
-            react,
-            inputs,
-            lm,
-            emit=emit,
-            output_field="assistant_message",
-            input_field="user_message",
-            binary=settings.pi_binary,
-            pending_skip=_PENDING_SKIP,
-            steer_inbox=inbox,
-        )
+        try:
+            reply_text = await run_react_turn_on_pi(
+                react,
+                inputs,
+                lm,
+                emit=emit,
+                output_field="assistant_message",
+                input_field="user_message",
+                binary=settings.pi_binary,
+                pending_skip=_PENDING_SKIP,
+                steer_inbox=inbox,
+            )
+        except asyncio.CancelledError:
+            # Stop ends the turn; a command that still runs in the folder copy must end with it.
+            if folder_shell and feedback_target and (workspace := live_workspace(feedback_target.conversation_id)):
+                workspace.stop_commands()
+            raise
         _require_answer(None, reply_text, next_step="Send your message again or pick a different model.")
         return reply_text
 

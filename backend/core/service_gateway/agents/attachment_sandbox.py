@@ -47,6 +47,7 @@ from ...sandbox.environment import ExecResult, SandboxEnvironment
 from ...sandbox.factory import create_environment
 from ...sandbox.resources import ResourceRequest, SandboxSpec
 from ...storage.models import ChatMediaModel
+from .folder_workspace import close_workspace
 from .local_command_runner import CommandSession, LocalCommandRunner, SessionTable, clamp_yield_ms
 
 logger = logging.getLogger(__name__)
@@ -822,7 +823,7 @@ def stop_chat_runner(conversation_id: str) -> threading.Thread:
 
 
 def _close_chat(conversation_id: str, runner: CommandRunner | None) -> None:
-    """Close a deleted chat's runner, or delete its Mac workspace when it has none.
+    """Close a deleted chat's runner, or delete its Mac workspace when it has none, and its folder copy.
 
     Args:
         conversation_id: The chat.
@@ -834,6 +835,8 @@ def _close_chat(conversation_id: str, runner: CommandRunner | None) -> None:
         # A workspace outlives the app process that made it, so a chat deleted
         # after a restart has a folder but no runner.
         shutil.rmtree(local_workspace(conversation_id), ignore_errors=True)
+    # A setup chat's folder copy (SKY-997) goes with the chat.
+    close_workspace(conversation_id)
 
 
 def charge_chat_sandbox(engine: Any, username: str, runner: CommandRunner, *, settlement_key: str) -> int:

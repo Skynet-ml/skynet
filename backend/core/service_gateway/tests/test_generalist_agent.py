@@ -39,6 +39,7 @@ from core.service_gateway.agents.generalist import (
     _clean_summary,
     _history_from_chat,
     _needs_approval,
+    _never_ask,
     _screen_needs_approval,
     _screen_problems,
     _TurnAuthoringFlag,
@@ -57,6 +58,7 @@ from core.service_gateway.agents.generalist import (
     validate_wizard_patch_order,
     validate_wizard_screen,
 )
+from core.service_gateway.agents.workspace_tools import FOLDER_SHELL_TOOLS
 from core.storage.models import AgentConversationModel, AgentFeedbackReportModel, AgentMessageModel, Base
 
 from .test_pi_react import _simulated_pi
@@ -2646,3 +2648,19 @@ def test_dataset_prompt_says_the_card_is_a_preview_and_the_run_uses_every_row() 
     assert "only a preview" in prompt
     assert "The run uses every row" in prompt
     assert "never ask the user to paste rows" in prompt
+
+
+async def test_the_folder_shell_tools_never_ask_for_approval() -> None:
+    """The folder shell writes only a private copy, so ask mode runs its tools with no card (SKY-997)."""
+    for name in FOLDER_SHELL_TOOLS:
+        events: list[dict] = []
+        tool = _wrap_tool_with_approval(
+            _make_fake_tool(name, return_value="ran"),
+            trust_mode="ask",
+            registry=ApprovalRegistry(),
+            emit=events.append,
+            outer_loop=asyncio.get_running_loop(),
+            needs_approval=_never_ask,
+        )
+        assert await tool.func._async_body() == "ran"
+        assert [event["event"] for event in events] == ["tool_start", "tool_end"]
