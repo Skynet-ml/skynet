@@ -24,7 +24,6 @@ type AnalyticsFilters = {
   access: string | null;
   improvement: AnalyticsBucket | null;
   runtime: AnalyticsBucket | null;
-  dataset: AnalyticsBucket | null;
 };
 
 export type UseAnalyticsFiltersReturn = AnalyticsFilters & {
@@ -38,7 +37,6 @@ export type UseAnalyticsFiltersReturn = AnalyticsFilters & {
   setAccess: (v: string | null) => void;
   setImprovement: (v: AnalyticsBucket | null) => void;
   setRuntime: (v: AnalyticsBucket | null) => void;
-  setDataset: (v: AnalyticsBucket | null) => void;
   /** True when any filter narrows the dashboard beyond the full history. */
   hasFilters: boolean;
   clearAll: () => void;
@@ -57,7 +55,6 @@ export function useAnalyticsFilters(): UseAnalyticsFiltersReturn {
   const [access, setAccess] = useState<string | null>(null);
   const [improvement, setImprovement] = useState<AnalyticsBucket | null>(null);
   const [runtime, setRuntime] = useState<AnalyticsBucket | null>(null);
-  const [dataset, setDataset] = useState<AnalyticsBucket | null>(null);
 
   const setDate = useCallback((v: string | null) => {
     setDateOnly(v);
@@ -80,7 +77,6 @@ export function useAnalyticsFilters(): UseAnalyticsFiltersReturn {
     setAccess(null);
     setImprovement(null);
     setRuntime(null);
-    setDataset(null);
   }, []);
 
   const hasFilters =
@@ -92,8 +88,7 @@ export function useAnalyticsFilters(): UseAnalyticsFiltersReturn {
     owner != null ||
     access != null ||
     improvement != null ||
-    runtime != null ||
-    dataset != null;
+    runtime != null;
 
   const key = useMemo(
     () =>
@@ -108,9 +103,8 @@ export function useAnalyticsFilters(): UseAnalyticsFiltersReturn {
         access ?? "",
         improvement?.label ?? "",
         runtime?.label ?? "",
-        dataset?.label ?? "",
       ].join("|"),
-    [range, optimizer, model, status, date, dateTo, owner, access, improvement, runtime, dataset],
+    [range, optimizer, model, status, date, dateTo, owner, access, improvement, runtime],
   );
 
   return {
@@ -124,7 +118,6 @@ export function useAnalyticsFilters(): UseAnalyticsFiltersReturn {
     access,
     improvement,
     runtime,
-    dataset,
     setRange,
     setOptimizer,
     setModel,
@@ -135,7 +128,6 @@ export function useAnalyticsFilters(): UseAnalyticsFiltersReturn {
     setAccess,
     setImprovement,
     setRuntime,
-    setDataset,
     hasFilters,
     clearAll,
     key,

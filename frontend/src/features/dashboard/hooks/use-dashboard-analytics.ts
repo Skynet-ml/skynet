@@ -20,7 +20,6 @@ type UseDashboardAnalyticsArgs = {
   access: string | null;
   improvement: AnalyticsBucket | null;
   runtime: AnalyticsBucket | null;
-  dataset: AnalyticsBucket | null;
 };
 
 export type UseDashboardAnalyticsReturn = {
@@ -53,7 +52,6 @@ export function useDashboardAnalytics({
   access,
   improvement,
   runtime,
-  dataset,
 }: UseDashboardAnalyticsArgs): UseDashboardAnalyticsReturn {
   const [analyticsData, setAnalyticsData] = useState<DashboardAnalytics | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
@@ -61,7 +59,7 @@ export function useDashboardAnalytics({
   const requestId = useRef(0);
   const queryKey = JSON.stringify([
     source, isAdmin, sessionUser, range, optimizer, model, status, date, dateTo, owner, access,
-    improvement?.lower, improvement?.upper, runtime?.lower, runtime?.upper, dataset?.lower, dataset?.upper,
+    improvement?.lower, improvement?.upper, runtime?.lower, runtime?.upper,
   ]);
   const currentQuery = useRef(queryKey);
   const swapping = useSourceSwap(source);
@@ -97,8 +95,6 @@ export function useDashboardAnalytics({
         improvement_max: improvement?.upper,
         runtime_min: runtime?.lower,
         runtime_max: runtime?.upper,
-        dataset_min: dataset?.lower,
-        dataset_max: dataset?.upper,
       });
       if (id === requestId.current) {
         setAnalyticsData(result);
@@ -124,7 +120,6 @@ export function useDashboardAnalytics({
     access,
     improvement,
     runtime,
-    dataset,
   ]);
 
   useEffect(() => {

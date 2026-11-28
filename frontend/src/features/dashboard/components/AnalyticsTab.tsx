@@ -10,7 +10,6 @@ import type { DashboardAnalytics } from "@/shared/lib/api";
 import { rememberLayout } from "@/shared/lib/layout-hint";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { tip } from "@/shared/lib/tooltips";
-import { TERMS } from "@/shared/lib/terms";
 import { STATUS_COLORS } from "../constants";
 import { ANALYTICS_LAYOUT_KEY, analyticsShape } from "../lib/analytics-shape";
 import { AnalyticsEmpty } from "./AnalyticsEmpty";
@@ -20,7 +19,6 @@ import {
   kpiLabels,
   ModelBars,
   pointsAccent,
-  pointsText,
   pointsValue,
   RangeControl,
   ShareBars,
@@ -87,7 +85,6 @@ function AnalyticsTabImpl({
     setAccess,
     setImprovement,
     setRuntime,
-    setDataset,
     hasFilters,
     key: filterKey,
   } = filters;
@@ -178,22 +175,11 @@ function AnalyticsTabImpl({
                     label={labels[1]}
                     accent="default"
                     value={<AnimatedNumber value={Math.round(kpis.successRate)} suffix="%" />}
-                    detail={formatMsg("dashboard.analytics.kpi_success_detail", {
-                      p1: kpis.successCount,
-                      p2: kpis.terminalCount,
-                    })}
                   />
                   <KpiCard
                     label={labels[2]}
                     accent={pointsAccent(kpis.avgImprovement)}
                     value={pointsValue(kpis.avgImprovement)}
-                    detail={
-                      kpis.medianImprovement != null
-                        ? formatMsg("dashboard.analytics.kpi_median_detail", {
-                            p1: pointsText(kpis.medianImprovement),
-                          })
-                        : undefined
-                    }
                   />
                   <KpiCard
                     label={labels[3]}
@@ -237,21 +223,6 @@ function AnalyticsTabImpl({
                       onBucketClick={bucketFilter(setRuntime)}
                     />
                   </div>
-                </div>
-                <div className="mt-6 min-w-0">
-                  <PanelHeading>
-                    <HelpTip text={tip("analytics.dataset_buckets")}>
-                      {msg("auto.features.dashboard.components.analyticstab.28")}
-                      {TERMS.dataset}
-                      {msg("auto.features.dashboard.components.analyticstab.29")}
-                    </HelpTip>
-                  </PanelHeading>
-                  <RangeHistogram
-                    data={chartData.datasetBuckets}
-                    unitLabel={TERMS.rowPlural}
-                    withAverage
-                    onBucketClick={bucketFilter(setDataset)}
-                  />
                 </div>
               </AnalyticsSection>
             </StaggerItem>

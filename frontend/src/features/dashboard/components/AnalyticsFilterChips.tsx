@@ -5,7 +5,6 @@ import { getStatusLabel } from "@/shared/constants/job-status";
 import { modelDisplayName } from "@/shared/lib/formatters";
 import { msg } from "@/shared/lib/messages";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
-import { TERMS } from "@/shared/lib/terms";
 import type { UseAnalyticsFiltersReturn } from "../hooks/use-analytics-filters";
 
 export function AnalyticsFilterChips({
@@ -26,7 +25,6 @@ export function AnalyticsFilterChips({
     access,
     improvement,
     runtime,
-    dataset,
     setRange,
     setOptimizer,
     setModel,
@@ -36,7 +34,6 @@ export function AnalyticsFilterChips({
     setAccess,
     setImprovement,
     setRuntime,
-    setDataset,
     hasFilters,
     clearAll,
   } = filters;
@@ -117,14 +114,6 @@ export function AnalyticsFilterChips({
           onClear={() => setRuntime(null)}
         />
       )}
-      {dataset && (
-        <FilterChip
-          dir="ltr"
-          label={`${dataset.label} ${TERMS.rowPlural}`}
-          ariaLabel={bucketClearLabel}
-          onClear={() => setDataset(null)}
-        />
-      )}
       {model !== "all" && (
         <FilterChip
           dir="ltr"
@@ -174,9 +163,9 @@ function FilterChip({
   truncate?: boolean;
 }) {
   return (
-    <span className="group inline-flex items-center gap-1.5 rounded-lg border on-primary pe-1 ps-2.5 py-1 transition-all duration-150 hover:border-primary-fill/20 hover:bg-primary-fill/[0.1]">
+    <span className="group inline-flex items-center gap-1.5 rounded-lg border border-border bg-card pe-1 ps-2.5 py-1 transition-all duration-150 hover:bg-accent">
       <span
-        className={`text-[0.6875rem] font-medium text-primary/80 ${truncate ? "font-mono truncate max-w-[140px]" : ""}`}
+        className={`text-[0.6875rem] font-medium text-foreground/80 ${truncate ? "font-mono truncate max-w-[140px]" : ""}`}
         dir={dir}
         title={title}
       >
@@ -185,7 +174,7 @@ function FilterChip({
       <button
         type="button"
         onClick={onClear}
-        className="close-button [--close-btn-size:20px] [--close-btn-radius:6px] [--close-btn-icon:12px]"
+        className="close-button hover:text-primary [--close-btn-size:20px] [--close-btn-radius:6px] [--close-btn-icon:12px]"
         aria-label={ariaLabel}
       >
         <X />

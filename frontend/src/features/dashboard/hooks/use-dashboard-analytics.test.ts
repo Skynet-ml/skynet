@@ -57,7 +57,7 @@ test("analytics refreshes keep charts mounted and source changes reject stale re
     current = useDashboardAnalytics({
       source, range, sessionUser: "desktop", isAdmin: false, activeTab: "analytics",
       optimizer: "all", model: "all", status: "all", date: null, dateTo: null,
-      owner: null, access: null, improvement: null, runtime: null, dataset: null,
+      owner: null, access: null, improvement: null, runtime: null,
     });
     return current.analyticsData
       ? React.createElement(Charts, { total: current.analyticsData.filtered_total })

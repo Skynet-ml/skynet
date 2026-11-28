@@ -184,7 +184,6 @@ export function AnalyticsTabSkeleton() {
                     accent="default"
                     label={<TextGhost>{label}</TextGhost>}
                     value={<TextGhost>00</TextGhost>}
-                    detail={i === 1 || i === 2 ? <Skeleton width={72} /> : undefined}
                   />
                 ))}
               </div>
