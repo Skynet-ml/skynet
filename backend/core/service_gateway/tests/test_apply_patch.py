@@ -204,7 +204,8 @@ def _tree(root: Path) -> list[str]:
 
 
 def test_one_patch_can_replace_a_folder_with_a_file(tmp_path: Path) -> None:
-    (tmp_path / "pkg" / "sub" / "empty").mkdir(parents=True)
+    """Delete every file below a folder, nested ones too, then add a file at its path."""
+    (tmp_path / "pkg" / "sub").mkdir(parents=True)
     (tmp_path / "pkg" / "a.py").write_text("a\n")
     (tmp_path / "pkg" / "sub" / "b.py").write_text("b\n")
     summary = apply_patch(
@@ -217,6 +218,7 @@ def test_one_patch_can_replace_a_folder_with_a_file(tmp_path: Path) -> None:
 
 
 def test_a_move_can_replace_the_folder_it_leaves(tmp_path: Path) -> None:
+    """Move the last file of a folder to the folder's path and keep its mode."""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("a\n")
     (tmp_path / "pkg" / "a.py").chmod(0o755)
@@ -228,6 +230,7 @@ def test_a_move_can_replace_the_folder_it_leaves(tmp_path: Path) -> None:
 
 
 def test_a_folder_that_the_patch_does_not_empty_is_refused_and_changes_nothing(tmp_path: Path) -> None:
+    """Refuse a folder replacement when a file below the folder stays."""
     (tmp_path / "pkg" / "sub").mkdir(parents=True)
     (tmp_path / "pkg" / "a.py").write_text("a\n")
     (tmp_path / "pkg" / "sub" / "b.py").write_text("b\n")
@@ -244,6 +247,7 @@ def test_a_folder_that_the_patch_does_not_empty_is_refused_and_changes_nothing(t
 
 
 def test_a_link_in_the_folder_is_refused_and_never_followed(tmp_path: Path) -> None:
+    """Refuse a folder replacement when a link is below the folder, and leave the link's target as it is."""
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "x.py").write_text("outside\n")
@@ -264,6 +268,7 @@ def test_a_link_in_the_folder_is_refused_and_never_followed(tmp_path: Path) -> N
 
 
 def test_an_update_or_delete_of_a_folder_is_still_refused(tmp_path: Path) -> None:
+    """Refuse a delete or an update of a folder path."""
     (tmp_path / "pkg").mkdir()
     for lines in (("*** Delete File: pkg",), ("*** Update File: pkg", "@@", "-a", "+b")):
         with pytest.raises(PatchError, match="folder"):
@@ -272,6 +277,7 @@ def test_an_update_or_delete_of_a_folder_is_still_refused(tmp_path: Path) -> Non
 
 
 def test_a_new_file_at_a_replaced_folder_can_be_deleted_again(tmp_path: Path) -> None:
+    """Delete the file that replaced a folder later in the same patch."""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("a\n")
     apply_patch(tmp_path, _patch("*** Delete File: pkg/a.py", "*** Add File: pkg", "+new", "*** Delete File: pkg"))
@@ -279,7 +285,53 @@ def test_a_new_file_at_a_replaced_folder_can_be_deleted_again(tmp_path: Path) ->
 
 
 def test_a_move_can_put_a_file_below_its_own_name(tmp_path: Path) -> None:
+    """Move a file to a path below its own name, as a delete and an add do."""
     (tmp_path / "a").write_text("old\n")
     summary = apply_patch(tmp_path, _patch("*** Update File: a", "*** Move to: a/b"))
     assert summary == ["R a -> a/b"]
     assert _snapshot(tmp_path) == {"a/b": b"old\n"}
+
+
+@pytest.mark.parametrize("empty", ["pkg/empty", "pkg/sub/empty"])
+def test_an_empty_folder_with_no_deleted_file_is_refused_and_changes_nothing(tmp_path: Path, empty: str) -> None:
+    """Refuse a folder replacement when a folder below it holds no deleted file, as the run does."""
+    (tmp_path / "pkg" / "sub").mkdir(parents=True)
+    (tmp_path / "pkg" / "a.py").write_text("a\n")
+    (tmp_path / "pkg" / "sub" / "b.py").write_text("b\n")
+    (tmp_path / empty).mkdir()
+    before = _tree(tmp_path)
+    with pytest.raises(PatchError, match=empty):
+        apply_patch(
+            tmp_path,
+            _patch("*** Delete File: pkg/a.py", "*** Delete File: pkg/sub/b.py", "*** Add File: pkg", "+new"),
+        )
+    assert _tree(tmp_path) == before
+
+
+def test_an_empty_folder_cannot_become_a_file(tmp_path: Path) -> None:
+    """Refuse an add at the path of an empty folder, which no delete empties."""
+    (tmp_path / "pkg").mkdir()
+    with pytest.raises(PatchError, match="pkg"):
+        apply_patch(tmp_path, _patch("*** Add File: pkg", "+new"))
+    assert _tree(tmp_path) == ["pkg"]
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ("*** Add File: pkg/a.py", "+new"),
+        ("*** Update File: c", "*** Move to: pkg/a.py"),
+    ],
+)
+def test_a_write_below_a_replaced_folder_is_refused_and_changes_nothing(tmp_path: Path, lines: tuple[str, ...]) -> None:
+    """Refuse a later write below a folder that the patch replaces, even after the new file is deleted."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("a\n")
+    (tmp_path / "c").write_text("c\n")
+    before = _snapshot(tmp_path)
+    with pytest.raises(PatchError, match="replaces the folder pkg"):
+        apply_patch(
+            tmp_path,
+            _patch("*** Delete File: pkg/a.py", "*** Add File: pkg", "+x", "*** Delete File: pkg", *lines),
+        )
+    assert _snapshot(tmp_path) == before

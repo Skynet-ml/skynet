@@ -386,31 +386,47 @@ def _remove_empty_tree(parent: int, name: str) -> None:
     os.rmdir(name, dir_fd=parent)
 
 
-def _check_folder_emptied(rel: str, folder: Path, planned: Mapping[str, tuple[bytes, int] | None]) -> None:
-    """Check that the patch's earlier deletes remove every file below a folder.
+def _deletes_empty(rel: str, folder: Path, planned: Mapping[str, tuple[bytes, int] | None]) -> bool:
+    """Walk a folder without following a link and check that the deletes empty it.
+
+    The run removes a folder only when a deleted file sits somewhere below it
+    (``write_to_checkout``, ``FolderWorkspace.reset``), so the copy refuses a
+    folder with no deleted file below it, to accept only what the run accepts.
 
     Args:
         rel: The folder's clean ``/``-joined path.
         folder: The folder on disk.
         planned: The patch's earlier ops: path to new bytes and mode, or None for a delete.
 
+    Returns:
+        True when the patch deletes at least one file below the folder.
+
     Raises:
-        PatchError: When the folder holds a link or a special file, or a file
-            that the patch does not delete.
+        PatchError: When the folder holds a link, a special file, a file that
+            the patch does not delete, or a subfolder with no deleted file below it.
     """
+    found = False
     with os.scandir(folder) as entries:
         for entry in entries:
             child = f"{rel}/{entry.name}"
             if entry.is_symlink():
                 raise PatchError(f"{child}: the path is a link, so the patch cannot replace the folder that holds it.")
             if entry.is_dir(follow_symlinks=False):
-                _check_folder_emptied(child, Path(entry.path), planned)
+                if not _deletes_empty(child, Path(entry.path), planned):
+                    raise PatchError(
+                        f"{child}: the folder holds no file that the patch deletes, so the patch cannot replace "
+                        "the folder that holds it."
+                    )
+                found = True
             elif not entry.is_file(follow_symlinks=False):
                 raise PatchError(f"{child}: the path is not a regular file, so the patch cannot replace its folder.")
             elif child not in planned or planned[child] is not None:
                 raise PatchError(
                     f"{child}: to replace the folder with a file, delete every file in the folder earlier in the patch."
                 )
+            else:
+                found = True
+    return found
 
 
 def _check_parents(
@@ -460,7 +476,8 @@ def _check_parents(
         return False
     if not replace_folder:
         raise PatchError(f"{rel}: the path is a folder.")
-    _check_folder_emptied(rel, target, planned)
+    if not _deletes_empty(rel, target, planned):
+        raise PatchError(f"{rel}: the folder holds no file that the patch deletes, so it cannot become a file.")
     return True
 
 
@@ -530,7 +547,27 @@ def apply_patch(root: Path, patch: str) -> list[str]:
             return None if item is None else (item[0].decode("utf-8"), item[1])
         return _read(root, rel)
 
+    def check_not_below_folder(rel: str) -> None:
+        """Refuse a write below a folder that the patch replaces with a file.
+
+        The write would recreate the folder after its removal, and a name in
+        it may also be a planned delete that the write then overrides.
+
+        Args:
+            rel: The clean path the op writes.
+
+        Raises:
+            PatchError: When ``rel`` is below a folder in ``folders``.
+        """
+        for folder in folders:
+            if rel.startswith(f"{folder}/"):
+                raise PatchError(
+                    f"{rel}: the patch replaces the folder {folder} with a file, so it cannot write below it."
+                )
+
     for op in ops:
+        if op.kind == "add":
+            check_not_below_folder(op.path)
         if _check_parents(root, op.path, planned, replace_folder=op.kind == "add"):
             folders.append(op.path)
         if op.kind == "add":
@@ -549,6 +586,7 @@ def apply_patch(root: Path, patch: str) -> list[str]:
         if op.move_to is not None and op.move_to != op.path:
             # The source is marked deleted first, so a move out of a folder empties it.
             planned[op.path] = None
+            check_not_below_folder(op.move_to)
             if _check_parents(root, op.move_to, planned, replace_folder=True):
                 folders.append(op.move_to)
             planned[op.move_to] = (new_text.encode("utf-8"), mode)
