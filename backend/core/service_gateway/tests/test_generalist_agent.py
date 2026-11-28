@@ -769,7 +769,7 @@ def test_a_web_run_prompt_has_no_local_folder_text(monkeypatch: pytest.MonkeyPat
     assert "Never set ``repository`` in a local run" not in focus
 
 
-@pytest.mark.parametrize("screen", ["artifact", "metric", "check"])
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check", "overview"])
 def test_the_repository_screens_show_the_local_folder_path(screen: str) -> None:
     """The agent sees which folder a local run reads, beside its provider."""
     state = {"wizard_screen": screen, "repo_provider": "local", "repo_path": "/Users/me/shop"}

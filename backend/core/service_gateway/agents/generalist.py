@@ -1562,7 +1562,17 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
     ),
     "overview": frozenset().union(*(fields for fields in _SCREEN_FIELDS.values()))
     | frozenset(
-        {"job_name", "job_description", "is_private", "max_cost_cents", "run_code", "metric_code", "env_secret_clashes"}
+        {
+            "job_name",
+            "job_description",
+            "is_private",
+            "max_cost_cents",
+            "run_code",
+            "metric_code",
+            "repo_provider",
+            "repo_path",
+            "env_secret_clashes",
+        }
     ),
 }
 
