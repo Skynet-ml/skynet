@@ -326,9 +326,13 @@ void test("a deleted draft file lists struck through, and Restore takes the dele
     );
   }
   const view = await mount(<Host />);
-  const row = (path: string) => view.container.querySelector<HTMLElement>(`div[title="${path}"]`);
+  // The file list's row; the diffs list the same delete with its full path.
+  const row = (path: string) =>
+    view.container.querySelector<HTMLElement>(`aside div[title="${path}"]`);
   const restore = (path: string) =>
-    byLabel(view.container, `Restore ${path}`)[0] as HTMLButtonElement | undefined;
+    byLabel(view.container.querySelector("aside")!, `Restore ${path}`)[0] as
+      | HTMLButtonElement
+      | undefined;
 
   const old = row("src/old.py")!;
   assert.ok(old, "the deleted file has a row in the Changes list");
@@ -347,6 +351,60 @@ void test("a deleted draft file lists struck through, and Restore takes the dele
   await click(restore("src/old.py")!);
   assert.deepEqual(restored, ["src/old.py"]);
   assert.equal(row("src/old.py"), null);
+  assert.equal(view.container.querySelector('[title="src/old.py"]'), null);
   assert.ok(row("gone.py"));
+  await view.unmount();
+});
+
+void test("a draft that only deletes files shows the deletes in the diffs, not the empty state", async () => {
+  const restored: string[] = [];
+  const view = await mount(
+    <AgenticIde
+      chat={<div />}
+      texts={{}}
+      deleted={["src/old.py"]}
+      repo={null}
+      busy={false}
+      onWrite={noop}
+      onRestore={(path) => restored.push(path)}
+    />,
+  );
+  const panel = () => view.container.querySelector<HTMLElement>('[role="tabpanel"]')!;
+  assert.ok(!view.container.textContent?.includes("No changes yet"));
+  assert.equal(panel().querySelector(".line-through")?.textContent, "src/old.py");
+
+  // With the file list hidden, the diffs still show the delete and take it back.
+  await click(byLabel(view.container, "Hide files")[0]!);
+  assert.equal(byLabel(view.container, "Show files").length, 1);
+  assert.ok(panel().textContent?.includes("src/old.py"));
+  await click(byLabel(panel(), "Restore src/old.py")[0]!);
+  assert.deepEqual(restored, ["src/old.py"]);
+  await view.unmount();
+});
+
+void test("the Last turn source lists no draft deletes", async () => {
+  const ide = (texts: Record<string, string>, busy: boolean) => (
+    <AgenticIde
+      chat={<div />}
+      texts={texts}
+      deleted={["old.py"]}
+      repo={null}
+      busy={busy}
+      onWrite={noop}
+      onRestore={noop}
+    />
+  );
+  const start = { "a.py": "x = 1\n" };
+  const view = await mount(ide(start, false));
+  await view.render(ide(start, true));
+  await view.render(ide({ "a.py": "x = 2\n" }, true));
+  await view.render(ide({ "a.py": "x = 2\n" }, false));
+  assert.ok(view.container.querySelector('[title="old.py"]'));
+
+  await openMenu(sourcePill(view.container)!);
+  await click(menuItem("Last turn")!);
+  assert.deepEqual(headers(view.container), ["a.py"]);
+  assert.equal(view.container.querySelector('[title="old.py"]'), null);
+  assert.equal(byLabel(view.container, "Restore old.py").length, 0);
   await view.unmount();
 });

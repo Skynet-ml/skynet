@@ -758,7 +758,9 @@ export function ReviewPane({
   const commentCount = (path: string) =>
     source === "turn" ? 0 : comments.filter((c) => c.path === path).length;
   const matching = filter.trim() ? changed.filter((f) => fuzzyScore(filter, f.path) > 0) : changed;
-  const deletedMatching = (deleted ?? []).filter(
+  // A delete has no turn data, so "Last turn" shows none.
+  const draftDeleted = source === "turn" ? [] : (deleted ?? []);
+  const deletedMatching = draftDeleted.filter(
     (path) => !filter.trim() || fuzzyScore(filter, path) > 0,
   );
   const newPage = isNewTab(active);
@@ -901,15 +903,18 @@ export function ReviewPane({
   });
 
   // A deleted file has no text left to diff: its row shows the path struck through.
-  const deletedRows = deletedMatching.map((path) => (
+  const deletedRow = (path: string, inBody: boolean) => (
     <div
       key={`deleted:${path}`}
       title={path}
-      className="flex h-7 w-full shrink-0 items-center gap-1.5 rounded-md ps-5 pe-1 text-[13px]"
+      className={cn(
+        "flex w-full shrink-0 items-center gap-1.5 text-[13px]",
+        inBody ? "h-9 bg-[var(--surface-2)] ps-3 pe-2" : "h-7 rounded-md ps-5 pe-1",
+      )}
     >
       <FileGlyph path={path} />
       <span className="min-w-0 flex-1 truncate text-[var(--destructive)] line-through" dir="ltr">
-        {baseName(path)}
+        {inBody ? path : baseName(path)}
       </span>
       <span className="sr-only">{msg("submit.agentic_ide.review.status.deleted")}</span>
       {onRestore && (
@@ -924,7 +929,8 @@ export function ReviewPane({
         </button>
       )}
     </div>
-  ));
+  );
+  const deletedRows = deletedMatching.map((path) => deletedRow(path, false));
 
   const body = (f: RepoFile) => {
     if (f.loading || f.issue) return <FileNotice file={f} />;
@@ -1300,7 +1306,7 @@ export function ReviewPane({
               <NewTabPage showList={showList} onShowList={() => setShowList(true)} />
             ) : tabFile ? (
               tabView(tabFile)
-            ) : !changed.length ? (
+            ) : !changed.length && !draftDeleted.length ? (
               <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 pb-16 text-center">
                 <h2 className="text-[14px] font-medium text-foreground">
                   {source === "turn"
@@ -1413,6 +1419,14 @@ export function ReviewPane({
                 );
               })
             )}
+            {/* The diffs list the deletes too, so a hidden file list still shows them. */}
+            {!newPage &&
+              !tabFile &&
+              draftDeleted.map((path) => (
+                <section key={path} className="border-t border-border/60 first:border-t-0">
+                  {deletedRow(path, true)}
+                </section>
+              ))}
           </div>
         </div>
 
