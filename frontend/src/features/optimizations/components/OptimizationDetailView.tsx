@@ -86,7 +86,7 @@ import { HeldOutNotice, isNotHeldOut } from "./HeldOutNotice";
 import { RunLifecycleNotice } from "./RunLifecycleNotice";
 import { isBudgetPause } from "../lib/run-lifecycle";
 import { RunCostChip } from "./RunCostChip";
-import { BestVersionTab } from "./BestVersionTab";
+import { BestVersionTab, hasLocalDrafts } from "./BestVersionTab";
 import { UsageTab } from "./UsageTab";
 import { ContinuousTab } from "./ContinuousTab";
 import { linkifyMessage } from "@/shared/lib/linkify";
@@ -1216,12 +1216,9 @@ export function OptimizationDetailView({
                     (payload?.payload?.target as { repo?: { provider?: unknown } } | undefined)
                       ?.repo?.provider === "local"
                   }
-                  localDrafts={
-                    Object.keys(
-                      (payload?.payload?.target as { repo?: { draft_files?: object } } | undefined)
-                        ?.repo?.draft_files ?? {},
-                    ).length > 0
-                  }
+                  localDrafts={hasLocalDrafts(
+                    (payload?.payload?.target as { repo?: unknown } | undefined)?.repo,
+                  )}
                   optimizationId={job.optimization_id}
                 />
               </TabsContent>
