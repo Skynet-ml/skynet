@@ -502,7 +502,7 @@ def apply_version(
                             _save_record(record, root, changes, made)
                 except BaseException:
                     # A file left half way still needs its kept bytes, so only a full rollback drops the record.
-                    if _put_back(folder, done, made):
+                    if _put_back(folder, done, made, _twins(changes)):
                         record.unlink(missing_ok=True)
                     raise
             finally:
@@ -552,7 +552,7 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
                     pending.append(change)
                 if conflicts:
                     raise LocalFolderConflictError(conflicts)
-                _put_back(folder, pending, made, strict=True)
+                _put_back(folder, pending, made, twins, strict=True)
             finally:
                 os.close(folder)
         except OSError as error:
@@ -746,7 +746,7 @@ def _apply_in_index(checkout: Path, patch: str) -> bool:
             info, path = line.split("\t", 1)
             mode, sha, _ = info.split(" ")
             if mode not in _GIT_FILE_MODES:
-                raise RuntimeError(f"Symlinks are not allowed; the change leaves one at {path!r}.")
+                raise RuntimeError(f"The version leaves a link or a special file at {path}.")
             result[path] = (mode, sha)
     gone = entries.keys() - result.keys()
     # The disk keeps one form of each name, so a version with two forms of a path cannot be written.
@@ -1135,13 +1135,18 @@ def _put(
         os.close(parent)
 
 
-def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: bool = False) -> bool:
+def _put_back(
+    folder: int, changes: list[_Change], made: list[str], twins: Collection[str], *, strict: bool = False
+) -> bool:
     """Return changed files to their state before Apply, then remove the folders Apply made.
 
     Args:
         folder: The open root folder.
         changes: The changes to take back; each file is in its ``after`` state.
         made: The folders Apply made, highest first.
+        twins: The paths with twins among all the Apply's changes, not only
+            these. A dir/x whose twin Dir/x is already back must still rename
+            the folder back to dir/.
         strict: Raise on the first failure (Undo); else keep going (rollback of a failed Apply).
 
     Returns:
@@ -1152,7 +1157,6 @@ def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: b
         OSError: With ``strict``, when a write fails.
     """
     restored = True
-    twins = _twins(changes)
     for change in reversed(changes):
         try:
             _put(

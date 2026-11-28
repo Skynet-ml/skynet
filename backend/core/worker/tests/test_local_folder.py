@@ -1307,6 +1307,91 @@ def test_undo_of_a_folder_case_rename_keeps_the_files_added_after_apply(tmp_path
     assert not local_folder.is_applied("case")
 
 
+def test_a_failed_write_after_a_folder_case_rename_rolls_the_folder_back(
+    tmp_path: Path, folded_disk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails after dir/ became Dir/ gives back dir/ and dir/x, and keeps no Undo record."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
+    real = local_folder.os.replace
+    failed = []
+
+    def fail_once(src: str, dst: str, *, src_dir_fd: int | None = None, dst_dir_fd: int | None = None) -> None:
+        """Fail the first write into the folder, and do every other rename.
+
+        Args:
+            src: The name to move.
+            dst: The name to replace.
+            src_dir_fd: The source's open folder.
+            dst_dir_fd: The target's open folder.
+
+        Raises:
+            OSError: For the first write into the folder.
+        """
+        if dst_dir_fd is not None and not failed:
+            failed.append(dst)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(local_folder.os, "replace", fail_once)
+    with pytest.raises(LocalFolderError, match="No space left"):
+        _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    assert failed == ["x"]
+    assert _listed(root) == ["dir", "dir/x", "keep.txt"]
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
+
+
+def test_undo_of_a_folder_case_rename_that_stopped_half_way_runs_again(
+    tmp_path: Path, folded_disk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Undo stops after it deletes Dir/x, a second Undo still gives back dir/ and dir/x."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
+    _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    real = local_folder._put
+    calls = []
+
+    def fail_second(*arguments: object, **options: object) -> None:
+        """Do the first put, and fail the second.
+
+        Args:
+            *arguments: The ``_put`` arguments.
+            **options: The ``_put`` options.
+
+        Raises:
+            OSError: For the second put.
+        """
+        calls.append(arguments[1])
+        if len(calls) == 2:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(*arguments, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(local_folder, "_put", fail_second)
+    with pytest.raises(LocalFolderError, match="No space left"):
+        local_folder.undo_version(root, "case")
+    assert calls == ["Dir/x", "dir/x"]
+    monkeypatch.setattr(local_folder, "_put", real)
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["dir", "dir/x", "keep.txt"]
+    assert _fingerprint(root) == before
+    local_folder.forget_undone(root, "case")
+    assert not local_folder.is_applied("case")
+
+
+def test_undo_of_a_folder_case_rename_after_the_user_deletes_the_new_file(tmp_path: Path, folded_disk: None) -> None:
+    """When the user deletes Dir/x after Apply, Undo still gives back dir/ and dir/x."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
+    _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    (root / "Dir/x").unlink()
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["dir", "dir/x", "keep.txt"]
+    assert _fingerprint(root) == before
+    local_folder.forget_undone(root, "case")
+    assert not local_folder.is_applied("case")
+
+
 _NESTED_CASE_PATCH = (
     "diff --git a/src/pkg/m.py b/src/pkg/m.py\ndeleted file mode 100644\n--- a/src/pkg/m.py\n+++ /dev/null\n"
     "@@ -1 +0,0 @@\n-m\n"
@@ -1369,7 +1454,13 @@ _INDEX_REFUSALS = {
         "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
         "diff --git a/A.txt b/A.txt\nnew file mode 120000\n--- /dev/null\n+++ b/A.txt\n@@ -0,0 +1 @@\n"
         "+/etc/passwd\n\\ No newline at end of file\n",
-        "Symlinks are not allowed",
+        "a link or a special file at A.txt",
+    ),
+    "gitlink": (
+        "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+        "diff --git a/A.txt b/A.txt\nnew file mode 160000\nindex 0000000..1111111111111111111111111111111111111111\n--- /dev/null\n+++ b/A.txt\n"
+        "@@ -0,0 +1 @@\n+Subproject commit 1111111111111111111111111111111111111111\n",
+        "a link or a special file at A.txt",
     ),
 }
 
@@ -1378,7 +1469,7 @@ _INDEX_REFUSALS = {
 def test_the_index_path_refuses_a_patch_it_cannot_write(
     tmp_path: Path, folded_disk: None, patch: str, message: str
 ) -> None:
-    """A new A.txt next to a kept a.txt, a hunk that does not match, or a new link leaves the folder as it was."""
+    """A new A.txt next to a kept a.txt, a hunk that does not match, a new link or a gitlink leaves the folder as it was."""
     root, commit = _pinned(tmp_path, {"a.txt": "a\n"})
     before = _fingerprint(root)
     with pytest.raises(LocalFolderError, match=message):
