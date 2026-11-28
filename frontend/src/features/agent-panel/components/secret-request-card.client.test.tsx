@@ -78,17 +78,17 @@ const payload = {
 };
 
 /** Render the card the way the chat panel does: its answer goes to the confirm route. */
-async function renderCard(answers: boolean[]) {
+async function renderCard(answers: boolean[], card = payload) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await React.act(async () => {
     root.render(
       <ApprovalCard
-        payload={payload}
+        payload={card}
         onResolve={async (approved) => {
           answers.push(approved);
-          await confirmGeneralistApproval(payload.id, approved);
+          await confirmGeneralistApproval(card.id, approved);
         }}
       />,
     );
@@ -197,6 +197,45 @@ void test("a secret saved for the shown host can be kept without a new value", a
     await submit(container);
     assert.equal(sent.some((r) => r.method === "PUT"), false);
     assert.deepEqual(answers, [true]);
+  } finally {
+    await React.act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+const hostless = { ...payload, arguments: { name: "MAPS_KEY", purpose: "Local tool key", host: "" } };
+
+void test("a request with no host says so and saves the secret with no host (SKY-994)", async () => {
+  sent.length = 0;
+  saved = {};
+  const answers: boolean[] = [];
+  const { container, root } = await renderCard(answers, hostless);
+  try {
+    assert.match(container.textContent ?? "", /Goes to no host/);
+    await React.act(async () => type(container.querySelector<HTMLInputElement>('input[type="password"]')!, VALUE));
+    await submit(container);
+    const put = sent.find((r) => r.method === "PUT");
+    assert.deepEqual(JSON.parse(put!.body), { name: "MAPS_KEY", value: VALUE, allowed_hosts: [] });
+    assert.deepEqual(answers, [true]);
+    assert.doesNotMatch(container.innerHTML, new RegExp(VALUE));
+  } finally {
+    await React.act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+void test("a request with no host can keep any saved value and adds no host (SKY-994)", async () => {
+  sent.length = 0;
+  saved = { MAPS_KEY: ["api.example.com"] };
+  const answers: boolean[] = [];
+  const { container, root } = await renderCard(answers, hostless);
+  try {
+    const submitButton = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    assert.equal(submitButton.textContent, "Keep the saved value");
+    await React.act(async () => type(container.querySelector<HTMLInputElement>('input[type="password"]')!, VALUE));
+    await submit(container);
+    const put = sent.find((r) => r.method === "PUT");
+    assert.deepEqual(JSON.parse(put!.body).allowed_hosts, ["api.example.com"]);
   } finally {
     await React.act(async () => root.unmount());
     container.remove();

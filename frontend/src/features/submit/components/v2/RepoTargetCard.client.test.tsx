@@ -494,8 +494,9 @@ void test("Choose folder sets the picked path, drops the git fields and shows th
       assert.equal(path?.getAttribute("aria-live"), "polite");
       assert.ok(path?.textContent?.includes("/Users/me/app"));
       // A folder source reads no branch, commit or file list from a repository host.
+      // It reads only the names in the folder's .env (SKY-994).
       assert.deepEqual(
-        calls.filter((url) => !url.endsWith("/connectors")),
+        calls.filter((url) => !url.endsWith("/connectors") && !url.includes("/secrets/local-env?")),
         [],
       );
     } finally {
@@ -585,4 +586,141 @@ void test("a folder draft without the folder card asks for a repository instead"
   } finally {
     await unmount();
   }
+});
+
+void test("a new folder hides the last folder's .env preview while its read waits or fails (SKY-994)", async () => {
+  for (const second of ["pending", "rejected"] as const) {
+    const bridge: Bridge = { pickFolder: async () => "/Users/me/b" };
+    const linkedFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes("/secrets/local-env?")) return linkedFetch(input);
+      const path = new URL(url, "https://api.example.test").searchParams.get("path");
+      if (path === "/Users/me/b") {
+        if (second === "rejected") throw new TypeError("network down");
+        return new Promise<Response>(() => {});
+      }
+      return new Response(
+        JSON.stringify({
+          status: "found",
+          entries: [{ name: "NEW_KEY", clash: false }],
+          skipped: [{ line: 4, name: "MY-KEY", reason: "invalid_name" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+    await asDesktop(bridge, true, async () => {
+      const sent: RepoDraft[] = [];
+      const { container, unmount } = await mountControlled({ ...repo, localPath: "/Users/me/a" }, sent);
+      try {
+        await React.act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        assert.ok((container.textContent ?? "").includes("Skipped .env lines"), "no preview for folder A");
+        const choose = container.querySelector<HTMLButtonElement>('button[aria-describedby="v2-repo-folder-path"]');
+        assert.ok(choose, "no Choose folder button");
+        await React.act(async () => {
+          choose.click();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        assert.equal(sent.at(-1)!.localPath, "/Users/me/b");
+        assert.ok(!(container.textContent ?? "").includes("Skipped .env lines"), `${second}: folder A preview stays`);
+      } finally {
+        await unmount();
+        globalThis.fetch = linkedFetch;
+      }
+    });
+  }
+});
+
+void test("the folder card keeps a run-start .env clash pick when the preview finds no file (SKY-994)", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  const linkedFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!url.includes("/secrets/local-env?")) return linkedFetch(input);
+    return new Response(JSON.stringify({ status: "missing", entries: [], skipped: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled(
+      { ...repo, localPath: "/Users/me/app", envClashes: ["DB_URL"] },
+      sent,
+    );
+    try {
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.ok(!sent.some((draft) => (draft.envClashes ?? []).length === 0), "the preview dropped the clash");
+      const text = container.textContent ?? "";
+      assert.ok(text.includes("DB_URL"));
+      assert.ok(buttonWithText(container, "Keep saved"), "no Keep saved choice");
+      const use = buttonWithText(container, "Use .env");
+      assert.ok(use, "no Use .env choice");
+      assert.ok(text.includes("Pick Keep saved or Use .env for: DB_URL."), "no undecided notice");
+      await React.act(async () => use.click());
+      assert.deepEqual(sent.at(-1)!.envChoices, { DB_URL: "use" });
+    } finally {
+      await unmount();
+      globalThis.fetch = linkedFetch;
+    }
+  });
+});
+
+void test("the folder card lists .env clashes and a pick goes into the draft (SKY-994)", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  const linkedFetch = globalThis.fetch;
+  const previews: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!url.includes("/secrets/local-env?")) return linkedFetch(input);
+    previews.push(new URL(url, "https://api.example.test").searchParams.get("path") ?? "");
+    return new Response(
+      JSON.stringify({
+        status: "found",
+        entries: [
+          { name: "DB_URL", clash: true },
+          { name: "NEW_KEY", clash: false },
+        ],
+        skipped: [{ line: 4, name: "MY-KEY", reason: "invalid_name" }],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled({ ...repo, localPath: "/Users/me/app" }, sent);
+    try {
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.deepEqual(previews, ["/Users/me/app"]);
+      assert.deepEqual(sent.at(-1)!.envClashes, ["DB_URL"]);
+      assert.deepEqual(sent.at(-1)!.envChoices, {});
+      const text = container.textContent ?? "";
+      assert.ok(text.includes("DB_URL"));
+      assert.ok(text.includes("4 (MY-KEY)"));
+      const use = buttonWithText(container, "Use .env");
+      assert.ok(use, "no Use .env choice");
+      assert.ok(buttonWithText(container, "Keep saved"), "no Keep saved choice");
+      assert.ok(text.includes("Pick Keep saved or Use .env for: DB_URL."), "no undecided notice");
+      await React.act(async () => use.click());
+      assert.deepEqual(sent.at(-1)!.envChoices, { DB_URL: "use" });
+      assert.ok(!(container.textContent ?? "").includes("Pick Keep saved or Use .env for:"));
+      // The same preview again changes nothing, so the draft does not loop.
+      const count = sent.length;
+      await React.act(async () => {
+        dom.window.dispatchEvent(new dom.window.Event("saved-secrets-changed"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.equal(previews.length, 2);
+      assert.equal(sent.length, count);
+    } finally {
+      await unmount();
+      globalThis.fetch = linkedFetch;
+    }
+  });
 });

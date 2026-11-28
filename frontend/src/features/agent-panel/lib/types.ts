@@ -76,6 +76,8 @@ export interface WizardState {
   workspace_files?: Record<string, string>;
   /** The folder files the Mac setup agent's shell deleted; the run removes them. Sent whole. */
   workspace_deleted?: string[];
+  /** The local folder's `.env` names saved with another value that the user has not decided on (SKY-994). Names only. */
+  env_secret_clashes?: string[];
   /** The commit the agent read the draft files at; the run refuses them on any other commit. */
   workspace_base?: string;
   /** The wizard screen on view; the agent may edit only the fields on it. */

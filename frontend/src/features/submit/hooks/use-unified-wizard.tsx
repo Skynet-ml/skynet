@@ -45,6 +45,7 @@ import {
   isStorageQuotaError,
   setupDraftApi,
   submitRepoRun,
+  importLocalEnvSecrets,
   listSavedSecrets,
   SAVED_SECRETS_CHANGED_EVENT,
   type SavedSecret,
@@ -89,7 +90,15 @@ import {
   type Row,
 } from "../lib/inputs-mode";
 import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate-reasons";
-import { contractText, finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
+import {
+  contractText,
+  envSecretClashesState,
+  envSubmitFailure,
+  withEnvClashes,
+  finishedHardeningJobId,
+  repoRunRequest,
+  withLocalEnvImport,
+} from "../lib/repo-run";
 import {
   WIZARD_HARDENING_KEY,
   WIZARD_SESSION_KEY,
@@ -233,7 +242,8 @@ type Action =
   | { type: "level"; level: ExperienceLevel; optimizerBlocked: boolean }
   | { type: "defaultModels"; models: Record<ModelRole, ModelConfig | null> }
   // Applied to the state it reduces, not a copy from the submit click.
-  | { type: "secretHostIssues"; issues: Record<string, string> };
+  | { type: "secretHostIssues"; issues: Record<string, string> }
+  | { type: "envClashes"; names: string[] };
 
 const stepIndex = (step: WizardStepId) => WIZARD_V2_STEPS.indexOf(step);
 
@@ -261,6 +271,10 @@ function reducer(state: WizardV2State, action: Action): WizardV2State {
   if (action.type === "secretHostIssues") {
     const task = withSecretHostIssues(state.task, action.issues);
     return task === state.task ? state : { ...state, task };
+  }
+  if (action.type === "envClashes") {
+    const repo = withEnvClashes(state.task.repo, action.names);
+    return repo === state.task.repo ? state : { ...state, task: { ...state.task, repo } };
   }
   if (action.slice === "optimizer") {
     return { ...state, optimizer: withOptimizerPatch(state.optimizer, action.patch) };
@@ -763,6 +777,14 @@ export function WizardV2Provider({
   };
 
   const submitFailed = (err: unknown) => {
+    const envFailure = envSubmitFailure(err);
+    if (envFailure) {
+      if (envFailure.clashes) dispatch({ type: "envClashes", names: envFailure.clashes });
+      toast.error(msg(envFailure.key, envFailure.params));
+      submittingRef.current = false;
+      setSubmitPhase("idle");
+      return;
+    }
     // The storage 409 and the balance 402 each open their own shared modal.
     if (!isStorageQuotaError(err) && !isInsufficientFundsError(err)) {
       // A refused setup check names what to change, such as an unknown connector.
@@ -803,9 +825,12 @@ export function WizardV2Provider({
         metricCommand,
       );
       const conversationId = runSetupChatId(readSessionValue(SETUP_CHAT_KEY), runOn);
+      // Every local run start imports the folder's .env, so the run gets its
+      // current values (SKY-994).
+      const runRequest = await withLocalEnvImport(request, state.task.repo, importLocalEnvSecrets);
       const result = await submitRepoRun(
         {
-          ...request,
+          ...runRequest,
           ...(hardeningJobId ? { hardening_job_id: hardeningJobId } : {}),
           ...(conversationId ? { conversation_id: conversationId } : {}),
         },
@@ -1193,6 +1218,7 @@ export function WizardV2Provider({
       // ascent.toml has its own field; the agent sees the other repo files here.
       workspace_files: otherFiles(workspace.files),
       workspace_deleted: workspace.deleted?.length ? workspace.deleted : undefined,
+      env_secret_clashes: envSecretClashesState(task.repo),
       // Only while drafts exist: the agent pins the first new draft to the commit it reads then.
       workspace_base:
         Object.keys(workspace.files).length > 0 || workspace.deleted?.length

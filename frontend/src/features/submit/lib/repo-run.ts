@@ -6,12 +6,22 @@
  * no artifact or run code, and carries cases only when the interview found
  * the run needs data.
  */
+import type { LocalEnvStatus } from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
+import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
 import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig } from "@/shared/types/api";
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
 import { runModels, scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
-import { isLocalRepo, LOCAL_SANDBOX_PROVIDER, parseAllowedHosts, type WizardV2State } from "./wizard-v2";
+import {
+  envReplaceNames,
+  isLocalRepo,
+  LOCAL_SANDBOX_PROVIDER,
+  parseAllowedHosts,
+  undecidedEnvClashes,
+  type RepoDraft,
+  type WizardV2State,
+} from "./wizard-v2";
 
 export interface RepoRunOptions {
   username: string;
@@ -174,6 +184,186 @@ function savedServiceSecrets(
       approved.find((entry) => entry.startsWith("*.") && host.endsWith(entry.slice(1)));
     return match ? [{ name, saved_secret_id: secret.id, allowed_hosts: [match] }] : [];
   });
+}
+
+/**
+ * Add the secrets that a local folder's `.env` import saved to a local run
+ * (SKY-994). Each goes by id as an environment variable only, with no host.
+ * A secret that the request already sends, typed or saved, keeps its entry.
+ *
+ * Args:
+ *   request: The run request.
+ *   saved: The saved secrets the import returned; names and ids only.
+ *
+ * Returns:
+ *   The request with the `.env` secrets, or the same request for a git run.
+ */
+export function withEnvSecrets(
+  request: BlackboxRunRequest,
+  saved: ReadonlyArray<{ id: string; name: string }>,
+): BlackboxRunRequest {
+  const repo = request.target.repo;
+  if (!repo || repo.provider !== "local") return request;
+  const current = repo.secrets ?? [];
+  const sent = new Set(current.map((secret) => secret.name));
+  const added = saved
+    .filter((secret) => !sent.has(secret.name))
+    .map((secret) => ({ name: secret.name, saved_secret_id: secret.id, allowed_hosts: [] }));
+  if (added.length === 0) return request;
+  return {
+    ...request,
+    target: { ...request.target, repo: { ...repo, secrets: [...current, ...added] } },
+  };
+}
+
+/** Most secrets one run request takes (`BlackboxRepoTarget.secrets` on the server). */
+export const RUN_SECRETS_MAX = 100;
+
+/** A local run that the folder's `.env` gives more secrets than one run takes (SKY-994). */
+export class TooManyRunSecretsError extends Error {
+  readonly count: number;
+
+  /**
+   * Keep the count for the message.
+   *
+   * Args:
+   *   count: How many secrets the run would send.
+   */
+  constructor(count: number) {
+    super("submit.v2.repo.env.too_many");
+    this.count = count;
+    this.name = "TooManyRunSecretsError";
+  }
+}
+
+/** A local run whose folder `.env` has clashing names with no Keep saved or Use .env pick (SKY-994). */
+export class UndecidedEnvClashesError extends Error {
+  readonly names: string[];
+
+  /**
+   * Keep the names for the message and the clash list.
+   *
+   * Args:
+   *   names: The clashing names with no pick.
+   */
+  constructor(names: string[]) {
+    super("submit.v2.repo.env.undecided");
+    this.names = names;
+    this.name = "UndecidedEnvClashesError";
+  }
+}
+
+/** A local run whose folder `.env` the run start could not read, so no secret came from it (SKY-994). */
+export class EnvImportFailedError extends Error {
+  readonly status: "unsafe" | "too_large" | "unreadable";
+
+  /**
+   * Keep the import status for the message.
+   *
+   * Args:
+   *   status: Why the import read no `.env`.
+   */
+  constructor(status: "unsafe" | "too_large" | "unreadable") {
+    super(`submit.v2.repo.env.${status}`);
+    this.status = status;
+    this.name = "EnvImportFailedError";
+  }
+}
+
+/**
+ * Import the folder's `.env` at a local run start and add its secrets to the run.
+ *
+ * Every clashing name needs a pick first: Use .env replaces the saved value,
+ * Keep saved keeps it. A clash that the `.env` got after the preview stops the
+ * run too; the import then saved no value for it. A `.env` that the run
+ * start cannot read stops the run, so the run never starts without its secrets.
+ * A git run imports nothing (SKY-994).
+ *
+ * Args:
+ *   request: The run request.
+ *   repo: The wizard's repository draft.
+ *   importEnv: The import call, `importLocalEnvSecrets` in the app.
+ *
+ * Returns:
+ *   The request with the `.env` secrets.
+ *
+ * Throws:
+ *   UndecidedEnvClashesError: When a clashing name has no pick.
+ *   EnvImportFailedError: When the import cannot read the `.env`.
+ *   TooManyRunSecretsError: When the run would send more than `RUN_SECRETS_MAX` secrets.
+ */
+export async function withLocalEnvImport(
+  request: BlackboxRunRequest,
+  repo: RepoDraft,
+  importEnv: (
+    path: string,
+    replace: string[],
+  ) => Promise<{
+    status: LocalEnvStatus;
+    kept: readonly string[];
+    secrets: ReadonlyArray<{ id: string; name: string }>;
+  }>,
+): Promise<BlackboxRunRequest> {
+  if (!isLocalRepo(repo)) return request;
+  const undecided = undecidedEnvClashes(repo);
+  if (undecided.length > 0) throw new UndecidedEnvClashesError(undecided);
+  const imported = await importEnv((repo.localPath ?? "").trim(), envReplaceNames(repo));
+  if (imported.status !== "found" && imported.status !== "missing") throw new EnvImportFailedError(imported.status);
+  const late = imported.kept.filter((name) => repo.envChoices?.[name] !== "keep");
+  if (late.length > 0) throw new UndecidedEnvClashesError(late);
+  const sent = withEnvSecrets(request, imported.secrets);
+  const count = sent.target.repo?.secrets?.length ?? 0;
+  if (count > RUN_SECRETS_MAX) throw new TooManyRunSecretsError(count);
+  return sent;
+}
+
+/**
+ * What a failed run start shows and keeps for a `.env` problem (SKY-994).
+ *
+ * A late clash returns its names. The wizard merges them into the current
+ * draft with `withEnvClashes`, so the Repository screen shows their picks and
+ * the setup agent sees them in `env_secret_clashes`.
+ *
+ * Args:
+ *   err: The error that stopped the run start.
+ *
+ * Returns:
+ *   The toast message and any late clash names, or null for any other error.
+ */
+export function envSubmitFailure(
+  err: unknown,
+): { key: MessageKey; params: Record<string, string | number>; clashes?: string[] } | null {
+  if (err instanceof UndecidedEnvClashesError)
+    return { key: "submit.v2.repo.env.undecided", params: { names: err.names.join(", ") }, clashes: err.names };
+  if (err instanceof EnvImportFailedError) return { key: `submit.v2.repo.env.${err.status}`, params: {} };
+  if (err instanceof TooManyRunSecretsError)
+    return { key: "submit.v2.repo.env.too_many", params: { count: err.count, limit: RUN_SECRETS_MAX } };
+  return null;
+}
+
+/**
+ * Add `.env` clash names to a repository draft, keeping every other field.
+ *
+ * The wizard applies it to the draft it reduces, not to a copy from the submit
+ * click, so a setup agent edit during the run start survives (SKY-994).
+ *
+ * Args:
+ *   repo: The current repository draft.
+ *   names: The clash names to add.
+ *
+ * Returns:
+ *   The draft with the names in `envClashes`, or the same draft when none is new.
+ */
+export function withEnvClashes(repo: RepoDraft, names: readonly string[]): RepoDraft {
+  const held = repo.envClashes ?? [];
+  if (names.every((name) => held.includes(name))) return repo;
+  return { ...repo, envClashes: [...new Set([...held, ...names])] };
+}
+
+/** The `.env` clashes the agent must ask about: a local draft's names with no pick yet. */
+export function envSecretClashesState(repo: RepoDraft): string[] | undefined {
+  const clashes = isLocalRepo(repo) ? undecidedEnvClashes(repo) : [];
+  return clashes.length > 0 ? clashes : undefined;
 }
 
 const hasModel = (config: ModelConfig | null): config is ModelConfig =>

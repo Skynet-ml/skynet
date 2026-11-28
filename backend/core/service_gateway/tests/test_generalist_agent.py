@@ -652,6 +652,40 @@ def test_the_repository_screens_show_the_local_folder_path(screen: str) -> None:
     assert "repo_path" not in screen_snapshot(cast(WizardState, {**state, "wizard_screen": "budget"}))
 
 
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check", "overview"])
+def test_the_agent_sees_the_env_secret_clashes_until_the_run_starts(screen: str) -> None:
+    """The screens up to the run start show the undecided .env clashes, names only (SKY-994)."""
+    state = {"wizard_screen": screen, "repo_provider": "local", "env_secret_clashes": ["API_KEY"]}
+    assert screen_snapshot(cast(WizardState, state))["env_secret_clashes"] == ["API_KEY"]
+    assert "env_secret_clashes" not in screen_snapshot(cast(WizardState, {**state, "wizard_screen": "budget"}))
+
+
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check", "overview"])
+def test_a_local_run_prompt_asks_about_each_env_secret_clash(monkeypatch: pytest.MonkeyPatch, screen: str) -> None:
+    """In the desktop app the agent asks about each clash before the run starts, and never about a value."""
+    state = cast(WizardState, {"wizard_screen": screen, "repo_provider": "local", "env_secret_clashes": ["API_KEY"]})
+    assert "API_KEY" in str(screen_snapshot(state))
+    monkeypatch.setattr(settings, "local_mode", True)
+    focus = screen_signature(screen).instructions
+    # The prompt names the state field and the two picks the Repository screen shows.
+    assert "env_secret_clashes" in focus
+    assert "Keep saved" in focus
+    assert "Use .env" in focus
+    assert "env_secret_clashes" not in screen_signature("budget").instructions
+    monkeypatch.setattr(settings, "local_mode", False)
+    assert "env_secret_clashes" not in screen_signature(screen).instructions
+
+
+def test_a_local_run_prompt_handles_a_clash_that_stops_the_run_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clash the .env gets after the folder check reaches the overview agent, which asks and restarts."""
+    state = cast(WizardState, {"wizard_screen": "overview", "repo_provider": "local", "env_secret_clashes": ["LATE"]})
+    assert screen_snapshot(state)["env_secret_clashes"] == ["LATE"]
+    monkeypatch.setattr(settings, "local_mode", True)
+    focus = screen_signature("overview").instructions
+    assert "new clashing name" in focus
+    assert "start the run again" in focus
+
+
 def test_screen_prompts_forbid_unconfirmed_claims() -> None:
     """Both prompts tell the agent not to claim writes or screen moves a tool did not confirm."""
     assert "Say only what a tool result confirms." in (GENERALIST_SYSTEM_PROMPT or "")

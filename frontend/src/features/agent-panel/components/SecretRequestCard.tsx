@@ -33,7 +33,9 @@ export function SecretRequestCard({ payload, onResolve, className }: SecretReque
   const [storedHosts, setStoredHosts] = React.useState<string[] | null>(null);
   // The saved value may be kept only when the user already approved this
   // host for it; a new host needs the value typed again with the host shown.
-  const alreadySaved = storedHosts?.includes(host) ?? false;
+  // A request with no host (SKY-994) adds no host, so any saved value fits.
+  const alreadySaved = storedHosts !== null && (!host || storedHosts.includes(host));
+  const withHost = (hosts: string[] | null) => [...new Set([...(hosts ?? []), ...(host ? [host] : [])])];
 
   React.useEffect(() => {
     let live = true;
@@ -69,7 +71,7 @@ export function SecretRequestCard({ payload, onResolve, className }: SecretReque
     try {
       // The host shown here is the consent the user gives, so it is stored
       // with the secret, and the server sends the secret to no other host.
-      await saveSecret(name, value, [...new Set([...(storedHosts ?? []), host])]);
+      await saveSecret(name, value, withHost(storedHosts));
     } catch {
       // The server's error text stays out of the card; it may name the input.
       setFailed(true);
@@ -77,7 +79,7 @@ export function SecretRequestCard({ payload, onResolve, className }: SecretReque
       return;
     }
     setValue("");
-    setStoredHosts((hosts) => [...new Set([...(hosts ?? []), host])]);
+    setStoredHosts(withHost);
     await resolve(true);
   };
 
@@ -104,7 +106,7 @@ export function SecretRequestCard({ payload, onResolve, className }: SecretReque
           <code dir="ltr" className="rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
             {name}
           </code>
-          <span>{formatMsg("agent.secret_card.host", { host })}</span>
+          <span>{host ? formatMsg("agent.secret_card.host", { host }) : msg("agent.secret_card.no_host")}</span>
         </div>
         {alreadySaved && <p className="text-[0.75rem] text-muted-foreground">{msg("agent.secret_card.already_saved")}</p>}
         <Input

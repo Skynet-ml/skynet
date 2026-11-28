@@ -58,6 +58,20 @@ export interface RepoDraft {
    * local source; `provider`, `repository`, `branch` and `commit` are then unused.
    */
   localPath?: string;
+  /** The names in the folder's root `.env` that are saved with another value (SKY-994); names only. */
+  envClashes?: string[];
+  /** The user's pick per clash: keep the saved value, or use the `.env` value. A run needs a pick for each. */
+  envChoices?: Record<string, "keep" | "use">;
+}
+
+/** The `.env` clashes the user has not decided on yet. */
+export function undecidedEnvClashes(repo: RepoDraft): string[] {
+  return (repo.envClashes ?? []).filter((name) => !repo.envChoices?.[name]);
+}
+
+/** The `.env` clashes whose saved value the user chose to replace with the `.env` value. */
+export function envReplaceNames(repo: RepoDraft): string[] {
+  return (repo.envClashes ?? []).filter((name) => repo.envChoices?.[name] === "use");
 }
 
 /** Whether the draft runs on a folder of this computer, not on a hosted repository. */
@@ -79,8 +93,10 @@ export function isLocalRepo(repo: RepoDraft): boolean {
  *   The draft with the folder and no repository, host, branch or commit.
  */
 export function withLocalFolder(repo: RepoDraft, path: string): RepoDraft {
-  const { provider: _provider, ...rest } = repo;
-  return { ...rest, repository: "", branch: "", commit: "", createdBySkynet: false, localPath: path };
+  const { provider: _provider, envClashes, envChoices, ...rest } = repo;
+  // Another folder has another `.env`, so its clashes and picks do not carry over.
+  const env = repo.localPath === path ? { envClashes, envChoices } : {};
+  return { ...rest, ...env, repository: "", branch: "", commit: "", createdBySkynet: false, localPath: path };
 }
 
 /** The sandbox provider id of the local Docker box, the only box a local folder may run in. */
@@ -269,7 +285,12 @@ const hasModel = (config: ModelConfig | null): boolean => Boolean(config?.name.t
  * move on. There is no separate confirm: Continue is the confirmation.
  */
 export function taskIssue(task: TaskSlice): string | null {
-  return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
+  return repoIssue(task.repo) ?? envClashIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
+}
+
+/** The issue of a local draft whose `.env` clashes are not all picked; no silent default (SKY-994). */
+function envClashIssue(repo: RepoDraft): string | null {
+  return isLocalRepo(repo) && undecidedEnvClashes(repo).length > 0 ? "submit.v2.repo.issue.env_clash" : null;
 }
 
 const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;

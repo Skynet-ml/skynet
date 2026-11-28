@@ -31,6 +31,9 @@ import { useConnectors } from "@/features/connectors";
 import {
   createGithubRepository,
   listGithubBranches,
+  previewLocalEnvSecrets,
+  SAVED_SECRETS_CHANGED_EVENT,
+  type LocalEnvPreview,
   listRepoCommits,
   startConnectorOAuth,
   REPO_HOST_NAMES as HOST_NAMES,
@@ -111,7 +114,7 @@ export function RepoTargetCard({
   /** The run starts on this computer, so a local folder can be its source (SKY-993). */
   localFolders?: boolean;
 }) {
-  const t = (key: string) => v2Msg(key, guided);
+  const t = (key: string, params?: Record<string, string | number>) => v2Msg(key, guided, params);
   const { byProvider, loading } = useConnectors();
   const isLinked = (target: RepoHost) => {
     const account = byProvider(target);
@@ -151,9 +154,58 @@ export function RepoTargetCard({
   }, [repo]);
   /** The draft without a local folder, for a git source. */
   const gitRepo = (): RepoDraft => {
-    const { localPath: _localPath, ...rest } = repo;
+    const { localPath: _localPath, envClashes: _clashes, envChoices: _choices, ...rest } = repo;
     return rest;
   };
+
+  // The names in the folder's .env, read again when the folder or the saved
+  // secrets change, so the clashes match what the run start imports (SKY-994).
+  const folderPath = isLocalRepo(repo) ? (repo.localPath ?? "").trim() : "";
+  const [envPreview, setEnvPreview] = useState<LocalEnvPreview | null>(null);
+  useEffect(() => {
+    if (!folderPath || !offerFolder) {
+      setEnvPreview(null);
+      return;
+    }
+    // A new folder must not show the last folder's preview while its own read runs or fails.
+    setEnvPreview(null);
+    let controller = new AbortController();
+    const load = () => {
+      controller.abort();
+      controller = new AbortController();
+      previewLocalEnvSecrets(folderPath, controller.signal)
+        .then((preview) => {
+          setEnvPreview(preview);
+          // Only a read of the file changes the clashes. A missing or failed read
+          // keeps a clash the run start found, because that clash still needs a pick.
+          if (preview.status !== "found") return;
+          const current = latestRepo.current;
+          if (!isLocalRepo(current) || (current.localPath ?? "").trim() !== folderPath) return;
+          const clashes = preview.entries.filter((entry) => entry.clash).map((entry) => entry.name);
+          const choices = Object.fromEntries(
+            Object.entries(current.envChoices ?? {}).filter(([name]) => clashes.includes(name)),
+          );
+          const held = current.envClashes ?? [];
+          if (
+            held.length === clashes.length &&
+            held.every((name, i) => name === clashes[i]) &&
+            Object.keys(choices).length === Object.keys(current.envChoices ?? {}).length
+          )
+            return;
+          onChange({ ...current, envClashes: clashes, envChoices: choices });
+        })
+        .catch(() => {
+          // The run start reads the file again and reports a failure there.
+        });
+    };
+    load();
+    window.addEventListener(SAVED_SECRETS_CHANGED_EVENT, load);
+    return () => {
+      controller.abort();
+      window.removeEventListener(SAVED_SECRETS_CHANGED_EVENT, load);
+    };
+    // onChange is a new function on each render; the folder decides what to read.
+  }, [folderPath, offerFolder]);
 
   const pickFolder = async () => {
     setFolderBusy(true);
@@ -430,6 +482,17 @@ export function RepoTargetCard({
               </Button>
             </div>
           )}
+          {folderPath && (envPreview || (repo.envClashes ?? []).length > 0) && (
+            <EnvSecrets
+              preview={envPreview}
+              clashes={repo.envClashes ?? []}
+              choices={repo.envChoices ?? {}}
+              onChoose={(name, choice) =>
+                patch({ envChoices: { ...(repo.envChoices ?? {}), [name]: choice } })
+              }
+              t={t}
+            />
+          )}
           <RepoSecretsField
             secrets={repo.secrets ?? []}
             onChange={(secrets) => patch({ secrets })}
@@ -668,6 +731,88 @@ export function RepoTargetCard({
               ? "submit.v2.run_on.blocked.local_folder"
               : issue,
           )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What the run start does with the folder's root `.env` file (SKY-994): it
+ * saves each pair as a saved secret. A name already saved with another value
+ * changes only when the user picks Use .env. Names only; never a value.
+ * The clash picks show whatever the preview says: a clash that the run start
+ * found later still blocks the run, so its pick must stay on screen.
+ */
+function EnvSecrets({
+  preview,
+  clashes,
+  choices,
+  onChoose,
+  t,
+}: {
+  preview: LocalEnvPreview | null;
+  clashes: string[];
+  choices: Record<string, "keep" | "use">;
+  onChoose: (name: string, choice: "keep" | "use") => void;
+  t: (key: string, params?: Record<string, string | number>) => string;
+}) {
+  const found = preview?.status === "found" ? preview : null;
+  const note =
+    preview && preview.status !== "found" && preview.status !== "missing" ? (
+      <p role="status" className="text-xs text-muted-foreground">
+        {t(`submit.v2.repo.env.${preview.status}`)}
+      </p>
+    ) : null;
+  if (clashes.length === 0) {
+    if (!found) return note;
+    if (found.entries.length === 0 && found.skipped.length === 0) return null;
+  }
+  const options = [
+    { value: "keep" as const, label: t("submit.v2.repo.env.keep") },
+    { value: "use" as const, label: t("submit.v2.repo.env.use") },
+  ];
+  const undecided = clashes.filter((name) => !choices[name]);
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
+      <span className="text-sm font-medium text-foreground">{t("submit.v2.repo.env.title")}</span>
+      {note}
+      {found && found.entries.length > 0 && (
+        <p className="text-xs text-muted-foreground">{t("submit.v2.repo.env.intro")}</p>
+      )}
+      {clashes.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-muted-foreground">{t("submit.v2.repo.env.clash_intro")}</p>
+          <ul className="flex flex-col gap-2">
+            {clashes.map((name) => (
+              <li key={name} className="flex flex-wrap items-center justify-between gap-2">
+                <span dir="ltr" className="font-mono text-sm text-foreground">
+                  {name}
+                </span>
+                <Segmented
+                  size="sm"
+                  value={choices[name] ?? null}
+                  onChange={(choice) => onChoose(name, choice)}
+                  options={options}
+                  label={t("submit.v2.repo.env.choice_label", { name })}
+                />
+              </li>
+            ))}
+          </ul>
+          {undecided.length > 0 && (
+            <p role="status" className="text-xs text-destructive">
+              {t("submit.v2.repo.env.undecided", { names: undecided.join(", ") })}
+            </p>
+          )}
+        </div>
+      )}
+      {found && found.skipped.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {t("submit.v2.repo.env.skipped", {
+            lines: found.skipped
+              .map((skip) => (skip.name ? `${skip.line} (${skip.name})` : String(skip.line)))
+              .join(", "),
+          })}
         </p>
       )}
     </div>
