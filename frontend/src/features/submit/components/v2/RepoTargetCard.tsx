@@ -377,7 +377,7 @@ export function RepoTargetCard({
           gesture="open"
           icon={
             <FolderOpen
-              className="size-5 transition-transform duration-300 ease-out group-hover:-rotate-12 group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
+              className="size-5 transition-transform duration-300 ease-out motion-safe:group-hover:-rotate-12 motion-safe:group-hover:scale-110 motion-reduce:transition-none"
               aria-hidden="true"
             />
           }
@@ -396,7 +396,7 @@ export function RepoTargetCard({
           gesture="add"
           icon={
             <Plus
-              className="size-5 transition-transform duration-300 ease-out group-hover:rotate-90 group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
+              className="size-5 transition-transform duration-300 ease-out motion-safe:group-hover:rotate-90 motion-safe:group-hover:scale-110 motion-reduce:transition-none"
               aria-hidden="true"
             />
           }
@@ -413,7 +413,7 @@ export function RepoTargetCard({
             gesture="boot"
             icon={
               <Desktop
-                className="size-5 transition-transform duration-300 ease-out group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:transform-none"
+                className="size-5 transition-transform duration-300 ease-out motion-safe:group-hover:scale-110 motion-reduce:transition-none"
                 aria-hidden="true"
               />
             }
@@ -852,7 +852,7 @@ function SourceCard({
       disabled={disabled}
       className={cn(
         "group relative isolate flex min-h-20 flex-1 cursor-pointer items-center gap-4 overflow-hidden rounded-xl border bg-card px-5 py-4 text-start outline-none",
-        "transition-[transform,border-color,box-shadow,background-color] duration-300 ease-out motion-reduce:transition-none",
+        "transition-[translate,scale,border-color,box-shadow,background-color] duration-300 ease-out motion-reduce:transition-none",
         "hover:-translate-y-0.5 hover:shadow-[0_10px_30px_-12px] hover:shadow-primary-fill/40 active:translate-y-0 active:scale-[0.99] motion-reduce:hover:translate-y-0",
         "focus-visible:ring-[3px] focus-visible:ring-ring/50",
         "disabled:pointer-events-none disabled:opacity-60",

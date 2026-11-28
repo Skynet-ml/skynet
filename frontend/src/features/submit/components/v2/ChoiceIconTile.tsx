@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { cn } from "@/shared/lib/utils";
 
@@ -23,8 +23,9 @@ export type ChoiceIconGesture = keyof typeof GESTURES;
  *
  * Hover lifts and tilts the tile, casts an orange shadow, sweeps a light
  * across it and plays the icon's own gesture once. Choosing the card pops the tile,
- * turns the icon into place and sends out one ring. With reduced motion
- * only the colors change.
+ * turns the icon into place and sends out one ring. A card that is already
+ * chosen when it mounts does not animate. With reduced motion only the
+ * colors change.
  *
  * Args:
  *   selected: Whether the card is the chosen one.
@@ -43,6 +44,14 @@ export function ChoiceIconTile({
   gesture: ChoiceIconGesture;
   children: ReactNode;
 }) {
+  // The animations play only when the user picks the card, not when the step
+  // mounts with a card already chosen (the wizard preselects a run place).
+  const [prevSelected, setPrevSelected] = useState(selected);
+  const [picked, setPicked] = useState(false);
+  if (selected !== prevSelected) {
+    setPrevSelected(selected);
+    setPicked(selected);
+  }
   return (
     <span
       className={cn(
@@ -51,8 +60,9 @@ export function ChoiceIconTile({
         "group-hover:-translate-y-[3px] group-hover:-rotate-3 group-hover:scale-[1.08] group-active:translate-y-0 group-active:scale-95",
         "motion-reduce:transition-colors motion-reduce:group-hover:translate-y-0 motion-reduce:group-hover:rotate-0 motion-reduce:group-hover:scale-100 motion-reduce:group-active:scale-100",
         selected
-          ? "border-primary-fill/30 bg-primary-fill text-primary-foreground shadow-[0_6px_18px_-6px] shadow-primary-fill/70 motion-safe:animate-[choice-tile-pop_420ms_cubic-bezier(0.16,1,0.3,1)]"
+          ? "border-primary-fill/30 bg-primary-fill text-primary-foreground shadow-[0_6px_18px_-6px] shadow-primary-fill/70"
           : "border-border bg-muted text-muted-foreground group-hover:border-primary-fill/30 group-hover:bg-primary-fill/10 group-hover:text-primary-fill group-hover:shadow-[0_8px_16px_-8px] group-hover:shadow-primary-fill/50",
+        picked && "motion-safe:animate-[choice-tile-pop_420ms_cubic-bezier(0.16,1,0.3,1)]",
       )}
     >
       {/* The light sweep is clipped to the tile; the ring below must not be. */}
@@ -62,7 +72,7 @@ export function ChoiceIconTile({
         />
       </span>
       {/* Mounts with the choice, so the ring plays once for each choice. */}
-      {selected && (
+      {picked && (
         <span
           aria-hidden="true"
           className="pointer-events-none absolute -inset-px rounded-lg border-2 border-primary-fill opacity-0 motion-safe:animate-[choice-tile-ring_600ms_cubic-bezier(0.16,1,0.3,1)]"
@@ -73,7 +83,7 @@ export function ChoiceIconTile({
       <span
         className={cn(
           "relative flex items-center justify-center",
-          selected && "motion-safe:animate-[choice-icon-settle_480ms_cubic-bezier(0.16,1,0.3,1)]",
+          picked && "motion-safe:animate-[choice-icon-settle_480ms_cubic-bezier(0.16,1,0.3,1)]",
         )}
       >
         <span className={cn("flex items-center justify-center", GESTURES[gesture])}>
