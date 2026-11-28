@@ -85,7 +85,8 @@ is missing, run `ls ../attachments/*/` and find the file by its name. Files \
 there never become draft files."""
 FOLDER_CHANGED = (
     "The folder changed after the draft files were written, so the run would refuse them. "
-    "Ask the user to discard the changed files in the editor, then read the folder again."
+    "Ask the user to discard the changed files in the editor. The editor does not list deleted files: to undo them, "
+    "the user can choose another folder and then this folder again, which drops every draft. Then read the folder again."
 )
 # The editor keeps a root run.py as a text run's program, so a repository file there would not reach the run.
 UNWRITABLE_PATHS = frozenset({"run.py"})
@@ -244,15 +245,19 @@ How to write the run's files:
 
 
 def has_drafts(state: dict[str, Any]) -> bool:
-    """Say whether the setup draft holds repository files that the run request sends as draft files.
+    """Say whether the setup draft holds repository files that the run request sends as draft files or deletes.
 
     Args:
         state: The wizard snapshot with this turn's writes merged in.
 
     Returns:
-        ``True`` when ``workspace_files`` or ``ascent_toml`` holds text.
+        ``True`` when ``workspace_files``, ``workspace_deleted`` or ``ascent_toml`` holds a value.
     """
-    return bool(state.get(DRAFT_FILES_FIELD)) or bool(str(state.get("ascent_toml") or "").strip())
+    return (
+        bool(state.get(DRAFT_FILES_FIELD))
+        or bool(state.get(DRAFT_DELETED_FIELD))
+        or bool(str(state.get("ascent_toml") or "").strip())
+    )
 
 
 def open_folder(state: dict[str, Any]) -> tuple[RepoBrowser | None, str]:

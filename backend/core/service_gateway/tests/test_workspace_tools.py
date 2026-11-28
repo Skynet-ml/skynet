@@ -54,6 +54,7 @@ from core.service_gateway.agents.workspace_tools import (
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
+    has_drafts,
     open_folder,
     open_repo,
 )
@@ -1790,7 +1791,9 @@ async def test_a_local_folder_that_changed_after_the_drafts_is_refused(
 
     assert result == {
         "error": "The folder changed after the draft files were written, so the run would refuse them. "
-        "Ask the user to discard the changed files in the editor, then read the folder again."
+        "Ask the user to discard the changed files in the editor. The editor does not list deleted files: to undo "
+        "them, the user can choose another folder and then this folder again, which drops every draft. "
+        "Then read the folder again."
     }
     stale_base_no_drafts = {**state, "workspace_base": "b" * 40}
     assert isinstance(
@@ -2403,3 +2406,21 @@ async def test_a_file_swapped_with_a_folder_keeps_the_delete_and_a_new_copy_rebu
     assert "wizard_state" not in again
     assert (root / "README.md").is_file()
     assert (root / "src" / "app.py").is_file()
+
+
+@pytest.mark.asyncio
+async def test_delete_drafts_of_an_older_folder_are_refused_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A draft that only deletes files counts as a draft, so a changed folder refuses it in every tool."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    drafted = {**state, "workspace_base": "b" * 40, "workspace_deleted": ["README.md"]}
+
+    result = await _shell_tools(drafted, _TurnAuthoringFlag())["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch"
+    )
+
+    assert has_drafts(drafted)
+    assert result == {"error": FOLDER_CHANGED}
+    assert open_folder(drafted) == (None, FOLDER_CHANGED)
+    assert "choose another folder" in FOLDER_CHANGED
