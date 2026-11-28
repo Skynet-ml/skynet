@@ -2176,6 +2176,18 @@ export function githubRepoFile(repo: string, ref: string, path: string, host: Re
   return request<GithubFileResponse>(`/connectors/${host}/file?${params}`);
 }
 
+/** A local folder's tree with the run's filter (desktop app only), in the host tree's shape. */
+export function localFolderTree(folder: string) {
+  const params = new URLSearchParams({ path: folder });
+  return request<GithubTreeResponse>(`/connectors/local/tree?${params}`);
+}
+
+/** One file of a local folder (desktop app only), read when it is opened; `.env*` files are never served. */
+export function localFolderFile(folder: string, path: string) {
+  const params = new URLSearchParams({ path: folder, file: path });
+  return request<GithubFileResponse>(`/connectors/local/file?${params}`);
+}
+
 /** A short-lived token, API key and app id for opening the Google Picker as the caller. */
 export function getConnectorPicker(provider: ConnectorProvider) {
   return request<{ access_token: string; developer_key: string; app_id: string }>(

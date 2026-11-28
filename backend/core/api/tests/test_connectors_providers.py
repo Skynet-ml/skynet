@@ -2042,3 +2042,119 @@ def test_supabase_oauth_browses_projects_and_reads_a_table(
     assert imported.json()["dataset"]["name"] == "runs"
     library = DatasetLibraryStore(store.engine, PostgresDatasetBlobStore(store.engine))
     assert len(library.get_rows(imported.json()["dataset"]["id"])) == 2
+
+
+@pytest.fixture
+def local_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make a folder with kept, ignored, secret and linked files, in desktop local mode.
+
+    Args:
+        tmp_path: Pytest's temporary directory.
+        monkeypatch: Pytest's patcher, for ``settings.local_mode``.
+
+    Returns:
+        The folder the routes read.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside secret\n")
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("print('hi')\n")
+    (root / "README.md").write_text("# Project\n")
+    (root / "logo.png").write_bytes(b"\x89PNG\x00\x01")
+    (root / "latin1.txt").write_bytes(b"caf\xe9\n")
+    (root / ".gitignore").write_text("ignored.txt\n")
+    (root / "ignored.txt").write_text("ignored\n")
+    (root / ".env").write_text("API_KEY=env-secret\n")
+    (root / ".env.local").write_text("API_KEY=env-local-secret\n")
+    (root / "linked.txt").symlink_to(outside / "secret.txt")
+    (root / "linked_dir").symlink_to(outside)
+    return root
+
+
+def test_local_folder_tree_lists_the_runs_files(local_folder: Path) -> None:
+    """The local tree keeps what the run copies: no ``.env*``, ignored file or link (SKY-1001)."""
+    client, _ = _make_client()
+    response = client.get("/connectors/local/tree", params={"path": str(local_folder)})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "entries": [
+            {"path": ".gitignore", "type": "file"},
+            {"path": "README.md", "type": "file"},
+            {"path": "latin1.txt", "type": "file"},
+            {"path": "logo.png", "type": "file"},
+            {"path": "src", "type": "dir"},
+            {"path": "src/app.py", "type": "file"},
+        ],
+        "truncated": False,
+    }
+
+
+def test_local_folder_file_reads_text_and_flags_the_rest(local_folder: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One file reads as text; binary, oversized, missing and unlisted files are flagged like a host's file."""
+    client, _ = _make_client()
+    (local_folder / "big.txt").write_text("x" * 20)
+    monkeypatch.setattr("core.api.routers.connectors.GITHUB_FILE_MAX_BYTES", 16)
+
+    def read(file: str) -> dict[str, Any]:
+        """Read one file of the folder through the route."""
+        response = client.get("/connectors/local/file", params={"path": str(local_folder), "file": file})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    flags = {"text": None, "binary": False, "too_large": False, "missing": False}
+    assert read("src/app.py") == {**flags, "path": "src/app.py", "text": "print('hi')\n"}
+    assert read("logo.png") == {**flags, "path": "logo.png", "binary": True}
+    assert read("latin1.txt") == {**flags, "path": "latin1.txt", "binary": True}
+    assert read("big.txt") == {**flags, "path": "big.txt", "too_large": True}
+    assert read("gone.py") == {**flags, "path": "gone.py", "missing": True}
+    assert read("ignored.txt") == {**flags, "path": "ignored.txt", "missing": True}
+    assert read(".git/config") == {**flags, "path": ".git/config", "missing": True}
+
+
+@pytest.mark.parametrize(
+    "file",
+    [
+        "../outside/secret.txt",
+        "src/../../outside/secret.txt",
+        "/etc/passwd",
+        "C:/Windows/win.ini",
+        "linked.txt",
+        "linked_dir/secret.txt",
+        ".env",
+        ".env.local",
+    ],
+)
+def test_local_folder_file_refuses_paths_out_of_the_folder_and_env_files(local_folder: Path, file: str) -> None:
+    """``..``, absolute paths, links out of the folder and ``.env*`` files are refused, and no content leaks."""
+    client, _ = _make_client()
+    response = client.get("/connectors/local/file", params={"path": str(local_folder), "file": file})
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "connectors.invalid_ref"
+    assert "secret" not in response.text
+
+
+@pytest.mark.parametrize("route", ["tree", "file"])
+def test_local_folder_routes_refuse_a_bad_folder(local_folder: Path, route: str) -> None:
+    """A relative, linked or missing folder is refused before any read."""
+    client, _ = _make_client()
+    for folder in ("project", str(local_folder.parent / "linked_root"), str(local_folder / "nowhere")):
+        (local_folder.parent / "linked_root").unlink(missing_ok=True)
+        (local_folder.parent / "linked_root").symlink_to(local_folder)
+        response = client.get(f"/connectors/local/{route}", params={"path": folder, "file": "README.md"})
+        assert response.status_code == 400, (folder, response.text)
+        assert response.json()["code"] == "connectors.invalid_ref"
+
+
+@pytest.mark.parametrize("route", ["tree", "file"])
+def test_local_folder_routes_work_only_in_local_mode(
+    local_folder: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Outside the desktop app the local routes answer ``local.not_available`` and read nothing."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    client, _ = _make_client()
+    response = client.get(f"/connectors/local/{route}", params={"path": str(local_folder), "file": "README.md"})
+    assert response.status_code == 404, response.text
+    assert response.json()["code"] == "local.not_available"
