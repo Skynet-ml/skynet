@@ -25,6 +25,7 @@ from core.config import settings
 from core.connectors.github_repo import RepoRateLimitError
 from core.local import folder_tree
 from core.local.folder_tree import folder_source_id
+from core.local.picked_folders import PICKED_FOLDERS_FILE
 from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
 from core.service_gateway.agents import apply_patch as apply_patch_module
 from core.service_gateway.agents import folder_workspace, pi_bridge, pi_react, repo_browser, workspace_tools
@@ -1688,12 +1689,25 @@ def test_the_router_merges_each_written_file_into_the_draft_files() -> None:
     assert state == {"workspace_files": {"a.py": "3", "b.py": "2"}, "job_name": "y"}
 
 
-def _local_folder(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, Any]:
-    """Make a local folder run in desktop local mode; no host may be asked anything.
+def _pick(monkeypatch: pytest.MonkeyPatch, state_dir: Path, *folders: Path) -> None:
+    """Point the app's state folder at ``state_dir`` and write its picked-folder list, as the desktop app does.
 
     Args:
         monkeypatch: The test's monkeypatch.
-        root: The folder the run optimizes.
+        state_dir: The app's state folder.
+        folders: The folders the user picked.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / PICKED_FOLDERS_FILE).write_text(json.dumps([str(f) for f in folders]), encoding="utf-8")
+    monkeypatch.setattr(settings, "local_state_dir", str(state_dir))
+
+
+def _local_folder(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, Any]:
+    """Make a local folder run in desktop local mode, on a folder the user picked; no host may be asked anything.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        root: The folder the run optimizes; its state folder goes next to it, so the listing stays the same.
 
     Returns:
         The Metric screen state of the run.
@@ -1711,6 +1725,7 @@ def _local_folder(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, Any]
     (root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
     (root / "README.md").write_text("# Shop\n", encoding="utf-8")
     (root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    _pick(monkeypatch, root.with_name(f"{root.name}-state"), root)
     return {
         "wizard_screen": "metric",
         "job_name": "Faster tests",
@@ -1738,6 +1753,43 @@ def test_open_repo_picks_the_local_folder_with_no_host_token(monkeypatch: pytest
     assert open_repo({**state, "repo_path": " "}, no_token) == (None, "No folder is chosen yet.")
     monkeypatch.setattr(settings, "local_mode", False)
     assert open_repo(state, no_token) == (None, "A local folder can be read only in the desktop app.")
+
+
+def test_open_repo_refuses_a_folder_the_user_did_not_pick_and_reads_no_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A folder off the picked list gives the read tools the not-picked reason, before any file is read (SKY-1013)."""
+    root = tmp_path / "project"
+    root.mkdir()
+    state = _local_folder(monkeypatch, root)
+    (root / "sub").mkdir()
+    (tmp_path / "outside" / "inner").mkdir(parents=True)
+    (tmp_path / "outside" / "inner" / "secret.txt").write_text("outside\n", encoding="utf-8")
+    (root / "link").symlink_to(tmp_path / "outside", target_is_directory=True)
+    digests: list[str] = []
+    monkeypatch.setattr(folder_tree, "file_digest", lambda base, rel: digests.append(rel) or b"")
+
+    assert open_repo({**state, "repo_path": str(tmp_path / "outside")}, None) == (None, folder_workspace.NOT_PICKED)
+    assert open_repo({**state, "repo_path": f"{root}/sub/../../outside"}, None) == (None, folder_workspace.NOT_PICKED)
+    assert open_repo({**state, "repo_path": str(root / "link" / "inner")}, None) == (
+        None,
+        folder_workspace.NOT_PICKED,
+    )
+    assert digests == []
+    browser, reason = open_repo({**state, "repo_path": str(root / "sub")}, None)
+    assert isinstance(browser, repo_browser.LocalFolderBrowser)
+    assert reason == ""
+
+
+def test_the_hosted_app_gives_the_desktop_only_reason_for_a_local_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Outside the desktop app, with no state folder, a local run gets the desktop-only reason, not the picked one."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+    state = {"repo_provider": "local", "repo_path": str(tmp_path)}
+
+    assert open_repo(state, None) == (None, "A local folder can be read only in the desktop app.")
 
 
 @pytest.mark.asyncio
@@ -1891,6 +1943,7 @@ def test_open_folder_refuses_a_folder_larger_than_the_agent_can_read_before_any_
 ) -> None:
     """A folder past the agent's raw read limit is refused before the agent hashes every byte of it."""
     monkeypatch.setattr(settings, "local_mode", True)
+    _pick(monkeypatch, tmp_path.with_name(f"{tmp_path.name}-state"), tmp_path)
     (tmp_path / "a.py").write_text("x" * 6, encoding="utf-8")
     (tmp_path / "b.py").write_text("y" * 6, encoding="utf-8")
     monkeypatch.setattr(repo_browser, "LOCAL_FOLDER_READ_BYTES", 10)
@@ -1918,12 +1971,12 @@ def _shell_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[dict[st
         tmp_path: The test's folder.
 
     Returns:
-        The Metric screen state and the user's folder.
+        The Metric screen state and the user's folder, which the user picked in the app.
     """
     root = tmp_path / "project"
     root.mkdir()
     state = _local_folder(monkeypatch, root)
-    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
+    _pick(monkeypatch, tmp_path / "state", root)
     monkeypatch.setattr(folder_workspace, "_WORKSPACES", {})
     monkeypatch.setattr(folder_workspace, "_KEY_LOCKS", {})
     monkeypatch.setattr(folder_workspace, "_ABORTED", set())
@@ -1999,6 +2052,30 @@ async def test_an_apply_patch_edit_becomes_a_draft_and_the_folder_stays(
     }
     assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
     assert (root / "README.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_shell_tools_refuse_a_folder_the_user_did_not_pick(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A folder the user never picked gives every shell tool a short reason, and no copy opens (SKY-1013)."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    _pick(monkeypatch, tmp_path / "state", tmp_path / "other")
+    calls: list[str] = []
+    monkeypatch.setattr(folder_workspace, "folder_entries", lambda *args, **kwargs: calls.append("list") or ([], False))
+    monkeypatch.setattr(folder_workspace, "copy_folder", lambda *args, **kwargs: calls.append("copy") or {})
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    patched = await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    ran = await tools["exec_command"].acall(cmd="ls")
+
+    assert patched == {"error": folder_workspace.NOT_PICKED}
+    assert folder_workspace.NOT_PICKED in str(ran)
+    assert calls == []
+    assert turn.wizard_patch == {}
+    assert folder_workspace.live_workspace("chat-1") is None
+    assert not folder_workspace.session_folder("chat-1").exists()
 
 
 @pytest.mark.asyncio

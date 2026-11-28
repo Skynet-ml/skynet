@@ -52,6 +52,7 @@ from ...local.folder_tree import (
     is_executable,
     open_no_follow,
 )
+from ...local.picked_folders import is_picked
 from ...models.blackbox import DRAFT_FILE_BYTES, clean_draft_path
 from .apply_patch import apply_patch, remove_inside, write_inside
 from .local_command_runner import LocalCommandRunner
@@ -65,6 +66,8 @@ EGRESS_DIR = "setup-egress"
 COPY_DIR = "folder"
 ATTACHMENTS_DIR = "attachments"
 CLOSED = "Error: the folder copy is closed. Send the message again to open a new copy."
+# The same meaning as the routes' ``local.folder_not_picked`` (SKY-1007, SKY-1013).
+NOT_PICKED = "The agent opens only a folder that you picked in the app. Pick the folder again."
 _KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
 # The copy holds the raw files, so it takes the folder browser's raw cap, not the run's 200 MB pack cap.
 COPY_BYTES_MAX = LOCAL_FOLDER_READ_BYTES
@@ -677,12 +680,15 @@ def open_workspace(
         The workspace, and whether it is new.
 
     Raises:
-        FolderTreeError: When ``source`` is not a folder.
+        FolderTreeError: When ``source`` is not a folder, or the user did not
+            pick it (or a folder above it) in the app.
         ValueError: For a chat id that is not a safe folder name, or a chat
             that closed while its copy was made.
     """
     session = session_folder(key)
     folder = Path(source)
+    if not is_picked(folder, settings.local_state_dir):
+        raise FolderTreeError(NOT_PICKED)
     with _LOCK:
         key_lock = _KEY_LOCKS.setdefault(key, threading.Lock())
     with key_lock:
