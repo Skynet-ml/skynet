@@ -461,7 +461,9 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
     """Put back every file that Apply changed, from the bytes Apply kept, and delete the files it added.
 
     A file that is already back in its state before Apply is left as it is,
-    so an Undo that stopped half way can run again.
+    so an Undo that stopped half way can run again. The Undo record stays:
+    the caller deletes it with ``forget_apply`` once it saves the run as not
+    applied, so a failed save still leaves a working Undo.
 
     Args:
         root: The run's folder.
@@ -497,8 +499,21 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
                 os.close(folder)
         except OSError as error:
             raise LocalFolderError(f"The folder could not be written: {error.strerror or error}") from None
-        record.unlink()
     return [change.path for change in changes]
+
+
+def forget_apply(run_id: str) -> None:
+    """Delete the Undo record of a run's Apply after its Undo.
+
+    Args:
+        run_id: The run.
+
+    Raises:
+        LocalFolderError: When the run id is not valid or there is no local state folder.
+        OSError: When the record cannot be deleted.
+    """
+    with APPLY_LOCK:
+        applied_record(run_id).unlink(missing_ok=True)
 
 
 def check_applied(root: str | os.PathLike[str], run_id: str) -> None:

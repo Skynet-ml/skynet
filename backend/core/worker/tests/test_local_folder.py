@@ -495,6 +495,10 @@ def test_apply_writes_the_version_and_undo_restores_every_byte_and_mode(tmp_path
     assert _fingerprint(root) == before
     assert not (root / "cfg").exists()
     assert not (root / "src/deep").exists()
+    # The record stays until the caller saves the run, so a repeat Undo finds the files restored.
+    assert local_folder.undo_version(root, "run-1") == changed
+    assert _fingerprint(root) == before
+    local_folder.forget_apply("run-1")
     assert not local_folder.is_applied("run-1")
     with pytest.raises(LocalFolderError, match="nothing to undo"):
         local_folder.undo_version(root, "run-1")
@@ -762,6 +766,7 @@ def test_a_failed_rollback_keeps_the_undo_record_so_undo_can_finish(
 
     monkeypatch.setattr(local_folder, "_put", real_put)
     local_folder.undo_version(root, "run-1")
+    local_folder.forget_apply("run-1")
 
     assert _fingerprint(root) == before
     assert not local_folder.is_applied("run-1")

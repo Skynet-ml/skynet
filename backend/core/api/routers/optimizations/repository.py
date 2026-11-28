@@ -56,6 +56,7 @@ from ....worker.local_folder import (
     LocalFolderError,
     apply_version,
     check_applied,
+    forget_apply,
     is_applied,
     kept_snapshot,
     snapshot_file,
@@ -794,7 +795,11 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         with APPLY_LOCK:
             if _is_applied(optimization_id):
                 _change_folder(lambda: undo_version(repo["path"], optimization_id))
-            elif _says_applied(job_store, optimization_id):
+                # The record goes only after the row save, so a failed save leaves a repeat Undo that works.
+                state = _record_apply(job_store, optimization_id, applied=False)
+                _change_folder(lambda: forget_apply(optimization_id))
+                return state
+            if _says_applied(job_store, optimization_id):
                 # Saving "not applied" here would hide that the folder still holds the version.
                 raise DomainError("optimization.local_folder_undo_missing", status=409)
             return _record_apply(job_store, optimization_id, applied=False)

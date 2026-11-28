@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import zipfile
 from collections.abc import Iterator
@@ -142,6 +143,23 @@ def store() -> FakeJobStore:
         payload={"username": "alice", "target": {"kind": "repo", "repo": {"repository": "acme/app"}}},
     )
     return jobs
+
+
+def _tree_hash(folder: Path) -> str:
+    """Hash every path and file's bytes under a folder.
+
+    Args:
+        folder: The folder.
+
+    Returns:
+        The hex digest.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(folder.rglob("*")):
+        digest.update(path.relative_to(folder).as_posix().encode() + b"\0")
+        if path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _client(store: FakeJobStore, user: AuthenticatedUser | None = None) -> TestClient:
@@ -909,6 +927,52 @@ def test_a_lost_state_save_after_apply_still_leads_to_a_working_undo(
     assert undone.json() == {"applied": False, "applied_at": repaired.json()["applied_at"]}
     assert (folder / "src" / "main.py").read_text() == "x = 1\n"
     assert not (folder / "src" / "cfg.toml").exists()
+
+
+def test_a_lost_state_save_after_undo_still_leads_to_a_working_undo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed row save after a good Undo keeps the Undo record, so a repeat Undo saves the row.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    original = _tree_hash(folder)
+    client = _client(jobs)
+    applied = client.post("/optimizations/local-run/repository/apply")
+    assert applied.status_code == 200, applied.text
+    real_update = jobs.update_job
+    calls = {"n": 0}
+
+    def fail_once(optimization_id: str, **fields: Any) -> None:
+        """Fail the first save of the run's state during Undo.
+
+        Args:
+            optimization_id: The run.
+            **fields: The fields to save.
+
+        Raises:
+            RuntimeError: On the first call.
+        """
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is gone")
+        real_update(optimization_id, **fields)
+
+    monkeypatch.setattr(jobs, "update_job", fail_once)
+    lost = client.post("/optimizations/local-run/repository/undo")
+    assert lost.status_code == 500
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"]["applied"] is True
+
+    undone = client.post("/optimizations/local-run/repository/undo")
+
+    assert undone.status_code == 200, undone.text
+    assert undone.json() == {"applied": False, "applied_at": applied.json()["applied_at"]}
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"]["applied"] is False
+    assert _tree_hash(folder) == original
+    assert not local_folder.is_applied("local-run")
 
 
 def test_a_repeat_apply_after_a_failed_rollback_does_not_report_applied(
