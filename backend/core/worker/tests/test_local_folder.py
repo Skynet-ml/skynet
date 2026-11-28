@@ -989,3 +989,33 @@ def test_apply_and_undo_a_setup_that_renames_a_file_by_case(tmp_path: Path) -> N
     local_folder.undo_version(root, "case")
     assert sorted(path.name for path in root.iterdir()) == ["Foo.py", "keep.txt"]
     assert (root / "Foo.py").read_text() == "old\n"
+
+
+def test_apply_refuses_a_draft_that_another_case_of_a_new_folder_file_would_take(tmp_path: Path) -> None:
+    if not case_insensitive(tmp_path):
+        pytest.skip("Only a disk that ignores case opens Foo.py for foo.py.")
+    root = _write(tmp_path / "app", {"keep.txt": "k\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    (root / "Foo.py").write_text("mine\n")
+    with pytest.raises(local_folder.LocalFolderConflictError, match=r"foo\.py"):
+        _apply(root, commit, "", "case", drafts={"foo.py": "new\n"})
+    assert sorted(path.name for path in root.iterdir()) == ["Foo.py", "keep.txt"]
+    assert (root / "Foo.py").read_text() == "mine\n"
+    assert not local_folder.is_applied("case")
+
+
+def test_apply_refuses_a_case_rename_when_the_user_added_a_third_form(tmp_path: Path) -> None:
+    if not case_insensitive(tmp_path):
+        pytest.skip("Only a disk that ignores case opens Foo.py for foo.py.")
+    root = _write(tmp_path / "app", {"Foo.py": "old\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    (root / "Foo.py").unlink()
+    (root / "FOO.py").write_text("mine\n")
+    with pytest.raises(local_folder.LocalFolderConflictError):
+        _apply(root, commit, "", "case", drafts={"foo.py": "new\n"}, deleted=["Foo.py"])
+    assert sorted(path.name for path in root.iterdir()) == ["FOO.py"]
+    assert (root / "FOO.py").read_text() == "mine\n"
