@@ -57,6 +57,7 @@ from ....worker.local_folder import (
     apply_version,
     check_applied,
     forget_apply,
+    forget_undone,
     is_applied,
     kept_snapshot,
     snapshot_file,
@@ -750,6 +751,9 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         if problems:
             raise DomainError("optimization.local_folder_failed", status=409, reason=problems[0])
         with APPLY_LOCK:
+            if _is_applied(optimization_id) and not _says_applied(job_store, optimization_id):
+                # A record delete that failed after a saved Undo leaves the record with every file back.
+                _change_folder(lambda: forget_undone(repo["path"], optimization_id))
             # A repeat Apply only saves the row a failed save missed, and only when
             # the files hold the version: a failed rollback keeps the record too.
             if _is_applied(optimization_id):

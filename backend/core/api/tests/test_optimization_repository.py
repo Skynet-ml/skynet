@@ -975,6 +975,54 @@ def test_a_lost_state_save_after_undo_still_leads_to_a_working_undo(
     assert not local_folder.is_applied("local-run")
 
 
+def test_a_failed_record_delete_after_undo_does_not_block_the_next_apply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A record left by a saved Undo, with every file back, does not stop Apply, and Undo after it works.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    original = _tree_hash(folder)
+    client = _client(jobs)
+    assert client.post("/optimizations/local-run/repository/apply").status_code == 200
+    real_forget = repository_module.forget_apply
+    calls = {"n": 0}
+
+    def fail_once(run_id: str) -> None:
+        """Fail the first record delete.
+
+        Args:
+            run_id: The run.
+
+        Raises:
+            OSError: On the first call.
+        """
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk is gone")
+        real_forget(run_id)
+
+    monkeypatch.setattr(repository_module, "forget_apply", fail_once)
+    lost = client.post("/optimizations/local-run/repository/undo")
+    assert lost.status_code == 500
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"]["applied"] is False
+    assert local_folder.is_applied("local-run")
+
+    applied = client.post("/optimizations/local-run/repository/apply")
+
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"] is True
+    assert (folder / "src" / "main.py").read_text() == "x = 2\n"
+    undone = client.post("/optimizations/local-run/repository/undo")
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["applied"] is False
+    assert _tree_hash(folder) == original
+    assert not local_folder.is_applied("local-run")
+
+
 def test_a_repeat_apply_after_a_failed_rollback_does_not_report_applied(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

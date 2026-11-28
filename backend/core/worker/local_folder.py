@@ -516,6 +516,37 @@ def forget_apply(run_id: str) -> None:
         applied_record(run_id).unlink(missing_ok=True)
 
 
+def forget_undone(root: str | os.PathLike[str], run_id: str) -> None:
+    """Delete an Undo record whose Undo finished, when every file is back in its state before Apply.
+
+    A record delete that fails after a finished Undo leaves the record. Any
+    other folder state keeps it, so a half-applied or edited folder still
+    stops a repeat Apply.
+
+    Args:
+        root: The run's folder.
+        run_id: The run.
+
+    Raises:
+        LocalFolderError: When the record is missing, damaged or for another
+            folder, or the folder cannot be read.
+        OSError: When the record cannot be deleted.
+    """
+    with APPLY_LOCK:
+        record = applied_record(run_id)
+        changes = _load_record(record, root)[0]
+        try:
+            folder = _open_root(root)
+        except OSError as error:
+            raise LocalFolderError(f"The folder could not be read: {error.strerror or error}") from None
+        try:
+            undone = all(_read_disk(folder, change.path)[0] == change.before for change in changes)
+        finally:
+            os.close(folder)
+        if undone:
+            record.unlink(missing_ok=True)
+
+
 def check_applied(root: str | os.PathLike[str], run_id: str) -> None:
     """Check that every file a run's Apply changes holds the version, not only that the Undo record exists.
 
