@@ -330,10 +330,20 @@ class FolderWorkspace:
             rel: The path.
 
         Returns:
-            True when nothing has the path, or a folder has it.
+            True when nothing has the path, or a folder has it. Each part is
+            matched against its folder's listing, so a case-only rename on a
+            file system that ignores case leaves the old name gone.
         """
-        path = self.folder / rel
-        return not os.path.lexists(path) or (path.is_dir() and not path.is_symlink())
+        path = self.folder
+        for part in rel.split("/"):
+            try:
+                names = {child.name for child in path.iterdir()}
+            except OSError:
+                return True
+            if part not in names:
+                return True
+            path = path / part
+        return path.is_dir() and not path.is_symlink()
 
     def reset(self, files: Mapping[str, str], deleted: Iterable[str] = ()) -> None:
         """Make the copy hold the user's folder with the setup draft on top, as the run will see it.
@@ -452,9 +462,7 @@ class FolderWorkspace:
                 result.skipped[rel] = reason
         result.deleted = self._deleted(listed, truncated)
         if not truncated:
-            result.dropped = sorted(
-                rel for rel in set(tracked) - set(listed) - set(self.snapshot) if not os.path.lexists(self.folder / rel)
-            )
+            result.dropped = sorted(rel for rel in set(tracked) - set(listed) - set(self.snapshot) if self._gone(rel))
         return result
 
     def _text(self, rel: str, result: Changes) -> str:

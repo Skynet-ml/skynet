@@ -482,3 +482,34 @@ def test_a_command_reads_the_chat_attachments_next_to_the_copy(state_dir: Path, 
     held.clear()
     workspace.exec_command("true")
     assert not (workspace.session / fw.ATTACHMENTS_DIR / "m1").exists()
+
+
+def _case_insensitive(folder: Path) -> bool:
+    """Say whether a folder's file system ignores the case of names.
+
+    Args:
+        folder: A folder on the file system.
+
+    Returns:
+        True when ``A`` and ``a`` name one file.
+    """
+    probe = folder / "CaseProbe"
+    probe.write_text("")
+    try:
+        return (folder / "caseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+def test_a_case_only_rename_records_the_old_name_as_deleted(state_dir: Path, source: Path) -> None:
+    """On a file system that ignores case, a rename of Utils.py to utils.py still deletes Utils.py."""
+    (source / "Utils.py").write_text("u\n")
+    workspace, _ = open_workspace("chat1", source)
+    if not _case_insensitive(workspace.folder):
+        pytest.skip("the file system is case-sensitive")
+
+    (workspace.folder / "Utils.py").rename(workspace.folder / "utils.py")
+    found = workspace.changes(["Utils.py"])
+
+    assert found.deleted == ["Utils.py"]
+    assert found.files == {"utils.py": "u\n"}
