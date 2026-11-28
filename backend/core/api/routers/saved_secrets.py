@@ -18,6 +18,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 
+from ...config import settings
 from ...connectors.env_file import EnvFile, EnvFileError, read_env_file
 from ...connectors.saved_secrets import (
     MAX_SECRET_BYTES,
@@ -26,6 +27,7 @@ from ...connectors.saved_secrets import (
     SavedSecretView,
     clean_allowed_hosts,
 )
+from ...local.picked_folders import is_picked
 from ...models.blackbox import REPO_SECRET_NAME_PATTERN
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -145,8 +147,11 @@ def _read_local_env(path: str) -> tuple[LocalEnvStatus, EnvFile | None]:
         path: Absolute path of the folder.
 
     Returns:
-        The status and, when the file was read, its parsed content.
+        The status and, when the file was read, its parsed content. A folder
+        the user did not pick in the app reads as ``missing`` (SKY-1007).
     """
+    if not is_picked(path, settings.local_state_dir):
+        return "missing", None
     try:
         return "found", read_env_file(path)
     except EnvFileError as exc:

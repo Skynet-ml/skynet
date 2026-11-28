@@ -48,6 +48,7 @@ from ...connectors import (
 from ...connectors.registry import OAUTH_PROVIDERS, oauth_config_problems
 from ...connectors.vault import ConnectorSecret, ConnectorVault
 from ...local import folder_tree
+from ...local.picked_folders import PICKED_FOLDERS_FILE
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ...storage.models import UserConnectorModel
 from ..auth import get_authenticated_user
@@ -2051,12 +2052,15 @@ def local_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     Args:
         tmp_path: Pytest's temporary directory.
-        monkeypatch: Pytest's patcher, for ``settings.local_mode``.
+        monkeypatch: Pytest's patcher, for ``settings.local_mode`` and ``settings.local_state_dir``.
 
     Returns:
-        The folder the routes read.
+        The folder the routes read, which the user picked in the app.
     """
     monkeypatch.setattr(settings, "local_mode", True)
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(settings, "local_state_dir", str(state))
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("outside secret\n")
@@ -2072,6 +2076,7 @@ def local_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / ".env.local").write_text("API_KEY=env-local-secret\n")
     (root / "linked.txt").symlink_to(outside / "secret.txt")
     (root / "linked_dir").symlink_to(outside)
+    (state / PICKED_FOLDERS_FILE).write_text(json.dumps([str(root)]))
     return root
 
 
@@ -2218,6 +2223,31 @@ def test_local_folder_routes_refuse_a_bad_folder(local_folder: Path, route: str)
         response = client.get(f"/connectors/local/{route}", params={"path": folder, "file": "README.md"})
         assert response.status_code == 400, (folder, response.text)
         assert response.json()["code"] == "connectors.invalid_ref"
+
+
+@pytest.mark.parametrize("route", ["tree", "file"])
+def test_local_folder_routes_refuse_a_folder_the_user_did_not_pick(local_folder: Path, route: str) -> None:
+    """A real folder that is not on the picked list, or is reached through a link out of it, is refused (SKY-1007)."""
+    client, _ = _make_client()
+    outside = local_folder.parent / "outside"
+    (outside / "README.md").write_text("outside readme\n")
+    (local_folder / "src" / "up").symlink_to(local_folder.parent)
+    for folder in (str(outside), str(local_folder.parent), str(local_folder / "src" / "up" / "outside")):
+        response = client.get(f"/connectors/local/{route}", params={"path": folder, "file": "README.md"})
+        assert response.status_code == 400, (folder, response.text)
+        assert response.json()["code"] == "connectors.invalid_ref"
+        assert "outside readme" not in response.text
+
+
+def test_local_folder_routes_read_a_folder_below_a_picked_one(local_folder: Path) -> None:
+    """A folder below the picked one keeps today's behavior (SKY-1007)."""
+    client, _ = _make_client()
+    tree = client.get("/connectors/local/tree", params={"path": str(local_folder / "src")})
+    assert tree.status_code == 200, tree.text
+    assert tree.json()["entries"] == [{"path": "app.py", "type": "file"}]
+    file = client.get("/connectors/local/file", params={"path": str(local_folder / "src"), "file": "app.py"})
+    assert file.status_code == 200, file.text
+    assert "print('hi')" in file.text
 
 
 @pytest.mark.parametrize("route", ["tree", "file"])

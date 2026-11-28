@@ -2,7 +2,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createFolderIn, isAppPageSender, isValidFolderName, type FolderSender } from "../src/main/folders";
+import {
+  createFolderIn,
+  isAppPageSender,
+  isValidFolderName,
+  MAX_PICKED_FOLDERS,
+  PICKED_FOLDERS_FILE,
+  recordPickedFolder,
+  type FolderSender,
+} from "../src/main/folders";
 
 describe("isValidFolderName", () => {
   it("accepts a plain name", () => {
@@ -84,5 +92,63 @@ describe("isAppPageSender", () => {
 
   it("refuses every call before the web app runs", () => {
     expect(isAppPageSender(appPage, null)).toBe(false);
+  });
+});
+
+describe("recordPickedFolder", () => {
+  let tmp: string;
+  let stateDir: string;
+  const read = (): string[] => JSON.parse(fs.readFileSync(path.join(stateDir, PICKED_FOLDERS_FILE), "utf8"));
+  const folder = (name: string): string => {
+    const dir = path.join(tmp, name);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  beforeEach(() => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skynet-picked-")));
+    stateDir = path.join(tmp, "state");
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("creates the list and adds each folder once, newest last", () => {
+    const a = folder("a");
+    const b = folder("b");
+    recordPickedFolder(stateDir, a);
+    recordPickedFolder(stateDir, b);
+    recordPickedFolder(stateDir, a);
+    expect(read()).toEqual([b, a]);
+    expect(fs.readdirSync(stateDir)).toEqual([PICKED_FOLDERS_FILE]);
+  });
+
+  it("stores the resolved path of a linked folder", () => {
+    const real = folder("real");
+    const link = path.join(tmp, "link");
+    fs.symlinkSync(real, link);
+    recordPickedFolder(stateDir, link);
+    expect(read()).toEqual([real]);
+  });
+
+  it("keeps only the last 200 folders, and the list survives a restart", () => {
+    const dirs = Array.from({ length: MAX_PICKED_FOLDERS + 5 }, (_, i) => folder(`f${i}`));
+    for (const dir of dirs) recordPickedFolder(stateDir, dir);
+    expect(MAX_PICKED_FOLDERS).toBe(200);
+    expect(read()).toEqual(dirs.slice(-MAX_PICKED_FOLDERS));
+    // Each call reads the list from disk, as a new app process does.
+    recordPickedFolder(stateDir, folder("after-restart"));
+    expect(read()).toHaveLength(MAX_PICKED_FOLDERS);
+    expect(read().at(-1)).toBe(path.join(tmp, "after-restart"));
+    expect(read()[0]).toBe(dirs[6]);
+  });
+
+  it("starts again from a damaged list", () => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, PICKED_FOLDERS_FILE), "{not json");
+    const a = folder("a");
+    recordPickedFolder(stateDir, a);
+    expect(read()).toEqual([a]);
   });
 });
