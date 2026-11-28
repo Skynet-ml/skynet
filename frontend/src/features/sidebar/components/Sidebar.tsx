@@ -77,7 +77,6 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { perLocale } from "@/shared/lib/per-locale";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
-import { SIDEBAR_TOGGLE_EVENT, announceSidebarState } from "@/shared/lib/sidebar-toggle";
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { recentResumableId } from "@/shared/lib/recent-session";
 import { TERMS } from "@/shared/lib/terms";
@@ -98,6 +97,7 @@ import {
   childrenByParent,
   type FolderDialogState,
 } from "./SidebarFolders";
+import { SIDEBAR_COLLAPSED_STORAGE_KEY, useSidebarCollapsed } from "../hooks/use-sidebar-collapsed";
 import { DEFAULT_RUN_VIEW, applyRunView, parseRunView, type RunView } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
@@ -130,7 +130,6 @@ const SIDEBAR_COLLAPSED_WIDTH = 64;
 const SIDEBAR_COLLAPSE_AT = 150;
 const SIDEBAR_EXPAND_AT = 196;
 const SIDEBAR_WIDTH_STORAGE_KEY = "app.sidebar.width";
-const SIDEBAR_COLLAPSED_STORAGE_KEY = "app.sidebar.collapsed";
 const SIDEBAR_VIEW_STORAGE_KEY = "app.sidebar.view";
 const FOLDERS_EXPANDED_STORAGE_KEY = "app.sidebar.folders.expanded";
 const DESKTOP_MQ = "(min-width: 768px)";
@@ -170,14 +169,14 @@ export function Sidebar() {
   const [view, setView] = React.useState<RunView>(DEFAULT_RUN_VIEW);
   const [folderDialog, setFolderDialog] = React.useState<FolderDialogState | null>(null);
   const [width, setWidth] = React.useState(SIDEBAR_DEFAULT_WIDTH);
-  const [collapsed, setCollapsed] = React.useState(false);
   // Arms the collapse/expand width glide for the discrete snap only; continuous
   // resize drags leave it false so the rail tracks the cursor 1:1.
   const [snapping, setSnapping] = React.useState(false);
   const [isDesktop, setIsDesktop] = React.useState(true);
+  const armSnap = React.useCallback(() => setSnapping(true), []);
   // Collapse is a desktop-only affordance: the mobile drawer always shows the
-  // full rail, so gate the icon-rail on the breakpoint.
-  const isCollapsed = collapsed && isDesktop;
+  // full rail, so the hook gates the icon-rail on the breakpoint.
+  const { collapsed, isCollapsed, setCollapsed, setCollapsedPersist } = useSidebarCollapsed(isDesktop, armSnap);
   const effectiveWidth = isCollapsed ? SIDEBAR_COLLAPSED_WIDTH : width;
   // Collapsed tooltips read toward the content area: right in LTR, left in RTL.
   const tooltipSide = isRtl ? "left" : "right";
@@ -216,40 +215,6 @@ export function Sidebar() {
       /* noop */
     }
   }, []);
-
-  const setCollapsedPersist = React.useCallback((value: boolean) => {
-    setCollapsed((prev) => {
-      if (prev === value) return prev;
-      try {
-        window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, value ? "1" : "0");
-      } catch {
-        /* noop */
-      }
-      return value;
-    });
-  }, []);
-
-  // The header's toggle button reaches the rail through a window event,
-  // because the header renders outside this client-only chunk.
-  React.useEffect(() => {
-    const onToggle = () => {
-      setSnapping(true);
-      setCollapsed((prev) => {
-        try {
-          window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, prev ? "0" : "1");
-        } catch {
-          /* noop */
-        }
-        return !prev;
-      });
-    };
-    window.addEventListener(SIDEBAR_TOGGLE_EVENT, onToggle);
-    return () => window.removeEventListener(SIDEBAR_TOGGLE_EVENT, onToggle);
-  }, []);
-
-  React.useEffect(() => {
-    announceSidebarState(isCollapsed);
-  }, [isCollapsed]);
 
   // Drag-resize doubles as the collapse control. The rail is pinned to the
   // inline-start edge (left in LTR, right in RTL), so the dragged inline-end

@@ -994,10 +994,19 @@ main {
    arms html[data-sidebar-snapping], gliding the rail's own width and <main>'s
    reserved margin together over one matched transition instead of jumping in a
    single frame. Continuous drags clear the flag so the rail tracks the cursor
-   1:1 (no transition). Honour reduced-motion — the snap stays instant there. */
+   1:1 (no transition). Honour reduced-motion — the snap stays instant there.
+   This rule replaces the rail's own transition-colors, so it repeats the
+   color fade. The header's Back/Forward gap reads --app-sidebar-width and
+   glides with the rail. */
 @media (min-width: 768px) and (prefers-reduced-motion: no-preference) {
   html[data-sidebar-snapping] .app-sidebar-rail {
-    transition: width 200ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition:
+      width 200ms cubic-bezier(0.16, 1, 0.3, 1),
+      background-color 200ms cubic-bezier(0.4, 0, 0.2, 1),
+      border-color 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  html[data-sidebar-snapping] .app-shell-nav-gap {
+    transition: margin-inline-start 200ms cubic-bezier(0.16, 1, 0.3, 1);
   }
   html[data-sidebar-snapping] .app-main {
     transition: margin-inline-start 200ms cubic-bezier(0.16, 1, 0.3, 1);

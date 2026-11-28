@@ -14,6 +14,7 @@ void it("ShellNavControls client tests pass", () => {
     {
       cwd: frontend,
       encoding: "utf8",
+      timeout: 60_000,
       env: {
         ...process.env,
         NODE_TEST_CONTEXT: undefined,

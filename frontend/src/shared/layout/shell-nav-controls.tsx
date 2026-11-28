@@ -89,7 +89,7 @@ export function ShellNavControls({ dir, sidebarId }: { dir: "ltr" | "rtl"; sideb
       </HoverTooltip>
       {/* The gap keeps Back and Forward in the header's flow, so the search
           and the other header controls never sit under them. */}
-      <div className="flex items-center gap-2" style={{ marginInlineStart: BACK_FORWARD_GAP_CSS }}>
+      <div className="app-shell-nav-gap flex items-center gap-2" style={{ marginInlineStart: BACK_FORWARD_GAP_CSS }}>
         <HoverTooltip label={msg("app.nav.back")}>
           <Button
             type="button"

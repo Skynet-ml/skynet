@@ -189,7 +189,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-        className="app-header fixed inset-x-0 top-0 z-30 flex h-[var(--header-height)] items-center justify-between border-b border-border/40 bg-background/60 px-2 py-0 backdrop-blur-2xl backdrop-saturate-[1.8] sm:px-4"
+        className="fixed inset-x-0 top-0 z-30 flex h-[var(--header-height)] items-center justify-between border-b border-border/40 bg-background/60 px-2 py-0 backdrop-blur-2xl backdrop-saturate-[1.8] sm:px-4"
         dir="ltr"
         style={{
           borderImage:

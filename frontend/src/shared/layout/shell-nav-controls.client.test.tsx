@@ -40,6 +40,7 @@ const { createRoot } = await import("react-dom/client");
 const { TooltipProvider } = await import("@/shared/ui/primitives/tooltip");
 const { announceSidebarState } = await import("@/shared/lib/sidebar-toggle");
 const { ShellNavControls } = await import("./shell-nav-controls");
+const { NAV_BUTTON_PX, NAV_GAP_PX, TOGGLE_PX } = await import("./shell-nav-layout");
 
 after(() => dom.window.close());
 
@@ -119,5 +120,39 @@ void test("Back is disabled when the history cannot go back", async () => {
   } finally {
     view.unmount();
     delete (dom.window as unknown as { navigation?: unknown }).navigation;
+  }
+});
+
+/**
+ * Return the px of one Tailwind spacing class (`<prefix>-N`, 4px a step) on an element.
+ *
+ * Args:
+ *   el: The element.
+ *   prefix: The utility name, for example "size" or "gap".
+ *
+ * Returns:
+ *   The px value.
+ */
+function spacingPx(el: Element, prefix: string): number {
+  const steps = el.className
+    .split(/\s+/)
+    .map((name) => new RegExp(`^${prefix}-(\\d+(?:\\.\\d+)?)$`).exec(name)?.[1])
+    .filter((n) => n !== undefined);
+  assert.equal(steps.length, 1, `${prefix}-N in "${el.className}"`);
+  return Number(steps[0]) * 4;
+}
+
+void test("the rendered sizes match the layout math", async () => {
+  const view = await mount();
+  try {
+    assert.equal(spacingPx(toggle(view.container), "size"), TOGGLE_PX);
+    const back = navButton(view.container, "Back");
+    assert.equal(spacingPx(back, "size"), NAV_BUTTON_PX);
+    assert.equal(spacingPx(navButton(view.container, "Forward"), "size"), NAV_BUTTON_PX);
+    const group = back.closest(".app-shell-nav-gap");
+    assert.ok(group, "the nav group carries the glide class");
+    assert.equal(spacingPx(group, "gap"), NAV_GAP_PX);
+  } finally {
+    view.unmount();
   }
 });
