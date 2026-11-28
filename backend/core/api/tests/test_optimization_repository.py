@@ -1053,3 +1053,21 @@ def test_undo_without_a_local_state_folder_is_a_409(monkeypatch: pytest.MonkeyPa
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "optimization.local_folder_failed"
     assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+
+
+def test_undo_on_a_run_never_applied_saves_and_logs_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An Undo before any Apply is a no-op 200: no ``local_apply`` state and no log line.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+
+    response = _client(jobs).post("/optimizations/local-run/repository/undo")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"applied": False, "applied_at": None}
+    assert "local_apply" not in jobs.get_job("local-run")["result"]["details"]
+    assert jobs.get_log_count("local-run") == 0
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"

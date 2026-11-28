@@ -603,7 +603,8 @@ def _changes(original: dict[str, _Blob], version: dict[str, _Blob]) -> list[_Cha
     Raises:
         LocalFolderError: When a change is at a path the folder copy leaves
             out (git data, installed packages, ``.env*`` and operating system
-            files), which the kept tree cannot vouch for.
+            files), which the kept tree cannot vouch for, or when a folder
+            becomes a file or a file becomes a folder.
     """
     changes = []
     for path in sorted(original.keys() | version.keys()):
@@ -614,6 +615,17 @@ def _changes(original: dict[str, _Blob], version: dict[str, _Blob]) -> list[_Cha
             if part.lower() in SKIPPED_DIRS or is_env_name(part) or is_os_name(part):
                 raise LocalFolderError(f"The version changes {path}, which the folder copy leaves out.")
         changes.append(_Change(path, before, after))
+    # A path and a path below it can both change only when a folder becomes a file or back.
+    # The file-by-file writes cannot do that in place, so Apply refuses it before any write.
+    paths = {change.path for change in changes}
+    for change in changes:
+        parts = change.path.split("/")
+        for depth in range(1, len(parts)):
+            if (parent := "/".join(parts[:depth])) in paths:
+                raise LocalFolderError(
+                    f"The version turns {parent} from a folder into a file, or back, which Apply cannot do. "
+                    "Download the version instead."
+                )
     return changes
 
 

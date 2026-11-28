@@ -430,7 +430,8 @@ def _record_apply(job_store, optimization_id: str, applied: bool) -> dict[str, A
     previous = details.get("local_apply") if isinstance(details.get("local_apply"), dict) else {}
     first = previous.get("applied_at") or (datetime.now(UTC).isoformat() if applied else None)
     state = {"applied": applied, "applied_at": first}
-    if previous == state:
+    # An Undo on a run never applied changes nothing, so it saves and logs nothing either.
+    if previous == state or (not applied and not previous):
         return state
     details["local_apply"] = state
     result["details"] = details

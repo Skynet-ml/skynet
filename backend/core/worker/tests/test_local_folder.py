@@ -894,3 +894,35 @@ def test_a_record_write_that_fails_at_close_or_rename_leaves_no_temporary_file(
 
     assert list((local_state / local_folder.APPLIED_FOLDER).iterdir()) == []
     assert _fingerprint(root) == before
+
+
+_FOLDER_TO_FILE_PATCH = (
+    "diff --git a/pkg/mod.py b/pkg/mod.py\ndeleted file mode 100644\n"
+    "--- a/pkg/mod.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x = 1\n"
+    "diff --git a/pkg b/pkg\nnew file mode 100644\n"
+    "--- /dev/null\n+++ b/pkg\n@@ -0,0 +1 @@\n+y = 1\n"
+)
+
+
+def test_apply_refuses_a_version_that_turns_a_folder_into_a_file(tmp_path: Path, local_state: Path) -> None:
+    """A folder that becomes a file at the same path is refused with its own reason, not a false conflict.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+    """
+    root = _write(tmp_path / "app", {"pkg/mod.py": "x = 1\n", "README.md": "hi\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    before = _fingerprint(root)
+
+    with pytest.raises(LocalFolderError, match="turns pkg") as caught:
+        _apply(root, commit, _FOLDER_TO_FILE_PATCH, "run-1")
+
+    assert not isinstance(caught.value, local_folder.LocalFolderConflictError)
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+    assert not (local_state / local_folder.APPLIED_FOLDER).exists() or not any(
+        (local_state / local_folder.APPLIED_FOLDER).iterdir()
+    )
