@@ -2444,3 +2444,27 @@ async def test_a_deleted_file_reads_as_missing_and_an_edit_cannot_bring_it_back(
     assert "deletes README.md" in edit["error"]
     assert turn.wizard_patch == {}
     assert "x = 1" in await tools["read_repo_file"].acall(path="src/app.py")
+
+
+@pytest.mark.asyncio
+async def test_the_folder_listings_leave_out_the_deleted_files_and_the_folders_they_emptied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The overview and ``list_repo_folder`` show the folder as the run starts: without the draft's deletes."""
+    root = tmp_path / "project"
+    root.mkdir()
+    state = _local_folder(monkeypatch, root)
+    (root / "docs").mkdir()
+    (root / "docs" / "guide.md").write_text("g\n", encoding="utf-8")
+    state["workspace_deleted"] = ["src/app.py", "README.md"]
+    tools = _shell_tools(state, _TurnAuthoringFlag(), key=None)
+
+    overview = await tools["list_repo_folder"].acall(path="")
+    folder = await tools["list_repo_folder"].acall(path="src")
+
+    assert "docs/" in overview
+    assert "guide.md" in overview
+    assert "src/" not in overview
+    assert "app.py" not in overview
+    assert "README.md" not in overview
+    assert "No folder named 'src'" in folder["error"]

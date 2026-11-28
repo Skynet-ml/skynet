@@ -406,6 +406,29 @@ class RepoBrowser:
                 raise
         return self._read_text(path, limit)
 
+    def hide(self, paths: Collection[str]) -> None:
+        """Leave files out of every later tree, listing and read, as the setup draft deletes them (SKY-997).
+
+        A folder that only held such files goes too. The call can repeat: a
+        path that is already gone is skipped.
+
+        Args:
+            paths: File paths inside the repository.
+        """
+        gone = {path for path in paths if path in self._files}
+        if not gone:
+            return
+        self._files -= gone
+        kept = [entry for entry in self._entries if str(entry.get("path")) not in gone]
+        for path in gone:
+            parent = path.rpartition("/")[0]
+            while parent and not any(str(entry.get("path")).startswith(f"{parent}/") for entry in kept):
+                kept = [entry for entry in kept if str(entry.get("path")) != parent]
+                parent = parent.rpartition("/")[0]
+        self._entries = kept
+        self._nodes = _build_nodes(kept)
+        self._key_files = [(path, text) for path, text in self._key_files if path not in gone]
+
     def overview(self) -> RepoRead:
         """Show the repository's tree with its README and manifest, as one read.
 

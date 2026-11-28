@@ -669,6 +669,9 @@ def workspace_tools(
             browser, reason = opened[0]
             if browser is None:
                 return {"error": reason}
+            # A command may delete files during the turn, so each read hides the deletes so far.
+            deleted = {**state, **turn.wizard_patch}.get(DRAFT_DELETED_FIELD)
+            browser.hide([str(path) for path in deleted] if isinstance(deleted, list) else [])
             return await asyncio.to_thread(read, browser)
 
     async def list_repo_folder(path: str = "") -> RepoRead:
