@@ -8,6 +8,7 @@ import io
 import os
 import tarfile
 import threading
+import time
 import unicodedata
 import zipfile
 from collections.abc import Callable
@@ -209,6 +210,48 @@ def test_a_run_without_its_kept_copy_says_so(tmp_path: Path) -> None:
         local_folder.kept_snapshot("../../etc")
 
 
+def _age(path: Path) -> float:
+    """Set a file's mtime to before the fresh-pack window.
+
+    Args:
+        path: The file.
+
+    Returns:
+        The new mtime.
+    """
+    old = time.time() - local_folder.FRESH_PACK_SECONDS - 60
+    os.utime(path, (old, old))
+    return old
+
+
+def test_forget_snapshot_keeps_a_recent_pack(tmp_path: Path) -> None:
+    """A pack written in the last minutes may belong to a run that has not stored its commit yet."""
+    root = _write(tmp_path / "app", {"main.py": "x = 1\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+
+    assert local_folder.forget_snapshot(commit) is False
+    assert local_folder.kept_snapshot(commit).is_file()
+
+
+def test_reusing_a_kept_pack_marks_it_as_recent(tmp_path: Path) -> None:
+    """A later pass that reuses the pack refreshes its mtime, so a cleanup keeps it."""
+    root = _write(tmp_path / "app", {"main.py": "x = 1\n"})
+    first = tmp_path / "w1"
+    first.mkdir()
+    commit = local_folder.snapshot_folder(root, first).commit
+    kept = local_folder.kept_snapshot(commit)
+    old = _age(kept)
+    second = tmp_path / "w2"
+    second.mkdir()
+
+    local_folder.snapshot_folder(root, second, commit)
+
+    assert kept.stat().st_mtime > old + local_folder.FRESH_PACK_SECONDS
+    assert local_folder.forget_snapshot(commit) is False
+
+
 def test_forget_snapshot_deletes_only_the_named_pack(tmp_path: Path, local_state: Path) -> None:
     """The kept pack goes, a second call is a no-op, and a commit with a path in it is refused."""
     root = _write(tmp_path / "app", {"main.py": "x = 1\n"})
@@ -216,11 +259,12 @@ def test_forget_snapshot_deletes_only_the_named_pack(tmp_path: Path, local_state
     workdir.mkdir()
     commit = local_folder.snapshot_folder(root, workdir).commit
     kept = local_folder.kept_snapshot(commit)
+    _age(kept)
     outside = local_state / "outside.tgz"
     outside.write_bytes(b"keep")
 
-    local_folder.forget_snapshot(commit)
-    local_folder.forget_snapshot(commit)
+    assert local_folder.forget_snapshot(commit) is True
+    assert local_folder.forget_snapshot(commit) is False
 
     assert not kept.exists()
     with pytest.raises(LocalFolderError, match="not valid"):

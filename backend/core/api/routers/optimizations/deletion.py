@@ -16,6 +16,8 @@ import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....i18n_en import t_en
@@ -25,6 +27,8 @@ from ....models import (
     BulkDeleteSkipped,
     JobDeleteResponse,
 )
+from ....models.hardening import ACTIVE_STATUSES as HARDENING_ACTIVE_STATUSES
+from ....models.hardening import HardeningJobModel
 from ....storage.tree_purge import TreePurgeError
 from ....worker.local_folder import LocalFolderError, forget_snapshot, is_local
 from ...auth import AuthenticatedUser, get_authenticated_user
@@ -87,6 +91,29 @@ def _local_commits(job_store, optimization_ids: list[str]) -> set[str]:
     return {commit for payload in payloads.values() if (repo := _local_repo(payload)) and (commit := _pinned(repo))}
 
 
+def _active_hardening_repos(job_store) -> list[dict[str, Any]]:
+    """Read the local repository blocks of the unfinished metric-hardening jobs.
+
+    Hardening jobs live in their own table, and their later passes reuse the
+    pack of the commit they pinned.
+
+    Args:
+        job_store: Job-store whose ``engine`` holds the hardening jobs.
+
+    Returns:
+        The ``target.repo`` blocks that name a local folder; empty for a store
+        without an engine.
+    """
+    engine = getattr(job_store, "engine", None)
+    if engine is None:
+        return []
+    with Session(engine) as session:
+        documents = session.scalars(
+            select(HardeningJobModel.job).where(HardeningJobModel.status.in_(HARDENING_ACTIVE_STATUSES))
+        ).all()
+    return [repo for document in documents if (repo := _local_repo(document))]
+
+
 def _forget_unused_packs(job_store, commits: set[str]) -> None:
     """Delete the kept folder packs that no stored run uses after a delete.
 
@@ -101,7 +128,7 @@ def _forget_unused_packs(job_store, commits: set[str]) -> None:
     try:
         # One read sees every run at once; pages could skip a row that a parallel delete moves.
         limit = job_store.count_jobs() + 1
-        while len(rows := job_store.list_jobs(limit=limit)) >= limit:
+        while len(rows := job_store.list_jobs(limit=limit, with_counts=False)) >= limit:
             limit *= 2
         statuses = {row["optimization_id"]: row.get("status") for row in rows}
         in_use: set[str] = set()
@@ -115,6 +142,11 @@ def _forget_unused_packs(job_store, commits: set[str]) -> None:
                 # A starting run keeps its pack before it stores the commit, so any pack may be its pack.
                 logger.info("Kept folder packs kept: run %s has not stored its commit yet", optimization_id)
                 return
+        for repo in _active_hardening_repos(job_store):
+            if not (commit := _pinned(repo)):
+                logger.info("Kept folder packs kept: a hardening job has not stored its commit yet")
+                return
+            in_use.add(commit)
     except Exception:
         logger.exception("Kept folder packs kept: the stored runs could not be read")
         return
