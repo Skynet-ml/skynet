@@ -93,6 +93,7 @@ MAX_CLIENTS = 128
 _CALL_HISTORY = 1000
 # A shorter value would cut ordinary responses that happen to hold it.
 _ECHO_GUARD_MIN = 8
+_UNICODE_ESCAPE = re.compile(rb"\\u([0-9a-fA-F]{4})")
 _CA_DAYS = 2
 _HOP_HEADERS = frozenset(
     {b"connection", b"keep-alive", b"proxy-connection", b"proxy-authorization", b"expect", b"upgrade", b"te"}
@@ -367,6 +368,31 @@ class _PlaceholderScan:
             return match.group(1).decode()
         self._tail = text[-_PLACEHOLDER_MAX:]
         return None
+
+
+def _echo_needles(value: bytes) -> frozenset[bytes]:
+    """Return a swapped value and the forms a JSON echo endpoint can write it in.
+
+    JSON encoders escape quotes, backslashes and control characters, may write
+    non-ASCII as ``\\uXXXX`` in either hex case, may escape ``/`` (PHP) and
+    may escape ``<``, ``>`` and ``&`` (Go). A URL- or base64-encoded echo is
+    not caught: the guard is best-effort for encodings other than these.
+
+    Args:
+        value: The real value, as sent.
+
+    Returns:
+        At most 17 byte strings, the raw value among them.
+    """
+    text = value.decode("utf-8", "replace")
+    needles = {value}
+    for ascii_only in (True, False):
+        escaped = json.dumps(text, ensure_ascii=ascii_only)[1:-1]
+        for slash in (escaped, escaped.replace("/", "\\/")):
+            for html in (slash, slash.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")):
+                needles.add(html.encode())
+                needles.add(_UNICODE_ESCAPE.sub(lambda match: b"\\u" + match.group(1).upper(), html.encode()))
+    return frozenset(needles)
 
 
 def _status_code(first: bytes) -> int | None:
@@ -1065,7 +1091,7 @@ class LocalEgressProxy:
             _CutError: When the response holds a swapped value, or is encoded
                 after a swap so the proxy cannot check it.
         """
-        guard = {name: value for name, value in used.items() if len(value) >= _ECHO_GUARD_MIN}
+        guard = {name: _echo_needles(value) for name, value in used.items() if len(value) >= _ECHO_GUARD_MIN}
 
         def check(data: bytes) -> None:
             """Stop the response when it holds a swapped value.
@@ -1076,8 +1102,8 @@ class LocalEgressProxy:
             Raises:
                 _CutError: When a value is in the bytes.
             """
-            for name, value in guard.items():
-                if value in data:
+            for name, needles in guard.items():
+                if any(needle in data for needle in needles):
                     raise _CutError(f"the response held the value of secret {name}, so it was cut")
 
         while True:
@@ -1111,7 +1137,7 @@ class LocalEgressProxy:
         tls.sendall(head)
         if method == b"HEAD" or code in (204, 304):
             return
-        keep = max((len(value) for value in guard.values()), default=1) - 1
+        keep = max((len(needle) for needles in guard.values() for needle in needles), default=1) - 1
         pending = b""
 
         def emit(data: bytes) -> None:

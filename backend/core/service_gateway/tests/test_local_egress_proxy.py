@@ -8,6 +8,7 @@ import datetime
 import gzip
 import http.client
 import io
+import json
 import socket
 import ssl
 import threading
@@ -34,6 +35,7 @@ APPROVED = "api.example.com"
 OTHER = "other.example.com"
 VALUE = "sk-test-real-value-0123456789"
 SECRET = SetupSecret("API_KEY", VALUE, (APPROVED,))
+JSON_VALUE = 'sk-test/"quoted"/caf\u00e9-0123456789'
 
 
 def _cert(
@@ -118,6 +120,7 @@ def _answer_for(request: bytes) -> bytes:
     ``/chunked-echo`` returns it in chunks that split the real value. ``/dup-gzip-echo``
     and ``/dup-te-echo`` return it gzipped, behind a repeated encoding header that ends in a plain one.
     The ``/lf-*`` paths hide the framing behind bare line feeds, which many clients accept.
+    The ``/json-*`` paths return the Authorization value in JSON, escaped as common encoders do.
 
     Args:
         request: The request the host got.
@@ -126,6 +129,11 @@ def _answer_for(request: bytes) -> bytes:
         The response bytes.
     """
     path = request.split(b" ")[1:2]
+    if path in ([b"/json-echo"], [b"/json-slash-echo"], [b"/json-utf8-echo"]):
+        sent = request.split(b"Authorization: Bearer ")[1].split(b"\r\n")[0].decode()
+        text = json.dumps({"h": sent}, ensure_ascii=path != [b"/json-utf8-echo"])
+        body = (text.replace("/", "\\/") if path == [b"/json-slash-echo"] else text).encode()
+        return b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body
     if path == [b"/lf-gzip-echo"]:
         body = gzip.compress(request)
         return b"HTTP/1.1 200 OK\r\nX-A: a\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % len(body) + body
@@ -216,6 +224,7 @@ def proxy(tmp_path: Path, upstream: Upstream, monkeypatch: pytest.MonkeyPatch) -
         SECRET,
         SetupSecret("PLAIN_TOKEN", "plain-value"),
         SetupSecret("WILD", "wild-value-123", ("*.wild.test",)),
+        SetupSecret("JSON_KEY", JSON_VALUE, (APPROVED,)),
     ]
     egress = LocalEgressProxy(secrets, tmp_path / "state")
     egress._upstream_context = ssl.create_default_context(cadata=upstream.ca_pem.decode())
@@ -626,6 +635,20 @@ def test_bare_line_feeds_in_the_response_head_cannot_hide_an_echo(proxy: LocalEg
     assert _calls(proxy, 1)[-1]["status"] == "failed"
 
 
+@pytest.mark.parametrize("path", ["/json-echo", "/json-slash-echo", "/json-utf8-echo"])
+def test_json_escaped_echo_of_the_real_value_is_cut(proxy: LocalEgressProxy, path: str) -> None:
+    """Check that a JSON echo cannot pass a value with a quote, a slash and a non-ASCII letter."""
+    response = _via_proxy(proxy, APPROVED, _get(path, header=placeholder("JSON_KEY")), trust=proxy.ca_pem)
+    echoed = ""
+    with contextlib.suppress(ValueError):
+        echoed = json.loads(_lenient_body(response)).get("h", "")
+    assert JSON_VALUE not in echoed
+    assert JSON_VALUE.encode() not in response
+    record = _calls(proxy, 1)[-1]
+    assert record["status"] == "failed"
+    assert "JSON_KEY" in record["reason"]
+
+
 def test_stop_keeps_tls_on_a_socket_that_sends_during_shutdown(
     proxy: LocalEgressProxy, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -783,3 +806,12 @@ def test_no_swap_after_stop(proxy: LocalEgressProxy, upstream: Upstream) -> None
     assert all(VALUE.encode() not in sent for sent in upstream.requests)
     with pytest.raises(OSError):
         proxy._leaf_context(OTHER)
+
+
+def test_echo_needles_cover_go_and_upper_case_escapes() -> None:
+    """Check that the guard knows Go's ``<>&`` escapes and upper-case ``\\u`` hex, and stays small."""
+    value = "k<&>/é-0123456789"
+    go_style = json.dumps(value)[1:-1].replace("<", "\\u003C").replace(">", "\\u003E").replace("&", "\\u0026")
+    needles = proxy_module._echo_needles(value.encode())
+    assert go_style.replace("\\u00e9", "\\u00E9").encode() in needles
+    assert len(needles) <= 17
