@@ -4628,5 +4628,10 @@
   "blog.meta_description": "AI, ऑप्टिमाइज़ेशन और फ़र्स्ट-प्रिंसिपल्स सोच पर {term.appName} टीम के निबंध।",
   "blog.read": "पढ़ें",
   "blog.by_author": "{author} द्वारा",
-  "blog.back": "सभी पोस्ट"
+  "blog.back": "सभी पोस्ट",
+  "app.sidebar.show": "साइडबार दिखाएं",
+  "app.sidebar.hide": "साइडबार छिपाएं",
+  "app.sidebar.toggle": "साइडबार दिखाएं या छिपाएं",
+  "app.nav.back": "पीछे जाएं",
+  "app.nav.forward": "आगे जाएं"
 }

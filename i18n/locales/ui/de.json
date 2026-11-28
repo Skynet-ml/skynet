@@ -4628,5 +4628,10 @@
   "blog.meta_description": "Essays des {term.appName}-Teams über KI, Optimierung und Denken nach ersten Prinzipien.",
   "blog.read": "Lesen",
   "blog.by_author": "Von {author}",
-  "blog.back": "Alle Beiträge"
+  "blog.back": "Alle Beiträge",
+  "app.sidebar.show": "Seitenleiste einblenden",
+  "app.sidebar.hide": "Seitenleiste ausblenden",
+  "app.sidebar.toggle": "Seitenleiste ein- oder ausblenden",
+  "app.nav.back": "Zurück",
+  "app.nav.forward": "Vorwärts"
 }

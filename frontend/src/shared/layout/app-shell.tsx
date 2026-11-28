@@ -7,10 +7,8 @@ import { useSession } from "next-auth/react";
 import { motion } from "motion/react";
 import { List } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
-import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
-import { AppMark } from "@/shared/ui/app-mark";
-import { APP_NAME } from "@/shared/lib/brand";
 import { GlobalSearch } from "@/shared/layout/global-search";
+import { ShellNavControls } from "@/shared/layout/shell-nav-controls";
 import { useLocale } from "@/shared/providers";
 import { dirForLocale } from "@/shared/lib/locale";
 import { msg } from "@/shared/lib/messages";
@@ -36,8 +34,8 @@ const Sidebar = dynamic(() => import("@/features/sidebar").then((m) => m.Sidebar
   loading: () => (
     <div
       aria-hidden="true"
-      className="hidden h-full border-e border-sidebar-border/60 bg-sidebar/80 backdrop-blur-xl md:block"
-      style={{ width: "var(--app-sidebar-width, min(240px, 40vw, 92vw))" }}
+      className="hidden h-full border-e border-sidebar-border/60 bg-sidebar md:block"
+      style={{ width: "var(--app-sidebar-width, min(291px, 40vw, 92vw))" }}
     />
   ),
 });
@@ -191,7 +189,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-        className="fixed inset-x-0 top-0 z-30 flex h-[var(--header-height)] items-center justify-between border-b border-border/40 bg-background/60 px-2 py-0 backdrop-blur-2xl backdrop-saturate-[1.8] sm:px-4"
+        className="app-header fixed inset-x-0 top-0 z-30 flex h-[var(--header-height)] items-center justify-between border-b border-border/40 bg-background/60 px-2 py-0 backdrop-blur-2xl backdrop-saturate-[1.8] sm:px-4"
         dir="ltr"
         style={{
           borderImage:
@@ -199,19 +197,9 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         }}
       >
         <div className="flex items-center gap-2 cursor-default">
-          {/* The morphing mark and wordmark anchor the header at sm+; below sm they
-              collapse to the static mark and the plain-text name where the
-              full SVG would crowd the row. */}
-          <div className="hidden sm:block">
-            <AnimatedWordmark size={16} withMark autoMorph autoMorphDuration={10000} morphSpeed={250} />
-          </div>
-          <AppMark className="sm:hidden size-5 shrink-0" aria-hidden="true" />
-          <span
-            className="sm:hidden text-sm font-bold tracking-[0.14em] uppercase text-primary cursor-default"
-            style={{ fontFamily: "var(--font-ui)" }}
-          >
-            {APP_NAME}
-          </span>
+          {/* The toggle and Back/Forward sit above the sidebar, at the
+              inline-start edge: here in LTR, in the end group in RTL. */}
+          {!isRtl && <ShellNavControls dir={dir} sidebarId={SIDEBAR_ID} />}
         </div>
 
         <div className="flex flex-1 justify-center px-2">
@@ -219,6 +207,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-1.5" dir={dir}>
+          {isRtl && <ShellNavControls dir={dir} sidebarId={SIDEBAR_ID} />}
           <BalanceChip />
           <ResourceModeSwitch />
           <NotificationBell />

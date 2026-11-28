@@ -4628,5 +4628,10 @@
   "blog.meta_description": "AI、最適化、第一原理思考についての {term.appName} チームのエッセイ。",
   "blog.read": "読む",
   "blog.by_author": "著者: {author}",
-  "blog.back": "すべての記事"
+  "blog.back": "すべての記事",
+  "app.sidebar.show": "サイドバーを表示",
+  "app.sidebar.hide": "サイドバーを非表示",
+  "app.sidebar.toggle": "サイドバーの表示を切り替え",
+  "app.nav.back": "戻る",
+  "app.nav.forward": "進む"
 }

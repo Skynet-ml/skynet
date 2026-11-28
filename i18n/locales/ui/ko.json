@@ -4628,5 +4628,10 @@
   "blog.meta_description": "AI, 최적화, 제1원리 사고에 관한 {term.appName} 팀의 에세이.",
   "blog.read": "읽기",
   "blog.by_author": "작성자: {author}",
-  "blog.back": "모든 글"
+  "blog.back": "모든 글",
+  "app.sidebar.show": "사이드바 표시",
+  "app.sidebar.hide": "사이드바 숨기기",
+  "app.sidebar.toggle": "사이드바 표시/숨기기",
+  "app.nav.back": "뒤로",
+  "app.nav.forward": "앞으로"
 }

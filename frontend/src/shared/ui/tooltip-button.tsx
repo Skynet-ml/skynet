@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { Kbd } from "@/shared/ui/kbd";
+import { SIDEBAR_STATE_EVENT } from "@/shared/lib/sidebar-toggle";
 
 import {
   Tooltip,
@@ -52,6 +53,65 @@ export function TooltipButton({
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
+  );
+}
+
+/**
+ * Show a tooltip only while a mouse hovers the trigger, or while it has
+ * keyboard focus.
+ *
+ * It opens at once, with no delay. A trigger can move under a still cursor
+ * (the header buttons move when the sidebar opens or closes), and then no
+ * pointerleave comes: Radix kept the tooltip open with no hover. A click, a
+ * sidebar change or a window blur closes it, and only a new mouse enter opens
+ * it again.
+ *
+ * Args:
+ *   label: The tooltip body.
+ *   side: The side of the trigger where the tooltip shows.
+ *   children: The trigger button.
+ *
+ * Returns:
+ *   The tooltip with its trigger.
+ */
+export function HoverTooltip({
+  label,
+  side = "bottom",
+  children,
+}: {
+  label: React.ReactNode;
+  side?: "top" | "right" | "bottom" | "left";
+  children: React.ReactElement;
+}) {
+  const [open, setOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    const close = () => setOpen(false);
+    window.addEventListener(SIDEBAR_STATE_EVENT, close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener(SIDEBAR_STATE_EVENT, close);
+      window.removeEventListener("blur", close);
+    };
+  }, []);
+
+  return (
+    // Radix asks to open on its own pointer and focus events; only the
+    // handlers below open it, so a request to open is ignored here.
+    <Tooltip open={open} onOpenChange={(next) => !next && setOpen(false)}>
+      <TooltipTrigger
+        asChild
+        onPointerEnter={(e) => e.pointerType === "mouse" && setOpen(true)}
+        onPointerLeave={() => setOpen(false)}
+        onPointerDown={() => setOpen(false)}
+        onClick={() => setOpen(false)}
+        onFocus={(e) => e.currentTarget.matches(":focus-visible") && setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent side={side}>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

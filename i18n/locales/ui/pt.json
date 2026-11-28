@@ -4628,5 +4628,10 @@
   "blog.meta_description": "Ensaios da equipe {term.appName} sobre IA, otimização e pensamento a partir de primeiros princípios.",
   "blog.read": "Ler",
   "blog.by_author": "Por {author}",
-  "blog.back": "Todos os posts"
+  "blog.back": "Todos os posts",
+  "app.sidebar.show": "Mostrar barra lateral",
+  "app.sidebar.hide": "Ocultar barra lateral",
+  "app.sidebar.toggle": "Mostrar ou ocultar barra lateral",
+  "app.nav.back": "Voltar",
+  "app.nav.forward": "Avançar"
 }

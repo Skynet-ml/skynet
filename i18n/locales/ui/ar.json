@@ -4628,5 +4628,10 @@
   "blog.meta_description": "مقالات من فريق {term.appName} عن الذكاء الاصطناعي والتحسين والتفكير من المبادئ الأولى.",
   "blog.read": "اقرأ",
   "blog.by_author": "بقلم {author}",
-  "blog.back": "كل المقالات"
+  "blog.back": "كل المقالات",
+  "app.sidebar.show": "إظهار الشريط الجانبي",
+  "app.sidebar.hide": "إخفاء الشريط الجانبي",
+  "app.sidebar.toggle": "إظهار الشريط الجانبي أو إخفاؤه",
+  "app.nav.back": "رجوع",
+  "app.nav.forward": "تقدم"
 }

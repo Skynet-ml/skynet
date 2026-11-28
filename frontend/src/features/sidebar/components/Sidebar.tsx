@@ -77,6 +77,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { perLocale } from "@/shared/lib/per-locale";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
+import { SIDEBAR_TOGGLE_EVENT, announceSidebarState } from "@/shared/lib/sidebar-toggle";
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { recentResumableId } from "@/shared/lib/recent-session";
 import { TERMS } from "@/shared/lib/terms";
@@ -116,7 +117,7 @@ const PAGE_SIZE = 20;
 
 const SIDEBAR_MIN_WIDTH = 210;
 const SIDEBAR_MAX_WIDTH = 420;
-const SIDEBAR_DEFAULT_WIDTH = 240;
+const SIDEBAR_DEFAULT_WIDTH = 291;
 // Icon-rail width when collapsed: just enough to center a nav icon (and the
 // account avatar / storage icon) with comfortable padding.
 const SIDEBAR_COLLAPSED_WIDTH = 64;
@@ -227,6 +228,28 @@ export function Sidebar() {
       return value;
     });
   }, []);
+
+  // The header's toggle button reaches the rail through a window event,
+  // because the header renders outside this client-only chunk.
+  React.useEffect(() => {
+    const onToggle = () => {
+      setSnapping(true);
+      setCollapsed((prev) => {
+        try {
+          window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, prev ? "0" : "1");
+        } catch {
+          /* noop */
+        }
+        return !prev;
+      });
+    };
+    window.addEventListener(SIDEBAR_TOGGLE_EVENT, onToggle);
+    return () => window.removeEventListener(SIDEBAR_TOGGLE_EVENT, onToggle);
+  }, []);
+
+  React.useEffect(() => {
+    announceSidebarState(isCollapsed);
+  }, [isCollapsed]);
 
   // Drag-resize doubles as the collapse control. The rail is pinned to the
   // inline-start edge (left in LTR, right in RTL), so the dragged inline-end
@@ -646,7 +669,10 @@ export function Sidebar() {
 
   return (
     <aside
-      className="app-sidebar-rail relative flex h-full shrink-0 flex-col border-e border-sidebar-border/60 bg-sidebar/80 backdrop-blur-xl overflow-hidden"
+      className={cn(
+        "app-sidebar-rail relative flex h-full shrink-0 flex-col overflow-hidden border-e transition-colors duration-200",
+        isCollapsed ? "border-sidebar-border/40 bg-background" : "border-sidebar-border/60 bg-sidebar",
+      )}
       style={{ width: isDesktop ? `${effectiveWidth}px` : `min(${width}px, 88vw)` }}
       onTransitionEnd={(e) => {
         // Disarm once the collapse/expand width glide lands so the next

@@ -332,9 +332,12 @@
   --code-punct: #a0a1a6;
   --code-function: #8fb8de;
 
-  --background: #221d19;
+  /* Codex shape (REA, ChatGPT.app 2026-11): the main panel is the darkest
+     surface, the sidebar sits one step lighter behind a hairline, and cards
+     step clearly up with a lighter 1px border. Kept warm, not neutral gray. */
+  --background: #171411;
   --foreground: #f3ede6;
-  --card: #2c2621;
+  --card: #2b2520;
   --card-foreground: #f3ede6;
   --popover: #312a24;
   --popover-foreground: #f3ede6;
@@ -361,13 +364,13 @@
   --effort-arc: oklch(0.99 0.03 85);
 
   --bg: #1c1814;
-  --surface-1: #2c2621;
+  --surface-1: #2b2520;
   --surface-2: #27211d;
   --surface-3: #382f28;
   /* The setup splash sits on the page's near-black with pure white type, for full contrast. */
   --splash-ground: var(--background);
   --splash-ink: #ffffff;
-  --border-subtle: #3a312a;
+  --border-subtle: #2f2924;
   --text-1: #f3ede6;
   --text-2: #cdbfb1;
   --text-3: #a0917f;
@@ -415,13 +418,13 @@
 
   --gradient-progress: linear-gradient(90deg, #b4521f, #e0935a, #f0b98a);
 
-  --sidebar: #1c1814;
+  --sidebar: #1f1b17;
   --sidebar-foreground: #f3ede6;
   --sidebar-primary: #e0935a;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #382f28;
   --sidebar-accent-foreground: #f3ede6;
-  --sidebar-border: #483d34;
+  --sidebar-border: #3a322b;
   --sidebar-ring: #e0935a;
 
   --skeleton-base: color-mix(in srgb, var(--text-1) 8%, transparent);
@@ -974,7 +977,7 @@ main {
    share routes (which render no sidebar) are unaffected. */
 @media (min-width: 768px) {
   .app-main {
-    margin-inline-start: var(--app-sidebar-width, min(240px, 40vw, 92vw));
+    margin-inline-start: var(--app-sidebar-width, min(291px, 40vw, 92vw));
   }
   /* When the rail is collapsed to its 64px icon strip, let the page box grow
      into the freed space instead of staying capped at 7xl and leaving a dead
@@ -985,6 +988,18 @@ main {
   html[data-sidebar-collapsed] .app-main .mx-auto.max-w-7xl {
     max-width: none;
   }
+}
+
+/* The Mac desktop app hides the native title bar (the preload sets the mark).
+   The header drags the window, and its start padding clears the traffic
+   lights: the toggle starts 88px from the edge, as in Codex. */
+html[data-desktop-titlebar] .app-header {
+  padding-left: 88px;
+  --app-header-pad-left: 88px;
+  -webkit-app-region: drag;
+}
+html[data-desktop-titlebar] .app-header :is(button, a, input, [role="button"], [role="combobox"]) {
+  -webkit-app-region: no-drag;
 }
 
 /* Collapse/expand snap: when the Sidebar commits the discrete icon-rail toggle it
