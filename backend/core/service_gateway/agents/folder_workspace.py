@@ -316,12 +316,24 @@ class FolderWorkspace:
             truncated: Whether that listing stopped at its limit.
 
         Returns:
-            The paths; a path that is only left out of the listing (now
-            ignored, or a link) is not deleted.
+            The paths, with a file that became a folder; a path that is only
+            left out of the listing (now ignored, or a link) is not deleted.
         """
         if truncated:
             return []
-        return [rel for rel in sorted(set(self.snapshot) - set(listed)) if not os.path.lexists(self.folder / rel)]
+        return [rel for rel in sorted(set(self.snapshot) - set(listed)) if self._gone(rel)]
+
+    def _gone(self, rel: str) -> bool:
+        """Say whether a path of the copy holds no file and no link.
+
+        Args:
+            rel: The path.
+
+        Returns:
+            True when nothing has the path, or a folder has it.
+        """
+        path = self.folder / rel
+        return not os.path.lexists(path) or (path.is_dir() and not path.is_symlink())
 
     def reset(self, files: Mapping[str, str], deleted: Iterable[str] = ()) -> None:
         """Make the copy hold the user's folder with the setup draft on top, as the run will see it.
@@ -346,12 +358,19 @@ class FolderWorkspace:
         for rel in self._deleted(listed, truncated):
             if rel not in gone and rel not in files:
                 self._restore(rel)
+        # The deletes go first, as in the run, so a draft can swap a file and a folder.
+        for path in gone - set(files):
+            with contextlib.suppress(ValueError, OSError):
+                rel = clean_draft_path(path)
+                remove_inside(self.folder, rel)
+                # The run keeps no folder that the deletes empty, so a draft file can take its path.
+                parent = (self.folder / rel).parent
+                while parent != self.folder:
+                    parent.rmdir()
+                    parent = parent.parent
         for path, text in files.items():
             with contextlib.suppress(ValueError, OSError):
                 write_inside(self.folder, clean_draft_path(path), text.encode("utf-8", "surrogatepass"))
-        for path in gone - set(files):
-            with contextlib.suppress(ValueError, OSError):
-                remove_inside(self.folder, clean_draft_path(path))
 
     def revert(self, rel: str) -> None:
         """Make one file of the copy match the user's folder again.

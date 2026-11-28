@@ -602,15 +602,27 @@ def test_only_a_local_source_takes_deleted_draft_files(monkeypatch: pytest.Monke
         BlackboxRepoSource(repository="acme/app", editable_paths=["src"], draft_deleted=["a.py"])
 
 
+def test_a_file_swapped_with_a_folder_keeps_its_delete(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """A deleted file under a written path, or above one, is no conflict: the deletes go first (SKY-997)."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", True)
+
+    source = BlackboxRepoSource.model_validate(
+        _local_source(
+            str(tmp_path), draft_deleted=["config", "pkg/a.py"], draft_files={"config/a.py": "x\n", "pkg": "p\n"}
+        )
+    )
+
+    assert source.draft_deleted == ["config", "pkg/a.py"]
+
+
 @pytest.mark.parametrize(
     ("deleted", "drafts", "message"),
     [
         (["ascent.toml"], {}, "cannot delete ascent.toml"),
         (["a.py"], {"a.py": "x\n"}, "both written and deleted"),
-        (["src"], {"src/a.py": "x\n"}, "both written and deleted"),
         (["../a.py"], {}, "must stay inside"),
     ],
-    ids=["ascent-toml", "same-path", "folder-of-a-draft", "outside"],
+    ids=["ascent-toml", "same-path", "outside"],
 )
 def test_a_deleted_draft_path_that_cannot_be_deleted_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, deleted: list[str], drafts: dict[str, str], message: str

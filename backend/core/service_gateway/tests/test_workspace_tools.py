@@ -2379,3 +2379,27 @@ async def test_a_truncated_copy_listing_keeps_the_earlier_deletes(
     assert "*" in result["skipped_files"]
     assert result.get("wizard_state", {}).get("workspace_deleted", ["old.py"]) == ["old.py"]
     assert turn.wizard_patch.get("workspace_deleted", ["old.py"]) == ["old.py"]
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_file_swapped_with_a_folder_keeps_the_delete_and_a_new_copy_rebuilds_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file that becomes a folder, and a folder that becomes a file, stay deleted under the new draft."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["exec_command"].acall(
+        cmd="rm README.md && mkdir README.md && echo x > README.md/a.py && rm src/app.py && rmdir src && echo p > src"
+    )
+
+    assert result["wizard_state"]["workspace_deleted"] == ["README.md", "src/app.py"]
+    assert turn.wizard_patch["workspace_files"] == {"README.md/a.py": "x\n", "src": "p\n"}
+    again = await _shell_tools({**state, **turn.wizard_patch}, _TurnAuthoringFlag(), key="chat-2")[
+        "exec_command"
+    ].acall(cmd="cat README.md/a.py src")
+    assert again["output"].count("x\np\n") == 1
+    assert "wizard_state" not in again
+    assert (root / "README.md").is_file()
+    assert (root / "src" / "app.py").is_file()

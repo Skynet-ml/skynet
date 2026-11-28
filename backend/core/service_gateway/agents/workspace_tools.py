@@ -43,7 +43,6 @@ from ...models.blackbox import (
     LOCAL_REPO_PROVIDER,
     REPO_COMMIT_PATTERN,
     clean_draft_path,
-    path_inside,
 )
 from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, parse_constraints, rule_file_settings
 from .apply_patch import APPLY_PATCH_TOOL, PatchError
@@ -1103,10 +1102,8 @@ def workspace_tools(
         if changed:
             patch[DRAFT_FILES_FIELD] = changed
         written = [*files, *changed]
-        # The run request refuses a deleted path that meets a written one, so the written file wins.
-        gone = [
-            path for path in gone if not path_inside(path, written) and not any(path_inside(w, [path]) for w in written)
-        ]
+        # The run request refuses a path that is both written and deleted, so the written file wins.
+        gone = [path for path in gone if path not in written]
         if gone != sorted(before_deleted):
             patch[DRAFT_DELETED_FIELD] = gone
         if changed or "ascent_toml" in fields or DRAFT_DELETED_FIELD in patch:

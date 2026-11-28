@@ -673,7 +673,12 @@ test("a local folder run sends the shell deletes that no draft writes again (SKY
   state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [] };
   state.workspace.files = { "src/app.py": "x = 2\n", "lib/new/a.py": "a = 1\n" };
   state.workspace.deleted = ["old.py", "src/app.py", "lib/new", "lib/new/a.py/x"];
-  assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_deleted, ["old.py"]);
+  // A file swapped with a folder keeps its delete; the run deletes before it writes.
+  assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_deleted, [
+    "old.py",
+    "lib/new",
+    "lib/new/a.py/x",
+  ]);
 
   state.workspace.deleted = ["src/app.py"];
   assert.equal("draft_deleted" in repoRunRequest(state, options)!.target.repo, false);

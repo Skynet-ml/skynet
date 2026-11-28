@@ -533,8 +533,8 @@ class BlackboxRepoSource(BaseModel):
                 raise ValueError("Only a local source takes deleted draft files.")
             if path == "ascent.toml":
                 raise ValueError("The draft cannot delete ascent.toml.")
-            # One path is either written or deleted; a nested pair would depend on the order.
-            if path_inside(path, drafts) or any(path_inside(other, [path]) for other in drafts):
+            # One path is either written or deleted. A nested pair swaps a file and a folder; the deletes go first.
+            if path in drafts:
                 raise ValueError(f"The draft file {path!r} is both written and deleted.")
             if path not in deleted:
                 deleted.append(path)
