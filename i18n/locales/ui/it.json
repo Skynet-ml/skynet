@@ -4628,5 +4628,9 @@
   "blog.meta_description": "Saggi del team di {term.appName} su IA, ottimizzazione e ragionamento per principi primi.",
   "blog.read": "Leggi",
   "blog.by_author": "Di {author}",
-  "blog.back": "Tutti gli articoli"
+  "blog.back": "Tutti gli articoli",
+  "app.sidebar.show": "Mostra barra laterale",
+  "app.sidebar.hide": "Nascondi barra laterale",
+  "app.nav.back": "Indietro",
+  "app.nav.forward": "Avanti"
 }

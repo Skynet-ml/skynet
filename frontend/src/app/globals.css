@@ -332,9 +332,12 @@
   --code-punct: #a0a1a6;
   --code-function: #8fb8de;
 
-  --background: #221d19;
+  /* Codex shape (REA, ChatGPT.app 2026-11): the main panel is the darkest
+     surface, the sidebar sits one step lighter behind a hairline, and cards
+     step clearly up with a lighter 1px border. Kept warm, not neutral gray. */
+  --background: #171411;
   --foreground: #f3ede6;
-  --card: #2c2621;
+  --card: #2b2520;
   --card-foreground: #f3ede6;
   --popover: #312a24;
   --popover-foreground: #f3ede6;
@@ -361,13 +364,13 @@
   --effort-arc: oklch(0.99 0.03 85);
 
   --bg: #1c1814;
-  --surface-1: #2c2621;
+  --surface-1: #2b2520;
   --surface-2: #27211d;
   --surface-3: #382f28;
   /* The setup splash sits on the page's near-black with pure white type, for full contrast. */
   --splash-ground: var(--background);
   --splash-ink: #ffffff;
-  --border-subtle: #3a312a;
+  --border-subtle: #2f2924;
   --text-1: #f3ede6;
   --text-2: #cdbfb1;
   --text-3: #a0917f;
@@ -415,13 +418,13 @@
 
   --gradient-progress: linear-gradient(90deg, #b4521f, #e0935a, #f0b98a);
 
-  --sidebar: #1c1814;
+  --sidebar: #1f1b17;
   --sidebar-foreground: #f3ede6;
   --sidebar-primary: #e0935a;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #382f28;
   --sidebar-accent-foreground: #f3ede6;
-  --sidebar-border: #483d34;
+  --sidebar-border: #3a322b;
   --sidebar-ring: #e0935a;
 
   --skeleton-base: color-mix(in srgb, var(--text-1) 8%, transparent);
@@ -974,7 +977,7 @@ main {
    share routes (which render no sidebar) are unaffected. */
 @media (min-width: 768px) {
   .app-main {
-    margin-inline-start: var(--app-sidebar-width, min(240px, 40vw, 92vw));
+    margin-inline-start: var(--app-sidebar-width, min(291px, 40vw, 92vw));
   }
   /* When the rail is collapsed to its 64px icon strip, let the page box grow
      into the freed space instead of staying capped at 7xl and leaving a dead
@@ -991,10 +994,19 @@ main {
    arms html[data-sidebar-snapping], gliding the rail's own width and <main>'s
    reserved margin together over one matched transition instead of jumping in a
    single frame. Continuous drags clear the flag so the rail tracks the cursor
-   1:1 (no transition). Honour reduced-motion — the snap stays instant there. */
+   1:1 (no transition). Honour reduced-motion — the snap stays instant there.
+   This rule replaces the rail's own transition-colors, so it repeats the
+   color fade. The header's Back/Forward gap reads --app-sidebar-width and
+   glides with the rail. */
 @media (min-width: 768px) and (prefers-reduced-motion: no-preference) {
   html[data-sidebar-snapping] .app-sidebar-rail {
-    transition: width 200ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition:
+      width 200ms cubic-bezier(0.16, 1, 0.3, 1),
+      background-color 200ms cubic-bezier(0.4, 0, 0.2, 1),
+      border-color 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  html[data-sidebar-snapping] .app-shell-nav-gap {
+    transition: margin-inline-start 200ms cubic-bezier(0.16, 1, 0.3, 1);
   }
   html[data-sidebar-snapping] .app-main {
     transition: margin-inline-start 200ms cubic-bezier(0.16, 1, 0.3, 1);

@@ -4628,5 +4628,9 @@
   "blog.meta_description": "Есе команди {term.appName} про ШІ, оптимізацію та мислення від перших принципів.",
   "blog.read": "Читати",
   "blog.by_author": "Автор: {author}",
-  "blog.back": "Усі публікації"
+  "blog.back": "Усі публікації",
+  "app.sidebar.show": "Показати бічну панель",
+  "app.sidebar.hide": "Сховати бічну панель",
+  "app.nav.back": "Назад",
+  "app.nav.forward": "Уперед"
 }

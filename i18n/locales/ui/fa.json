@@ -4628,5 +4628,9 @@
   "blog.meta_description": "جستارهایی از تیم {term.appName} درباره‌ی هوش مصنوعی، بهینه‌سازی و تفکر از اصول اولیه.",
   "blog.read": "بخوانید",
   "blog.by_author": "نوشته‌ی {author}",
-  "blog.back": "همه‌ی نوشته‌ها"
+  "blog.back": "همه‌ی نوشته‌ها",
+  "app.sidebar.show": "نمایش نوار کناری",
+  "app.sidebar.hide": "پنهان کردن نوار کناری",
+  "app.nav.back": "بازگشت",
+  "app.nav.forward": "جلو"
 }

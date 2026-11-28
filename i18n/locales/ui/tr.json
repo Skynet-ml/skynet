@@ -4628,5 +4628,9 @@
   "blog.meta_description": "{term.appName} ekibinden yapay zekâ, optimizasyon ve ilk ilkelerden düşünme üzerine denemeler.",
   "blog.read": "Oku",
   "blog.by_author": "Yazan: {author}",
-  "blog.back": "Tüm yazılar"
+  "blog.back": "Tüm yazılar",
+  "app.sidebar.show": "Kenar çubuğunu göster",
+  "app.sidebar.hide": "Kenar çubuğunu gizle",
+  "app.nav.back": "Geri",
+  "app.nav.forward": "İleri"
 }

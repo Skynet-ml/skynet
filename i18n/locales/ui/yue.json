@@ -4628,5 +4628,9 @@
   "blog.meta_description": "{term.appName} 團隊關於 AI、優化同第一性原理思維嘅文章。",
   "blog.read": "閱讀",
   "blog.by_author": "作者：{author}",
-  "blog.back": "所有文章"
+  "blog.back": "所有文章",
+  "app.sidebar.show": "顯示側邊欄",
+  "app.sidebar.hide": "隱藏側邊欄",
+  "app.nav.back": "返回",
+  "app.nav.forward": "前進"
 }

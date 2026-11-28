@@ -97,6 +97,7 @@ import {
   childrenByParent,
   type FolderDialogState,
 } from "./SidebarFolders";
+import { SIDEBAR_COLLAPSED_STORAGE_KEY, useSidebarCollapsed } from "../hooks/use-sidebar-collapsed";
 import { DEFAULT_RUN_VIEW, applyRunView, parseRunView, type RunView } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
@@ -116,7 +117,7 @@ const PAGE_SIZE = 20;
 
 const SIDEBAR_MIN_WIDTH = 210;
 const SIDEBAR_MAX_WIDTH = 420;
-const SIDEBAR_DEFAULT_WIDTH = 240;
+const SIDEBAR_DEFAULT_WIDTH = 291;
 // Icon-rail width when collapsed: just enough to center a nav icon (and the
 // account avatar / storage icon) with comfortable padding.
 const SIDEBAR_COLLAPSED_WIDTH = 64;
@@ -129,7 +130,6 @@ const SIDEBAR_COLLAPSED_WIDTH = 64;
 const SIDEBAR_COLLAPSE_AT = 150;
 const SIDEBAR_EXPAND_AT = 196;
 const SIDEBAR_WIDTH_STORAGE_KEY = "app.sidebar.width";
-const SIDEBAR_COLLAPSED_STORAGE_KEY = "app.sidebar.collapsed";
 const SIDEBAR_VIEW_STORAGE_KEY = "app.sidebar.view";
 const FOLDERS_EXPANDED_STORAGE_KEY = "app.sidebar.folders.expanded";
 const DESKTOP_MQ = "(min-width: 768px)";
@@ -169,14 +169,14 @@ export function Sidebar() {
   const [view, setView] = React.useState<RunView>(DEFAULT_RUN_VIEW);
   const [folderDialog, setFolderDialog] = React.useState<FolderDialogState | null>(null);
   const [width, setWidth] = React.useState(SIDEBAR_DEFAULT_WIDTH);
-  const [collapsed, setCollapsed] = React.useState(false);
   // Arms the collapse/expand width glide for the discrete snap only; continuous
   // resize drags leave it false so the rail tracks the cursor 1:1.
   const [snapping, setSnapping] = React.useState(false);
   const [isDesktop, setIsDesktop] = React.useState(true);
+  const armSnap = React.useCallback(() => setSnapping(true), []);
   // Collapse is a desktop-only affordance: the mobile drawer always shows the
-  // full rail, so gate the icon-rail on the breakpoint.
-  const isCollapsed = collapsed && isDesktop;
+  // full rail, so the hook gates the icon-rail on the breakpoint.
+  const { collapsed, isCollapsed, setCollapsed, setCollapsedPersist } = useSidebarCollapsed(isDesktop, armSnap);
   const effectiveWidth = isCollapsed ? SIDEBAR_COLLAPSED_WIDTH : width;
   // Collapsed tooltips read toward the content area: right in LTR, left in RTL.
   const tooltipSide = isRtl ? "left" : "right";
@@ -214,18 +214,6 @@ export function Sidebar() {
     } catch {
       /* noop */
     }
-  }, []);
-
-  const setCollapsedPersist = React.useCallback((value: boolean) => {
-    setCollapsed((prev) => {
-      if (prev === value) return prev;
-      try {
-        window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, value ? "1" : "0");
-      } catch {
-        /* noop */
-      }
-      return value;
-    });
   }, []);
 
   // Drag-resize doubles as the collapse control. The rail is pinned to the
@@ -646,7 +634,10 @@ export function Sidebar() {
 
   return (
     <aside
-      className="app-sidebar-rail relative flex h-full shrink-0 flex-col border-e border-sidebar-border/60 bg-sidebar/80 backdrop-blur-xl overflow-hidden"
+      className={cn(
+        "app-sidebar-rail relative flex h-full shrink-0 flex-col overflow-hidden border-e transition-colors duration-200",
+        isCollapsed ? "border-sidebar-border/40 bg-background" : "border-sidebar-border/60 bg-sidebar",
+      )}
       style={{ width: isDesktop ? `${effectiveWidth}px` : `min(${width}px, 88vw)` }}
       onTransitionEnd={(e) => {
         // Disarm once the collapse/expand width glide lands so the next
