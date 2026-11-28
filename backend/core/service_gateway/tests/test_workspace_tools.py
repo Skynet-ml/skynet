@@ -1764,6 +1764,7 @@ def test_open_repo_refuses_a_folder_the_user_did_not_pick_and_reads_no_file(
     state = _local_folder(monkeypatch, root)
     (root / "sub").mkdir()
     (tmp_path / "outside" / "inner").mkdir(parents=True)
+    (tmp_path / "outside" / "inner" / "secret.txt").write_text("outside\n", encoding="utf-8")
     (root / "link").symlink_to(tmp_path / "outside", target_is_directory=True)
     digests: list[str] = []
     monkeypatch.setattr(folder_tree, "file_digest", lambda base, rel: digests.append(rel) or b"")
@@ -2059,7 +2060,7 @@ async def test_the_shell_tools_refuse_a_folder_the_user_did_not_pick(
 ) -> None:
     """A folder the user never picked gives every shell tool a short reason, and no copy opens (SKY-1013)."""
     state, _ = _shell_run(monkeypatch, tmp_path)
-    (tmp_path / "state" / PICKED_FOLDERS_FILE).write_text(json.dumps([str(tmp_path / "other")]), encoding="utf-8")
+    _pick(monkeypatch, tmp_path / "state", tmp_path / "other")
     turn = _TurnAuthoringFlag()
     tools = _shell_tools(state, turn)
 
