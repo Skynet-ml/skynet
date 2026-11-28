@@ -52,7 +52,7 @@ registerHooks({
   },
 });
 
-const { useGeneralistAgent } = await import("./use-generalist-agent.ts");
+const { LIVE_OUTPUT_MAX_CHARS, tailOutput, useGeneralistAgent } = await import("./use-generalist-agent.ts");
 const { createRoot } = await import("react-dom/client");
 
 interface Call {
@@ -114,6 +114,40 @@ test("an error after done leaves the next turn untouched", async () => {
   } finally {
     await unmount();
   }
+});
+
+test("live command output grows on the running call, and tool_end replaces it with the result (SKY-1006)", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  try {
+    await act(() => agent().send("run make"));
+    const h = calls[0]!.handlers;
+    await act(() => h.onToolStart!({ id: "t1", tool: "exec_command", arguments: { cmd: "make" } }));
+    await act(() => h.onToolOutput!({ id: "t1", chunk: "step 1\n", skipped: false }));
+    await act(() => h.onToolOutput!({ id: "t1", chunk: "step 2\n", skipped: false }));
+    await act(() => h.onToolOutput!({ id: "other", chunk: "lost", skipped: false }));
+    const call = () => agent().messages[agent().messages.length - 1]?.toolCalls?.[0];
+    assert.equal(call()?.payload?.liveOutput, "step 1\nstep 2\n");
+
+    await act(() => h.onToolOutput!({ id: "t1", chunk: "tail", skipped: true }));
+    assert.equal(call()?.payload?.liveOutput, "step 1\nstep 2\n\n…\ntail");
+
+    await act(() => h.onToolEnd!({ id: "t1", tool: "exec_command", status: "ok", result: "Output:\ndone" }));
+    assert.equal(call()?.status, "done");
+    assert.equal(call()?.payload?.result, "Output:\ndone");
+    assert.equal("liveOutput" in (call()?.payload ?? {}), false);
+
+    await act(() => h.onToolOutput!({ id: "t1", chunk: "late", skipped: false }));
+    assert.equal("liveOutput" in (call()?.payload ?? {}), false, "no live text after tool_end");
+  } finally {
+    await unmount();
+  }
+});
+
+test("the live output keeps only its newest LIVE_OUTPUT_MAX_CHARS (SKY-1006)", () => {
+  const live = tailOutput("a".repeat(LIVE_OUTPUT_MAX_CHARS), "bcd", false);
+  assert.equal(live.length, LIVE_OUTPUT_MAX_CHARS);
+  assert.ok(live.endsWith("abcd"));
+  assert.equal(tailOutput("", "x", true), "\n…\nx");
 });
 
 test("a new chat keeps its session key when it gets its id, and a chat switch changes it (SKY-783)", async () => {

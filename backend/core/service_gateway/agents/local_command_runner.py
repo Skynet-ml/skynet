@@ -29,8 +29,11 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from .tool_output import tool_stream
 
 if TYPE_CHECKING:
     from .local_egress_proxy import LocalEgressProxy
@@ -135,6 +138,7 @@ class CommandSession:
         self._done = threading.Event()
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
+        self._listener: Callable[[str], None] | None = None
 
     @property
     def done(self) -> bool:
@@ -148,6 +152,9 @@ class CommandSession:
             text: The output chunk.
         """
         with self._changed:
+            # Under the lock, so a listener sees the chunks in order and none after it detaches.
+            if self._listener is not None and text:
+                self._listener(text)
             room = self._keep - len(self._head)
             if room > 0:
                 self._head += text[:room]
@@ -158,6 +165,21 @@ class CommandSession:
                     self._dropped += len(self._tail) - self._keep
                     self._tail = self._tail[-self._keep :]
             self._changed.notify_all()
+
+    def listen(self, listener: Callable[[str], None] | None) -> None:
+        """Send new output to a listener too, or stop with None.
+
+        A new listener first gets the output that no read took yet, as
+        ``write_stdin`` reads it.
+
+        Args:
+            listener: Gets each chunk under the session lock, so it must not
+                block or take the session's lock; None detaches it.
+        """
+        with self._changed:
+            self._listener = listener
+            if listener is not None and (self._head or self._tail):
+                listener(self._head + (f"\n…{self._dropped} chars cut…\n" if self._dropped else "") + self._tail)
 
     def finish(self, exit_code: int) -> None:
         """Mark the command as ended.
@@ -233,7 +255,9 @@ class SessionTable:
     def collect(self, session: CommandSession, *, started: float, yield_ms: int, max_output_tokens: int | None) -> str:
         """Read a session's new output and write the result text.
 
-        An ended session leaves the table once its last output is read.
+        An ended session leaves the table once its last output is read. While
+        a chat tool call waits here, its new output also streams to the chat
+        (:mod:`.tool_output`).
 
         Args:
             session: The session to read.
@@ -244,7 +268,15 @@ class SessionTable:
         Returns:
             The result text for the model.
         """
-        output, exit_code = session.read(yield_ms)
+        stream = tool_stream.get()
+        if stream is not None:
+            session.listen(stream.write)
+        try:
+            output, exit_code = session.read(yield_ms)
+        finally:
+            if stream is not None:
+                session.listen(None)
+                stream.flush()
         if exit_code is not None:
             with self._lock:
                 self._sessions.pop(session.id, None)

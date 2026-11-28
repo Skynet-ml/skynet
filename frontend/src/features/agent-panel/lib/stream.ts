@@ -76,6 +76,8 @@ export interface GeneralistAgentHandlers {
   onToolPendingClear?: () => void;
   onToolStart?: (ev: ToolStartPayload) => void;
   onToolEnd?: (ev: ToolEndPayload) => void;
+  /** New output of a running shell command, for display only; `skipped` marks lost text before `chunk`. */
+  onToolOutput?: (ev: { id: string; chunk: string; skipped: boolean }) => void;
   onPendingApproval?: (ev: PendingApprovalPayload) => void;
   onApprovalResolved?: (ev: ApprovalResolvedPayload) => void;
   onMessagePatch?: (chunk: string) => void;

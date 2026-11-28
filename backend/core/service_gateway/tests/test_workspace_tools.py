@@ -2437,6 +2437,36 @@ async def test_the_stop_button_ends_a_folder_command_through_the_wrapped_tool(
     assert not running()
 
 
+@on_mac
+@pytest.mark.asyncio
+async def test_folder_command_output_streams_while_it_runs_and_the_result_stays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The folder shell sends each output line to the chat while the command runs, before its tool_end (SKY-1006)."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    events: list[tuple[float, dict[str, Any]]] = []
+    tool = _wrap_tool_with_approval(
+        _shell_tools(state, _TurnAuthoringFlag())["exec_command"],
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda event: events.append((time.monotonic(), event)),
+        outer_loop=asyncio.get_running_loop(),
+    )
+
+    result = await asyncio.to_thread(tool.func, cmd="echo one; sleep 0.6; echo two >&2; sleep 0.2", yield_time_ms=10000)
+
+    names = [event["event"] for _, event in events]
+    assert names[0] == "tool_start"
+    assert names[-1] == "tool_end"
+    call_id = events[0][1]["data"]["id"]
+    outputs = [(at, event["data"]) for at, event in events if event["event"] == "tool_output"]
+    assert {data["id"] for _, data in outputs} == {call_id}
+    assert "".join(data["chunk"] for _, data in outputs) == "one\ntwo\n"
+    assert events[-1][0] - outputs[0][0] > 0.5
+    assert result["output"].endswith("Process exited with code 0\nOutput:\none\ntwo\n")
+    assert events[-1][1]["data"]["result"]["output"] == result["output"]
+
+
 @pytest.mark.asyncio
 async def test_a_truncated_copy_listing_keeps_the_earlier_deletes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None

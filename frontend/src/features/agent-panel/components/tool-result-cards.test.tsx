@@ -31,6 +31,7 @@ const {
   WebPagesCard,
   WorkspaceWriteCard,
 } = await import("./ToolResultCards");
+const { ToolCallRow } = await import("./ToolCallRow");
 const { TOOL_ICONS, getToolMeta } = await import("../lib/tool-meta");
 const { formatTemplate } = await import("@/shared/lib/i18n");
 const { ascentTomlDiagnosticLines } = await import("@/shared/lib/api");
@@ -670,5 +671,27 @@ void describe("tool result cards", () => {
     assert.equal(html.match(/<code /g)?.length, 24);
     assert.match(html, />\+2 more</);
     assert.doesNotMatch(html, />mod24</);
+  });
+  void it("a running command shows its live output, then only the final result (SKY-1006)", () => {
+    const running: AgentToolCall = {
+      ...call("exec_command", undefined, { cmd: "make" }, "running"),
+      payload: { arguments: { cmd: "make" }, liveOutput: "building step 1\nbuilding step 2" },
+    };
+    const live = renderOpen(<ToolCallRow call={running} />);
+    assert.match(live, /data-testid="tool-live-output"/);
+    assert.match(live, /building step 1\nbuilding step 2/);
+
+    const done = renderOpen(
+      <ToolCallRow call={call("exec_command", "Output:\nall done", { cmd: "make" })} />,
+    );
+    assert.doesNotMatch(done, /tool-live-output/);
+    assert.match(done, /Output:\nall done/);
+
+    // A stale live text on a finished call never shows.
+    const stale: AgentToolCall = {
+      ...call("exec_command", "final", {}),
+      payload: { result: "final", liveOutput: "old" },
+    };
+    assert.doesNotMatch(renderOpen(<ToolCallRow call={stale} />), /old/);
   });
 });

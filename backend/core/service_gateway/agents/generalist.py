@@ -90,6 +90,7 @@ from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
 from .secret_request import SECRET_REQUEST_TOOL, secret_request_problem, secret_request_result, secret_request_tool
 from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
+from .tool_output import ToolOutputStream, tool_stream
 from .web_tools import build_web_tools
 from .workspace_tools import (
     EDIT_FILE_TOOL,
@@ -903,7 +904,13 @@ class _ApprovalGatedTool:
                         }
                     )
                     return declined
-            result = await self._original(*args, **kwargs)
+            stream = ToolOutputStream(call_id, self._emit)
+            token = tool_stream.set(stream)
+            try:
+                result = await self._original(*args, **kwargs)
+            finally:
+                tool_stream.reset(token)
+                stream.close()
             shown = self._keep_existing_job_name(_serialize_tool_result(result))
             if self._tool_name == "update_wizard_state":
                 if isinstance(shown, dict):
@@ -4222,6 +4229,8 @@ async def run_generalist_agent(
     * ``tool_pending_clear`` — ``{}``, a loop step's model call started; drop
       every ``tool_pending`` row that has no ``tool_start`` yet
     * ``tool_start`` / ``tool_end`` — wrap each MCP tool call
+    * ``tool_output`` — ``{id, chunk, skipped?}``, a shell command's new
+      output while its call runs; display only, never saved (SKY-1006)
     * ``status_patch`` — human-readable progress around each tool call
     * ``message_patch`` — per-token assistant reply
     * ``message_reset`` — ``{}``, take back the reply streamed so far (its

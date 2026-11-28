@@ -58,6 +58,7 @@ from core.service_gateway.agents.generalist import (
     validate_wizard_patch_order,
     validate_wizard_screen,
 )
+from core.service_gateway.agents.tool_output import TOOL_OUTPUT_EVENT, ToolOutputStream, tool_stream
 from core.service_gateway.agents.workspace_tools import FOLDER_SHELL_TOOLS
 from core.storage.models import AgentConversationModel, AgentFeedbackReportModel, AgentMessageModel, Base
 
@@ -263,6 +264,89 @@ async def test_wrap_reports_previous_values_of_a_wizard_write() -> None:
         "job_description": None,
     }
     assert end["data"]["result"]["wizard_state"] == {"run_code": "new"}
+
+
+@pytest.mark.asyncio
+async def test_wrap_streams_tool_output_between_start_and_end_and_never_after() -> None:
+    """Live output carries the call's id, ends before tool_end, and the model's result is unchanged (SKY-1006)."""
+    events: list[dict] = []
+    kept: list[ToolOutputStream] = []
+
+    async def shell(cmd: str) -> str:
+        """Stream two chunks, as a running command does, and keep the stream for a late write.
+
+        Args:
+            cmd: Not used.
+
+        Returns:
+            The model's result.
+        """
+        stream = tool_stream.get()
+        assert stream is not None
+        kept.append(stream)
+        stream.write("one\n")
+        stream.flush()
+        stream.write("two\n")
+        return "Process exited with code 0\nOutput:\none\ntwo\n"
+
+    tool = _wrap_tool_with_approval(
+        dspy.Tool(shell, name="exec_command"),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        outer_loop=asyncio.get_running_loop(),
+    )
+    result = await tool.func._async_body(cmd="x")
+    kept[0].write("late\n")
+    kept[0].flush()
+    await asyncio.sleep(0.2)
+
+    assert result == "Process exited with code 0\nOutput:\none\ntwo\n"
+    assert tool_stream.get() is None
+    call_id = events[0]["data"]["id"]
+    assert [(e["event"], e["data"].get("chunk")) for e in events] == [
+        ("tool_start", None),
+        (TOOL_OUTPUT_EVENT, "one\n"),
+        (TOOL_OUTPUT_EVENT, "two\n"),
+        ("tool_end", None),
+    ]
+    assert {e["data"]["id"] for e in events} == {call_id}
+    assert events[-1]["data"]["result"] == result
+
+
+@pytest.mark.asyncio
+async def test_wrap_closes_the_tool_stream_when_the_tool_fails() -> None:
+    """A tool that raises still sends its queued output before its error tool_end."""
+    events: list[dict] = []
+
+    async def broken() -> str:
+        """Write output, then fail.
+
+        Returns:
+            Never returns.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        stream = tool_stream.get()
+        assert stream is not None
+        stream.write("partial\n")
+        raise RuntimeError("boom")
+
+    tool = _wrap_tool_with_approval(
+        dspy.Tool(broken, name="exec_command"),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        outer_loop=asyncio.get_running_loop(),
+    )
+    with pytest.raises(RuntimeError):
+        await tool.func._async_body()
+
+    assert [e["event"] for e in events] == ["tool_start", TOOL_OUTPUT_EVENT, "tool_end"]
+    assert events[1]["data"]["chunk"] == "partial\n"
+    assert events[-1]["data"]["status"] == "error"
+    assert tool_stream.get() is None
 
 
 def test_cloned_setup_snapshot_holds_the_whole_setup() -> None:

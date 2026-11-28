@@ -288,6 +288,21 @@ function messageMedia(media: AgentMessage["media"], content: string): AgentMessa
   return next.length ? next : undefined;
 }
 
+/** The most live command output one tool row keeps; older text leaves from the start. */
+export const LIVE_OUTPUT_MAX_CHARS = 16_000;
+
+/** Add a live output chunk, mark text the server skipped, and keep only the newest text. */
+export function tailOutput(live: string, chunk: string, skipped: boolean): string {
+  const next = live + (skipped ? "\n…\n" : "") + chunk;
+  return next.length > LIVE_OUTPUT_MAX_CHARS ? next.slice(-LIVE_OUTPUT_MAX_CHARS) : next;
+}
+
+/** Drop a tool call's live output; the saved chat and the final row keep only the result. */
+function withoutLiveOutput(payload: Record<string, unknown> | undefined): Record<string, unknown> {
+  const { liveOutput: _live, ...rest } = payload ?? {};
+  return rest;
+}
+
 function blankSession(key: string): SessionView {
   return {
     key,
@@ -567,11 +582,34 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                   ...t,
                   status: nextStatus,
                   endedAt: Date.now(),
-                  payload: { ...(t.payload ?? {}), result },
+                  // The final result replaces the live output, as in the Codex app.
+                  payload: { ...withoutLiveOutput(t.payload), result },
                 }
               : t,
           ),
         };
+        return next;
+      });
+    },
+    [patchMessages],
+  );
+
+  // One SSE batch is about 100 ms of output, so each chunk is one state update.
+  const appendToolOutput = React.useCallback(
+    (key: string, id: string, chunk: string, skipped: boolean) => {
+      patchMessages(key, (prev) => {
+        const last = prev[prev.length - 1];
+        if (!last || last.role !== "assistant" || !last.toolCalls?.length) return prev;
+        let changed = false;
+        const toolCalls = last.toolCalls.map((t) => {
+          if (t.id !== id || t.status !== "running") return t;
+          changed = true;
+          const live = typeof t.payload?.liveOutput === "string" ? t.payload.liveOutput : "";
+          return { ...t, payload: { ...(t.payload ?? {}), liveOutput: tailOutput(live, chunk, skipped) } };
+        });
+        if (!changed) return prev;
+        const next = prev.slice();
+        next[next.length - 1] = { ...last, toolCalls };
         return next;
       });
     },
@@ -887,6 +925,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               }
               callbacksRef.current.onToolEnd?.(ev, eventContext(key));
             },
+            onToolOutput: (ev) => {
+              if (ended()) return;
+              appendToolOutput(key, ev.id, ev.chunk, ev.skipped);
+            },
             onPendingApproval: (ev) => {
               if (ended()) return;
               if (ev.auto_review) markAutoReviewDenied(key, ev.id, true);
@@ -1058,6 +1100,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     },
     [
       appendReply,
+      appendToolOutput,
       eventContext,
       finishToolCall,
       getRuntime,
