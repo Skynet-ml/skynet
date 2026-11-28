@@ -778,8 +778,9 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         result = job_data.get("result")
         patch = result.get("best_candidate") if isinstance(result, dict) else None
         drafts = _run_drafts(job_data)
+        deleted = _run_deleted(job_data)
         # A best version equal to the start still differs from the folder by the setup drafts.
-        if not isinstance(patch, str) or not (patch or drafts):
+        if not isinstance(patch, str) or not (patch or drafts or deleted):
             raise DomainError("optimization.no_result_pending", status=409)
         environment = repo.get("environment") if isinstance(repo.get("environment"), dict) else {}
         editable = repo.get("editable_paths") or ()
@@ -810,6 +811,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
                             readonly_paths=_run_readonly_paths(job_data),
                             editable_paths=editable,
                             blocked_paths=[*readonly, *protected, *hidden],
+                            deleted=deleted,
                         )
                     )
             except DomainError:

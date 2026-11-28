@@ -27,7 +27,7 @@ import tarfile
 import tempfile
 import threading
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
@@ -377,6 +377,7 @@ def apply_version(
     readonly_paths: Iterable[str] = (),
     editable_paths: Iterable[str],
     blocked_paths: Iterable[str],
+    deleted: Collection[str] = (),
 ) -> list[str]:
     """Write one version of a local run into its folder, and keep what Undo needs.
 
@@ -397,6 +398,7 @@ def apply_version(
         editable_paths: The run's editable paths; every file the patch changes must lie below one.
         blocked_paths: Read-only, protected and scoring-side paths; no file
             the patch changes may lie below one, in any case or Unicode form.
+        deleted: The run's ``draft_deleted``, removed with the drafts.
 
     Returns:
         The changed files, sorted.
@@ -419,9 +421,9 @@ def apply_version(
             original.mkdir()
             with _open_kept(commit) as packed:
                 packed.extractall(original, filter="data")
-            drafted = _build_version(commit, patch, checkout, drafts, readonly_paths)
+            drafted = _build_version(commit, patch, checkout, drafts, readonly_paths, deleted)
             changes = _changes(_scan(original), _scan(checkout))
-            _check_rules(changes, drafted, editable_paths, blocked_paths)
+            _check_rules(changes, drafted, editable_paths, blocked_paths, deleted)
             folder = _open_root(root)
             try:
                 conflicts = []
@@ -690,7 +692,11 @@ def _changes(original: dict[str, _Blob], version: dict[str, _Blob]) -> list[_Cha
 
 
 def _check_rules(
-    changes: list[_Change], drafted: Mapping[str, _Blob], editable_paths: Iterable[str], blocked_paths: Iterable[str]
+    changes: list[_Change],
+    drafted: Mapping[str, _Blob],
+    editable_paths: Iterable[str],
+    blocked_paths: Iterable[str],
+    deleted: Collection[str] = (),
 ) -> None:
     """Refuse a version whose real changed files break the run's editing rules.
 
@@ -698,13 +704,15 @@ def _check_rules(
     in the patch, so a name in another case or Unicode form cannot reach a
     blocked file on the disk. A file that ends as the setup draft wrote it
     is the run's own setup, which a pull request also carries, so only the
-    read-only paths, checked when the draft is written, apply to it.
+    read-only paths, checked when the draft is written, apply to it. A file
+    that the setup deleted and the patch did not add back is the same.
 
     Args:
         changes: The version's changes.
         drafted: The tree's files after the drafts and before the patch.
         editable_paths: Paths the run may change.
         blocked_paths: Paths the run may never change.
+        deleted: The run's ``draft_deleted``.
 
     Raises:
         LocalFolderError: When a changed file is blocked or outside the editable paths.
@@ -713,6 +721,8 @@ def _check_rules(
     blocked = [_FOLD_BLOCKED(path.strip("/")) for path in blocked_paths if path.strip("/")]
     for change in changes:
         if change.after is not None and drafted.get(change.path) == change.after:
+            continue
+        if change.after is None and change.path in deleted:
             continue
         folded = _FOLD_BLOCKED(change.path)
         if inside(folded, blocked) or any(root.startswith(folded + "/") for root in blocked):

@@ -708,6 +708,7 @@ def _local_apply_run(
     patch: str = _MAIN_PATCH,
     protected: list[str] | None = None,
     drafts: dict[str, str] | None = None,
+    deleted: list[str] | None = None,
 ) -> tuple[_LoggingJobStore, Path]:
     """Seed a stopped local folder run whose best version changes one file.
 
@@ -720,6 +721,7 @@ def _local_apply_run(
         patch: The best version.
         protected: The run's protected paths.
         drafts: The run's setup drafts; one draft file when not given.
+        deleted: The files the run's setup deleted; none when not given.
 
     Returns:
         The store and the run's folder.
@@ -748,6 +750,7 @@ def _local_apply_run(
                     "commit": commit,
                     "editable_paths": editable or ["src"],
                     "draft_files": {"src/cfg.toml": "[run]\n"} if drafts is None else drafts,
+                    "draft_deleted": deleted or [],
                     "environment": {"readonly_paths": [], "protected_paths": protected or []},
                 },
             },
@@ -758,6 +761,43 @@ def _local_apply_run(
         },
     )
     return jobs, folder
+
+
+@pytest.mark.parametrize("patch_text", [_MAIN_PATCH, ""])
+def test_apply_deletes_the_setup_deleted_files_and_undo_brings_them_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patch_text: str
+) -> None:
+    """Apply removes the files the setup deleted, also outside the editable paths, and Undo restores the folder (SKY-997).
+
+    A run whose only setup change is a delete still has a version to apply.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+        patch_text: The best version; empty for the start.
+    """
+    jobs, folder = _local_apply_run(
+        monkeypatch,
+        tmp_path,
+        files={"src/gone.py": "g\n", "docs/old.md": "o\n"},
+        patch=patch_text,
+        drafts={},
+        deleted=["src/gone.py", "docs/old.md"],
+    )
+    original = _tree_hash(folder)
+    client = _client(jobs)
+
+    applied = client.post("/optimizations/local-run/repository/apply")
+
+    assert applied.status_code == 200, applied.text
+    assert not (folder / "src" / "gone.py").exists()
+    assert not (folder / "docs" / "old.md").exists()
+    assert (folder / "src" / "main.py").read_text() == ("x = 2\n" if patch_text else "x = 1\n")
+
+    undone = client.post("/optimizations/local-run/repository/undo")
+
+    assert undone.status_code == 200, undone.text
+    assert _tree_hash(folder) == original
 
 
 def test_apply_and_undo_change_the_folder_and_keep_the_first_apply_time(
