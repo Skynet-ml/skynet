@@ -6,6 +6,7 @@ import errno
 import hashlib
 import io
 import os
+import subprocess
 import tarfile
 import threading
 import time
@@ -18,7 +19,7 @@ import pytest
 
 from core.config import settings
 from core.local import folder_tree
-from core.service_gateway.optimization.blackbox.repo_tree import case_insensitive
+from core.service_gateway.optimization.blackbox.repo_tree import NOT_CLEAN, apply_patch, case_insensitive
 from core.worker import local_folder
 from core.worker.local_folder import LocalFolderError
 
@@ -1038,47 +1039,596 @@ def test_apply_refuses_a_version_that_turns_a_file_into_a_folder_in_another_case
     )
 
 
-def test_apply_and_undo_a_setup_that_renames_a_file_by_case(tmp_path: Path) -> None:
-    if not case_insensitive(tmp_path):
-        pytest.skip("Only a disk that ignores case opens Foo.py for foo.py.")
-    root = _write(tmp_path / "app", {"Foo.py": "old\n", "keep.txt": "k\n"})
+class _FoldedOs:
+    """Stand in for ``os`` in ``local_folder``, finding a name under another case as macOS does.
+
+    It lets the case tests run on a case-sensitive disk, as on Linux CI. Like
+    APFS, a rename onto another form of an existing name keeps the old form.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        """Use the real ``os`` for everything else.
+
+        Args:
+            name: The attribute.
+
+        Returns:
+            The real attribute.
+        """
+        return getattr(os, name)
+
+    @staticmethod
+    def _form(name: str, dir_fd: int | None) -> str:
+        """Find the form under which a folded disk would open a name.
+
+        Args:
+            name: The name.
+            dir_fd: The open folder it is in, or ``None`` for a full path.
+
+        Returns:
+            The listed form of the name, or the name when none is listed.
+        """
+        if dir_fd is None or "/" in name:
+            return name
+        listed = os.listdir(dir_fd)  # noqa: PTH208
+        if name in listed:
+            return name
+        return next((entry for entry in listed if entry.casefold() == name.casefold()), name)
+
+    def open(self, path: str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        """Open a name under any case form.
+
+        Args:
+            path: The name.
+            flags: The open flags.
+            mode: The new file's bits.
+            dir_fd: The open folder.
+
+        Returns:
+            The open descriptor.
+
+        Raises:
+            FileExistsError: For an exclusive create when another form exists.
+        """
+        form = self._form(path, dir_fd)
+        if form != path and flags & os.O_CREAT and flags & os.O_EXCL:
+            raise FileExistsError(errno.EEXIST, "File exists", path)
+        return os.open(form, flags, mode, dir_fd=dir_fd)
+
+    def mkdir(self, path: str, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        """Make a folder, refusing one when another form exists.
+
+        Args:
+            path: The name.
+            mode: The folder's bits.
+            dir_fd: The open folder.
+
+        Raises:
+            FileExistsError: When another form exists.
+        """
+        if self._form(path, dir_fd) != path:
+            raise FileExistsError(errno.EEXIST, "File exists", path)
+        os.mkdir(path, mode, dir_fd=dir_fd)
+
+    def unlink(self, path: str, *, dir_fd: int | None = None) -> None:
+        """Delete a file under any case form.
+
+        Args:
+            path: The name.
+            dir_fd: The open folder.
+        """
+        os.unlink(self._form(path, dir_fd), dir_fd=dir_fd)
+
+    def rmdir(self, path: str, *, dir_fd: int | None = None) -> None:
+        """Delete an empty folder under any case form.
+
+        Args:
+            path: The name.
+            dir_fd: The open folder.
+        """
+        os.rmdir(self._form(path, dir_fd), dir_fd=dir_fd)
+
+    def replace(self, src: str, dst: str, *, src_dir_fd: int | None = None, dst_dir_fd: int | None = None) -> None:
+        """Rename onto a name, keeping the form of an existing one.
+
+        Args:
+            src: The name to move.
+            dst: The name to replace.
+            src_dir_fd: The source's open folder.
+            dst_dir_fd: The target's open folder.
+        """
+        os.replace(src, self._form(dst, dst_dir_fd), src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+
+@pytest.fixture
+def folded_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the user's folder and the version build act as on a disk that ignores case.
+
+    On such a disk the test uses it as it is. Else ``local_folder`` gets a
+    folding ``os``, and git apply refuses every patch, as it refuses a
+    case-only rename on macOS, so the build takes its index path.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Restores ``local_folder`` after the test.
+    """
+    if case_insensitive(tmp_path):
+        return
+
+    def refuse(checkout: Path, patch: str) -> None:
+        """Refuse a patch as git apply does for a case-only rename on macOS.
+
+        Args:
+            checkout: The unpacked tree.
+            patch: The version's patch.
+
+        Raises:
+            RuntimeError: For every patch that is not empty.
+        """
+        if patch.strip():
+            raise RuntimeError(f"{NOT_CLEAN}: error: already exists in working directory")
+
+    monkeypatch.setattr(local_folder, "os", _FoldedOs())
+    monkeypatch.setattr(local_folder, "apply_patch", refuse)
+    monkeypatch.setattr(local_folder, "case_insensitive", lambda directory: True)
+
+
+def _pinned(tmp_path: Path, files: dict[str, str]) -> tuple[Path, str]:
+    """Write a folder and pack it as a run's source.
+
+    Args:
+        tmp_path: Scratch folder.
+        files: Root-relative path to text.
+
+    Returns:
+        The folder and its commit.
+    """
+    root = _write(tmp_path / "app", files)
     workdir = tmp_path / "w"
     workdir.mkdir()
-    commit = local_folder.snapshot_folder(root, workdir).commit
+    return root, local_folder.snapshot_folder(root, workdir).commit
+
+
+def _listed(root: Path) -> list[str]:
+    """List every path below a folder by the names the disk stores.
+
+    Args:
+        root: The folder.
+
+    Returns:
+        The sorted ``/``-joined paths, folders included.
+    """
+    return sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
+
+
+def test_apply_and_undo_a_setup_that_renames_a_file_by_case(tmp_path: Path, folded_disk: None) -> None:
+    """A draft foo.py with Foo.py in ``draft_deleted`` renames the file by case, and Undo renames it back."""
+    root, commit = _pinned(tmp_path, {"Foo.py": "old\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
     assert _apply(root, commit, "", "case", drafts={"foo.py": "new\n"}, deleted=["Foo.py"]) == ["Foo.py", "foo.py"]
-    assert sorted(path.name for path in root.iterdir()) == ["foo.py", "keep.txt"]
+    assert _listed(root) == ["foo.py", "keep.txt"]
     assert (root / "foo.py").read_text() == "new\n"
     local_folder.check_applied(root, "case")
     local_folder.undo_version(root, "case")
-    assert sorted(path.name for path in root.iterdir()) == ["Foo.py", "keep.txt"]
-    assert (root / "Foo.py").read_text() == "old\n"
+    assert _listed(root) == ["Foo.py", "keep.txt"]
+    assert _fingerprint(root) == before
 
 
-def test_apply_refuses_a_draft_that_another_case_of_a_new_folder_file_would_take(tmp_path: Path) -> None:
-    if not case_insensitive(tmp_path):
-        pytest.skip("Only a disk that ignores case opens Foo.py for foo.py.")
-    root = _write(tmp_path / "app", {"keep.txt": "k\n"})
-    workdir = tmp_path / "w"
+_CASE_RENAME_PATCHES = {
+    "rename": "diff --git a/a.txt b/A.txt\nsimilarity index 100%\nrename from a.txt\nrename to A.txt\n",
+    "delete-and-add": (
+        "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+        "diff --git a/A.txt b/A.txt\nnew file mode 100644\n--- /dev/null\n+++ b/A.txt\n@@ -0,0 +1 @@\n+a\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("patch", _CASE_RENAME_PATCHES.values(), ids=_CASE_RENAME_PATCHES.keys())
+def test_apply_and_undo_a_patch_that_renames_a_file_by_case(tmp_path: Path, folded_disk: None, patch: str) -> None:
+    """A patch that renames a.txt to A.txt builds, applies and undoes, on a disk that ignores case too."""
+    root, commit = _pinned(tmp_path, {"a.txt": "a\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
+    assert _apply(root, commit, patch, "case") == ["A.txt", "a.txt"]
+    assert _listed(root) == ["A.txt", "keep.txt"]
+    assert (root / "A.txt").read_text() == "a\n"
+    local_folder.check_applied(root, "case")
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["a.txt", "keep.txt"]
+    assert _fingerprint(root) == before
+
+
+_FOLDER_CASE_PATCH = (
+    "diff --git a/dir/x b/dir/x\ndeleted file mode 100644\n--- a/dir/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    "diff --git a/Dir/x b/Dir/x\nnew file mode 100644\n--- /dev/null\n+++ b/Dir/x\n@@ -0,0 +1 @@\n+y\n"
+)
+
+
+@pytest.mark.parametrize("by", ["patch", "draft"])
+def test_apply_and_undo_a_version_that_renames_a_folder_by_case(tmp_path: Path, folded_disk: None, by: str) -> None:
+    """A version that deletes dir/x and adds Dir/x renames the folder, and Undo gives back dir/ and its bits."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    (root / "dir").chmod(0o750)
+    before = _fingerprint(root)
+    if by == "patch":
+        changed = _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    else:
+        changed = _apply(root, commit, "", "case", drafts={"Dir/x": "y\n"}, deleted=["dir/x"])
+    assert changed == ["Dir/x", "dir/x"]
+    assert _listed(root) == ["Dir", "Dir/x", "keep.txt"]
+    assert (root / "Dir/x").read_text() == "y\n"
+    local_folder.check_applied(root, "case")
+    assert local_folder.undo_version(root, "case") == ["dir/x", "Dir/x"]
+    assert _listed(root) == ["dir", "dir/x", "keep.txt"]
+    assert _fingerprint(root) == before
+    local_folder.forget_undone(root, "case")
+    assert not local_folder.is_applied("case")
+
+
+@pytest.mark.parametrize("new", ["Dir/a_new", "Dir/z_new"])
+def test_apply_and_undo_a_folder_case_rename_that_also_adds_a_file_in_the_folder(
+    tmp_path: Path, folded_disk: None, new: str
+) -> None:
+    """A new file in the renamed folder ends up in Dir/, whether it is written before or after Dir/x."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n"})
+    before = _fingerprint(root)
+    _apply(root, commit, "", "case", drafts={"Dir/x": "y\n", new: "n\n"}, deleted=["dir/x"])
+    assert _listed(root) == sorted(["Dir", "Dir/x", new])
+    local_folder.check_applied(root, "case")
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["dir", "dir/x"]
+    assert _fingerprint(root) == before
+
+
+def test_a_folder_case_rename_moves_the_files_the_copy_leaves_out_and_the_users_files(
+    tmp_path: Path, folded_disk: None
+) -> None:
+    """A .DS_Store and a file the user added in dir/ move with the folder to Dir/, and Undo moves them back."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n"})
+    (root / "dir/.DS_Store").write_bytes(b"\0")
+    (root / "dir/notes.txt").write_text("mine\n")
+    before = _fingerprint(root)
+    _apply(root, commit, "", "case", drafts={"Dir/x": "y\n"}, deleted=["dir/x"])
+    assert _listed(root) == ["Dir", "Dir/.DS_Store", "Dir/notes.txt", "Dir/x"]
+    local_folder.undo_version(root, "case")
+    assert _fingerprint(root) == before
+
+
+def test_undo_of_a_folder_case_rename_keeps_the_files_added_after_apply(tmp_path: Path, folded_disk: None) -> None:
+    """Files that Finder or the user put in Dir/ after Apply do not stop Undo, and move back with the folder."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    (root / "Dir/.DS_Store").write_bytes(b"\0")
+    (root / "Dir/notes.txt").write_text("mine\n")
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["dir", "dir/.DS_Store", "dir/notes.txt", "dir/x", "keep.txt"]
+    assert (root / "dir/x").read_text() == "x\n"
+    assert (root / "dir/notes.txt").read_text() == "mine\n"
+    local_folder.forget_undone(root, "case")
+    assert not local_folder.is_applied("case")
+
+
+def test_a_failed_write_after_a_folder_case_rename_rolls_the_folder_back(
+    tmp_path: Path, folded_disk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails after dir/ became Dir/ gives back dir/ and dir/x, and keeps no Undo record."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
+    real = local_folder.os.replace
+    failed = []
+
+    def fail_once(src: str, dst: str, *, src_dir_fd: int | None = None, dst_dir_fd: int | None = None) -> None:
+        """Fail the first write into the folder, and do every other rename.
+
+        Args:
+            src: The name to move.
+            dst: The name to replace.
+            src_dir_fd: The source's open folder.
+            dst_dir_fd: The target's open folder.
+
+        Raises:
+            OSError: For the first write into the folder.
+        """
+        if dst_dir_fd is not None and not failed:
+            failed.append(dst)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(local_folder.os, "replace", fail_once)
+    with pytest.raises(LocalFolderError, match="No space left"):
+        _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    assert failed == ["x"]
+    assert _listed(root) == ["dir", "dir/x", "keep.txt"]
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
+
+
+def test_undo_of_a_folder_case_rename_that_stopped_half_way_runs_again(
+    tmp_path: Path, folded_disk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Undo stops after it deletes Dir/x, a second Undo still gives back dir/ and dir/x."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
+    _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    real = local_folder._put
+    calls = []
+
+    def fail_second(*arguments: object, **options: object) -> None:
+        """Do the first put, and fail the second.
+
+        Args:
+            *arguments: The ``_put`` arguments.
+            **options: The ``_put`` options.
+
+        Raises:
+            OSError: For the second put.
+        """
+        calls.append(arguments[1])
+        if len(calls) == 2:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(*arguments, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(local_folder, "_put", fail_second)
+    with pytest.raises(LocalFolderError, match="No space left"):
+        local_folder.undo_version(root, "case")
+    assert calls == ["Dir/x", "dir/x"]
+    monkeypatch.setattr(local_folder, "_put", real)
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["dir", "dir/x", "keep.txt"]
+    assert _fingerprint(root) == before
+    local_folder.forget_undone(root, "case")
+    assert not local_folder.is_applied("case")
+
+
+def test_undo_of_a_folder_case_rename_after_the_user_deletes_the_new_file(tmp_path: Path, folded_disk: None) -> None:
+    """When the user deletes Dir/x after Apply, Undo still gives back dir/ and dir/x."""
+    root, commit = _pinned(tmp_path, {"dir/x": "x\n", "keep.txt": "k\n"})
+    before = _fingerprint(root)
+    _apply(root, commit, _FOLDER_CASE_PATCH, "case")
+    (root / "Dir/x").unlink()
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["dir", "dir/x", "keep.txt"]
+    assert _fingerprint(root) == before
+    local_folder.forget_undone(root, "case")
+    assert not local_folder.is_applied("case")
+
+
+_NESTED_CASE_PATCH = (
+    "diff --git a/src/pkg/m.py b/src/pkg/m.py\ndeleted file mode 100644\n--- a/src/pkg/m.py\n+++ /dev/null\n"
+    "@@ -1 +0,0 @@\n-m\n"
+    "diff --git a/Src/pkg/m.py b/Src/pkg/m.py\nnew file mode 100644\n--- /dev/null\n+++ b/Src/pkg/m.py\n"
+    "@@ -0,0 +1 @@\n+m\n"
+)
+
+
+@pytest.mark.parametrize("by", ["patch", "draft"])
+def test_apply_and_undo_a_case_rename_of_a_folder_above_another_folder(
+    tmp_path: Path, folded_disk: None, by: str
+) -> None:
+    """src/pkg/m.py to Src/pkg/m.py renames src/ and keeps pkg/ in it; Undo renames it back."""
+    root, commit = _pinned(tmp_path, {"src/pkg/m.py": "m\n"})
+    before = _fingerprint(root)
+    if by == "patch":
+        _apply(root, commit, _NESTED_CASE_PATCH, "case")
+    else:
+        _apply(root, commit, "", "case", drafts={"Src/pkg/m.py": "m\n"}, deleted=["src/pkg/m.py"])
+    assert _listed(root) == ["Src", "Src/pkg", "Src/pkg/m.py"]
+    local_folder.undo_version(root, "case")
+    assert _fingerprint(root) == before
+
+
+_NEW_FILE_BELOW_A_FILE = {
+    "rename-and-new-folder": (
+        "diff --git a/a.txt b/A.txt\nsimilarity index 100%\nrename from a.txt\nrename to A.txt\n"
+        "diff --git a/sub/f b/sub/f\nnew file mode 100644\n--- /dev/null\n+++ b/sub/f\n@@ -0,0 +1 @@\n+f\n"
+    ),
+    "below-a-file": (
+        "diff --git a/a.txt/b b/a.txt/b\nnew file mode 100644\n--- /dev/null\n+++ b/a.txt/b\n@@ -0,0 +1 @@\n+b\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("patch", _NEW_FILE_BELOW_A_FILE.values(), ids=_NEW_FILE_BELOW_A_FILE.keys())
+def test_a_patch_that_puts_a_file_below_a_kept_file_does_not_apply(
+    tmp_path: Path, folded_disk: None, patch: str
+) -> None:
+    """A new sub/f or a.txt/b where that name is a file is refused as a patch that does not apply, also in the zip."""
+    root, commit = _pinned(tmp_path, {"a.txt": "a\n", "sub": "s\n"})
+    before = _fingerprint(root)
+    with pytest.raises(LocalFolderError, match=NOT_CLEAN):
+        _apply(root, commit, patch, "case")
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
+    workdir = tmp_path / "zip"
+    workdir.mkdir()
+    with pytest.raises(LocalFolderError, match=NOT_CLEAN):
+        local_folder.snapshot_zip(commit, patch, workdir, folder="app")
+
+
+_NEW_FILE_AT_AN_EMPTY_FOLDER = {
+    "file": "diff --git a/e b/e\nnew file mode 100644\n--- /dev/null\n+++ b/e\n@@ -0,0 +1 @@\n+f\n",
+    "file-under-another-form": "diff --git a/E b/E\nnew file mode 100644\n--- /dev/null\n+++ b/E\n@@ -0,0 +1 @@\n+f\n",
+    "folder-under-another-form": (
+        "diff --git a/E/x b/E/x\nnew file mode 100644\n--- /dev/null\n+++ b/E/x\n@@ -0,0 +1 @@\n+f\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("added", _NEW_FILE_AT_AN_EMPTY_FOLDER.values(), ids=_NEW_FILE_AT_AN_EMPTY_FOLDER.keys())
+def test_a_case_rename_that_clashes_with_a_kept_empty_folder_is_refused(
+    tmp_path: Path, folded_disk: None, added: str
+) -> None:
+    """A rename of a.txt to A.txt next to a new e, E or E/x where the kept tree has an empty e/ is refused."""
+    root, _ = _pinned(tmp_path, {"a.txt": "a\n"})
+    (root / "e").mkdir()
+    workdir = tmp_path / "pinned"
     workdir.mkdir()
     commit = local_folder.snapshot_folder(root, workdir).commit
+    patch = _CASE_RENAME_PATCHES["rename"] + added
+    before = _fingerprint(root)
+    with pytest.raises(LocalFolderError, match=NOT_CLEAN):
+        _apply(root, commit, patch, "case")
+    assert _listed(root) == ["a.txt", "e"]
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
+    zipped = tmp_path / "zip"
+    zipped.mkdir()
+    with pytest.raises(LocalFolderError, match=NOT_CLEAN):
+        local_folder.snapshot_zip(commit, patch, zipped, folder="app")
+
+
+def test_a_case_rename_next_to_a_kept_empty_folder_applies(tmp_path: Path, folded_disk: None) -> None:
+    """A rename of a.txt to A.txt and a new e/x into the kept empty e/ applies, and Undo gives the folder back."""
+    root, _ = _pinned(tmp_path, {"a.txt": "a\n"})
+    (root / "e").mkdir()
+    workdir = tmp_path / "pinned"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    before = _fingerprint(root)
+    added = "diff --git a/e/x b/e/x\nnew file mode 100644\n--- /dev/null\n+++ b/e/x\n@@ -0,0 +1 @@\n+f\n"
+    _apply(root, commit, _CASE_RENAME_PATCHES["rename"] + added, "case")
+    assert _listed(root) == ["A.txt", "e", "e/x"]
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["a.txt", "e"]
+    assert _fingerprint(root) == before
+
+
+_INDEX_REFUSALS = {
+    "two-forms": (
+        "diff --git a/A.txt b/A.txt\nnew file mode 100644\n--- /dev/null\n+++ b/A.txt\n@@ -0,0 +1 @@\n+z\n",
+        NOT_CLEAN,
+    ),
+    "bad-hunk": ("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-zzz\n+b\n", NOT_CLEAN),
+    "symlink": (
+        "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+        "diff --git a/A.txt b/A.txt\nnew file mode 120000\n--- /dev/null\n+++ b/A.txt\n@@ -0,0 +1 @@\n"
+        "+/etc/passwd\n\\ No newline at end of file\n",
+        "a link or a special file at A.txt",
+    ),
+    "gitlink": (
+        "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+        "diff --git a/A.txt b/A.txt\nnew file mode 160000\nindex 0000000..1111111111111111111111111111111111111111\n--- /dev/null\n+++ b/A.txt\n"
+        "@@ -0,0 +1 @@\n+Subproject commit 1111111111111111111111111111111111111111\n",
+        "a link or a special file at A.txt",
+    ),
+}
+
+
+@pytest.mark.parametrize(("patch", "message"), _INDEX_REFUSALS.values(), ids=_INDEX_REFUSALS.keys())
+def test_the_index_path_refuses_a_patch_it_cannot_write(
+    tmp_path: Path, folded_disk: None, patch: str, message: str
+) -> None:
+    """A new A.txt next to a kept a.txt, a hunk that does not match, a new link or a gitlink leaves the folder as it was."""
+    root, commit = _pinned(tmp_path, {"a.txt": "a\n"})
+    before = _fingerprint(root)
+    with pytest.raises(LocalFolderError, match=message):
+        _apply(root, commit, patch, "case")
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
+
+
+@pytest.mark.parametrize("command", ["init", "hash-object", "update-index", "apply", "ls-files", "cat-file"])
+def test_the_index_path_gives_back_git_applys_error_when_a_git_step_fails(
+    tmp_path: Path, folded_disk: None, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """When a git step on the scratch index fails, the build raises the first apply's error."""
+    root, commit = _pinned(tmp_path, {"a.txt": "a\n"})
+    real = subprocess.run
+
+    def fail(arguments: list[str], **options: object) -> subprocess.CompletedProcess[bytes]:
+        """Fail the one git step on the scratch index, and run every other command.
+
+        Args:
+            arguments: The command.
+            **options: The ``subprocess.run`` options.
+
+        Returns:
+            The finished command, or a failed one for the step.
+        """
+        if command in arguments and any(argument.startswith("--git-dir=") for argument in arguments):
+            return subprocess.CompletedProcess(arguments, 1, b"", b"")
+        return real(arguments, **options)  # type: ignore[call-overload,no-any-return]
+
+    before = _fingerprint(root)
+    monkeypatch.setattr(local_folder.subprocess, "run", fail)
+    with pytest.raises(LocalFolderError, match=NOT_CLEAN):
+        _apply(root, commit, _CASE_RENAME_PATCHES["rename"], "case")
+    assert _listed(root) == ["a.txt"]
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
+
+
+@pytest.mark.parametrize(
+    ("ignores_case", "refusal"),
+    [(False, f"{NOT_CLEAN}: error: patch failed"), (True, "Symlinks are not allowed; the change leaves one at 'a'.")],
+    ids=["disk-keeps-case", "other-refusal"],
+)
+def test_the_build_skips_the_index_path_unless_git_apply_refused_on_a_disk_that_ignores_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignores_case: bool, refusal: str
+) -> None:
+    """A disk that keeps case, or a refusal other than git apply's, raises the first error with no second try."""
+    root, commit = _pinned(tmp_path, {"a.txt": "a\n"})
+
+    def refuse(checkout: Path, patch: str) -> None:
+        """Refuse every patch with the test's error.
+
+        Args:
+            checkout: The unpacked tree.
+            patch: The version's patch.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError(refusal)
+
+    monkeypatch.setattr(local_folder, "apply_patch", refuse)
+    monkeypatch.setattr(local_folder, "case_insensitive", lambda directory: ignores_case)
+    monkeypatch.setattr(local_folder, "_apply_in_index", lambda checkout, patch: pytest.fail("index path used"))
+    with pytest.raises(LocalFolderError) as refused:
+        _apply(root, commit, _CASE_RENAME_PATCHES["rename"], "case")
+    assert str(refused.value) == refusal
+
+
+def test_an_exact_delete_does_not_take_the_file_under_another_folder_form(tmp_path: Path, folded_disk: None) -> None:
+    """A delete of dir/x for a version with twins does not delete Dir/x, which the disk would open for it."""
+    root = _write(tmp_path / "app", {"Dir/x": "x\n"})
+    blob = local_folder._Blob(hashlib.sha256(b"x\n").hexdigest(), executable=False)
+    folder = local_folder._open_root(root)
+    try:
+        with pytest.raises(local_folder.LocalFolderConflictError, match="dir/x"):
+            local_folder._put(folder, "dir/x", blob, None, None, [], exact=True)
+    finally:
+        os.close(folder)
+    assert _listed(root) == ["Dir", "Dir/x"]
+
+
+def test_git_applys_refusal_starts_with_the_text_the_index_path_looks_for(tmp_path: Path) -> None:
+    """The real apply_patch error starts with NOT_CLEAN, so the fallback sees git apply refuse a patch."""
+    (tmp_path / "a.txt").write_text("a\n")
+    with pytest.raises(RuntimeError) as refused:
+        apply_patch(tmp_path, _INDEX_REFUSALS["bad-hunk"][0])
+    assert str(refused.value).startswith(f"{NOT_CLEAN}: ")
+
+
+def test_apply_refuses_a_draft_that_another_case_of_a_new_folder_file_would_take(
+    tmp_path: Path, folded_disk: None
+) -> None:
+    """A Foo.py the user added since the pack is not overwritten by a new draft foo.py."""
+    root, commit = _pinned(tmp_path, {"keep.txt": "k\n"})
     (root / "Foo.py").write_text("mine\n")
     with pytest.raises(local_folder.LocalFolderConflictError, match=r"foo\.py"):
         _apply(root, commit, "", "case", drafts={"foo.py": "new\n"})
-    assert sorted(path.name for path in root.iterdir()) == ["Foo.py", "keep.txt"]
+    assert _listed(root) == ["Foo.py", "keep.txt"]
     assert (root / "Foo.py").read_text() == "mine\n"
     assert not local_folder.is_applied("case")
 
 
-def test_apply_refuses_a_case_rename_when_the_user_added_a_third_form(tmp_path: Path) -> None:
-    if not case_insensitive(tmp_path):
-        pytest.skip("Only a disk that ignores case opens Foo.py for foo.py.")
-    root = _write(tmp_path / "app", {"Foo.py": "old\n"})
-    workdir = tmp_path / "w"
-    workdir.mkdir()
-    commit = local_folder.snapshot_folder(root, workdir).commit
+def test_apply_refuses_a_case_rename_when_the_user_added_a_third_form(tmp_path: Path, folded_disk: None) -> None:
+    """A FOO.py the user put in place of Foo.py is not one of the rename's two forms, so it is a conflict."""
+    root, commit = _pinned(tmp_path, {"Foo.py": "old\n"})
     (root / "Foo.py").unlink()
     (root / "FOO.py").write_text("mine\n")
     with pytest.raises(local_folder.LocalFolderConflictError):
         _apply(root, commit, "", "case", drafts={"foo.py": "new\n"}, deleted=["Foo.py"])
-    assert sorted(path.name for path in root.iterdir()) == ["FOO.py"]
+    assert _listed(root) == ["FOO.py"]
     assert (root / "FOO.py").read_text() == "mine\n"
+    assert not local_folder.is_applied("case")

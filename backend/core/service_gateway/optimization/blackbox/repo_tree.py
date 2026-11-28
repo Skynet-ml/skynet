@@ -79,6 +79,8 @@ BASE_REF = "refs/app/base"
 EXPLOITS_DIR = ".optimize/exploits"
 # A version travels as one sandbox file, and uploads cap each file at 16 MiB.
 MAX_PATCH_BYTES = 8 * 1024 * 1024
+# The start of apply_patch's error when git apply refuses a patch; the local Apply tries again on it.
+NOT_CLEAN = "The change does not apply cleanly"
 
 _GITLINK_MODE = "160000"
 _SYMLINK_MODE = "120000"
@@ -895,7 +897,7 @@ def apply_patch(checkout: Path, patch: str) -> None:
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"The change does not apply cleanly: {(result.stderr or result.stdout).strip()[-2000:]}")
+        raise RuntimeError(f"{NOT_CLEAN}: {(result.stderr or result.stdout).strip()[-2000:]}")
     # A section with no mode takes the mode from the checkout, so a plain hunk
     # or rename can retarget or move a link the shipped tree already has. Only
     # the applied tree shows that (SKY-906).

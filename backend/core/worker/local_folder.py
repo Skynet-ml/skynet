@@ -23,6 +23,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -48,7 +49,16 @@ from ..local.folder_tree import (
     source_id,
 )
 from ..models.blackbox import LOCAL_FOLDER_ONLY_HERE, LOCAL_REPO_PROVIDER, REPO_COMMIT_PATTERN
-from ..service_gateway.optimization.blackbox.repo_tree import apply_patch, fold_case, inside
+from ..service_gateway.optimization.blackbox.repo_tree import (
+    NOT_CLEAN,
+    SAFE_GIT,
+    apply_patch,
+    case_insensitive,
+    fold_case,
+    inside,
+    patch_paths,
+    with_git_headers,
+)
 
 LOCAL_PROVIDER = LOCAL_REPO_PROVIDER
 LOCAL_SANDBOX_PROVIDER = "docker"
@@ -71,6 +81,7 @@ APPLY_LOCK = threading.RLock()
 # On a case-sensitive disk this only refuses more, and no probe file goes into the user's folder.
 _FOLD_BLOCKED = fold_case(True)
 _FOLD_EDITABLE = fold_case(False)
+_GIT_FILE_MODES = {"100644": _FILE_MODE, "100755": _EXEC_MODE}
 
 
 class LocalFolderError(RepoFetchError):
@@ -491,7 +502,7 @@ def apply_version(
                             _save_record(record, root, changes, made)
                 except BaseException:
                     # A file left half way still needs its kept bytes, so only a full rollback drops the record.
-                    if _put_back(folder, done, made):
+                    if _put_back(folder, done, made, _twins(changes)):
                         record.unlink(missing_ok=True)
                     raise
             finally:
@@ -541,7 +552,7 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
                     pending.append(change)
                 if conflicts:
                     raise LocalFolderConflictError(conflicts)
-                _put_back(folder, pending, made, strict=True)
+                _put_back(folder, pending, made, twins, strict=True)
             finally:
                 os.close(folder)
         except OSError as error:
@@ -668,10 +679,123 @@ def _build_version(
     try:
         write_to_checkout(checkout, drafts, readonly_paths, deleted)
         drafted = _scan(checkout) if drafts else {}
-        apply_patch(checkout, patch)
+        try:
+            apply_patch(checkout, patch)
+        except RuntimeError as error:
+            # git apply refuses A.txt while a.txt is on a disk that ignores case, also when the
+            # patch moves a.txt away (SKY-1010). An index keeps every case apart, so try there.
+            if not str(error).startswith(NOT_CLEAN) or not case_insensitive(checkout.parent):
+                raise
+            if not _apply_in_index(checkout, patch):
+                raise
     except (DraftFileError, RuntimeError) as error:
         raise LocalFolderError(str(error)) from None
     return drafted
+
+
+def _apply_in_index(checkout: Path, patch: str) -> bool:
+    """Apply a patch in a git index, then write its result into a checkout on a disk that ignores case.
+
+    Only the files the patch names go into the index, by exact name, so a
+    case-only rename such as ``a.txt`` to ``A.txt`` or ``dir/x`` to ``Dir/x``
+    applies. ``apply_patch`` checked the patch's headers already.
+
+    Args:
+        checkout: The unpacked tree, as ``apply_patch`` left it after it refused the patch.
+        patch: The version's patch.
+
+    Returns:
+        Whether the patch applied; ``False`` leaves the checkout as it was.
+
+    Raises:
+        RuntimeError: When the result has a link or another special file.
+    """
+    git = ["git", *SAFE_GIT, "-c", "core.ignorecase=false", f"--git-dir={checkout.parent / 'index.git'}"]
+
+    def run(*arguments: str, data: bytes = b"") -> subprocess.CompletedProcess[bytes]:
+        """Run one git command on the scratch index.
+
+        Args:
+            *arguments: The git command and its arguments.
+            data: The command's input.
+
+        Returns:
+            The finished command.
+        """
+        return subprocess.run([*git, *arguments], input=data, capture_output=True, check=False)
+
+    if run("init", "--quiet", "--bare").returncode:
+        return False
+    found = _scan(checkout)
+    entries = {}
+    for path in patch_paths(with_git_headers(patch)):
+        if path in found:
+            # --no-filters keeps the bytes exact; a .gitattributes in the tree could change line ends.
+            body = run("hash-object", "-w", "--no-filters", "--stdin", data=(checkout / path).read_bytes())
+            if body.returncode:
+                return False
+            mode = "100755" if found[path].executable else "100644"
+            entries[path] = (mode, body.stdout.decode().strip())
+    listing = b"".join(f"{mode} {sha}\t{path}\0".encode() for path, (mode, sha) in entries.items())
+    if run("update-index", "--add", "-z", "--index-info", data=listing).returncode:
+        return False
+    applied = run("apply", "--cached", "--binary", "--whitespace=nowarn", "-", data=with_git_headers(patch).encode())
+    if applied.returncode:
+        return False
+    staged = run("ls-files", "--stage", "-z")
+    if staged.returncode:
+        # An empty listing would read as every file deleted.
+        return False
+    result = {}
+    for line in staged.stdout.decode().split("\0"):
+        if line:
+            info, path = line.split("\t", 1)
+            mode, sha, _ = info.split(" ")
+            if mode not in _GIT_FILE_MODES:
+                raise RuntimeError(f"The version leaves a link or a special file at {path}.")
+            result[path] = (mode, sha)
+    gone = entries.keys() - result.keys()
+    # The disk keeps one form of each name, so a version with two forms of a path cannot be written.
+    # The index holds only the patch's files, so it also misses a new file below a kept file.
+    # The scan holds only files, so the kept tree's empty folders are added; each one stays.
+    empty = {
+        Path(top).relative_to(checkout).as_posix() + "/"
+        for top, below, names in os.walk(checkout)
+        if not below and not names and Path(top) != checkout
+    }
+    forms: dict[str, set[str]] = {}
+    files, folders = set(), set()
+    for path in (found.keys() - gone) | result.keys() | empty:
+        is_file = not path.endswith("/")
+        parts = path.rstrip("/").split("/")
+        if is_file:
+            files.add(_FOLD_BLOCKED(path))
+        for depth in range(1, len(parts) + 1):
+            name = "/".join(parts[:depth])
+            forms.setdefault(_FOLD_BLOCKED(name), set()).add(name)
+            if depth < len(parts) or not is_file:
+                folders.add(_FOLD_BLOCKED(name))
+    if any(len(names) > 1 for names in forms.values()) or files & folders:
+        return False
+    blobs: dict[str, tuple[bytes, int]] = {}
+    for path, (mode, sha) in result.items():
+        if entries.get(path) != (mode, sha):
+            blob = run("cat-file", "blob", sha)
+            if blob.returncode:
+                return False
+            blobs[path] = (blob.stdout, _GIT_FILE_MODES[mode])
+    for path in gone:
+        (checkout / path).unlink()
+        folder = (checkout / path).parent
+        while folder != checkout and not any(folder.iterdir()):
+            folder.rmdir()
+            folder = folder.parent
+    for path, (data, bits) in blobs.items():
+        target = checkout / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        target.chmod(bits)
+    return True
 
 
 def _scan(tree: Path) -> dict[str, _Blob]:
@@ -797,7 +921,15 @@ def _open_root(root: str | os.PathLike[str]) -> int:
     return os.open(root, _FOLDER_FLAGS)
 
 
-def _walk(folder: int, parts: list[str], made: list[str] | None = None, prefix: str = "") -> int | None:
+def _walk(
+    folder: int,
+    parts: list[str],
+    made: list[str] | None = None,
+    prefix: str = "",
+    *,
+    exact: bool = False,
+    names: list[str] | None = None,
+) -> int | None:
     """Open the folder at ``parts`` below an open folder, one part at a time, never following a link.
 
     Args:
@@ -805,12 +937,17 @@ def _walk(folder: int, parts: list[str], made: list[str] | None = None, prefix: 
         parts: The path parts to walk.
         made: When given, missing folders are made and their paths added to it.
         prefix: The ``/``-joined path of ``folder`` below the root, for ``made``.
+        exact: Take a folder only under its exact name. A folder that a disk
+            which ignores case opens under another form counts as missing
+            without ``made``; with ``made``, it is renamed to the exact name,
+            with everything in it.
+        names: When given, the name each part has on the disk is added to it.
 
     Returns:
         The open folder; ``None`` when a part is missing and ``made`` is ``None``.
 
     Raises:
-        OSError: When a part is a link or a file, or cannot be opened or made.
+        OSError: When a part is a link or a file, or cannot be opened, made or renamed.
     """
     current = os.dup(folder)
     try:
@@ -824,12 +961,47 @@ def _walk(folder: int, parts: list[str], made: list[str] | None = None, prefix: 
                 os.mkdir(part, _DIR_MODE, dir_fd=current)
                 made.append("/".join([*([prefix] if prefix else []), *parts[: index + 1]]))
                 below = os.open(part, _FOLDER_FLAGS, dir_fd=current)
+            if exact or names is not None:
+                name = _disk_name(current, part)
+                if exact and name != part:
+                    os.close(below)
+                    if made is None:
+                        os.close(current)
+                        return None
+                    # A folder rename by case only. The disk keeps one form per folder, so the
+                    # folder itself takes the new form, and the files the copy leaves out
+                    # (.DS_Store), the user's files and the version's other new files move with it.
+                    os.rename(name, part, src_dir_fd=current, dst_dir_fd=current)
+                    below = os.open(part, _FOLDER_FLAGS, dir_fd=current)
+                    name = part
+                if names is not None:
+                    names.append(name)
             os.close(current)
             current = below
     except BaseException:
         os.close(current)
         raise
     return current
+
+
+def _disk_name(folder: int, name: str) -> str:
+    """Find the name under which an open folder lists an entry that the disk opens as ``name``.
+
+    Args:
+        folder: The open folder.
+        name: The name opened in it.
+
+    Returns:
+        ``name`` when the folder lists it; else the one other case or Unicode
+        form it lists. ``name`` again when it lists no form or more than one.
+    """
+    # pathlib cannot list a folder descriptor.
+    listed = os.listdir(folder)
+    if name in listed:
+        return name
+    folded = _FOLD_BLOCKED(name)
+    forms = [entry for entry in listed if _FOLD_BLOCKED(entry) == folded]
+    return forms[0] if len(forms) == 1 else name
 
 
 def _twins(changes: Iterable[_Change], *, deletes_only: bool = False) -> dict[str, set[str]]:
@@ -840,18 +1012,15 @@ def _twins(changes: Iterable[_Change], *, deletes_only: bool = False) -> dict[st
         deletes_only: Count only the other files that the Apply deletes.
 
     Returns:
-        Each such path to the names of the other changed files in its folder
-        that fold to the same name.
+        Each such path to the other changed paths that fold to the same path,
+        folders included, so ``dir/x`` and ``Dir/x`` are twins.
     """
-    groups: dict[tuple[str, str], list[_Change]] = {}
+    groups: dict[str, list[_Change]] = {}
     for change in changes:
-        folder, _, name = change.path.rpartition("/")
-        groups.setdefault((folder, _FOLD_BLOCKED(name)), []).append(change)
+        groups.setdefault(_FOLD_BLOCKED(change.path), []).append(change)
     return {
         change.path: {
-            other.path.rpartition("/")[2]
-            for other in group
-            if other is not change and (not deletes_only or other.after is None)
+            other.path for other in group if other is not change and (not deletes_only or other.after is None)
         }
         for group in groups.values()
         if len(group) > 1
@@ -866,16 +1035,17 @@ def _read_disk(folder: int, path: str, twins: Collection[str] | None = None) -> 
         folder: The open root folder.
         path: The ``/``-joined path below it.
         twins: None to read the path as the disk opens it. Else only the exact
-            name counts, and a file under another case or Unicode form reads as
-            missing only when its name is in ``twins``; any other form reads
-            as ``"other"``.
+            path counts, and a file whose path on the disk has another case or
+            Unicode form, in its name or a folder, reads as missing only when
+            that path is in ``twins``; any other form reads as ``"other"``.
 
     Returns:
         The path's state, and for a regular file its bytes and permission bits.
     """
     parts = path.split("/")
+    names: list[str] | None = None if twins is None else []
     try:
-        parent = _walk(folder, parts[:-1])
+        parent = _walk(folder, parts[:-1], names=names)
     except OSError:
         return "other", None, None
     if parent is None:
@@ -891,13 +1061,11 @@ def _read_disk(folder: int, path: str, twins: Collection[str] | None = None) -> 
             status = os.fstat(body.fileno())
             if not stat.S_ISREG(status.st_mode):
                 return "other", None, None
-            if twins is not None:
-                # A disk that ignores case opens Foo.py for foo.py. pathlib cannot list a folder descriptor.
-                names = os.listdir(parent)  # noqa: PTH208
-                if parts[-1] not in names:
-                    folded = _FOLD_BLOCKED(parts[-1])
-                    forms = [name for name in names if _FOLD_BLOCKED(name) == folded]
-                    return (None if forms and all(name in twins for name in forms) else "other"), None, None
+            if names is not None and twins is not None:
+                # A disk that ignores case opens Foo.py for foo.py, and dir/x for Dir/x.
+                found = "/".join([*names, _disk_name(parent, parts[-1])])
+                if found != path:
+                    return (None if found in twins else "other"), None, None
             data = body.read()
     finally:
         os.close(parent)
@@ -941,15 +1109,17 @@ def _put(
         data: The new bytes, or ``None`` to delete the file.
         mode: The new file's permission bits.
         made: The folders made so far, which a write extends.
-        exact: Check only the exact name, and count a file under another case
-            or Unicode form as a conflict; for a path with twins.
+        exact: Check only the exact path, and count a file under another case
+            or Unicode form as a conflict; for a path with twins. A folder
+            under another form counts as missing for a delete, and is renamed
+            to the exact form, with everything in it, for a write.
 
     Raises:
         LocalFolderConflictError: When the path changed since the check.
         OSError: When a part on the way is a link or a file, or the write fails.
     """
     parts = path.split("/")
-    parent = _walk(folder, parts[:-1], made=None if data is None else made)
+    parent = _walk(folder, parts[:-1], made=None if data is None else made, exact=exact)
     if parent is None:
         if expected is not None:
             raise LocalFolderConflictError([path])
@@ -979,13 +1149,18 @@ def _put(
         os.close(parent)
 
 
-def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: bool = False) -> bool:
+def _put_back(
+    folder: int, changes: list[_Change], made: list[str], twins: Collection[str], *, strict: bool = False
+) -> bool:
     """Return changed files to their state before Apply, then remove the folders Apply made.
 
     Args:
         folder: The open root folder.
         changes: The changes to take back; each file is in its ``after`` state.
         made: The folders Apply made, highest first.
+        twins: The paths with twins among all the Apply's changes, not only
+            these. A dir/x whose twin Dir/x is already back must still rename
+            the folder back to dir/.
         strict: Raise on the first failure (Undo); else keep going (rollback of a failed Apply).
 
     Returns:
@@ -996,7 +1171,6 @@ def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: b
         OSError: With ``strict``, when a write fails.
     """
     restored = True
-    twins = _twins(changes)
     for change in reversed(changes):
         try:
             _put(
