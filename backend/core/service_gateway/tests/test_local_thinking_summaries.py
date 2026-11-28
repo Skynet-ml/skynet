@@ -270,7 +270,11 @@ def test_label_models_cover_exactly_the_local_clis() -> None:
 
 def test_slow_cli_label_never_holds_the_turns_cli_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a slow CLI label from waiting for or holding the CLI slots the turn's own calls use."""
-    label_seconds = 10
+    # The order summary timeout < label CLI limit < fake sleep keeps the label CLI alive through the turn checks.
+    # The 6 s limit gives a busy test machine time to start the fake CLI and log its call (SKY-1015). It stays
+    # under the label client's own 8 s timeout, so the gateway's reply never meets a closed socket.
+    label_limit = 6.0
+    label_seconds = 20
     behavior = f"if 'Summarize' in stdin: time.sleep({label_seconds})\nprint(json.dumps({CLAUDE_SUCCESS!r}))"
     fake_cli(tmp_path, "claude", behavior)
     current = local_settings(tmp_path)
@@ -278,28 +282,37 @@ def test_slow_cli_label_never_holds_the_turns_cli_slots(tmp_path: Path, monkeypa
         monkeypatch.setattr(module, "settings", current)
     monkeypatch.setattr(cli_dispatch, "_gateway", None)
     monkeypatch.setattr(cli_dispatch, "_list_prices", lambda model: None)
-    monkeypatch.setattr(cli_dispatch, "_LABEL_CLI_TIMEOUT_SECONDS", 2.0, raising=False)
+    monkeypatch.setattr(cli_dispatch, "_LABEL_CLI_TIMEOUT_SECONDS", label_limit, raising=False)
     monkeypatch.setattr(generalist, "_SUMMARY_TIMEOUT_SECONDS", 1.5)
     monkeypatch.setattr(generalist, "_SUMMARY_HEDGE_SECONDS", 0.3)
     turn = ModelConfig(name="anthropic/claude-opus-5.5", token_source="subscription", cli_provider="claude")
     summaries = generalist._thinking_summaries("English", asyncio.Queue(), None, turn)
-
-    assert asyncio.run(summaries._hedged(0, REASONING)) is None
     turn_slots = cli_dispatch._semaphore("claude", current.cli_max_concurrency)
-    assert turn_slots._value == current.cli_max_concurrency
-
+    label_slot = cli_dispatch._semaphore(f"claude:{cli_dispatch.THINKING_LABEL_ROLE}", 1)
     agent = build_language_model(
         ModelConfig(name="anthropic/claude-haiku-5.5", token_source="subscription", cli_provider="claude"),
         disable_cache=True,
     )
+
+    async def scenario() -> None:
+        """Abandon the label, then run the turn's call while the label CLI still runs.
+
+        ``asyncio.run`` waits for the label's worker thread only when the
+        scenario ends, so the checks here see the label CLI alive.
+        """
+        assert await summaries._hedged(0, REASONING) is None
+        assert turn_slots._value == current.cli_max_concurrency
+        assert not label_slot.acquire(blocking=False)
+        agent("ping")
+        # A turn call that waited for the label would end only after the label CLI stops.
+        assert not label_slot.acquire(blocking=False)
+
     started = time.monotonic()
-    agent("ping")
-    # Waiting for the abandoned label would take about 8 s; the margin is for a busy test machine.
-    assert time.monotonic() - started < 4.0
-    label_slot = cli_dispatch._semaphore(f"claude:{cli_dispatch.THINKING_LABEL_ROLE}", 1)
-    # The label CLI is stopped at its 2 s limit, well before its 10 s sleep ends.
-    assert label_slot.acquire(timeout=6.0)
+    asyncio.run(scenario())
+    # The label CLI is stopped at its limit, before its sleep ends.
+    assert label_slot.acquire(timeout=label_seconds - label_limit)
     label_slot.release()
+    assert time.monotonic() - started < label_seconds
     labels = [line for line in (tmp_path / "claude.log").read_text().splitlines() if "Summarize" in line]
     assert len(labels) == 1
 
