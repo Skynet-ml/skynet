@@ -757,15 +757,23 @@ def _apply_in_index(checkout: Path, patch: str) -> bool:
     gone = entries.keys() - result.keys()
     # The disk keeps one form of each name, so a version with two forms of a path cannot be written.
     # The index holds only the patch's files, so it also misses a new file below a kept file.
+    # The scan holds only files, so the kept tree's empty folders are added; each one stays.
+    empty = {
+        Path(top).relative_to(checkout).as_posix() + "/"
+        for top, below, names in os.walk(checkout)
+        if not below and not names and Path(top) != checkout
+    }
     forms: dict[str, set[str]] = {}
     files, folders = set(), set()
-    for path in (found.keys() - gone) | result.keys():
-        parts = path.split("/")
-        files.add(_FOLD_BLOCKED(path))
+    for path in (found.keys() - gone) | result.keys() | empty:
+        is_file = not path.endswith("/")
+        parts = path.rstrip("/").split("/")
+        if is_file:
+            files.add(_FOLD_BLOCKED(path))
         for depth in range(1, len(parts) + 1):
             name = "/".join(parts[:depth])
             forms.setdefault(_FOLD_BLOCKED(name), set()).add(name)
-            if depth < len(parts):
+            if depth < len(parts) or not is_file:
                 folders.add(_FOLD_BLOCKED(name))
     if any(len(names) > 1 for names in forms.values()) or files & folders:
         return False

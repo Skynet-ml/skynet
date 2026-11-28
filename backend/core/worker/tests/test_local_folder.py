@@ -1444,6 +1444,54 @@ def test_a_patch_that_puts_a_file_below_a_kept_file_does_not_apply(
         local_folder.snapshot_zip(commit, patch, workdir, folder="app")
 
 
+_NEW_FILE_AT_AN_EMPTY_FOLDER = {
+    "file": "diff --git a/e b/e\nnew file mode 100644\n--- /dev/null\n+++ b/e\n@@ -0,0 +1 @@\n+f\n",
+    "file-under-another-form": "diff --git a/E b/E\nnew file mode 100644\n--- /dev/null\n+++ b/E\n@@ -0,0 +1 @@\n+f\n",
+    "folder-under-another-form": (
+        "diff --git a/E/x b/E/x\nnew file mode 100644\n--- /dev/null\n+++ b/E/x\n@@ -0,0 +1 @@\n+f\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("added", _NEW_FILE_AT_AN_EMPTY_FOLDER.values(), ids=_NEW_FILE_AT_AN_EMPTY_FOLDER.keys())
+def test_a_case_rename_that_clashes_with_a_kept_empty_folder_is_refused(
+    tmp_path: Path, folded_disk: None, added: str
+) -> None:
+    """A rename of a.txt to A.txt next to a new e, E or E/x where the kept tree has an empty e/ is refused."""
+    root, _ = _pinned(tmp_path, {"a.txt": "a\n"})
+    (root / "e").mkdir()
+    workdir = tmp_path / "pinned"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    patch = _CASE_RENAME_PATCHES["rename"] + added
+    before = _fingerprint(root)
+    with pytest.raises(LocalFolderError, match=NOT_CLEAN):
+        _apply(root, commit, patch, "case")
+    assert _listed(root) == ["a.txt", "e"]
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
+    zipped = tmp_path / "zip"
+    zipped.mkdir()
+    with pytest.raises(LocalFolderError, match=NOT_CLEAN):
+        local_folder.snapshot_zip(commit, patch, zipped, folder="app")
+
+
+def test_a_case_rename_next_to_a_kept_empty_folder_applies(tmp_path: Path, folded_disk: None) -> None:
+    """A rename of a.txt to A.txt and a new e/x into the kept empty e/ applies, and Undo gives the folder back."""
+    root, _ = _pinned(tmp_path, {"a.txt": "a\n"})
+    (root / "e").mkdir()
+    workdir = tmp_path / "pinned"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    before = _fingerprint(root)
+    added = "diff --git a/e/x b/e/x\nnew file mode 100644\n--- /dev/null\n+++ b/e/x\n@@ -0,0 +1 @@\n+f\n"
+    _apply(root, commit, _CASE_RENAME_PATCHES["rename"] + added, "case")
+    assert _listed(root) == ["A.txt", "e", "e/x"]
+    local_folder.undo_version(root, "case")
+    assert _listed(root) == ["a.txt", "e"]
+    assert _fingerprint(root) == before
+
+
 _INDEX_REFUSALS = {
     "two-forms": (
         "diff --git a/A.txt b/A.txt\nnew file mode 100644\n--- /dev/null\n+++ b/A.txt\n@@ -0,0 +1 @@\n+z\n",
