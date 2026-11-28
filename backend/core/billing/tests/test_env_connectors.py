@@ -1081,8 +1081,9 @@ def test_relay_records_a_refused_call_with_its_reason(calls: PostgresRunCallStor
         ("https://api.judge.example/v1", b"key=%24%7BJUDGE_KEY%7D"),
         ("https://api.judge.example/v1?key=${JUDGE_KEY}", b"{}"),
         ("https://api.judge.example/v1?key=%2524%257BJUDGE_KEY%257D", b"{}"),
+        ("https://api.judge.example/v1", b"key=%252524%25257BJUDGE_KEY%25257D"),
     ],
-    ids=["json-body", "form-body", "url", "url-encoded-twice"],
+    ids=["json-body", "form-body", "url", "url-encoded-twice", "body-encoded-three-times"],
 )
 def test_relay_refuses_a_secret_in_the_url_or_body_of_its_own_host(
     calls: PostgresRunCallStore, url: str, body: bytes
@@ -1148,10 +1149,13 @@ def test_relay_refuses_a_deeply_encoded_url_or_body_fast(calls: PostgresRunCallS
     assert record["status"] == "refused"
 
 
+@pytest.mark.parametrize(
+    "body", [b'{"path": "${HOME}/data"}', b"%252525"], ids=["placeholder-not-a-secret", "encoded-three-times"]
+)
 def test_relay_fills_a_header_secret_next_to_a_body_placeholder_that_is_not_a_run_secret(
-    echo: Callable[[str, dict[str, str], bytes], bytes],
+    echo: Callable[[str, dict[str, str], bytes], bytes], body: bytes
 ) -> None:
-    """Fill the header placeholder, and send a body ``${HOME}`` that names no run secret as it is (SKY-1000)."""
+    """Fill the header placeholder, and send as it is a body with no run secret in its first three layers (SKY-1000)."""
     sent: list[tuple[dict[str, str], bytes]] = []
 
     def send(url: str, headers: dict[str, str], body: bytes) -> bytes:
@@ -1171,14 +1175,14 @@ def test_relay_fills_a_header_secret_next_to_a_body_placeholder_that_is_not_a_ru
     answer = relay_request(
         url="https://api.judge.example/v1",
         headers={"Authorization": "Bearer ${JUDGE_KEY}"},
-        body=b'{"path": "${HOME}/data"}',
+        body=body,
         user_secrets={"JUDGE_KEY": "user-judge-key-123"},
         bindings={},
         secret_hosts={"JUDGE_KEY": "api.judge.example"},
         allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
         send=send,
     )
-    assert sent == [({"Authorization": "Bearer user-judge-key-123"}, b'{"path": "${HOME}/data"}')]
+    assert sent == [({"Authorization": "Bearer user-judge-key-123"}, body)]
     assert "user-judge-key-123" not in answer.decode()
 
 
