@@ -271,6 +271,7 @@ def test_a_folder_that_is_a_link_is_refused(state_dir: Path, source: Path, tmp_p
 
 
 def test_a_folder_the_user_did_not_pick_is_refused_with_no_copy(state_dir: Path, source: Path, tmp_path: Path) -> None:
+    """A folder off the picked list is refused, and no copy or session folder is made (SKY-1013)."""
     pick(state_dir, tmp_path / "elsewhere")
     with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
         open_workspace("chat1", source)
@@ -279,6 +280,7 @@ def test_a_folder_the_user_did_not_pick_is_refused_with_no_copy(state_dir: Path,
 
 
 def test_no_picked_list_refuses_every_folder(state_dir: Path, source: Path) -> None:
+    """Without a picked-folder list, no folder opens."""
     (state_dir / PICKED_FOLDERS_FILE).unlink()
     with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
         open_workspace("chat1", source)
@@ -286,18 +288,21 @@ def test_no_picked_list_refuses_every_folder(state_dir: Path, source: Path) -> N
 
 
 def test_a_folder_below_a_picked_folder_opens(state_dir: Path, source: Path) -> None:
+    """A folder inside a picked folder opens as before."""
     workspace, new = open_workspace("chat1", source / "src")
     assert new
     assert (workspace.folder / "app.py").read_text() == "def main():\n    return 1\n"
 
 
 def test_a_dot_dot_path_out_of_the_picked_folder_is_refused(state_dir: Path, source: Path) -> None:
+    """A ``..`` path that leaves the picked folder is refused."""
     with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
         open_workspace("chat1", f"{source}/src/../../outside")
     assert not session_folder("chat1").exists()
 
 
 def test_a_path_through_a_link_to_a_folder_outside_is_refused(state_dir: Path, source: Path, tmp_path: Path) -> None:
+    """A path through a link in the picked folder to a folder outside it is refused."""
     (tmp_path / "outside" / "inner").mkdir()
     with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
         open_workspace("chat1", source / "linked_dir" / "inner")

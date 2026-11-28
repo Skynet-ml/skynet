@@ -36,6 +36,7 @@ from ...connectors import github, repo_hosts
 from ...connectors.github_repo import RepoRateLimitError, rate_limit_message
 from ...connectors.transport import label
 from ...local.folder_tree import FolderTreeError
+from ...local.picked_folders import is_picked
 from ...models.blackbox import (
     DRAFT_FILE_BYTES,
     DRAFT_FILES_MAX,
@@ -48,7 +49,7 @@ from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, pa
 from .apply_patch import APPLY_PATCH_TOOL, PatchError
 from .attachment_sandbox import EXEC_COMMAND_TOOL, WRITE_STDIN_TOOL
 from .folder_workspace import CLOSED as FOLDER_COPY_CLOSED
-from .folder_workspace import AttachmentLoader, FolderWorkspace, open_workspace
+from .folder_workspace import NOT_PICKED, AttachmentLoader, FolderWorkspace, open_workspace
 from .local_egress_proxy import SetupSecret
 from .repo_browser import (
     LocalFolderBrowser,
@@ -272,6 +273,8 @@ def open_folder(state: dict[str, Any]) -> tuple[RepoBrowser | None, str]:
     folder = str(state.get("repo_path") or "").strip()
     if not folder:
         return None, "No folder is chosen yet."
+    if not is_picked(folder, settings.local_state_dir):
+        return None, NOT_PICKED
     try:
         browser = LocalFolderBrowser(folder)
     except FolderTreeError as error:
