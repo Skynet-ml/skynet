@@ -461,7 +461,9 @@ def stage_repository(
             # The folder's content hash is the commit, so the draft base is checked only after packing.
             snapshot = snapshot_folder(repo["path"], workdir, repo.get("commit"))
             commit = snapshot.commit
-            if moved := check_draft_base(bool(drafts), draft_base, commit, place=sandbox_place(settings.local_mode)):
+            if moved := check_draft_base(
+                bool(drafts), draft_base, commit, place=sandbox_place(settings.local_mode), local=True
+            ):
                 raise RepoGateError(moved)
         else:
             try:

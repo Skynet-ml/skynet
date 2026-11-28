@@ -296,7 +296,9 @@ def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, 
     )
 
 
-def check_draft_base(has_drafts: bool, base: str | None, commit: str, *, place: Place) -> list[GateFailure]:
+def check_draft_base(
+    has_drafts: bool, base: str | None, commit: str, *, place: Place, local: bool = False
+) -> list[GateFailure]:
     """Refuse draft files written on another commit than the one the run starts from.
 
     A draft is a whole-file copy of the tree the setup agent read. When the
@@ -309,12 +311,16 @@ def check_draft_base(has_drafts: bool, base: str | None, commit: str, *, place: 
             do not record it.
         commit: The commit the run starts from.
         place: Where the run's sandbox runs.
+        local: Whether the run's source is a local folder.
 
     Returns:
         One failure when the two commits differ; else an empty list.
     """
     if not has_drafts or base is None or base == commit:
         return []
+    # A folder's commit is a content hash with no branch, so its message names the folder instead (SKY-1003).
+    if local:
+        return [_failure("draft_files", place, I18nKey.REPO_GATE_DRAFT_FOLDER_CHANGED)]
     return [_failure("draft_files", place, I18nKey.REPO_GATE_DRAFT_BASE_MOVED, base=base[:7], commit=commit[:7])]
 
 

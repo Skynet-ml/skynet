@@ -291,6 +291,7 @@
     "repo_gate.secret_host_unlisted": "El secreto {secret} no tiene hosts permitidos, pero el repositorio lo envía a {host}. Añade {host} a los hosts permitidos de {secret} en la ejecución.",
     "repo_gate.managed_secret_unavailable": "El secreto {secret} está vinculado a una clave de {term.appName}, pero {term.appName} no tiene clave para {host}. Vincula el secreto a user, o usa uno de estos hosts, que tienen una clave de {term.appName}: {known}.",
     "repo_gate.draft_base_moved": "El agente de configuración cambió archivos en el commit {base}, pero la ejecución empezaría desde el commit {commit}. La rama avanzó y los archivos cambiados desharían sus commits nuevos. Configura la ejecución de nuevo para que el agente cambie los archivos en el commit nuevo.",
+    "repo_gate.draft_folder_changed": "El agente de configuración cambió archivos en un estado anterior de la carpeta. La carpeta cambió después y los archivos cambiados desharían sus cambios nuevos. Configura la ejecución de nuevo para que el agente cambie los archivos en la carpeta actual.",
     "optimization.retry_no_payload": "La optimización de origen no tiene ninguna carga útil guardada para reintentar.",
     "optimization.retry_wrong_status": "Solo se pueden reintentar las optimizaciones en estado 'failed' o 'cancelled'; esta está en '{status}'. Clónala en su lugar.",
     "quota.reached": "Has alcanzado tu límite de {quota, plural, one {1 optimización} other {# optimizaciones}}. Elimina optimizaciones antiguas para crear nuevas.",

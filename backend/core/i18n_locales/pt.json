@@ -291,6 +291,7 @@
     "repo_gate.secret_host_unlisted": "O segredo {secret} não tem anfitriões permitidos, mas o repositório envia-o para {host}. Adicione {host} aos anfitriões permitidos de {secret} na execução.",
     "repo_gate.managed_secret_unavailable": "O segredo {secret} está associado a uma chave {term.appName}, mas o {term.appName} não tem chave para {host}. Associe o segredo a user, ou use um destes anfitriões, que têm uma chave {term.appName}: {known}.",
     "repo_gate.draft_base_moved": "O agente de configuração alterou ficheiros no commit {base}, mas a execução começaria no commit {commit}. O ramo avançou, e os ficheiros alterados desfariam os seus novos commits. Configure a execução de novo para que o agente altere os ficheiros no novo commit.",
+    "repo_gate.draft_folder_changed": "O agente de configuração alterou ficheiros num estado anterior da pasta. A pasta mudou depois disso, e os ficheiros alterados desfariam as suas novas alterações. Configure a execução de novo para que o agente altere os ficheiros na pasta atual.",
     "optimization.retry_no_payload": "A otimização de origem não tem nenhum payload guardado para repetir.",
     "optimization.retry_wrong_status": "Só as otimizações no estado 'failed' ou 'cancelled' podem ser repetidas — esta está em '{status}'. Clone-a em vez disso.",
     "quota.reached": "Atingiu o seu limite de {quota, plural, one {1 otimização} other {# otimizações}}. Elimine otimizações antigas para criar novas.",
