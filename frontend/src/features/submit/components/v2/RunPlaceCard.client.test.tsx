@@ -94,6 +94,14 @@ void test("a preselected run place does not animate, and a new pick sends one ri
       cards().map((c) => count(c, "choice-tile-pop")),
       [0, 1],
     );
+    // Reduced motion: every keyframe class is motion-safe, and the light sweep hides.
+    const tokens = cards().flatMap((c) =>
+      [...c.querySelectorAll("*")].flatMap((el) => [...el.classList]),
+    );
+    const animated = tokens.filter((t) => t.includes("animate-["));
+    assert.ok(animated.length >= 3, animated.join(" "));
+    assert.deepEqual(animated.filter((t) => !t.startsWith("motion-safe:")), []);
+    assert.ok(cards().every((c) => c.querySelector(".motion-reduce\\:hidden")));
   } finally {
     await React.act(async () => root.unmount());
     container.remove();
