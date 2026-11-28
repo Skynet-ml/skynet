@@ -21,7 +21,8 @@ registerHooks({
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
 
-const { BestVersionTab } = await import("./BestVersionTab");
+const { BestVersionTab, reportLocalApplyFailure } = await import("./BestVersionTab");
+const { ApiError } = await import("@/shared/lib/api");
 
 const PATCH = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n";
 
@@ -80,5 +81,28 @@ void describe("BestVersionTab local Apply", () => {
     assert.match(markup, UNDO_NEEDED);
     assert.match(markup, UNDO_BUTTON);
     assert.doesNotMatch(markup, APPLY_HINT);
+  });
+});
+
+void describe("BestVersionTab local Apply failure", () => {
+  void it("reloads the run, so a saved undo_needed reaches the row", () => {
+    const sent: unknown[] = [];
+    const target = new EventTarget();
+    target.addEventListener("optimization-updated", (event) => {
+      sent.push((event as CustomEvent).detail);
+    });
+    const globals = globalThis as { window?: unknown };
+    const previous = globals.window;
+    globals.window = target;
+    try {
+      const conflict = new ApiError("Undo first, then Apply again.", {
+        status: 409,
+        code: "optimization.local_folder_failed",
+      });
+      reportLocalApplyFailure("run-1", conflict, false);
+    } finally {
+      globals.window = previous;
+    }
+    assert.deepEqual(sent, [{ optimizationId: "run-1" }]);
   });
 });

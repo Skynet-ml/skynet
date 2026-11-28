@@ -574,6 +574,18 @@ function readLocalApply(details: Record<string, unknown>): LocalApplyState {
   };
 }
 
+/**
+ * Show why Apply or Undo failed, and reload the run. A failed Apply can save
+ * that the folder needs Undo, and a stopped run gets no live update.
+ */
+export function reportLocalApplyFailure(optimizationId: string, err: unknown, undo: boolean): void {
+  const fallback = undo
+    ? "optimization.blackbox.repo.undo_failed"
+    : "optimization.blackbox.repo.apply_failed";
+  toast.error(userErrorMessage(err, msg(fallback)));
+  window.dispatchEvent(new CustomEvent("optimization-updated", { detail: { optimizationId } }));
+}
+
 /** Apply the best version to the run's folder on this computer, or Undo it. */
 function LocalApplyRow({
   optimizationId,
@@ -593,10 +605,7 @@ function LocalApplyRow({
     try {
       setState(await (undo ? undoLocalVersion : applyLocalVersion)(optimizationId, source));
     } catch (err) {
-      const fallback = undo
-        ? "optimization.blackbox.repo.undo_failed"
-        : "optimization.blackbox.repo.apply_failed";
-      toast.error(userErrorMessage(err, msg(fallback)));
+      reportLocalApplyFailure(optimizationId, err, undo);
     } finally {
       setBusy(false);
     }

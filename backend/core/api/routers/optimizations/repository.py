@@ -442,7 +442,7 @@ def _record_apply(job_store, optimization_id: str, applied: bool, *, undo_needed
     details["local_apply"] = state
     result["details"] = details
     job_store.update_job(optimization_id, result=result)
-    # The run page's ETag counts log lines but not the result, so a log line makes it reload the new state.
+    # The log keeps a trace of each change; the page reloads the row itself, as a stopped run gets no live update.
     job_store.append_log(
         optimization_id,
         level="INFO",
