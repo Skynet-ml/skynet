@@ -84,7 +84,7 @@ from .code import _agent_error_payload, _format_agent_error, _reply_language, _r
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
 from .feedback import FeedbackTarget, send_feedback_tool
-from .folder_workspace import live_workspace, saved_setup_secrets
+from .folder_workspace import FolderWorkspace, live_workspace, saved_setup_secrets
 from .github_mcp import github_repo_tools, tool_from_mcp
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
@@ -103,6 +103,7 @@ from .workspace_tools import (
     diagnostic_text,
     has_error,
     model_diagnostics,
+    open_folder_shell,
     workspace_tools,
 )
 
@@ -3857,6 +3858,16 @@ async def _drive_generalist_agent(
             for spec in listing.tools
             if spec.name in allowed_names
         ]
+        session_key = feedback_target.conversation_id if feedback_target else None
+        setup_secrets = (
+            partial(saved_setup_secrets, feedback_target.engine, feedback_target.username) if feedback_target else None
+        )
+        attachments = (
+            chat_file_loader(feedback_target.engine, feedback_target.username, feedback_target.conversation_id)
+            if feedback_target
+            else None
+        )
+        shell: list[FolderWorkspace | str] = []
         # A chat with no wizard screen still gets ``ask_user``; a screen chat
         # has it among its own tools.
         own_tools = (
@@ -3866,25 +3877,27 @@ async def _drive_generalist_agent(
                     wizard_state,
                     authoring_flag,
                     github_token=github_token,
-                    session_key=feedback_target.conversation_id if feedback_target else None,
-                    setup_secrets=(
-                        partial(saved_setup_secrets, feedback_target.engine, feedback_target.username)
-                        if feedback_target
-                        else None
-                    ),
-                    attachments=(
-                        chat_file_loader(
-                            feedback_target.engine, feedback_target.username, feedback_target.conversation_id
-                        )
-                        if feedback_target
-                        else None
-                    ),
+                    session_key=session_key,
+                    setup_secrets=setup_secrets,
+                    attachments=attachments,
+                    shell=shell,
                 ),
             ]
             if screen is not None
             else [ask_user_tool(authoring_flag)]
         )
         folder_shell = any(tool.name in FOLDER_SHELL_TOOLS for tool in own_tools)
+        if folder_shell and file_tools:
+            # The folder shell takes the attachment shell's tool names, so the copy opens now: a copy that
+            # cannot open leaves the attachment shell in place (SKY-997).
+            shell.append(
+                await asyncio.to_thread(
+                    open_folder_shell, dict(wizard_state), cast(str, session_key), setup_secrets, attachments
+                )
+            )
+            if isinstance(shell[0], str):
+                own_tools = [tool for tool in own_tools if tool.name not in FOLDER_SHELL_TOOLS]
+                folder_shell = False
         # The folder shell has the attachment shell's tool names, and its commands run in the folder copy.
         files_prompt = FILE_TOOLS_PROMPT if file_tools else None
         if folder_shell:

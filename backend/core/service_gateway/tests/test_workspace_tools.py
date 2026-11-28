@@ -29,6 +29,7 @@ from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
 from core.service_gateway.agents import apply_patch as apply_patch_module
 from core.service_gateway.agents import folder_workspace, pi_bridge, pi_react, repo_browser, workspace_tools
 from core.service_gateway.agents import generalist as generalist_module
+from core.service_gateway.agents.attachment_sandbox import FILE_TOOLS_PROMPT
 from core.service_gateway.agents.feedback import FeedbackTarget
 from core.service_gateway.agents.generalist import (
     REPO_COLUMN_MAPPING,
@@ -2160,6 +2161,60 @@ async def test_a_setup_turn_runs_the_folder_shell_in_ask_mode_with_no_card(
     assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
     system = next(m["content"] for m in lm.requests[0]["messages"] if m["role"] == "system")
     assert FOLDER_FILES_PROMPT in system
+
+
+@pytest.mark.asyncio
+async def test_a_folder_copy_that_cannot_open_keeps_the_attachment_shell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A folder past the copy limit gives no folder shell, so the attached files stay readable (SKY-997)."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(generalist_module, "saved_setup_secrets", lambda *_args: [])
+    monkeypatch.setattr(folder_workspace, "COPY_BYTES_MAX", 1)
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield the fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession(["update_wizard_state"])
+
+    def attachment_shell(**_kwargs: Any) -> str:
+        """Answer like the attachment shell."""
+        return "attachment shell"
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    monkeypatch.setattr(dspy.Tool, "from_mcp_tool", staticmethod(_mcp_tool))
+    lm = _ScriptedLM([("submit", {"assistant_message": "I read the file. Which test counts?"})])
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(**state),
+        chat_history=[],
+        user_message="Read my file.",
+        trust_mode="auto_safe",
+        registry=ApprovalRegistry(),
+        emit=[].append,
+        lm=lm,
+        reply_language="English",
+        feedback_target=FeedbackTarget(cast(Any, None), "alice", "chat-1", None),
+        file_tools=[
+            dspy.Tool(attachment_shell, name="exec_command", desc="attachments", args={}, arg_types={}, arg_desc={})
+        ],
+    )
+
+    assert reply == "I read the file. Which test counts?"
+    tools = {t["function"]["name"]: t["function"] for t in lm.requests[0]["tools"]}
+    assert tools["exec_command"]["description"] == "attachments"
+    assert "apply_patch" not in tools
+    assert "write_stdin" not in tools
+    system = next(m["content"] for m in lm.requests[0]["messages"] if m["role"] == "system")
+    assert FILE_TOOLS_PROMPT in system
+    assert FOLDER_FILES_PROMPT not in system
 
 
 @on_mac

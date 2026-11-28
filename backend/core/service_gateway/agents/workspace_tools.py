@@ -611,6 +611,67 @@ def dropped_rule_files(current: str, text: str) -> str | None:
     )
 
 
+def draft_texts(current: dict[str, Any]) -> dict[str, str]:
+    """Return every file the run request sends in place of the folder's file.
+
+    Args:
+        current: The wizard snapshot with this turn's writes merged in.
+
+    Returns:
+        Path to text: the draft files, plus ``metric.py`` and ``ascent.toml`` when they hold text.
+    """
+    found = current.get(DRAFT_FILES_FIELD)
+    files = {str(k): str(v) for k, v in found.items()} if isinstance(found, dict) else {}
+    for path, field in WORKSPACE_FILES.items():
+        if text := str(current.get(field) or ""):
+            files[path] = text
+    return files
+
+
+def deleted_drafts(current: dict[str, Any]) -> list[str]:
+    """Return the copied files the draft deletes.
+
+    Args:
+        current: The wizard snapshot with this turn's writes merged in.
+
+    Returns:
+        The paths.
+    """
+    found = current.get(DRAFT_DELETED_FIELD)
+    return [str(path) for path in found] if isinstance(found, list) else []
+
+
+def open_folder_shell(
+    current: dict[str, Any],
+    session_key: str,
+    setup_secrets: Callable[[], list[SetupSecret]] | None,
+    attachments: AttachmentLoader | None,
+) -> FolderWorkspace | str:
+    """Open the chat's folder copy and put the current draft into it.
+
+    Args:
+        current: The wizard snapshot with this turn's writes merged in.
+        session_key: The setup chat's id, which names its folder copy.
+        setup_secrets: Returns the saved secrets that the copy's commands get as placeholders.
+        attachments: Loads the chat's attached files, which the copy's commands read next to the copy.
+
+    Returns:
+        The workspace, or the reason the shell tools cannot run.
+    """
+    try:
+        workspace, _ = open_workspace(session_key, str(current["repo_path"]).strip(), setup_secrets, attachments)
+    except FolderTreeError as error:
+        return str(error)
+    except (OSError, ValueError) as exc:  # a folder that cannot be copied leaves the agent without the shell
+        logger.info("Setup agent cannot copy the local folder: %s", type(exc).__name__)
+        return "The folder cannot be copied."
+    base = str(current.get(DRAFT_BASE_FIELD) or "")
+    if base and has_drafts(current) and base != workspace.base:
+        return FOLDER_CHANGED
+    workspace.reset(draft_texts(current), deleted_drafts(current))
+    return workspace
+
+
 def workspace_tools(
     state: WizardState,
     turn: _TurnAuthoringFlag,
@@ -619,6 +680,7 @@ def workspace_tools(
     session_key: str | None = None,
     setup_secrets: Callable[[], list[SetupSecret]] | None = None,
     attachments: AttachmentLoader | None = None,
+    shell: list[FolderWorkspace | str] | None = None,
 ) -> list[dspy.Tool]:
     """Build the Metric screen's tools that read the repository and write the run's files.
 
@@ -637,6 +699,9 @@ def workspace_tools(
             as placeholders.
         attachments: Loads the chat's attached files, which the copy's
             commands read next to the copy.
+        shell: Holds the turn's :func:`open_folder_shell` result once the
+            copy opens; a caller that opens the copy first puts its result
+            here, and the shell tools use it.
 
     Returns:
         The four tools, unwrapped, on the Metric and Check screens, plus
@@ -965,7 +1030,7 @@ def workspace_tools(
         and state.get("repo_provider") == LOCAL_REPO_PROVIDER
         and str(state.get("repo_path") or "").strip()
     )
-    shell: list[FolderWorkspace | str] = []
+    shell = [] if shell is None else shell
     shell_lock = asyncio.Lock()
 
     def mirrored(path: str, result: dict[str, Any], text: str) -> dict[str, Any]:
@@ -983,64 +1048,20 @@ def workspace_tools(
             shell[0].write(path, text)
         return result
 
-    def draft_texts(current: dict[str, Any]) -> dict[str, str]:
-        """Return every file the run request sends in place of the folder's file.
-
-        Args:
-            current: The wizard snapshot with this turn's writes merged in.
-
-        Returns:
-            Path to text: the draft files, plus ``metric.py`` and ``ascent.toml`` when they hold text.
-        """
-        files = drafts()
-        for path, field in WORKSPACE_FILES.items():
-            if text := str(current.get(field) or ""):
-                files[path] = text
-        return files
-
-    def deleted_drafts(current: dict[str, Any]) -> list[str]:
-        """Return the copied files the draft deletes.
-
-        Args:
-            current: The wizard snapshot with this turn's writes merged in.
-
-        Returns:
-            The paths.
-        """
-        found = current.get(DRAFT_DELETED_FIELD)
-        return [str(path) for path in found] if isinstance(found, list) else []
-
-    def open_shell() -> FolderWorkspace | str:
-        """Open the chat's folder copy and put the current draft into it.
-
-        Returns:
-            The workspace, or the reason the shell tools cannot run.
-        """
-        current = cast(dict[str, Any], {**state, **turn.wizard_patch})
-        try:
-            workspace, _ = open_workspace(
-                cast(str, session_key), str(current["repo_path"]).strip(), setup_secrets, attachments
-            )
-        except FolderTreeError as error:
-            return str(error)
-        except (OSError, ValueError) as exc:  # a folder that cannot be copied leaves the agent without the shell
-            logger.info("Setup agent cannot copy the local folder: %s", type(exc).__name__)
-            return "The folder cannot be copied."
-        base = str(current.get(DRAFT_BASE_FIELD) or "")
-        if base and has_drafts(current) and base != workspace.base:
-            return FOLDER_CHANGED
-        workspace.reset(draft_texts(current), deleted_drafts(current))
-        return workspace
-
     async def folder_shell() -> FolderWorkspace | str:
         """Open the folder copy once a turn.
 
         Returns:
-            The :func:`open_shell` result.
+            The :func:`open_folder_shell` result.
         """
         async with shell_lock:
             if not shell:
-                shell.append(await asyncio.to_thread(open_shell))
+                current = cast(dict[str, Any], {**state, **turn.wizard_patch})
+                shell.append(
+                    await asyncio.to_thread(
+                        open_folder_shell, current, cast(str, session_key), setup_secrets, attachments
+                    )
+                )
             return shell[0]
 
     def sync(workspace: FolderWorkspace) -> dict[str, Any]:
@@ -1353,6 +1374,7 @@ __all__ = [
     "has_error",
     "model_diagnostics",
     "omitted_text",
+    "open_folder_shell",
     "open_repo",
     "workspace_tools",
 ]
