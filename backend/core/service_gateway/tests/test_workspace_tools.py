@@ -1716,7 +1716,8 @@ def test_open_repo_picks_the_local_folder_with_no_host_token(monkeypatch: pytest
 
     browser, reason = open_repo(state, no_token)
 
-    assert (isinstance(browser, repo_browser.LocalFolderBrowser), reason) == (True, "")
+    assert isinstance(browser, repo_browser.LocalFolderBrowser)
+    assert reason == ""
     assert browser.branch == folder_source_id(tmp_path)
     assert "already read for you" in browser.summary()
     assert open_repo({**state, "repo_path": ""}, no_token) == (None, "No folder is chosen yet.")
@@ -1807,21 +1808,22 @@ def test_the_tool_texts_say_folder_for_a_local_source(monkeypatch: pytest.Monkey
     git = _tools(_REPO_METRIC, _TurnAuthoringFlag())
 
     for name in (LIST_REPO_TOOL, READ_REPO_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL):
-        assert "repository" not in local[name].desc
-        assert "folder" in local[name].desc or "folder" in json.dumps(local[name].arg_desc)
-        assert "repository" in git[name].desc
-    assert local[READ_REPO_TOOL].arg_desc["path"] == "File path inside the folder, exactly as the tree shows it."
+        local_desc, git_desc = local[name].desc or "", git[name].desc or ""
+        assert "repository" not in local_desc
+        assert "folder" in local_desc or "folder" in json.dumps(local[name].arg_desc)
+        assert "repository" in git_desc
+    assert (local[READ_REPO_TOOL].arg_desc or {})[
+        "path"
+    ] == "File path inside the folder, exactly as the tree shows it."
 
 
 @pytest.mark.asyncio
-async def test_the_read_tools_keep_a_space_that_is_part_of_a_folder_name(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The list tool strips only slashes, so a folder named with a trailing space opens."""
+async def test_the_read_tools_strip_a_padded_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The read tools strip spaces like the draft tools, so a padded path reads the file a draft edits."""
     state = _local_folder(monkeypatch, tmp_path)
-    (tmp_path / "docs ").mkdir()
-    (tmp_path / "docs " / "intro.md").write_text("hi\n", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "intro.md").write_text("hi\n", encoding="utf-8")
     tools = _tools(state, _TurnAuthoringFlag())
 
-    assert "intro.md" in await tools[LIST_REPO_TOOL].acall(path="/docs /")
-    assert await tools[READ_REPO_TOOL].acall(path="docs /intro.md") == "   1 hi"
+    assert "intro.md" in await tools[LIST_REPO_TOOL].acall(path=" /docs/ ")
+    assert await tools[READ_REPO_TOOL].acall(path=" docs/intro.md ") == "   1 hi"

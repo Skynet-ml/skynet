@@ -426,8 +426,7 @@ class RepoBrowser:
             The folder's tree, ``{"note": ...}`` when it is empty, or
             ``{"error": ...}`` when it does not exist.
         """
-        # A space can be part of a file name, and git keeps it, so only the slashes go.
-        clean = path.strip("/")
+        clean = path.strip().strip("/")
 
         def run() -> RepoRead:
             """Render the folder."""
@@ -457,8 +456,7 @@ class RepoBrowser:
             The file's text with line numbers, or ``{"error": ...}`` when it
             does not exist.
         """
-        # A space can be part of a file name, and git keeps it, so only the slashes go.
-        clean = path.strip("/")
+        clean = path.strip().strip("/")
 
         def run() -> RepoRead:
             """Fetch the file."""
@@ -496,13 +494,16 @@ def _folder_root(root: str | Path) -> Path:
         The resolved folder.
 
     Raises:
-        LocalFolderError: Outside desktop local mode, for a relative path, or when no folder is there.
+        LocalFolderError: Outside desktop local mode, for a relative path, a linked folder, or when no folder is there.
     """
     if not settings.local_mode:
         raise LocalFolderError("A local folder can be read only in the desktop app.")
     path = Path(root)
     if not path.is_absolute():
         raise LocalFolderError("The folder path must be absolute.")
+    # The run refuses a linked root, so the agent must not read one either; a link above it is fine.
+    if path.is_symlink():
+        raise LocalFolderError("The folder is a link, which is never followed.")
     resolved = path.resolve()
     if not resolved.is_dir():
         raise LocalFolderError(f"No folder at {root}.")

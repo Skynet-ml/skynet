@@ -1331,6 +1331,25 @@ _STEP_FIX_HINT = {
 }
 
 
+def _step_fix_hint(step: int, state: dict[str, Any]) -> str:
+    """Name what the agent must do to complete a gating step, for this run's source.
+
+    Args:
+        step: Wizard step index (see ``_WIZARD_STEP_LABELS``).
+        state: The wizard snapshot merged with this call's patch.
+
+    Returns:
+        The fix hint for the order error.
+    """
+    if step == 1 and state.get("repo_provider") == "local":
+        # The agent cannot pick a disk folder, and a ``repository`` would turn the run into a git run.
+        return (
+            "set ``task_objective`` via update_wizard_state, and ask the user to pick the folder "
+            "in the app (``repo_path``); never set ``repository``"
+        )
+    return _STEP_FIX_HINT[step]
+
+
 def _step_satisfied(step: int, state: WizardState, patch: dict[str, Any]) -> bool:
     """Return True when wizard ``step`` is complete in ``state`` or this ``patch``.
 
@@ -1380,7 +1399,8 @@ def validate_wizard_patch_order(patch: dict[str, Any], state: WizardState) -> st
     missing = [step for step in _PREREQ_STEPS if step < target_step and not _step_satisfied(step, state, patch)]
     if not missing:
         return None
-    steps_txt = "; ".join(f"{_WIZARD_STEP_LABELS[s]} — {_STEP_FIX_HINT[s]}" for s in missing)
+    merged = {**state, **patch}
+    steps_txt = "; ".join(f"{_WIZARD_STEP_LABELS[s]} — {_step_fix_hint(s, merged)}" for s in missing)
     return (
         f"Out of order: ``{blocked_field}`` belongs to the "
         f"{_WIZARD_STEP_LABELS[target_step]} step, but earlier required steps are "

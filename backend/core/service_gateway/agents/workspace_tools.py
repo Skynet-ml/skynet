@@ -641,8 +641,7 @@ def workspace_tools(
             The tree text, ``{"note": ...}`` for an empty folder, or ``{"error": ...}``
             for a missing folder, the read limit, or a repository that cannot open.
         """
-        # A space can be part of a folder name, and git keeps it, so only the slashes go.
-        clean = path.strip("/")
+        clean = path.strip().strip("/")
         if not clean:
             return await browse(RepoBrowser.overview)
         return await browse(lambda browser: browser.list_repo_folder(clean))

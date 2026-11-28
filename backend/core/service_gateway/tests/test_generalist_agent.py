@@ -582,6 +582,24 @@ def test_a_local_folder_run_completes_the_task_step_with_its_folder_alone() -> N
     assert _screen_problems("artifact", git) == ["repository must be set as owner/name"]
 
 
+def test_the_order_hint_asks_a_local_run_for_the_folder_not_a_repository() -> None:
+    """A local run's Task hint asks the user for the folder and never asks for ``repository``."""
+    local = cast(WizardState, {"job_name": "Bot", "repo_provider": "local"})
+
+    local_err = validate_wizard_patch_order({"data_mode": "single"}, local)
+    git_err = validate_wizard_patch_order({"data_mode": "single"}, cast(WizardState, {"job_name": "Bot"}))
+
+    assert local_err is not None
+    assert "repo_path" in local_err
+    assert "never set ``repository``" in local_err
+    assert "(owner/name)" not in local_err
+    assert git_err is not None
+    assert "``repository`` (owner/name)" in git_err
+    patched = validate_wizard_patch_order({"repo_provider": "local", "data_mode": "single"}, local)
+    assert patched is not None
+    assert "repo_path" in patched
+
+
 @pytest.mark.parametrize("screen", ["artifact", "metric"])
 def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(screen: str) -> None:
     """The repository screens say a local folder has no host parts and its result is applied with Apply."""

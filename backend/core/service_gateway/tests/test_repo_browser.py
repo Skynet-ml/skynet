@@ -449,19 +449,29 @@ def test_reading_a_local_folder_leaves_it_unchanged(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("local_mode")
-def test_a_space_in_a_path_is_part_of_the_name(tmp_path: Path) -> None:
-    """The read tools strip only the slashes, so a name with a trailing space is read, and a padded path is not."""
-    root = _folder(tmp_path, {"notes ": "spaced\n", "notes": "plain\n", "dir /a.py": "x = 1\n"})
+def test_a_padded_path_reads_the_stripped_name(tmp_path: Path) -> None:
+    """The read tools strip spaces and slashes, as the draft tools do, so a padded path reads the plain file."""
+    root = _folder(tmp_path, {"notes": "plain\n", "dir/a.py": "x = 1\n"})
     browser = LocalFolderBrowser(root)
 
-    assert browser.read_repo_file("notes ") == "   1 spaced"
-    assert browser.read_repo_file("/notes/") == "   1 plain"
-    assert browser.read_repo_file(" notes") == {
-        "error": "No file named ' notes' in the folder. Check the tree for the exact path."
-    }
-    assert isinstance(browser.list_repo_folder("dir "), str)
-    assert browser.list_repo_folder("dir") == {"error": "No folder named 'dir' in the folder."}
-    assert read_folder_text(root, "notes ", 100) == ("spaced\n", False)
+    assert browser.read_repo_file(" notes ") == "   1 plain"
+    assert browser.read_repo_file(" /notes/ ") == "   1 plain"
+    assert isinstance(browser.list_repo_folder(" dir "), str)
+    assert isinstance(_browser(["src/app.py"]).list_repo_folder(" src "), str)
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_linked_folder_root_is_refused_and_a_linked_parent_is_not(tmp_path: Path) -> None:
+    """The run refuses a linked root, so the agent does too; a link above the folder still works."""
+    root = _folder(tmp_path / "real" / "shop", {"app.py": "x = 1\n"})
+    (tmp_path / "shop-link").symlink_to(root)
+    (tmp_path / "parent-link").symlink_to(tmp_path / "real")
+
+    with pytest.raises(LocalFolderError, match="The folder is a link"):
+        LocalFolderBrowser(tmp_path / "shop-link")
+    with pytest.raises(LocalFolderError, match="The folder is a link"):
+        read_folder_text(tmp_path / "shop-link", "app.py", 100)
+    assert LocalFolderBrowser(tmp_path / "parent-link" / "shop").branch == folder_source_id(root)
 
 
 def test_a_git_source_names_itself_a_repository_and_a_local_one_a_folder() -> None:
