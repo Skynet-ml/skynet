@@ -1688,7 +1688,7 @@ def test_staging_checks_a_local_drafts_base_against_the_folder(local_stack: Path
             _local_payload(folder, draft_files=drafts, draft_base=base), username="alice", binding_id="b", engine=None
         )
 
-    assert refused.value.code == I18nKey.REPO_GATE_DRAFT_BASE_MOVED
+    assert refused.value.code == I18nKey.REPO_GATE_DRAFT_FOLDER_CHANGED
 
 
 def test_a_later_hardening_pass_stages_the_pinned_local_commit(local_stack: Path, tmp_path: Path) -> None:

@@ -319,6 +319,7 @@ class I18nKey(StrEnum):
     QUOTA_REACHED = 'quota.reached'
     RATE_LIMIT_EXCEEDED = 'rate_limit.exceeded'
     REPO_GATE_DRAFT_BASE_MOVED = 'repo_gate.draft_base_moved'
+    REPO_GATE_DRAFT_FOLDER_CHANGED = 'repo_gate.draft_folder_changed'
     REPO_GATE_MANAGED_SECRET_UNAVAILABLE = 'repo_gate.managed_secret_unavailable'
     REPO_GATE_MISSING_MCP_SECRET = 'repo_gate.missing_mcp_secret'
     REPO_GATE_MISSING_SECRET = 'repo_gate.missing_secret'

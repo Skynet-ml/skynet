@@ -232,6 +232,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "repo_gate.unenforced_cloud": "ascent.toml sets {key}. The cloud sandbox cannot enforce this setting yet. Remove it to run.",
     "repo_gate.missing_secret": "The service {service} in ascent.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",
     "repo_gate.draft_base_moved": "The setup agent changed files on commit {base}, but the run would start from commit {commit}. The branch moved, and the changed files would undo its new commits. Set up the run again so the agent changes the files on the new commit.",
+    "repo_gate.draft_folder_changed": "The setup agent changed files in an older state of the folder. The folder changed after that, and the changed files would undo its new changes. Set up the run again so the agent changes the files in the current folder.",
     "repo_gate.missing_mcp_secret": "The MCP server {server} in {path} needs the secret {secret}, but this run has no secret with that name. Add the secret to the run.",
     "repo_gate.secret_host_not_allowed": "The secret {secret} may go only to {allowed}, but the repository sends it to {host}. Add {host} to the allowed hosts of {secret} in the run, or change the url.",
     "repo_gate.secret_host_unlisted": "The secret {secret} has no allowed hosts, but the repository sends it to {host}. Add {host} to the allowed hosts of {secret} in the run.",

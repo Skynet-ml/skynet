@@ -1166,3 +1166,32 @@ def test_a_metric_entry_passes_the_gate(tmp_path: Path, entry: bytes, place: str
     }
 
     assert check_repository(_archive(tmp_path, files), (), place=place) == []  # type: ignore[arg-type]
+
+
+def test_moved_drafts_on_a_git_source_name_the_branch_and_commits() -> None:
+    """A git run keeps the branch message with both short commits (SKY-1003)."""
+    [failure] = repo_gate.check_draft_base(True, "d" * 40, "c" * 40, place="cloud")
+
+    assert failure.code == I18nKey.REPO_GATE_DRAFT_BASE_MOVED
+    assert failure.params == {"base": "ddddddd", "commit": "ccccccc"}
+    assert "branch moved" in failure.reason
+
+
+def test_moved_drafts_on_a_local_folder_name_the_folder() -> None:
+    """A folder run gets a folder message with no branch or commit, and is told to set up again (SKY-1003)."""
+    [failure] = repo_gate.check_draft_base(True, "d" * 40, "c" * 40, place="local", local=True)
+
+    assert failure.code == I18nKey.REPO_GATE_DRAFT_FOLDER_CHANGED
+    assert failure.params == {}
+    assert "folder" in failure.reason
+    assert "Set up the run again" in failure.reason
+    assert "branch" not in failure.reason
+    assert "commit" not in failure.reason
+    assert "התיקייה" in t_locale("he", failure.code)
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_drafts_on_the_current_state_pass_on_every_source(local: bool) -> None:
+    """Drafts on the start commit or with no recorded base pass for git and folder runs (SKY-1003)."""
+    assert repo_gate.check_draft_base(True, "c" * 40, "c" * 40, place="local", local=local) == []
+    assert repo_gate.check_draft_base(True, None, "c" * 40, place="local", local=local) == []
