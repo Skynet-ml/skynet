@@ -424,6 +424,9 @@ def apply_version(
             drafted = _build_version(commit, patch, checkout, drafts, readonly_paths, deleted)
             changes = _changes(_scan(original), _scan(checkout))
             _check_rules(changes, drafted, editable_paths, blocked_paths, deleted)
+            # Deletes go first, so on a disk that ignores case a deleted Foo.py is gone
+            # before its drafted foo.py is written; Undo takes them back in reverse.
+            changes.sort(key=lambda change: change.after is not None)
             folder = _open_root(root)
             try:
                 conflicts = []
@@ -458,7 +461,7 @@ def apply_version(
             raise LocalFolderError(f"The folder could not be written: {error.strerror or error}") from None
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
-    return [change.path for change in changes]
+    return sorted(change.path for change in changes)
 
 
 def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
@@ -809,6 +812,9 @@ def _read_disk(folder: int, path: str) -> tuple[_Disk, bytes | None, int | None]
             status = os.fstat(body.fileno())
             if not stat.S_ISREG(status.st_mode):
                 return "other", None, None
+            # A disk that ignores case opens Foo.py for foo.py, so only the exact name counts.
+            if parts[-1] not in os.listdir(parent):  # noqa: PTH208 - pathlib cannot list a folder descriptor.
+                return None, None, None
             data = body.read()
     finally:
         os.close(parent)
@@ -896,7 +902,7 @@ def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: b
         OSError: With ``strict``, when a write fails.
     """
     restored = True
-    for change in changes:
+    for change in reversed(changes):
         try:
             _put(folder, change.path, change.after, change.before_data, change.before_mode, [])
         except (OSError, LocalFolderConflictError):
