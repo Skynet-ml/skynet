@@ -4,6 +4,7 @@
  * message-markdown.render.test.ts spawns it through jiti inside `npm run test:unit`.
  */
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import { after, test } from "node:test";
 import * as React from "react";
 import { JSDOM } from "jsdom";
@@ -78,6 +79,14 @@ Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", {
 dom.window.__APP_MESSAGES__ = buildActiveCatalog("en");
 localStorage.setItem("skynet:code-appearance", JSON.stringify({ font: '"Fira Code"', size: 15 }));
 
+// The lazy KaTeX module imports its stylesheet, which node cannot load.
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url.endsWith(".css")) return { format: "module", source: "export {};", shortCircuit: true };
+    return nextLoad(url, context);
+  },
+});
+
 const { createRoot } = await import("react-dom/client");
 const { MessageMarkdown } = await import("./message-markdown");
 
@@ -148,5 +157,19 @@ void test("shows an svg fence's source when its image fails to load", async () =
     container.querySelector("pre")?.textContent?.includes("<svg><bad"),
     container.innerHTML,
   );
+  await unmount();
+});
+
+void test("shows a latex fence that KaTeX cannot draw as highlighted code", async () => {
+  const tex = "\\documentclass{article}\n\\begin{document}\nHi\n\\end{document}";
+  const { container, unmount } = await mount(`\`\`\`latex\n${tex}\n\`\`\``);
+  // Wait for the lazy KaTeX module, its failed render and the throttled highlighter.
+  for (let i = 0; i < 50 && !container.querySelector("pre code span[style]"); i += 1)
+    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+  assert.ok(button(container, "Enable word wrap"), container.innerHTML);
+  assert.equal(button(container, "Show source"), null, container.innerHTML);
+  assert.equal(button(container, "Show preview"), null, container.innerHTML);
+  assert.ok(container.querySelector("pre code span[style]"), container.innerHTML);
+  assert.ok(container.querySelector("pre")?.textContent?.includes("\\documentclass"));
   await unmount();
 });

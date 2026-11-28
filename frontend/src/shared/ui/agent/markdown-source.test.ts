@@ -138,6 +138,11 @@ test("svgDataUrl adds the SVG namespace only when the root has none", () => {
   assert.equal(svg(own), own);
 });
 
+test("svgDataUrl does not throw on a lone surrogate", () => {
+  const url = svgDataUrl("<svg>\ud83d</svg>");
+  assert.ok(url.includes("%EF%BF%BD"), url);
+});
+
 test("guessLanguage names an untagged fence only on a strong sign", () => {
   assert.equal(guessLanguage('{"a": [1, 2]}'), "json");
   assert.equal(guessLanguage("{not json"), "");
@@ -173,6 +178,12 @@ test("guessLanguage names an untagged fence only on a strong sign", () => {
     "TODO: fix\nNOTE: later",
     "Q: why?\nA: because",
     "Usage: foo\nOptions:",
+    "from here import that",
+    "class Notes:",
+    "git push to the remote when done",
+    "cd to the /tmp folder",
+    "npm is great --really",
+    "Steps:\n  - Install\n  - Run",
   ])
     assert.equal(guessLanguage(prose), "", prose);
   assert.equal(guessLanguage("cd ./app\nls -la"), "bash");
@@ -181,4 +192,8 @@ test("guessLanguage names an untagged fence only on a strong sign", () => {
   assert.equal(guessLanguage("const id: string = f();"), "typescript");
   assert.equal(guessLanguage("function f(): number {}"), "typescript");
   assert.equal(guessLanguage("let x = f(1);"), "javascript");
+  assert.equal(guessLanguage("class A:\n    pass"), "python");
+  assert.equal(guessLanguage("from os import path\nprint(path)"), "python");
+  assert.equal(guessLanguage("git push origin main"), "bash");
+  assert.equal(guessLanguage('git commit -m "fix the bug"'), "bash");
 });

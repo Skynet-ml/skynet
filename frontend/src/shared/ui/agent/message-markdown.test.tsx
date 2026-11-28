@@ -109,6 +109,11 @@ void describe("MessageMarkdown", () => {
     assert.ok(!html.includes('aria-label="Enable word wrap"'), html);
   });
 
+  void it("draws an svg fence with a lone surrogate without a crash", () => {
+    const html = render("```svg\n<svg>\ud83d</svg>\n```");
+    assert.ok(html.includes('<img src="data:image/svg+xml;charset=utf-8,'), html);
+  });
+
   void it("keeps a streaming svg fence as code until it closes", () => {
     const html = render("```svg\n<svg>", undefined, true);
     assert.ok(!html.includes("<img"), html);

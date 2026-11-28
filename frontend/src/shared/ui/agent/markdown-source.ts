@@ -266,7 +266,9 @@ export function isSvgFence(language: string, code: string): boolean {
  * An `<img>` shows no SVG without the SVG namespace, so a root `<svg>` with none gets it.
  */
 export function svgDataUrl(code: string): string {
+  // encodeURIComponent throws on a lone surrogate, so that one becomes U+FFFD first.
   const svg = code
+    .toWellFormed()
     .trim()
     .replace(/<svg\b(?![^>]*\sxmlns=)/i, '<svg xmlns="http://www.w3.org/2000/svg"');
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
@@ -274,6 +276,8 @@ export function svgDataUrl(code: string): string {
 
 const SHELL_COMMAND =
   /^(sudo|npm|npx|pnpm|yarn|pip3?|uv|git|cd|ls|curl|wget|brew|docker|kubectl|export|echo|mkdir|chmod|cargo|just)( |$)/;
+// Function words that prose has and a command line almost never has outside its quotes.
+const PROSE_WORD = /(^|\s)(the|to|is|are|and|when|then|into|you|your)(?=\s|$)/i;
 // A flag, a path, an assignment, or a package manager or git with a known subcommand.
 const SHELL_SIGN =
   /\s--?\w|\s(\.\/|\/|~|\$)|\w+=|^(sudo )?npx \S|^(sudo )?(npm|pnpm|yarn|pip3?|uv|git|brew|docker|kubectl|cargo) (install|add|i|ci|run|exec|init|build|test|clone|status|commit|push|pull|checkout|log|diff|ps|apply|get)\b/;
@@ -307,7 +311,10 @@ const GUESSES: Array<[string, (code: string) => boolean]> = [
       const lines = c.split("\n").filter((l) => l.trim() && !/^\s*#/.test(l));
       return (
         lines.length > 0 &&
-        lines.every((l) => SHELL_COMMAND.test(l.trim())) &&
+        lines.every(
+          (l) =>
+            SHELL_COMMAND.test(l.trim()) && !PROSE_WORD.test(l.replace(/(["'])[^"'\n]*\1/g, "")),
+        ) &&
         SHELL_SIGN.test(lines[0]!.trim())
       );
     },
@@ -315,7 +322,8 @@ const GUESSES: Array<[string, (code: string) => boolean]> = [
   [
     "python",
     (c) =>
-      /^\s*(def \w+\(.*\)( -> .+)?:|class \w+(\(.*\))?:|from [\w.]+ import |import \w+(\.\w+)*\s*$|if __name__ ==|elif .+:)/m.test(
+      // A class needs an indented body, and a one-word module import needs a next line, as prose has neither.
+      /^\s*(def \w+\(.*\)( -> .+)?:|class \w+(\(.*\))?:[ \t]*\n[ \t]+\S|from (\w+\.)+\w+ import |from \w+ import .*\n|import \w+(\.\w+)*\s*$|if __name__ ==|elif .+:)/m.test(
         c,
       ),
   ],
@@ -356,7 +364,9 @@ const GUESSES: Array<[string, (code: string) => boolean]> = [
         /^[\w.-]+:( |$)/.test(lines[0]!) &&
         lines.every((l) => /^\s*(- .*|-$|[\w.-]+:( .*)?)$/.test(l)) &&
         // Prose like "Error: x" then "Hint: y" also has key lines, so YAML needs nesting.
-        lines.some((l) => /^\s+\S/.test(l) || /^\s*- [\w.-]+:( |$)/.test(l))
+        lines.some((l) => /^\s+\S/.test(l) || /^\s*- [\w.-]+:( |$)/.test(l)) &&
+        // A heading over a bullet list has one key, so YAML needs two.
+        lines.filter((l) => /^\s*(- )?[\w.-]+:( |$)/.test(l)).length >= 2
       );
     },
   ],

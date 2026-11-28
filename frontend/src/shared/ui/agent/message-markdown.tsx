@@ -257,10 +257,18 @@ function MathFallback({ tex }: { tex: string }) {
   return <code dir="ltr">{tex}</code>;
 }
 
-function MathFormula({ tex, display }: { tex: string; display: boolean }) {
+function MathFormula({
+  tex,
+  display,
+  onError,
+}: {
+  tex: string;
+  display: boolean;
+  onError?: () => void;
+}) {
   return (
     <React.Suspense fallback={<MathFallback tex={tex} />}>
-      <MarkdownMath tex={tex} display={display} />
+      <MarkdownMath tex={tex} display={display} onError={onError} />
     </React.Suspense>
   );
 }
@@ -491,6 +499,8 @@ const urlTransform: UrlTransform = (url, key, node) =>
 function PreBlock({ end, children }: { end?: number; children?: React.ReactNode }) {
   const { userTone, openFenceEnd } = React.useContext(MarkdownContext);
   const [svgFailed, setSvgFailed] = React.useState(false);
+  const [mathFailed, setMathFailed] = React.useState(false);
+  const onMathError = React.useCallback(() => setMathFailed(true), []);
   const child = React.Children.toArray(children).find(
     (c): c is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
       React.isValidElement(c),
@@ -519,8 +529,9 @@ function PreBlock({ end, children }: { end?: number; children?: React.ReactNode 
       className="max-h-96 max-w-full"
       onError={() => setSvgFailed(true)}
     />
-  ) : isMathFence(language) ? (
-    <MathFormula tex={code} display />
+  ) : isMathFence(language) && !mathFailed ? (
+    // TeX that KaTeX cannot draw, such as a whole document, shows as highlighted code.
+    <MathFormula tex={code} display onError={onMathError} />
   ) : undefined;
   // As in Codex, a fence with no tag gets a guessed language; text outside fences gets none.
   return (
