@@ -308,6 +308,58 @@ def test_file_found_returns_its_text(store: FakeJobStore, github: _FakeGithub) -
     assert len(github.calls) == 1
 
 
+def _seed_deleting_run(store: FakeJobStore) -> None:
+    """Seed a run on the same commit whose setup deleted ``src/main.py`` and wrote ``README.md/notes.txt``.
+
+    Args:
+        store: Fake job store.
+    """
+    store.seed_job(
+        "deleting-run",
+        payload={
+            "username": "alice",
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "repository": "acme/app",
+                    "commit": COMMIT,
+                    "editable_paths": ["."],
+                    "draft_files": {"README.md/notes.txt": "n\n"},
+                    "draft_deleted": ["src/main.py", "README.md"],
+                },
+            },
+        },
+    )
+
+
+def test_tree_and_file_routes_leave_out_the_run_deleted_files(store: FakeJobStore, github: _FakeGithub) -> None:
+    """A deleted file and the folder it emptied leave the run's tree, and the file reads as missing (SKY-997).
+
+    A deleted file may come back as a folder of draft files, as the deletes apply first.
+    """
+    _seed_deleting_run(store)
+    client = _client(store)
+
+    tree = client.get("/optimizations/deleting-run/repository/tree").json()
+    gone = client.get("/optimizations/deleting-run/repository/file", params={"path": "src/main.py"}).json()
+    plain = client.get("/optimizations/repo-run/repository/tree").json()
+
+    assert tree["entries"] == [
+        {"path": "README.md", "type": "dir", "size": None},
+        {"path": "README.md/notes.txt", "type": "file", "size": 2},
+    ]
+    assert gone == {
+        "path": "src/main.py",
+        "content": None,
+        "binary": False,
+        "too_large": False,
+        "missing": True,
+        "size": None,
+    }
+    assert [entry["path"] for entry in plain["entries"]] == ["README.md", "src", "src/main.py"]
+    assert [call[0] for call in github.calls] == [TREE_PATH]
+
+
 def test_file_missing_at_the_commit_is_not_an_error(store: FakeJobStore, github: _FakeGithub) -> None:
     """A path the commit lacks, as a version's new file, reads as missing."""
     response = _client(store).get("/optimizations/repo-run/repository/file", params={"path": "src/new.py"})
