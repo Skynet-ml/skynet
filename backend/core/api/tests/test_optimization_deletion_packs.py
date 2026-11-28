@@ -210,12 +210,13 @@ def test_a_long_queued_run_keeps_the_pack_it_just_wrote(client: TestClient, stor
     assert kept.is_file()
 
 
+@pytest.mark.parametrize("created", ["not a time", None, 0], ids=["unreadable", "missing", "not-a-string"])
 def test_a_local_run_without_a_commit_or_a_readable_start_time_keeps_every_pack(
-    client: TestClient, store: _BaseFakeJobStore
+    client: TestClient, store: _BaseFakeJobStore, created: Any
 ) -> None:
     """A start time the cleanup cannot read counts as recent, so the pack stays."""
     _local_run(store, "done", COMMIT)
-    _local_run(store, "starting", None, status="running", created_at="not a time")
+    _local_run(store, "starting", None, status="running", created_at=created)
     kept = _pack(COMMIT)
 
     assert client.delete("/optimizations/done").status_code == 200
