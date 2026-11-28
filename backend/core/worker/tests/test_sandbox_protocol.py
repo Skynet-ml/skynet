@@ -49,6 +49,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     22: {"blackbox": "3e02206ab3dc54ab"},
     # target.repo.provider "local" and target.repo.path: a folder on this computer (SKY-990).
     23: {"blackbox": "e87133d61d8c74a2"},
+    # target.repo.draft_deleted: the folder files the setup shell deleted (SKY-997).
+    24: {"blackbox": "d70b43449d3621dd"},
 }
 
 

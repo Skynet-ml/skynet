@@ -78,12 +78,13 @@ from ..optimization.training_ground.registry import hash_tool_schema
 from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
 from .approval_choices import declined_result, take_approval_choice
-from .attachment_sandbox import EXEC_COMMAND_TOOL, FILE_TOOLS_PROMPT, WRITE_STDIN_TOOL
+from .attachment_sandbox import EXEC_COMMAND_TOOL, FILE_TOOLS_PROMPT, WRITE_STDIN_TOOL, chat_file_loader
 from .auto_review import AutoReviewer
 from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
 from .feedback import FeedbackTarget, send_feedback_tool
+from .folder_workspace import FolderWorkspace, live_workspace, saved_setup_secrets
 from .github_mcp import github_repo_tools, tool_from_mcp
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
@@ -92,6 +93,8 @@ from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
 from .workspace_tools import (
     EDIT_FILE_TOOL,
+    FOLDER_FILES_PROMPT,
+    FOLDER_SHELL_TOOLS,
     LIST_REPO_TOOL,
     METRIC_GUIDE,
     READ_REPO_TOOL,
@@ -100,6 +103,7 @@ from .workspace_tools import (
     diagnostic_text,
     has_error,
     model_diagnostics,
+    open_folder_shell,
     workspace_tools,
 )
 
@@ -984,6 +988,19 @@ class _ApprovalGatedTool:
         return {**serialized, "wizard_state": {k: v for k, v in patch.items() if k != "job_name"}}
 
 
+def _never_ask(tool_name: str, trust_mode: TrustMode) -> bool:
+    """Ask for no approval, the policy of the folder shell's tools.
+
+    Args:
+        tool_name: The tool's name.
+        trust_mode: The caller's trust level.
+
+    Returns:
+        Always False.
+    """
+    return False
+
+
 def _wrap_tool_with_approval(
     tool: dspy.Tool,
     *,
@@ -1096,6 +1113,8 @@ class WizardState(TypedDict, total=False):
     workspace_files: dict[str, str]
     # The commit the workspace tools read the draft files at; the run refuses them on any other commit.
     workspace_base: str
+    # The folder files the Mac setup agent's shell deleted (SKY-997); the run removes them from its tree.
+    workspace_deleted: list[str]
     # The wizard screen on view (see ``_SCREEN_FIELDS``). Absent when the
     # wizard is not on screen, which leaves the agent unscoped.
     wizard_screen: str
@@ -3839,6 +3858,52 @@ async def _drive_generalist_agent(
             for spec in listing.tools
             if spec.name in allowed_names
         ]
+        session_key = feedback_target.conversation_id if feedback_target else None
+        setup_secrets = (
+            partial(saved_setup_secrets, feedback_target.engine, feedback_target.username) if feedback_target else None
+        )
+        attachments = (
+            chat_file_loader(feedback_target.engine, feedback_target.username, feedback_target.conversation_id)
+            if feedback_target
+            else None
+        )
+        shell: list[FolderWorkspace | str] = []
+        # A chat with no wizard screen still gets ``ask_user``; a screen chat
+        # has it among its own tools.
+        own_tools = (
+            [
+                *screen_nav_tools(wizard_state, authoring_flag),
+                *workspace_tools(
+                    wizard_state,
+                    authoring_flag,
+                    github_token=github_token,
+                    session_key=session_key,
+                    setup_secrets=setup_secrets,
+                    attachments=attachments,
+                    shell=shell,
+                ),
+            ]
+            if screen is not None
+            else [ask_user_tool(authoring_flag)]
+        )
+        folder_shell = any(tool.name in FOLDER_SHELL_TOOLS for tool in own_tools)
+        if folder_shell and file_tools:
+            # The folder shell takes the attachment shell's tool names, so the copy opens now: a copy that
+            # cannot open leaves the attachment shell in place (SKY-997).
+            shell.append(
+                await asyncio.to_thread(
+                    open_folder_shell, dict(wizard_state), cast(str, session_key), setup_secrets, attachments
+                )
+            )
+            if isinstance(shell[0], str):
+                own_tools = [tool for tool in own_tools if tool.name not in FOLDER_SHELL_TOOLS]
+                folder_shell = False
+        # The folder shell has the attachment shell's tool names, and its commands run in the folder copy.
+        files_prompt = FILE_TOOLS_PROMPT if file_tools else None
+        if folder_shell:
+            # The attached files stay readable there, next to the copy (SKY-997).
+            files_prompt = FOLDER_FILES_PROMPT if file_tools else None
+            file_tools = None
         dspy_tools += [
             _wrap_tool_with_approval(
                 tool,
@@ -3871,16 +3936,6 @@ async def _drive_generalist_agent(
                     approval_owner=approval_owner,
                 )
             )
-        # A chat with no wizard screen still gets ``ask_user``; a screen chat
-        # has it among its own tools.
-        own_tools = (
-            [
-                *screen_nav_tools(wizard_state, authoring_flag),
-                *workspace_tools(wizard_state, authoring_flag, github_token=github_token),
-            ]
-            if screen is not None
-            else [ask_user_tool(authoring_flag)]
-        )
         dspy_tools += [
             _wrap_tool_with_approval(
                 tool,
@@ -3890,6 +3945,8 @@ async def _drive_generalist_agent(
                 outer_loop=outer_loop,
                 wizard_state=wizard_state,
                 authoring_flag=authoring_flag,
+                # The folder shell writes only a private copy of the folder, so its commands need no card (SKY-997).
+                needs_approval=_never_ask if tool.name in FOLDER_SHELL_TOOLS else None,
                 approval_owner=approval_owner,
             )
             for tool in own_tools
@@ -3913,8 +3970,8 @@ async def _drive_generalist_agent(
             if screen is None
             else screen_signature(screen or "", reply_language, cloned=bool(wizard_state.get("cloned_run")))
         )
-        if file_tools:
-            signature = signature.with_instructions(f"{signature.instructions}\n\n{FILE_TOOLS_PROMPT}")
+        if files_prompt:
+            signature = signature.with_instructions(f"{signature.instructions}\n\n{files_prompt}")
         if images:
             signature = signature.append(
                 _IMAGES_FIELD,
@@ -3947,17 +4004,23 @@ async def _drive_generalist_agent(
         }
         if images:
             inputs[_IMAGES_FIELD] = [dspy.Image(url=uri) for uri in images]
-        reply_text = await run_react_turn_on_pi(
-            react,
-            inputs,
-            lm,
-            emit=emit,
-            output_field="assistant_message",
-            input_field="user_message",
-            binary=settings.pi_binary,
-            pending_skip=_PENDING_SKIP,
-            steer_inbox=inbox,
-        )
+        try:
+            reply_text = await run_react_turn_on_pi(
+                react,
+                inputs,
+                lm,
+                emit=emit,
+                output_field="assistant_message",
+                input_field="user_message",
+                binary=settings.pi_binary,
+                pending_skip=_PENDING_SKIP,
+                steer_inbox=inbox,
+            )
+        except asyncio.CancelledError:
+            # Stop ends the turn; a command that still runs in the folder copy must end with it.
+            if folder_shell and feedback_target and (workspace := live_workspace(feedback_target.conversation_id)):
+                workspace.stop_commands()
+            raise
         _require_answer(None, reply_text, next_step="Send your message again or pick a different model.")
         return reply_text
 

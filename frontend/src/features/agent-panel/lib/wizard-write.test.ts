@@ -190,6 +190,14 @@ test("a file tool's patch merges its file over the files the state holds", () =>
   assert.equal(mergedPatch(state, plain), plain);
 });
 
+test("a shell delete takes its file out of the merged files (SKY-997)", () => {
+  const state = { workspace_files: { "src/a.py": "a = 1\n", "src/b.py": "b = 1\n" } };
+  assert.deepEqual(mergedPatch(state, { workspace_deleted: ["src/a.py"] }), {
+    workspace_deleted: ["src/a.py"],
+    workspace_files: { "src/b.py": "b = 1\n" },
+  });
+});
+
 // SKY-743: a finished write keeps its place in its group as a step row; only
 // one with nothing to show turns into an (empty) card.
 test("a wizard write stays a step unless it finished with no change", () => {

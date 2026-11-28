@@ -6,6 +6,9 @@ import asyncio
 import importlib
 import json
 import os
+import subprocess
+import sys
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,8 +26,11 @@ from core.connectors.github_repo import RepoRateLimitError
 from core.local import folder_tree
 from core.local.folder_tree import folder_source_id
 from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
+from core.service_gateway.agents import apply_patch as apply_patch_module
+from core.service_gateway.agents import folder_workspace, pi_bridge, pi_react, repo_browser, workspace_tools
 from core.service_gateway.agents import generalist as generalist_module
-from core.service_gateway.agents import pi_react, repo_browser, workspace_tools
+from core.service_gateway.agents.attachment_sandbox import FILE_TOOLS_PROMPT
+from core.service_gateway.agents.feedback import FeedbackTarget
 from core.service_gateway.agents.generalist import (
     REPO_COLUMN_MAPPING,
     SCREEN_FOCUS,
@@ -41,10 +47,15 @@ from core.service_gateway.agents.generalist import (
 from core.service_gateway.agents.workspace_tools import (
     ASCENT_TOML_EXAMPLE,
     EDIT_FILE_TOOL,
+    FOLDER_CHANGED,
+    FOLDER_COPY_CLOSED,
+    FOLDER_FILES_PROMPT,
+    FOLDER_SHELL_TOOLS,
     LIST_REPO_TOOL,
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
+    has_drafts,
     open_folder,
     open_repo,
 )
@@ -1781,7 +1792,9 @@ async def test_a_local_folder_that_changed_after_the_drafts_is_refused(
 
     assert result == {
         "error": "The folder changed after the draft files were written, so the run would refuse them. "
-        "Ask the user to discard the changed files in the editor, then read the folder again."
+        "Ask the user to discard the changed files in the editor. The editor does not list deleted files: to undo "
+        "them, the user can choose another folder and then this folder again, which drops every draft. "
+        "Then read the folder again."
     }
     stale_base_no_drafts = {**state, "workspace_base": "b" * 40}
     assert isinstance(
@@ -1890,3 +1903,642 @@ def test_open_folder_refuses_a_folder_larger_than_the_agent_can_read_before_any_
     assert "more than the setup agent can read" in reason
     assert "for a run" not in reason
     assert digests == []
+
+
+on_mac = pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(), reason="needs macOS sandbox-exec"
+)
+
+
+def _shell_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[dict[str, Any], Path]:
+    """Make a local folder run whose folder copies go to a test state folder.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        tmp_path: The test's folder.
+
+    Returns:
+        The Metric screen state and the user's folder.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    state = _local_folder(monkeypatch, root)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
+    monkeypatch.setattr(folder_workspace, "_WORKSPACES", {})
+    monkeypatch.setattr(folder_workspace, "_KEY_LOCKS", {})
+    monkeypatch.setattr(folder_workspace, "_ABORTED", set())
+    return state, root
+
+
+def _shell_tools(state: dict[str, Any], turn: _TurnAuthoringFlag, key: str | None = "chat-1") -> dict[str, dspy.Tool]:
+    """Build the workspace tools for one chat, by name.
+
+    Args:
+        state: The wizard state.
+        turn: The turn's shared flag.
+        key: The chat id.
+
+    Returns:
+        The tools by name.
+    """
+    tools = build_workspace_tools(WizardState(**state), turn, github_token=None, session_key=key)
+    return {tool.name: tool for tool in tools}
+
+
+@pytest.fixture
+def close_copies() -> Any:
+    """Delete every folder copy a test opened.
+
+    Yields:
+        Nothing.
+    """
+    yield
+    for key in list(folder_workspace._WORKSPACES):
+        folder_workspace.close_workspace(key)
+
+
+def test_the_shell_tools_show_only_for_a_local_folder_in_the_desktop_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Outside local mode, without a chat id, or on a git run, the agent gets no shell tools."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    assert set(_shell_tools(state, _TurnAuthoringFlag())) >= FOLDER_SHELL_TOOLS
+    assert not FOLDER_SHELL_TOOLS & set(_shell_tools(state, _TurnAuthoringFlag(), key=None))
+    assert not FOLDER_SHELL_TOOLS & set(_shell_tools(_REPO_METRIC, _TurnAuthoringFlag()))
+    monkeypatch.setattr(settings, "local_mode", False)
+    assert not FOLDER_SHELL_TOOLS & set(_shell_tools(state, _TurnAuthoringFlag()))
+
+
+@pytest.mark.asyncio
+async def test_an_apply_patch_edit_becomes_a_draft_and_the_folder_stays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A patch edit and a delete reach the turn's draft and the editor; the user's file keeps its text."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    result = await tools["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Update File: src/app.py\n@@\n-x = 1\n+x = 2\n"
+        "*** Delete File: README.md\n*** End Patch"
+    )
+
+    snapshot = folder_source_id(root)
+    assert result == {
+        "output": "M src/app.py\nD README.md",
+        "wizard_state": {
+            "workspace_files": {"src/app.py": "x = 2\n"},
+            "workspace_deleted": ["README.md"],
+            "workspace_base": snapshot,
+        },
+    }
+    assert turn.wizard_patch == {
+        "workspace_files": {"src/app.py": "x = 2\n"},
+        "workspace_deleted": ["README.md"],
+        "workspace_base": snapshot,
+    }
+    assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert (root / "README.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_bad_patch_returns_the_reason_and_changes_no_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A hunk that does not match gives an error, and the turn's draft stays empty."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Update File: src/app.py\n@@\n-not here\n+x\n*** End Patch"
+    )
+
+    assert list(result) == ["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_a_write_reaches_the_copy_and_a_later_patch_builds_on_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The copy starts from the drafts, and a write after it opens goes into it too."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    drafted = {
+        **state,
+        "workspace_base": folder_source_id(tmp_path / "project"),
+        "workspace_files": {"src/app.py": "x = 5\n"},
+    }
+    tools = _shell_tools(drafted, turn)
+
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: notes.txt\n+n\n*** End Patch")
+    await tools[WRITE_FILE_TOOL].acall(path="README.md", text="# Draft\n")
+    result = await tools["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Update File: README.md\n@@\n-# Draft\n+# Draft 2\n"
+        "*** Update File: src/app.py\n@@\n-x = 5\n+x = 6\n*** End Patch"
+    )
+
+    assert result["wizard_state"]["workspace_files"] == {"README.md": "# Draft 2\n", "src/app.py": "x = 6\n"}
+    assert turn.wizard_patch["workspace_files"] == {
+        "src/app.py": "x = 6\n",
+        "notes.txt": "n\n",
+        "README.md": "# Draft 2\n",
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_shell_refuses_drafts_of_an_older_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """Drafts based on another folder state get the same refusal the read tools give."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    drafted = {**state, "workspace_base": "b" * 40, "workspace_files": {"src/app.py": "x = 2\n"}}
+
+    result = await _shell_tools(drafted, _TurnAuthoringFlag())["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch"
+    )
+
+    assert result == {"error": FOLDER_CHANGED}
+
+
+@pytest.mark.asyncio
+async def test_a_patch_that_drops_a_rules_file_from_ascent_toml_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The rules-file guard of the write tool holds for shell edits too, and the copy gets its file back."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "ascent.toml").write_text(ASCENT_TOML_EXAMPLE, encoding="utf-8")
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+    removed = [line for line in ASCENT_TOML_EXAMPLE.splitlines() if line.startswith("instructions = ")]
+    assert removed
+
+    result = await tools["apply_patch"].acall(
+        patch=f"*** Begin Patch\n*** Update File: ascent.toml\n@@\n-{removed[0]}\n*** End Patch"
+    )
+
+    assert "drops instructions" in result["skipped_files"]["ascent.toml"]
+    assert "ascent_toml" not in turn.wizard_patch
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert (workspace.folder / "ascent.toml").read_text(encoding="utf-8") == ASCENT_TOML_EXAMPLE
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_shell_edit_becomes_a_draft_and_the_folder_stays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file a command writes reaches the turn's draft, and the command cannot write the user's folder."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    result = await tools["exec_command"].acall(
+        cmd=f"echo 'x = 3' > src/app.py && mkdir -p node_modules/a && echo j > node_modules/a/i.js; "
+        f"echo bad > {root}/README.md; echo done"
+    )
+
+    assert "done" in result["output"]
+    assert result["wizard_state"]["workspace_files"] == {"src/app.py": "x = 3\n"}
+    assert turn.wizard_patch["workspace_files"] == {"src/app.py": "x = 3\n"}
+    assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert (root / "README.md").read_text(encoding="utf-8") == "# Shop\n"
+
+
+@pytest.mark.asyncio
+async def test_a_setup_turn_runs_the_folder_shell_in_ask_mode_with_no_card(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """In ask mode a patch runs at once and reaches the editor; the attachment shell tools are left out."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    state, root = _shell_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(generalist_module, "saved_setup_secrets", lambda *_args: [])
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield the fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession(["update_wizard_state"])
+
+    def attachment_shell(**_kwargs: Any) -> str:
+        """Fail the test when the attachment shell runs."""
+        raise AssertionError("the attachment shell ran in place of the folder shell")
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    monkeypatch.setattr(dspy.Tool, "from_mcp_tool", staticmethod(_mcp_tool))
+    patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-x = 1\n+x = 2\n*** End Patch"
+    lm = _ScriptedLM(
+        [("apply_patch", {"patch": patch}), ("submit", {"assistant_message": "x is 2 now. Run the check?"})]
+    )
+    events: list[dict] = []
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(**state),
+        chat_history=[],
+        user_message="Set x to 2.",
+        trust_mode="ask",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        lm=lm,
+        reply_language="English",
+        feedback_target=FeedbackTarget(cast(Any, None), "alice", "chat-1", None),
+        file_tools=[dspy.Tool(attachment_shell, name="exec_command", desc="x", args={}, arg_types={}, arg_desc={})],
+    )
+
+    assert reply == "x is 2 now. Run the check?"
+    names = [t["function"]["name"] for t in lm.requests[0]["tools"]]
+    assert names.count("exec_command") == 1
+    assert {"apply_patch", "write_stdin"} <= set(names)
+    assert not [e for e in events if e["event"].startswith("approval")]
+    end = next(e for e in events if e["event"] == "tool_end" and e["data"]["tool"] == "apply_patch")
+    assert end["data"]["result"]["wizard_state"]["workspace_files"] == {"src/app.py": "x = 2\n"}
+    assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    system = next(m["content"] for m in lm.requests[0]["messages"] if m["role"] == "system")
+    assert FOLDER_FILES_PROMPT in system
+
+
+@pytest.mark.asyncio
+async def test_a_folder_copy_that_cannot_open_keeps_the_attachment_shell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A folder past the copy limit gives no folder shell, so the attached files stay readable (SKY-997)."""
+    monkeypatch.setattr(settings, "firecrawl_api_key", None)
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(generalist_module, "saved_setup_secrets", lambda *_args: [])
+    monkeypatch.setattr(folder_workspace, "COPY_BYTES_MAX", 1)
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield the fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession(["update_wizard_state"])
+
+    def attachment_shell(**_kwargs: Any) -> str:
+        """Answer like the attachment shell."""
+        return "attachment shell"
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    monkeypatch.setattr(dspy.Tool, "from_mcp_tool", staticmethod(_mcp_tool))
+    lm = _ScriptedLM([("submit", {"assistant_message": "I read the file. Which test counts?"})])
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(**state),
+        chat_history=[],
+        user_message="Read my file.",
+        trust_mode="auto_safe",
+        registry=ApprovalRegistry(),
+        emit=[].append,
+        lm=lm,
+        reply_language="English",
+        feedback_target=FeedbackTarget(cast(Any, None), "alice", "chat-1", None),
+        file_tools=[
+            dspy.Tool(attachment_shell, name="exec_command", desc="attachments", args={}, arg_types={}, arg_desc={})
+        ],
+    )
+
+    assert reply == "I read the file. Which test counts?"
+    tools = {t["function"]["name"]: t["function"] for t in lm.requests[0]["tools"]}
+    assert tools["exec_command"]["description"] == "attachments"
+    assert "apply_patch" not in tools
+    assert "write_stdin" not in tools
+    system = next(m["content"] for m in lm.requests[0]["messages"] if m["role"] == "system")
+    assert FILE_TOOLS_PROMPT in system
+    assert FOLDER_FILES_PROMPT not in system
+
+
+@pytest.mark.asyncio
+async def test_a_file_written_again_after_a_delete_shows_in_the_same_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A deleted file that the agent writes again is in the tree and readable again in the same turn."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Delete File: README.md\n*** End Patch")
+    assert "error" in await tools[READ_REPO_TOOL].acall(path="README.md")
+    assert "README.md" not in await tools[LIST_REPO_TOOL].acall(path="")
+    await tools[WRITE_FILE_TOOL].acall(path="README.md", text="# New\n")
+
+    assert "workspace_deleted" not in turn.wizard_patch or not turn.wizard_patch["workspace_deleted"]
+    assert await tools[READ_REPO_TOOL].acall(path="README.md") == "   1 # Shop"
+    assert "README.md" in await tools[LIST_REPO_TOOL].acall(path="")
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_shell_delete_lasts_into_the_next_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file a command deletes goes into ``workspace_deleted``, and the next turn's copy starts without it."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["exec_command"].acall(cmd="rm README.md && echo done")
+
+    assert result["wizard_state"]["workspace_deleted"] == ["README.md"]
+    assert turn.wizard_patch["workspace_deleted"] == ["README.md"]
+    next_state = {**state, **turn.wizard_patch}
+    next_turn = _TurnAuthoringFlag()
+    again = await _shell_tools(next_state, next_turn)["exec_command"].acall(cmd="ls")
+    assert "README.md" not in again["output"]
+    assert "workspace_deleted" not in again.get("wizard_state", {})
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert not (workspace.folder / "README.md").exists()
+    assert (root / "README.md").exists()
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_shell_delete_of_a_new_draft_file_drops_the_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file apply_patch added and a command then deletes leaves ``workspace_files``."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: notes.txt\n+n\n*** End Patch")
+    assert turn.wizard_patch["workspace_files"] == {"notes.txt": "n\n"}
+    await tools["exec_command"].acall(cmd="rm notes.txt")
+
+    assert turn.wizard_patch["workspace_files"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_patch_that_deletes_ascent_toml_is_refused_and_the_copy_keeps_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The contract file cannot be deleted, so the copy gets the folder's file back."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "ascent.toml").write_text(_VALID_TOML, encoding="utf-8")
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Delete File: ascent.toml\n*** End Patch"
+    )
+
+    assert "cannot be deleted" in result["skipped_files"]["ascent.toml"]
+    assert "workspace_deleted" not in turn.wizard_patch
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert (workspace.folder / "ascent.toml").read_text(encoding="utf-8") == _VALID_TOML
+
+
+@pytest.mark.asyncio
+async def test_a_refused_ascent_toml_gets_the_folder_bytes_back_when_they_are_not_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A change to an unreadable folder ascent.toml is refused, and the copy holds the folder's bytes, not an empty file."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "ascent.toml").write_bytes(b"\xff\xfe bad")
+    tools = _shell_tools(state, _TurnAuthoringFlag())
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    (workspace.folder / "ascent.toml").write_text(_VALID_TOML, encoding="utf-8")
+
+    result = await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: b.txt\n+b\n*** End Patch")
+
+    assert "cannot be read" in result["skipped_files"]["ascent.toml"]
+    assert (workspace.folder / "ascent.toml").read_bytes() == b"\xff\xfe bad"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_ascent_toml_gets_the_draft_text_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """When the draft holds an ascent.toml, a refused change puts the draft's text back in the copy."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    removed = next(line for line in ASCENT_TOML_EXAMPLE.splitlines() if line.startswith("instructions = "))
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools({**state, "ascent_toml": ASCENT_TOML_EXAMPLE}, turn)["apply_patch"].acall(
+        patch=f"*** Begin Patch\n*** Update File: ascent.toml\n@@\n-{removed}\n*** End Patch"
+    )
+
+    assert "drops instructions" in result["skipped_files"]["ascent.toml"]
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert (workspace.folder / "ascent.toml").read_text(encoding="utf-8") == ASCENT_TOML_EXAMPLE
+
+
+@pytest.mark.asyncio
+async def test_a_patch_write_that_fails_part_way_keeps_the_earlier_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The second write fails; the call gives a clear error and the first file still becomes a draft."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    real_write = apply_patch_module.write_inside
+    calls: list[str] = []
+
+    def failing_write(root: Path, rel: str, *args: Any) -> None:
+        """Fail the second write.
+
+        Args:
+            root: The folder.
+            rel: The file path.
+            args: The other :func:`write_inside` arguments.
+
+        Raises:
+            OSError: On the second call.
+        """
+        calls.append(rel)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        real_write(root, rel, *args)
+
+    monkeypatch.setattr(apply_patch_module, "write_inside", failing_write)
+    result = await _shell_tools(state, turn)["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** Add File: b.txt\n+b\n*** End Patch"
+    )
+
+    assert result["error"].startswith("The call failed part way:")
+    assert "stay changed" in result["error"]
+    assert result["wizard_state"]["workspace_files"] == {"a.txt": "a\n"}
+    assert turn.wizard_patch["workspace_files"] == {"a.txt": "a\n"}
+
+
+@pytest.mark.asyncio
+async def test_a_closed_copy_gives_a_clear_error_to_every_shell_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """After the chat's copy closes, apply_patch and write_stdin say so and change no draft."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    folder_workspace.close_workspace("chat-1")
+    before = dict(turn.wizard_patch)
+
+    patched = await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: b.txt\n+b\n*** End Patch")
+    read = await tools["write_stdin"].acall(session_id=1)
+
+    assert patched == {"error": FOLDER_COPY_CLOSED}
+    assert read == {"error": FOLDER_COPY_CLOSED}
+    assert turn.wizard_patch == before
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_the_stop_button_ends_a_folder_command_through_the_wrapped_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A stopped turn cancels the wrapped exec_command, and the command's process ends."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    marker = f"sleep {500 + os.getpid() % 89}"
+    tool = _wrap_tool_with_approval(
+        _shell_tools(state, _TurnAuthoringFlag())["exec_command"],
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _event: None,
+        outer_loop=asyncio.get_running_loop(),
+    )
+    stop = threading.Event()
+    token = pi_bridge._TURN_STOP.set((stop,))
+    try:
+        call = asyncio.ensure_future(asyncio.to_thread(tool.func, cmd=marker, yield_time_ms=30000))
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+
+    def running() -> bool:
+        """Say whether the marker command runs.
+
+        Returns:
+            True when pgrep finds it.
+        """
+        return subprocess.run(["pgrep", "-f", marker], capture_output=True, check=False).returncode == 0
+
+    for _ in range(500):
+        if running():
+            break
+        await asyncio.sleep(0.01)
+    assert running()
+    stop.set()
+    with pytest.raises(RuntimeError, match="turn stopped"):
+        await asyncio.wait_for(call, timeout=10)
+    for _ in range(500):
+        if not running():
+            break
+        await asyncio.sleep(0.01)
+    assert not running()
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_copy_listing_keeps_the_earlier_deletes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A copy with more files than the listing limit cannot see deletes, so the earlier deletes stay."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "old.py").write_text("old\n", encoding="utf-8")
+    drafted = {**state, "workspace_base": folder_source_id(root), "workspace_deleted": ["old.py"]}
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(drafted, turn)
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    monkeypatch.setattr(folder_workspace, "FOLDER_ENTRIES_MAX", 3)
+
+    adds = "".join(f"*** Add File: extra/{n}.txt\n+{n}\n" for n in range(5))
+    result = await tools["apply_patch"].acall(patch=f"*** Begin Patch\n{adds}*** End Patch")
+
+    assert "*" in result["skipped_files"]
+    assert result.get("wizard_state", {}).get("workspace_deleted", ["old.py"]) == ["old.py"]
+    assert turn.wizard_patch.get("workspace_deleted", ["old.py"]) == ["old.py"]
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_file_swapped_with_a_folder_keeps_the_delete_and_a_new_copy_rebuilds_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file that becomes a folder, and a folder that becomes a file, stay deleted under the new draft."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["exec_command"].acall(
+        cmd="rm README.md && mkdir README.md && echo x > README.md/a.py && rm src/app.py && rmdir src && echo p > src"
+    )
+
+    assert result["wizard_state"]["workspace_deleted"] == ["README.md", "src/app.py"]
+    assert turn.wizard_patch["workspace_files"] == {"README.md/a.py": "x\n", "src": "p\n"}
+    again = await _shell_tools({**state, **turn.wizard_patch}, _TurnAuthoringFlag(), key="chat-2")[
+        "exec_command"
+    ].acall(cmd="cat README.md/a.py src")
+    assert again["output"].count("x\np\n") == 1
+    assert "wizard_state" not in again
+    assert (root / "README.md").is_file()
+    assert (root / "src" / "app.py").is_file()
+
+
+@pytest.mark.asyncio
+async def test_delete_drafts_of_an_older_folder_are_refused_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A draft that only deletes files counts as a draft, so a changed folder refuses it in every tool."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    drafted = {**state, "workspace_base": "b" * 40, "workspace_deleted": ["README.md"]}
+
+    result = await _shell_tools(drafted, _TurnAuthoringFlag())["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch"
+    )
+
+    assert has_drafts(drafted)
+    assert result == {"error": FOLDER_CHANGED}
+    assert open_folder(drafted) == (None, FOLDER_CHANGED)
+    assert "choose another folder" in FOLDER_CHANGED
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_file_reads_as_missing_and_an_edit_cannot_bring_it_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The draft deletes README.md, so a read refuses it and an edit cannot start from the folder's old text."""
+    root = tmp_path / "project"
+    root.mkdir()
+    state = {**_local_folder(monkeypatch, root), "workspace_deleted": ["README.md"]}
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn, key=None)
+
+    read = await tools["read_repo_file"].acall(path="README.md")
+    edit = await tools["edit_workspace_file"].acall(path="README.md", old_text="# Shop", new_text="# Store")
+
+    assert "deletes README.md" in read["error"]
+    assert "deletes README.md" in edit["error"]
+    assert turn.wizard_patch == {}
+    assert "x = 1" in await tools["read_repo_file"].acall(path="src/app.py")
+
+
+@pytest.mark.asyncio
+async def test_the_folder_listings_leave_out_the_deleted_files_and_the_folders_they_emptied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The overview and ``list_repo_folder`` show the folder as the run starts: without the draft's deletes."""
+    root = tmp_path / "project"
+    root.mkdir()
+    state = _local_folder(monkeypatch, root)
+    (root / "docs").mkdir()
+    (root / "docs" / "guide.md").write_text("g\n", encoding="utf-8")
+    state["workspace_deleted"] = ["src/app.py", "README.md"]
+    tools = _shell_tools(state, _TurnAuthoringFlag(), key=None)
+
+    overview = await tools["list_repo_folder"].acall(path="")
+    folder = await tools["list_repo_folder"].acall(path="src")
+
+    assert "docs/" in overview
+    assert "guide.md" in overview
+    assert "src/" not in overview
+    assert "app.py" not in overview
+    assert "README.md" not in overview
+    assert "No folder named 'src'" in folder["error"]

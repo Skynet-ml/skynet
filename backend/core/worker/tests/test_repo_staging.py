@@ -10588,3 +10588,28 @@ def test_the_setup_check_builds_only_the_apt_image(monkeypatch: pytest.MonkeyPat
     assert set(checked.box_images) == {"run"}
     assert checked.box_sources["metric"] == ("dockerfile", "box/Dockerfile")
     assert checked.box_sources["run"][0] == "apt"
+
+
+def test_staging_removes_the_files_the_setup_deleted_and_keeps_the_list_from_the_guest(
+    local_stack: Path, tmp_path: Path
+) -> None:
+    """A deleted folder file leaves the staged tree, and ``draft_deleted`` leaves the payload (SKY-997).
+
+    Args:
+        local_stack: The local state folder.
+        tmp_path: Scratch folder.
+    """
+    folder = tmp_path / "app"
+    folder.mkdir()
+    (folder / "old.py").write_text("gone\n")
+    payload = _local_payload(folder, draft_files=dict(_FILES), draft_deleted=["old.py"])
+
+    staged_payload, staged = repo_staging.stage_repository(payload, username="alice", binding_id="b", engine=None)
+
+    assert "draft_deleted" not in staged_payload["target"]["repo"]
+    with tarfile.open(staged.snapshot.archive) as packed:
+        names = packed.getnames()
+    assert "old.py" not in names
+    assert "ascent.toml" in names
+    assert (folder / "old.py").read_text() == "gone\n"
+    staged.cleanup()

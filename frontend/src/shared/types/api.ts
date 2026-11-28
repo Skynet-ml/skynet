@@ -419,6 +419,8 @@ interface BlackboxLocalRepoSource {
   secrets?: BlackboxRepoSecret[];
   /** Setup draft files by folder path; the server writes them over the copy before the run. */
   draft_files?: Record<string, string>;
+  /** Folder files the setup deleted; the server removes them from the copy before the run. */
+  draft_deleted?: string[];
   environment?: BlackboxRepoSource["environment"];
 }
 

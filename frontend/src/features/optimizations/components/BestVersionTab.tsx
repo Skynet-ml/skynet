@@ -356,7 +356,7 @@ export function BestVersionTab({
   repository?: boolean;
   /** The run optimizes a folder on this computer, so its best version can be applied there. */
   localFolder?: boolean;
-  /** The setup wrote draft files, which Apply writes even when the best version is the start. */
+  /** The setup wrote or deleted files, which Apply writes even when the best version is the start. */
   localDrafts?: boolean;
   /** Needed to browse a repository version's files at the pinned commit. */
   optimizationId?: string;
@@ -556,6 +556,18 @@ export function BestVersionTab({
         )}
       </section>
     </FadeIn>
+  );
+}
+
+/** Whether a local run's setup wrote or deleted files, from its run request's `target.repo`. */
+export function hasLocalDrafts(repo: unknown): boolean {
+  const drafts = repo as
+    | { draft_files?: object | null; draft_deleted?: unknown }
+    | null
+    | undefined;
+  return (
+    Object.keys(drafts?.draft_files ?? {}).length > 0 ||
+    (Array.isArray(drafts?.draft_deleted) && drafts.draft_deleted.length > 0)
   );
 }
 

@@ -170,6 +170,8 @@ export interface WorkspaceSlice {
    * run refuses the drafts when it would start from another commit.
    */
   filesBase?: string;
+  /** The folder files the Mac setup agent's shell deleted; the run removes them (SKY-997). */
+  deleted?: string[];
   metricTimeoutSeconds: number;
 }
 
@@ -385,12 +387,16 @@ export function withTaskPatch(state: WizardV2State, patch: Partial<TaskSlice>): 
   const before = state.task.repo;
   const after = task.repo;
   if (
-    Object.keys(state.workspace.files).length === 0 ||
+    (Object.keys(state.workspace.files).length === 0 && !state.workspace.deleted?.length) ||
     !repoBaseMoved(before, after) ||
     (sameRepository(before, after) && pinsDraftBase(after.commit, state.workspace.filesBase))
   )
     return { ...state, task };
-  return { ...state, task, workspace: { ...state.workspace, files: {}, filesBase: undefined } };
+  return {
+    ...state,
+    task,
+    workspace: { ...state.workspace, files: {}, filesBase: undefined, deleted: undefined },
+  };
 }
 
 /**
@@ -619,25 +625,31 @@ export function workspacePathIssue(
 
 /** The patch that writes one file, creating an extra file that does not exist yet. */
 export function writeWorkspaceFile(
-  ws: Pick<WorkspaceSlice, "files">,
+  ws: Pick<WorkspaceSlice, "files" | "deleted">,
   path: string,
   text: string,
 ): Partial<WorkspaceSlice> {
   if (path === RUN_FILE) return { runCode: text };
   if (path === METRIC_FILE) return { metricCode: text };
-  return { files: { ...ws.files, [path]: text } };
+  const files = { ...ws.files, [path]: text };
+  // A written file is no longer deleted.
+  return ws.deleted?.includes(path)
+    ? { files, deleted: ws.deleted.filter((other) => other !== path) }
+    : { files };
 }
 
 /** The patch that deletes one extra file; run.py and metric.py are never deleted. */
 export function deleteWorkspaceFile(
-  ws: Pick<WorkspaceSlice, "files">,
+  ws: Pick<WorkspaceSlice, "files" | "deleted">,
   path: string,
 ): Partial<WorkspaceSlice> | null {
   if (FIXED_FILES.includes(path) || !(path in ws.files)) return null;
   const files = { ...ws.files };
   delete files[path];
   // With no draft left, the next draft records the commit it is read at.
-  return Object.keys(files).length === 0 ? { files, filesBase: undefined } : { files };
+  return Object.keys(files).length === 0 && !ws.deleted?.length
+    ? { files, filesBase: undefined }
+    : { files };
 }
 
 /**

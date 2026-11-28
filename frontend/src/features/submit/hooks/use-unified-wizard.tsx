@@ -1120,6 +1120,15 @@ export function WizardV2Provider({
             if (typeof text === "string" && state.workspace.files[path] !== text)
               setWorkspaceFile(path, text);
           break;
+        case "workspace_deleted":
+          // The list comes whole; a file it names leaves the drafts. The list
+          // goes in first, so the last draft's delete keeps the draft commit.
+          if (Array.isArray(shared.workspace_deleted)) {
+            patchWorkspace({ deleted: shared.workspace_deleted });
+            for (const path of shared.workspace_deleted)
+              if (path in state.workspace.files) setWorkspaceFile(path, null);
+          }
+          break;
         case "workspace_base":
           if (typeof shared.workspace_base === "string")
             patchWorkspace({ filesBase: shared.workspace_base });
@@ -1183,9 +1192,12 @@ export function WizardV2Provider({
       ascent_toml: workspace.files[ASCENT_TOML] || undefined,
       // ascent.toml has its own field; the agent sees the other repo files here.
       workspace_files: otherFiles(workspace.files),
+      workspace_deleted: workspace.deleted?.length ? workspace.deleted : undefined,
       // Only while drafts exist: the agent pins the first new draft to the commit it reads then.
       workspace_base:
-        Object.keys(workspace.files).length > 0 ? workspace.filesBase || undefined : undefined,
+        Object.keys(workspace.files).length > 0 || workspace.deleted?.length
+          ? workspace.filesBase || undefined
+          : undefined,
       dataset_columns: inputs.columns.length > 0 ? inputs.columns : undefined,
       input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
       expected_field: inputs.expectedField ?? undefined,

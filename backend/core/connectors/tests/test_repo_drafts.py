@@ -199,3 +199,93 @@ def test_drafts_that_push_the_tree_over_the_size_cap_are_refused(tmp_path: Path)
 
     assert archive.read_bytes() == before
     assert sorted(path.name for path in tmp_path.iterdir()) == ["tree.tgz"]
+
+
+def test_deleted_paths_leave_the_packed_tree_and_a_missing_one_is_no_error(tmp_path: Path) -> None:
+    """A deleted draft path is removed with the drafts written; a path the tree lacks changes nothing (SKY-997)."""
+    archive = _archive(tmp_path, {"a.py": "a\n", "src/b.py": "b\n"})
+
+    apply_to_archive(archive, {"c.py": "c\n"}, deleted=["src/b.py", "missing.py"])
+
+    assert set(_read(archive)) == {"a.py", "c.py"}
+
+
+def test_a_deleted_path_that_is_read_only_a_link_or_written_is_refused(tmp_path: Path) -> None:
+    """Only a regular file the draft does not write can be deleted."""
+    archive = _archive(tmp_path, {"a.py": "a\n", "lfs/big.bin": "x"}, links={"link.py": "a.py"})
+    for deleted, drafts, readonly in [
+        (["lfs/big.bin"], {}, ["lfs"]),
+        (["link.py"], {}, []),
+        (["a.py"], {"a.py": "b\n"}, []),
+    ]:
+        with pytest.raises(DraftFileError):
+            apply_to_archive(archive, drafts, readonly, deleted=deleted)
+    assert set(_read(archive)) == {"a.py", "lfs/big.bin"}
+
+
+def test_deleted_paths_leave_a_checkout(tmp_path: Path) -> None:
+    """The checkout loses the deleted file, a missing one is no error, and a folder is refused."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "old.py").write_text("old\n")
+    (tmp_path / "keep.py").write_text("k\n")
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "x.py").write_text("x\n")
+
+    write_to_checkout(tmp_path, {"new.py": "n\n"}, deleted=["src/old.py", "keep.py/x", "missing.py"])
+
+    assert not (tmp_path / "src").exists()
+    assert (tmp_path / "keep.py").read_text() == "k\n"
+    assert (tmp_path / "new.py").read_text() == "n\n"
+    with pytest.raises(DraftFileError):
+        write_to_checkout(tmp_path, {}, deleted=["lib"])
+
+
+def test_a_deleted_file_can_become_a_folder_and_an_emptied_folder_a_file_in_the_packed_tree(tmp_path: Path) -> None:
+    """The deletes apply first, so a file swapped with a folder, either way round, stages (SKY-997)."""
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        # The fetch can list folders as their own members; an emptied one must leave, an empty one stays.
+        for name in ["pkg", "pkg/sub", "empty"]:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            packed.addfile(info)
+        for name, text in {"config": "c\n", "pkg/sub/a.py": "a\n", "keep.py": "k\n"}.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(text)
+            packed.addfile(info, io.BytesIO(text.encode()))
+
+    apply_to_archive(archive, {"config/a.py": "x\n", "pkg": "p\n"}, deleted=["config", "pkg/sub/a.py"])
+
+    assert {name: text for name, (text, _) in _read(archive).items()} == {
+        "config/a.py": "x\n",
+        "pkg": "p\n",
+        "keep.py": "k\n",
+    }
+    with tarfile.open(archive) as packed:
+        assert sorted(member.name for member in packed.getmembers() if member.isdir()) == ["empty"]
+
+
+def test_a_folder_with_files_left_still_cannot_become_a_file_in_the_packed_tree(tmp_path: Path) -> None:
+    """A folder that keeps a file after the deletes stays a folder, so a draft file on its path is refused."""
+    archive = _archive(tmp_path, {"pkg/a.py": "a\n", "pkg/b.py": "b\n"})
+
+    with pytest.raises(DraftFileError, match="a link or a folder"):
+        apply_to_archive(archive, {"pkg": "p\n"}, deleted=["pkg/a.py"])
+
+
+def test_a_deleted_file_can_become_a_folder_and_an_emptied_folder_a_file_in_a_checkout(tmp_path: Path) -> None:
+    """The checkout takes both swaps too, and a folder that keeps a file stays a folder."""
+    (tmp_path / "config").write_text("c\n")
+    (tmp_path / "pkg" / "sub").mkdir(parents=True)
+    (tmp_path / "pkg" / "sub" / "a.py").write_text("a\n")
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "a.py").write_text("a\n")
+    (tmp_path / "lib" / "b.py").write_text("b\n")
+
+    written = write_to_checkout(tmp_path, {"config/a.py": "x\n", "pkg": "p\n"}, deleted=["config", "pkg/sub/a.py"])
+
+    assert sorted(written) == ["config/a.py", "pkg"]
+    assert (tmp_path / "config" / "a.py").read_text() == "x\n"
+    assert (tmp_path / "pkg").read_text() == "p\n"
+    with pytest.raises(DraftFileError, match="a link or a folder"):
+        write_to_checkout(tmp_path, {"lib": "l\n"}, deleted=["lib/a.py"])

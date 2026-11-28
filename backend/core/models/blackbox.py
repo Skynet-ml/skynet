@@ -400,6 +400,10 @@ class BlackboxRepoSource(BaseModel):
     # drafts are whole-file copies of that tree, so a run that would start from
     # another commit is refused. ``None`` (older drafts) skips the check.
     draft_base: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
+    # The folder files the Mac setup agent's shell deleted (SKY-997). Only a
+    # local source takes them; the trusted parent removes them from the tree
+    # with the draft files, and a missing file is no error.
+    draft_deleted: list[str] = Field(default_factory=list, max_length=DRAFT_FILES_MAX)
     # Where the run's ascent.toml comes from (SKY-693): the setup screen's
     # draft, the MCP contract step's draft, or the repository. The server
     # decides: the validator reads it from the drafts, and keeps ``mcp`` only
@@ -473,7 +477,9 @@ class BlackboxRepoSource(BaseModel):
             ValueError: When a path is absolute, empty, or walks out with ``..``,
                 when two secrets share a name, when a binding name is invalid,
                 when the repository path does not fit its host, or when a draft
-                file path fails :func:`clean_draft_path` or the drafts are too large.
+                file path fails :func:`clean_draft_path` or the drafts are too large,
+                or a deleted draft path is on a hosted source, is ``ascent.toml``,
+                or meets a draft file.
         """
         if self.provider != "gitlab" and not re.fullmatch(REPO_NAME_PATTERN, self.repository):
             raise ValueError("The repository must be written as 'owner/name'.")
@@ -520,6 +526,19 @@ class BlackboxRepoSource(BaseModel):
             # A file cannot also be a folder of another draft; the trusted parent would fail to write both.
             if path_inside(path, [other for other in drafts if other != path]):
                 raise ValueError(f"The draft file {path!r} lies under another draft file.")
+        deleted: list[str] = []
+        for raw in self.draft_deleted:
+            path = clean_draft_path(raw)
+            if self.provider != LOCAL_REPO_PROVIDER:
+                raise ValueError("Only a local source takes deleted draft files.")
+            if path == "ascent.toml":
+                raise ValueError("The draft cannot delete ascent.toml.")
+            # One path is either written or deleted. A nested pair swaps a file and a folder; the deletes go first.
+            if path in drafts:
+                raise ValueError(f"The draft file {path!r} is both written and deleted.")
+            if path not in deleted:
+                deleted.append(path)
+        self.draft_deleted = deleted
         # An empty ascent.toml would replace the repository's file with one that names no run entry.
         if not drafts.get("ascent.toml", "x").strip():
             raise ValueError("The draft ascent.toml is empty. Remove it or write its settings.")

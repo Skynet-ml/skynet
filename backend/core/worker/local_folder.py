@@ -27,7 +27,7 @@ import tarfile
 import tempfile
 import threading
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
@@ -260,6 +260,7 @@ def snapshot_zip(
     folder: str,
     drafts: Mapping[str, str] | None = None,
     readonly_paths: Iterable[str] = (),
+    deleted: Iterable[str] = (),
 ) -> Path:
     """Zip a local run's kept tree with the drafts written and one version's patch applied.
 
@@ -270,6 +271,7 @@ def snapshot_zip(
         folder: The one top-level folder name inside the zip.
         drafts: The run's ``draft_files``, which the patch was made against.
         readonly_paths: Paths a draft cannot change.
+        deleted: The run's ``draft_deleted``, removed with the drafts.
 
     Returns:
         The zip, its entries under ``<folder>/``, like a host run's zip.
@@ -279,7 +281,7 @@ def snapshot_zip(
             written, the patch does not apply, or the zip is larger than the limit.
     """
     checkout = workdir / "checkout"
-    _build_version(commit, patch, checkout, drafts, readonly_paths)
+    _build_version(commit, patch, checkout, drafts, readonly_paths, deleted)
     archive = workdir / f"{folder}.zip"
     # The pack stores every time as 0, which a zip cannot hold; this writes 1980 instead.
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as zipped:
@@ -375,6 +377,7 @@ def apply_version(
     readonly_paths: Iterable[str] = (),
     editable_paths: Iterable[str],
     blocked_paths: Iterable[str],
+    deleted: Collection[str] = (),
 ) -> list[str]:
     """Write one version of a local run into its folder, and keep what Undo needs.
 
@@ -395,6 +398,7 @@ def apply_version(
         editable_paths: The run's editable paths; every file the patch changes must lie below one.
         blocked_paths: Read-only, protected and scoring-side paths; no file
             the patch changes may lie below one, in any case or Unicode form.
+        deleted: The run's ``draft_deleted``, removed with the drafts.
 
     Returns:
         The changed files, sorted.
@@ -417,14 +421,19 @@ def apply_version(
             original.mkdir()
             with _open_kept(commit) as packed:
                 packed.extractall(original, filter="data")
-            drafted = _build_version(commit, patch, checkout, drafts, readonly_paths)
+            drafted = _build_version(commit, patch, checkout, drafts, readonly_paths, deleted)
             changes = _changes(_scan(original), _scan(checkout))
-            _check_rules(changes, drafted, editable_paths, blocked_paths)
+            _check_rules(changes, drafted, editable_paths, blocked_paths, deleted)
+            # Deletes go first, so on a disk that ignores case a deleted Foo.py is gone
+            # before its drafted foo.py is written; Undo takes them back in reverse.
+            changes.sort(key=lambda change: change.after is not None)
+            # Before the writes, a file under another form may only be one this Apply deletes.
+            pending = _twins(changes, deletes_only=True)
             folder = _open_root(root)
             try:
                 conflicts = []
                 for change in changes:
-                    disk, data, mode = _read_disk(folder, change.path)
+                    disk, data, mode = _read_disk(folder, change.path, pending.get(change.path))
                     if disk != change.before:
                         conflicts.append(change.path)
                     change.before_data, change.before_mode = data, mode
@@ -438,7 +447,7 @@ def apply_version(
                         data = (checkout / change.path).read_bytes() if change.after else None
                         mode = _mode_for(change.after, change.before_mode)
                         known = len(made)
-                        _put(folder, change.path, change.before, data, mode, made)
+                        _put(folder, change.path, change.before, data, mode, made, exact=change.path in pending)
                         done.append(change)
                         if len(made) != known:
                             # Undo must find every folder Apply made, also after a crash.
@@ -454,7 +463,7 @@ def apply_version(
             raise LocalFolderError(f"The folder could not be written: {error.strerror or error}") from None
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
-    return [change.path for change in changes]
+    return sorted(change.path for change in changes)
 
 
 def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
@@ -485,8 +494,9 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
             try:
                 pending = []
                 conflicts = []
+                twins = _twins(changes)
                 for change in changes:
-                    disk = _read_disk(folder, change.path)[0]
+                    disk = _read_disk(folder, change.path, twins.get(change.path))[0]
                     if disk == change.before:
                         continue
                     if disk != change.after:
@@ -542,7 +552,10 @@ def forget_undone(root: str | os.PathLike[str], run_id: str) -> None:
         except OSError as error:
             raise LocalFolderError(f"The folder could not be read: {error.strerror or error}") from None
         try:
-            undone = all(_read_disk(folder, change.path)[0] == change.before for change in changes)
+            twins = _twins(changes)
+            undone = all(
+                _read_disk(folder, change.path, twins.get(change.path))[0] == change.before for change in changes
+            )
         finally:
             os.close(folder)
         if undone:
@@ -573,7 +586,12 @@ def check_applied(root: str | os.PathLike[str], run_id: str) -> None:
         except OSError as error:
             raise LocalFolderError(f"The folder could not be read: {error.strerror or error}") from None
         try:
-            missing = [change.path for change in changes if _read_disk(folder, change.path)[0] != change.after]
+            twins = _twins(changes)
+            missing = [
+                change.path
+                for change in changes
+                if _read_disk(folder, change.path, twins.get(change.path))[0] != change.after
+            ]
         finally:
             os.close(folder)
     if missing:
@@ -583,7 +601,12 @@ def check_applied(root: str | os.PathLike[str], run_id: str) -> None:
 
 
 def _build_version(
-    commit: str, patch: str, checkout: Path, drafts: Mapping[str, str] | None, readonly_paths: Iterable[str]
+    commit: str,
+    patch: str,
+    checkout: Path,
+    drafts: Mapping[str, str] | None,
+    readonly_paths: Iterable[str],
+    deleted: Iterable[str] = (),
 ) -> dict[str, _Blob]:
     """Unpack the kept tree into a new folder, then write the drafts and the patch over it.
 
@@ -593,6 +616,7 @@ def _build_version(
         checkout: The folder to make; it must not exist.
         drafts: The run's ``draft_files``.
         readonly_paths: Paths a draft cannot change.
+        deleted: The run's ``draft_deleted``, removed with the drafts.
 
     Returns:
         The tree's files after the drafts and before the patch.
@@ -605,7 +629,7 @@ def _build_version(
     with _open_kept(commit) as packed:
         packed.extractall(checkout, filter="data")
     try:
-        write_to_checkout(checkout, drafts, readonly_paths)
+        write_to_checkout(checkout, drafts, readonly_paths, deleted)
         drafted = _scan(checkout) if drafts else {}
         apply_patch(checkout, patch)
     except (DraftFileError, RuntimeError) as error:
@@ -682,7 +706,11 @@ def _changes(original: dict[str, _Blob], version: dict[str, _Blob]) -> list[_Cha
 
 
 def _check_rules(
-    changes: list[_Change], drafted: Mapping[str, _Blob], editable_paths: Iterable[str], blocked_paths: Iterable[str]
+    changes: list[_Change],
+    drafted: Mapping[str, _Blob],
+    editable_paths: Iterable[str],
+    blocked_paths: Iterable[str],
+    deleted: Collection[str] = (),
 ) -> None:
     """Refuse a version whose real changed files break the run's editing rules.
 
@@ -690,13 +718,15 @@ def _check_rules(
     in the patch, so a name in another case or Unicode form cannot reach a
     blocked file on the disk. A file that ends as the setup draft wrote it
     is the run's own setup, which a pull request also carries, so only the
-    read-only paths, checked when the draft is written, apply to it.
+    read-only paths, checked when the draft is written, apply to it. A file
+    that the setup deleted and the patch did not add back is the same.
 
     Args:
         changes: The version's changes.
         drafted: The tree's files after the drafts and before the patch.
         editable_paths: Paths the run may change.
         blocked_paths: Paths the run may never change.
+        deleted: The run's ``draft_deleted``.
 
     Raises:
         LocalFolderError: When a changed file is blocked or outside the editable paths.
@@ -705,6 +735,8 @@ def _check_rules(
     blocked = [_FOLD_BLOCKED(path.strip("/")) for path in blocked_paths if path.strip("/")]
     for change in changes:
         if change.after is not None and drafted.get(change.path) == change.after:
+            continue
+        if change.after is None and change.path in deleted:
             continue
         folded = _FOLD_BLOCKED(change.path)
         if inside(folded, blocked) or any(root.startswith(folded + "/") for root in blocked):
@@ -763,12 +795,43 @@ def _walk(folder: int, parts: list[str], made: list[str] | None = None, prefix: 
     return current
 
 
-def _read_disk(folder: int, path: str) -> tuple[_Disk, bytes | None, int | None]:
+def _twins(changes: Iterable[_Change], *, deletes_only: bool = False) -> dict[str, set[str]]:
+    """Find the changed files that a disk which ignores case or Unicode form can open as one file.
+
+    Args:
+        changes: The Apply's changes.
+        deletes_only: Count only the other files that the Apply deletes.
+
+    Returns:
+        Each such path to the names of the other changed files in its folder
+        that fold to the same name.
+    """
+    groups: dict[tuple[str, str], list[_Change]] = {}
+    for change in changes:
+        folder, _, name = change.path.rpartition("/")
+        groups.setdefault((folder, _FOLD_BLOCKED(name)), []).append(change)
+    return {
+        change.path: {
+            other.path.rpartition("/")[2]
+            for other in group
+            if other is not change and (not deletes_only or other.after is None)
+        }
+        for group in groups.values()
+        if len(group) > 1
+        for change in group
+    }
+
+
+def _read_disk(folder: int, path: str, twins: Collection[str] | None = None) -> tuple[_Disk, bytes | None, int | None]:
     """Read one path of the user's folder without following a link.
 
     Args:
         folder: The open root folder.
         path: The ``/``-joined path below it.
+        twins: None to read the path as the disk opens it. Else only the exact
+            name counts, and a file under another case or Unicode form reads as
+            missing only when its name is in ``twins``; any other form reads
+            as ``"other"``.
 
     Returns:
         The path's state, and for a regular file its bytes and permission bits.
@@ -791,6 +854,13 @@ def _read_disk(folder: int, path: str) -> tuple[_Disk, bytes | None, int | None]
             status = os.fstat(body.fileno())
             if not stat.S_ISREG(status.st_mode):
                 return "other", None, None
+            if twins is not None:
+                # A disk that ignores case opens Foo.py for foo.py. pathlib cannot list a folder descriptor.
+                names = os.listdir(parent)  # noqa: PTH208
+                if parts[-1] not in names:
+                    folded = _FOLD_BLOCKED(parts[-1])
+                    forms = [name for name in names if _FOLD_BLOCKED(name) == folded]
+                    return (None if forms and all(name in twins for name in forms) else "other"), None, None
             data = body.read()
     finally:
         os.close(parent)
@@ -815,7 +885,16 @@ def _mode_for(after: _Blob | None, current: int | None) -> int:
     return current & ~0o111
 
 
-def _put(folder: int, path: str, expected: _Disk, data: bytes | None, mode: int | None, made: list[str]) -> None:
+def _put(
+    folder: int,
+    path: str,
+    expected: _Disk,
+    data: bytes | None,
+    mode: int | None,
+    made: list[str],
+    *,
+    exact: bool = False,
+) -> None:
     """Write or delete one file of the user's folder, after checking it is still as expected.
 
     Args:
@@ -825,6 +904,8 @@ def _put(folder: int, path: str, expected: _Disk, data: bytes | None, mode: int 
         data: The new bytes, or ``None`` to delete the file.
         mode: The new file's permission bits.
         made: The folders made so far, which a write extends.
+        exact: Check only the exact name, and count a file under another case
+            or Unicode form as a conflict; for a path with twins.
 
     Raises:
         LocalFolderConflictError: When the path changed since the check.
@@ -837,7 +918,7 @@ def _put(folder: int, path: str, expected: _Disk, data: bytes | None, mode: int 
             raise LocalFolderConflictError([path])
         return
     try:
-        if _read_disk(parent, parts[-1])[0] != expected:
+        if _read_disk(parent, parts[-1], set() if exact else None)[0] != expected:
             raise LocalFolderConflictError([path])
         if data is None:
             os.unlink(parts[-1], dir_fd=parent)
@@ -878,9 +959,18 @@ def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: b
         OSError: With ``strict``, when a write fails.
     """
     restored = True
-    for change in changes:
+    twins = _twins(changes)
+    for change in reversed(changes):
         try:
-            _put(folder, change.path, change.after, change.before_data, change.before_mode, [])
+            _put(
+                folder,
+                change.path,
+                change.after,
+                change.before_data,
+                change.before_mode,
+                [],
+                exact=change.path in twins,
+            )
         except (OSError, LocalFolderConflictError):
             if strict:
                 raise

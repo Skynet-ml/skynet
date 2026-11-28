@@ -422,6 +422,7 @@ def stage_repository(
     # a hidden scoring path, so only the parent keeps the drafts.
     drafts = dict(repo.pop("draft_files", None) or {})
     draft_base = repo.pop("draft_base", None)
+    deleted = list(repo.pop("draft_deleted", None) or [])
     # Resolving the secrets empties their list, so read the relay's inputs first.
     secret_bindings = dict(repo.get("secret_bindings") or {})
     secret_allowed_hosts = repo_secret_allowed_hosts(payload)
@@ -475,7 +476,7 @@ def stage_repository(
         # The setup draft's files replace the commit's, so every box and the
         # draft's ascent.toml see the tree the user set up.
         try:
-            apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
+            apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths, deleted=deleted)
         except DraftFileError as error:
             raise ConstraintsError(str(error)) from None
         # A started run passed its first staging under Skynet's older reader, so it re-reads in its forms (SKY-760).

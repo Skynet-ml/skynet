@@ -82,6 +82,7 @@ from ...models.blackbox import (
 from ...models.common import ModelConfig, OptimizationType
 from ...models.unified import METRIC_SIGNATURE, RUN_ENTRY
 from ...sandbox.bridge import default_provider
+from ...service_gateway.agents.folder_workspace import close_workspace
 from ...service_gateway.optimization.blackbox.registry import ENGINES
 from ...service_gateway.optimization.blackbox.service import engine_catalog, validate_blackbox_payload
 from ...storage.models import AgentConversationModel, JobModel
@@ -921,6 +922,8 @@ def submit_repo_payload(
     _create_submission_job(job_store, optimization_id, payload, normalized_key, verified)
     if conversation_id is not None:
         _bind_setup_chat(job_store, optimization_id, payload.username, conversation_id)
+        # The run has its own copy of the files now, so the setup chat's folder copy (SKY-997) goes.
+        close_workspace(conversation_id)
     payload_dump["execution_budget_generation"] = payload.execution_budget_generation
     job_store.set_payload_overview(
         optimization_id,

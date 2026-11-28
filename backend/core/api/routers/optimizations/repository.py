@@ -329,6 +329,19 @@ def _run_drafts(job_data: dict[str, Any]) -> dict[str, str]:
     return {str(path): str(text) for path, text in drafts.items()} if isinstance(drafts, dict) else {}
 
 
+def _run_deleted(job_data: dict[str, Any]) -> list[str]:
+    """Read the folder files the run's setup deleted (SKY-997).
+
+    Args:
+        job_data: The stored job row of a repository run.
+
+    Returns:
+        The paths; empty for a run that deleted none.
+    """
+    deleted = job_data["payload"]["target"]["repo"].get("draft_deleted")
+    return [str(path) for path in deleted] if isinstance(deleted, list) else []
+
+
 def _run_readonly_paths(job_data: dict[str, Any]) -> list[str]:
     """Read the run's recorded submodule and Git LFS paths, which a draft cannot change.
 
@@ -491,23 +504,38 @@ def _says_applied(job_store, optimization_id: str) -> bool:
     return isinstance(state, dict) and state.get("applied") is True
 
 
-def _tree_with_drafts(tree: BlackboxRepoTreeResponse, drafts: dict[str, str]) -> BlackboxRepoTreeResponse:
+def _tree_with_drafts(
+    tree: BlackboxRepoTreeResponse, drafts: dict[str, str], deleted: list[str]
+) -> BlackboxRepoTreeResponse:
     """Show the run's draft files in the commit's tree, as the run started from both.
 
     The cache holds the commit's tree for every run on that commit, so the
-    drafts of one run go on a copy, never into the cached tree.
+    drafts of one run go on a copy, never into the cached tree. The deletes
+    apply first, as when the run packs its tree, so a deleted file can come
+    back as a folder of draft files.
 
     Args:
         tree: The commit's tree.
         drafts: Repository path to file text.
+        deleted: The files the run's setup deleted (SKY-997).
 
     Returns:
-        ``tree`` itself without drafts; otherwise a copy that lists each draft
+        ``tree`` itself without drafts or deletes; otherwise a copy without
+        the deleted files and the folders they emptied, that lists each draft
         file with its size, and each folder above a new one.
     """
-    if not drafts:
+    if not drafts and not deleted:
         return tree
     entries = {entry.path: entry for entry in tree.entries}
+    for path in deleted:
+        if path not in entries or entries[path].type != "file":
+            continue
+        del entries[path]
+        parent = path.rpartition("/")[0]
+        # Only a folder the deletes emptied goes; a folder that was empty at the commit stays.
+        while parent and not any(other.startswith(f"{parent}/") for other in entries):
+            entries.pop(parent, None)
+            parent = parent.rpartition("/")[0]
     for path, text in drafts.items():
         parts = path.split("/")
         for depth in range(1, len(parts)):
@@ -598,7 +626,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
                 repository=repository, commit=commit, entries=entries, truncated=tree["truncated"]
             )
             _trees.put(key, cached)
-        return _tree_with_drafts(cached, _run_drafts(job_data))
+        return _tree_with_drafts(cached, _run_drafts(job_data), _run_deleted(job_data))
 
     @router.get(
         "/optimizations/{optimization_id}/repository/file",
@@ -619,7 +647,8 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
 
         Returns:
             The file's text (the run's draft text for a draft file), or flags
-            for a missing, binary or over-1 MB file.
+            for a missing (also a file the run's setup deleted), binary or
+            over-1 MB file.
 
         Raises:
             DomainError: 400 for a path outside the repository; 404 when the
@@ -634,6 +663,8 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         # The run started from its draft text, not the commit's, for these paths.
         if (draft := _run_drafts(job_data).get(clean)) is not None:
             return BlackboxRepoFileResponse(path=clean, content=draft, size=len(draft.encode("utf-8")))
+        if clean in _run_deleted(job_data):
+            return BlackboxRepoFileResponse(path=clean, missing=True)
         owner = job_owner(job_data) or ""
         key = (owner, provider, repository, commit, clean)
         cached = _files.get(key)
@@ -694,6 +725,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
                     folder=repository.rsplit("/", 1)[-1],
                     drafts=_run_drafts(job_data),
                     readonly_paths=_run_readonly_paths(job_data),
+                    deleted=_run_deleted(job_data),
                 )
             else:
                 token = _owner_token(getattr(job_store, "engine", None), job_owner(job_data) or "", provider)
@@ -746,8 +778,9 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         result = job_data.get("result")
         patch = result.get("best_candidate") if isinstance(result, dict) else None
         drafts = _run_drafts(job_data)
+        deleted = _run_deleted(job_data)
         # A best version equal to the start still differs from the folder by the setup drafts.
-        if not isinstance(patch, str) or not (patch or drafts):
+        if not isinstance(patch, str) or not (patch or drafts or deleted):
             raise DomainError("optimization.no_result_pending", status=409)
         environment = repo.get("environment") if isinstance(repo.get("environment"), dict) else {}
         editable = repo.get("editable_paths") or ()
@@ -778,6 +811,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
                             readonly_paths=_run_readonly_paths(job_data),
                             editable_paths=editable,
                             blocked_paths=[*readonly, *protected, *hidden],
+                            deleted=deleted,
                         )
                     )
             except DomainError:
