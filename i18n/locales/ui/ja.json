@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "{p1}を一時停止",
   "agent.tool.pause_job.description": "実行はチェックポイントに保存され、ワーカーが解放されます。同じ地点から再開できます。",
   "agent.tool.pause_job.confirm": "一時停止",
+  "agent.tool.live_output": "ライブ出力",
   "agent.tool.github_create_repo.title": "GitHub リポジトリを作成",
   "agent.tool.github_create_repo.description": "Skynet が GitHub アカウントにタスク、データ、スコアラーを含む新しいリポジトリを作成します。",
   "agent.tool.github_create_repo.confirm": "作成",

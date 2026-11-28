@@ -62,6 +62,14 @@ export function ToolCallRow({
   const argEntries = Object.entries(args);
   const hasArgs = argEntries.length > 0;
   const hasResult = result !== undefined && result !== null && result !== "";
+  // SKY-1006: a running command's output, replaced by the result at tool_end.
+  // A dropped stream marks the call failed with no result; keep what the user watched.
+  const liveOutput =
+    (call.status === "running" || call.status === "error") &&
+    !hasResult &&
+    typeof payload.liveOutput === "string"
+      ? payload.liveOutput
+      : "";
 
   const triggerText = summary ?? call.reason ?? null;
   const isError = call.status === "error";
@@ -69,7 +77,7 @@ export function ToolCallRow({
   const hasBody =
     customBody !== undefined || showReasonInBody || hasArgs || hasResult || call.status === "running";
 
-  return (
+  const row = (
     <StepRow
       icon={icon ?? meta.icon}
       label={derivedTitle}
@@ -112,7 +120,7 @@ export function ToolCallRow({
                   <ResultBody result={result} isError={isError} />
                 </Section>
               )}
-              {!hasArgs && !hasResult && call.status === "running" && (
+              {!hasArgs && !hasResult && !liveOutput && call.status === "running" && (
                 <div className="italic">
                   {msg("auto.features.agent.panel.components.toolcallrow.2")}
                 </div>
@@ -122,6 +130,18 @@ export function ToolCallRow({
         </>
       )}
     </StepRow>
+  );
+  if (!liveOutput) return row;
+  // The row starts closed, so the live text shows below its line, as the Codex running cell does.
+  return (
+    <>
+      {row}
+      <div className="pb-2 pe-1 ps-5.5 pt-0.5">
+        <Section label={msg("agent.tool.live_output")}>
+          <LiveOutput text={liveOutput} />
+        </Section>
+      </div>
+    </>
   );
 }
 
@@ -209,6 +229,30 @@ function ResultBody({ result, isError }: { result: unknown; isError: boolean }) 
     <div className="font-mono text-[0.6875rem]/[1.55] text-foreground/90" dir="ltr">
       {String(result)}
     </div>
+  );
+}
+
+/** The live output tail; it follows new text unless the user scrolled up. */
+function LiveOutput({ text }: { text: string }) {
+  const ref = React.useRef<HTMLPreElement>(null);
+  const follow = React.useRef(true);
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && follow.current) el.scrollTop = el.scrollHeight;
+  }, [text]);
+  return (
+    <pre
+      ref={ref}
+      dir="ltr"
+      data-testid="tool-live-output"
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+      }}
+      className="whitespace-pre-wrap break-words font-mono text-[0.6875rem]/[1.55] max-h-52 overflow-y-auto rounded-md border border-border/40 bg-background/70 p-2 text-foreground/90"
+    >
+      {text}
+    </pre>
   );
 }
 

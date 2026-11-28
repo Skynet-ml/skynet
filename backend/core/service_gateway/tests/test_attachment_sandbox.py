@@ -902,3 +902,63 @@ def test_command_tools_run_through_the_approval_wrapper() -> None:
     assert results == ["ran echo hi", "read 3"]
     assert [e["data"]["status"] for e in events if e["event"] == "tool_end"] == ["ok", "ok"]
     assert loop_thread not in runner.threads
+
+
+class _StreamingBox(FakeBox):
+    """A box whose command prints two lines with a pause between them."""
+
+    async def exec(self, command: str, *, timeout_sec: int = 0, on_output: Any = None, **_: Any) -> ExecResult:
+        """Stream two lines, as a slow command does.
+
+        Args:
+            command: The shell command.
+            timeout_sec: Not used.
+            on_output: Takes streamed output.
+
+        Returns:
+            The result.
+        """
+        self.commands.append(command)
+        on_output("stdout", "one\n")
+        await asyncio.sleep(0.4)
+        on_output("stderr", "two\n")
+        return ExecResult(exit_code=0, stdout="one\n", stderr="two\n")
+
+
+def test_web_command_output_streams_between_tool_start_and_tool_end() -> None:
+    """Check that a web chat command's output reaches the chat while it runs, and the result stays the same."""
+    runner = SandboxCommandRunner("chat-1", lambda skip: (set(), []), environment_factory=lambda _: _StreamingBox())
+
+    async def turn() -> tuple[str, list[tuple[float, dict[str, Any]]], float]:
+        """Call the wrapped exec_command from a worker thread, as DSPy does.
+
+        Returns:
+            The result, each event with its time, and the time the call returned.
+        """
+        events: list[tuple[float, dict[str, Any]]] = []
+        [tool, _] = [
+            _wrap_tool_with_approval(
+                tool,
+                trust_mode="yolo",
+                registry=ApprovalRegistry(),
+                emit=lambda event: events.append((time.monotonic(), event)),
+                outer_loop=asyncio.get_running_loop(),
+            )
+            for tool in command_tools(runner)
+        ]
+        result = await asyncio.to_thread(tool.func, cmd="slow", yield_time_ms=5000)
+        return result, events, time.monotonic()
+
+    result, events, returned = asyncio.run(turn())
+    runner.close()
+    names = [event["event"] for _, event in events]
+    assert names[0] == "tool_start"
+    assert names[-1] == "tool_end"
+    outputs = [(at, event["data"]) for at, event in events if event["event"] == "tool_output"]
+    call_id = events[0][1]["data"]["id"]
+    assert {data["id"] for _, data in outputs} == {call_id}
+    assert "".join(data["chunk"] for _, data in outputs) == "one\ntwo\n"
+    # The first line reached the chat while the command still waited.
+    assert returned - outputs[0][0] > 0.2
+    assert result.endswith("Process exited with code 0\nOutput:\none\ntwo\n")
+    assert events[-1][1]["data"]["result"] == result

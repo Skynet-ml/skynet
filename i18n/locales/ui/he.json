@@ -595,6 +595,7 @@
   "agent.tool.pause_job.title": "השהיית {p1}",
   "agent.tool.pause_job.description": "האופטימיזציה תישמר בנקודת ביקורת ותפנה את העובד. אפשר להמשיך אותה מאותה נקודה.",
   "agent.tool.pause_job.confirm": "השהה/השהי",
+  "agent.tool.live_output": "פלט חי",
   "agent.tool.github_create_repo.title": "יצירת מאגר GitHub",
   "agent.tool.github_create_repo.description": "Skynet ייצור מאגר חדש בחשבון GitHub שלך עם המשימה, הנתונים והמדרג.",
   "agent.tool.github_create_repo.confirm": "יצירה",

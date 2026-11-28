@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "{p1} रोकें",
   "agent.tool.pause_job.description": "रन को एक चेकपॉइंट पर सहेजा जाता है और वर्कर मुक्त हो जाता है। आप इसे उसी बिंदु से फिर शुरू कर सकते हैं।",
   "agent.tool.pause_job.confirm": "रोकें",
+  "agent.tool.live_output": "लाइव आउटपुट",
   "agent.tool.github_create_repo.title": "GitHub रिपॉज़िटरी बनाएँ",
   "agent.tool.github_create_repo.description": "Skynet आपके GitHub खाते में कार्य, डेटा और स्कोरर के साथ एक नई रिपॉज़िटरी बनाता है।",
   "agent.tool.github_create_repo.confirm": "बनाएँ",

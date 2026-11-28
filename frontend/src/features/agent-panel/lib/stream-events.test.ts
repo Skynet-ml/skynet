@@ -23,6 +23,7 @@ function recorder(): { calls: Call[]; handlers: GeneralistAgentHandlers } {
       onToolPendingClear: record("toolPendingClear"),
       onToolStart: record("toolStart"),
       onToolEnd: record("toolEnd"),
+      onToolOutput: record("toolOutput"),
       onPendingApproval: record("pendingApproval"),
       onApprovalResolved: record("approvalResolved"),
       onMessagePatch: record("message"),
@@ -226,4 +227,21 @@ test("a media notice passes the reference ids, and an empty one is dropped", () 
     ["media_notice", {}],
   ]);
   assert.deepEqual(calls, [["mediaNotice", ["a", "b"]]]);
+});
+
+test("live command output reaches its tool row between tool_start and tool_end", () => {
+  const calls = dispatch([
+    ["tool_start", { id: "c1", tool: "exec_command", arguments: { cmd: "make" } }],
+    ["tool_output", { id: "c1", chunk: "building\n" }],
+    ["tool_output", { id: "c1", chunk: "tail\n", skipped: true }],
+    ["tool_output", { id: "c1", chunk: "" }],
+    ["tool_output", { chunk: "no id" }],
+    ["tool_end", { id: "c1", tool: "exec_command", status: "ok", result: "Output:\nbuilding\ntail\n" }],
+  ]);
+  assert.deepEqual(calls, [
+    ["toolStart", { id: "c1", tool: "exec_command", reason: "", arguments: { cmd: "make" } }],
+    ["toolOutput", { id: "c1", chunk: "building\n", skipped: false }],
+    ["toolOutput", { id: "c1", chunk: "tail\n", skipped: true }],
+    ["toolEnd", { id: "c1", tool: "exec_command", status: "ok", result: "Output:\nbuilding\ntail\n" }],
+  ]);
 });

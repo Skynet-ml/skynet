@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,12 @@ from core.service_gateway.agents.local_command_runner import (
     seatbelt_profile,
 )
 from core.service_gateway.agents.local_egress_proxy import LocalEgressProxy, SetupSecret
+from core.service_gateway.agents.tool_output import (
+    MAX_CHUNK_CHARS,
+    TOOL_OUTPUT_EVENT,
+    ToolOutputStream,
+    tool_stream,
+)
 
 on_mac = pytest.mark.skipif(
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(), reason="needs macOS sandbox-exec"
@@ -83,6 +90,110 @@ def test_command_session_bounds_memory() -> None:
     assert len(text) < 80
     assert text.startswith("x" * 10)
     assert text.endswith("END")
+
+
+def _recorder() -> tuple[list[tuple[float, dict]], Callable[[dict], None]]:
+    """Make an emit callback that keeps each event with its time.
+
+    Returns:
+        The kept ``(time, data)`` pairs, and the callback.
+    """
+    events: list[tuple[float, dict]] = []
+
+    def emit(event: dict) -> None:
+        """Keep one ``tool_output`` event.
+
+        Args:
+            event: The SSE envelope.
+        """
+        assert event["event"] == TOOL_OUTPUT_EVENT
+        events.append((time.monotonic(), event["data"]))
+
+    return events, emit
+
+
+def test_tool_output_stream_batches_until_flush() -> None:
+    """Check that chunks wait for one batch, and a flush sends them in one event."""
+    events, emit = _recorder()
+    stream = ToolOutputStream("c1", emit)
+    stream.write("a")
+    stream.write("b")
+    assert events == []
+    stream.flush()
+    assert [data for _, data in events] == [{"id": "c1", "chunk": "ab"}]
+
+
+def test_tool_output_stream_timer_sends_the_batch() -> None:
+    """Check that the batch goes out without a flush, within a short time."""
+    events, emit = _recorder()
+    stream = ToolOutputStream("c1", emit)
+    stream.write("live")
+    deadline = time.monotonic() + 2
+    while not events and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert [data for _, data in events] == [{"id": "c1", "chunk": "live"}]
+    stream.close()
+
+
+def test_tool_output_stream_keeps_the_tail_of_a_flood_and_marks_the_gap() -> None:
+    """Check that one event holds at most one chunk's size, ends with the newest text, and marks the skip."""
+    events, emit = _recorder()
+    stream = ToolOutputStream("c1", emit)
+    stream.write("x" * (MAX_CHUNK_CHARS * 3) + "END")
+    stream.flush()
+    [(_, data)] = events
+    assert len(data["chunk"]) == MAX_CHUNK_CHARS
+    assert data["chunk"].endswith("END")
+    assert data["skipped"] is True
+
+
+def test_tool_output_stream_stops_at_the_call_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a call streams no more than its cap."""
+    monkeypatch.setattr("core.service_gateway.agents.tool_output.MAX_CALL_CHARS", 5)
+    events, emit = _recorder()
+    stream = ToolOutputStream("c1", emit)
+    stream.write("abc")
+    stream.flush()
+    stream.write("defgh")
+    stream.flush()
+    stream.write("more")
+    stream.flush()
+    assert "".join(data["chunk"] for _, data in events) == "abcde"
+
+
+def test_tool_output_stream_sends_nothing_after_close() -> None:
+    """Check that close sends the queued text, and later text never reaches the chat."""
+    events, emit = _recorder()
+    stream = ToolOutputStream("c1", emit)
+    stream.write("last")
+    stream.close()
+    stream.write("late")
+    stream.flush()
+    time.sleep(0.2)
+    assert [data["chunk"] for _, data in events] == ["last"]
+
+
+def test_session_listener_gets_unread_output_then_new_chunks_until_detached() -> None:
+    """Check that a listener first gets the unread output, then each chunk in order, and none after it detaches."""
+    session = CommandSession(1)
+    session.append("old ")
+    seen: list[str] = []
+    session.listen(seen.append)
+    session.append("new")
+    session.listen(None)
+    session.append(" gone")
+    assert seen == ["old ", "new"]
+    assert session.read(0) == ("old new gone", None)
+
+
+def test_collect_streams_nothing_without_a_tool_call() -> None:
+    """Check that a read outside a chat tool call gives the same result and sends no event."""
+    session = CommandSession(1)
+    session.append("hi\n")
+    session.finish(0)
+    assert tool_stream.get() is None
+    result = runner_module.SessionTable().collect(session, started=time.monotonic(), yield_ms=0, max_output_tokens=None)
+    assert result.endswith("Process exited with code 0\nOutput:\nhi\n")
 
 
 def test_seatbelt_profile_denies_network_and_writes_outside_workspace() -> None:
@@ -289,3 +400,55 @@ def test_setup_python_and_node_send_the_proxy_credentials(tmp_path: Path) -> Non
             assert "node done" in runner.exec_command(f'{node} -e "{script}"')
             assert [call["code"] for call in egress.calls][-1] == 403
         runner.close()
+
+
+@on_mac
+def test_command_output_streams_while_the_command_runs(tmp_path: Path) -> None:
+    """Check that output lines reach the chat before the call returns, and the model's result is unchanged."""
+    runner = LocalCommandRunner(tmp_path / "ws")
+    events, emit = _recorder()
+    stream = ToolOutputStream("c1", emit)
+    token = tool_stream.set(stream)
+    try:
+        result = runner.exec_command("for i in 1 2 3; do echo line$i; sleep 0.4; done", yield_time_ms=10_000)
+    finally:
+        tool_stream.reset(token)
+        stream.close()
+    returned = time.monotonic()
+    assert "Process exited with code 0" in result
+    assert result.endswith("Output:\nline1\nline2\nline3\n")
+    assert "".join(data["chunk"] for _, data in events) == "line1\nline2\nline3\n"
+    assert {data["id"] for _, data in events} == {"c1"}
+    # The first line went out while the command still slept, long before it ended.
+    first_at, first = events[0]
+    assert first["chunk"].startswith("line1")
+    assert returned - first_at > 0.5
+    runner.close()
+
+
+@on_mac
+def test_running_command_streams_nothing_after_its_call_and_write_stdin_picks_it_up(tmp_path: Path) -> None:
+    """Check that output after a call returns waits for the next write_stdin, which streams it."""
+    runner = LocalCommandRunner(tmp_path / "ws")
+    events, emit = _recorder()
+    first_stream = ToolOutputStream("c1", emit)
+    token = tool_stream.set(first_stream)
+    try:
+        first = runner.exec_command("echo early; sleep 0.6; echo later", yield_time_ms=300)
+    finally:
+        tool_stream.reset(token)
+        first_stream.close()
+    assert "Process running with session ID" in first
+    time.sleep(1.0)
+    assert [data for _, data in events] == [{"id": "c1", "chunk": "early\n"}]
+    session_id = int(first.split("session ID ")[1].split()[0])
+    second_stream = ToolOutputStream("c2", emit)
+    token = tool_stream.set(second_stream)
+    try:
+        second = runner.write_stdin(session_id, yield_time_ms=5000)
+    finally:
+        tool_stream.reset(token)
+        second_stream.close()
+    assert second.endswith("Output:\nlater\n")
+    assert [data for _, data in events][1:] == [{"id": "c2", "chunk": "later\n"}]
+    runner.close()

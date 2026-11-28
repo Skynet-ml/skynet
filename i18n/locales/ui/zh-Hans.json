@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "暂停 {p1}",
   "agent.tool.pause_job.description": "本次运行会保存到检查点并释放工作节点。你可以从同一位置继续。",
   "agent.tool.pause_job.confirm": "暂停",
+  "agent.tool.live_output": "实时输出",
   "agent.tool.github_create_repo.title": "创建 GitHub 仓库",
   "agent.tool.github_create_repo.description": "Skynet 会在你的 GitHub 账户中创建一个新仓库，包含任务、数据和评分器。",
   "agent.tool.github_create_repo.confirm": "创建",

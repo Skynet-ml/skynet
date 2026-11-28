@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "{p1} pausieren",
   "agent.tool.pause_job.description": "Der Lauf wird an einem Checkpoint gesichert und der Worker freigegeben. Du kannst ihn an derselben Stelle fortsetzen.",
   "agent.tool.pause_job.confirm": "Pausieren",
+  "agent.tool.live_output": "Live-Ausgabe",
   "agent.tool.github_create_repo.title": "GitHub-Repository erstellen",
   "agent.tool.github_create_repo.description": "Skynet erstellt in deinem GitHub-Konto ein neues Repository mit der Aufgabe, den Daten und dem Scorer.",
   "agent.tool.github_create_repo.confirm": "Erstellen",

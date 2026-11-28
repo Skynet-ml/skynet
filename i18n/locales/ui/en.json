@@ -744,6 +744,7 @@
   "agent.tool.pause_job.title": "Pause {p1}",
   "agent.tool.pause_job.description": "The optimization is checkpointed and its worker is freed. You can resume it from the same point.",
   "agent.tool.pause_job.confirm": "Pause",
+  "agent.tool.live_output": "Live output",
   "agent.tool.github_create_repo.title": "Create a GitHub repository",
   "agent.tool.github_create_repo.description": "Skynet creates a new repository in your GitHub account with the task, the data and the scorer.",
   "agent.tool.github_create_repo.confirm": "Create",

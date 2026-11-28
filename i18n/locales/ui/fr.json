@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "Mettre en pause : {p1}",
   "agent.tool.pause_job.description": "L'exécution est enregistrée à un point de contrôle et le worker est libéré. Vous pourrez la reprendre au même point.",
   "agent.tool.pause_job.confirm": "Mettre en pause",
+  "agent.tool.live_output": "Sortie en direct",
   "agent.tool.github_create_repo.title": "Créer un dépôt GitHub",
   "agent.tool.github_create_repo.description": "Skynet crée un nouveau dépôt dans votre compte GitHub avec la tâche, les données et l’évaluateur.",
   "agent.tool.github_create_repo.confirm": "Créer",

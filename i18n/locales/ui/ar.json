@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "إيقاف {p1} مؤقتًا",
   "agent.tool.pause_job.description": "يُحفظ التشغيل عند نقطة تحقق ويُحرَّر العامل. يمكنك استئنافه من النقطة نفسها.",
   "agent.tool.pause_job.confirm": "إيقاف مؤقت",
+  "agent.tool.live_output": "المخرجات المباشرة",
   "agent.tool.github_create_repo.title": "إنشاء مستودع GitHub",
   "agent.tool.github_create_repo.description": "سينشئ Skynet مستودعًا جديدًا في حساب GitHub الخاص بك يحتوي على المهمة والبيانات والمُقيِّم.",
   "agent.tool.github_create_repo.confirm": "إنشاء",

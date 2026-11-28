@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "Pausar {p1}",
   "agent.tool.pause_job.description": "A execução é guardada num ponto de controlo e o worker é libertado. Pode retomá-la a partir do mesmo ponto.",
   "agent.tool.pause_job.confirm": "Pausar",
+  "agent.tool.live_output": "Saída ao vivo",
   "agent.tool.github_create_repo.title": "Criar um repositório do GitHub",
   "agent.tool.github_create_repo.description": "O Skynet cria um novo repositório na sua conta do GitHub com a tarefa, os dados e o avaliador.",
   "agent.tool.github_create_repo.confirm": "Criar",

@@ -55,6 +55,12 @@ export function dispatchGeneralistEvent(
         result: data.result,
       });
       break;
+    case "tool_output": {
+      const id = String(data.id ?? "");
+      const chunk = String(data.chunk ?? "");
+      if (id && chunk) handlers.onToolOutput?.({ id, chunk, skipped: data.skipped === true });
+      break;
+    }
     // The status text is written in the server's language, not the viewer's;
     // the panel words its own status from tool_start and tool_end instead.
     case "status_patch":

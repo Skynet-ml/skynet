@@ -31,6 +31,7 @@ const {
   WebPagesCard,
   WorkspaceWriteCard,
 } = await import("./ToolResultCards");
+const { ToolCallRow } = await import("./ToolCallRow");
 const { TOOL_ICONS, getToolMeta } = await import("../lib/tool-meta");
 const { formatTemplate } = await import("@/shared/lib/i18n");
 const { ascentTomlDiagnosticLines } = await import("@/shared/lib/api");
@@ -670,5 +671,40 @@ void describe("tool result cards", () => {
     assert.equal(html.match(/<code /g)?.length, 24);
     assert.match(html, />\+2 more</);
     assert.doesNotMatch(html, />mod24</);
+  });
+  void it("a running command shows its live output without opening the row, then only the final result (SKY-1006)", () => {
+    const live = (status: AgentToolCall["status"]): AgentToolCall => ({
+      ...call("exec_command", undefined, { cmd: "make" }, status),
+      payload: { arguments: { cmd: "make" }, liveOutput: "building step 1\nbuilding step 2" },
+    });
+    const labels = { "agent.tool.live_output": "Live output" };
+    // A normal render: the row is closed, as it is when the call starts.
+    const running = withMessages(labels, () =>
+      renderToStaticMarkup(<ToolCallRow call={live("running")} />),
+    );
+    assert.match(running, /aria-expanded="false"/);
+    assert.match(running, />Live output</);
+    assert.match(running, /data-testid="tool-live-output"/);
+    assert.match(running, /building step 1\nbuilding step 2/);
+
+    // A dropped stream fails the call with no result; the watched output stays.
+    const dropped = withMessages(labels, () =>
+      renderToStaticMarkup(<ToolCallRow call={live("error")} />),
+    );
+    assert.match(dropped, />Live output</);
+    assert.match(dropped, /building step 2/);
+
+    const done = renderOpen(
+      <ToolCallRow call={call("exec_command", "Output:\nall done", { cmd: "make" })} />,
+    );
+    assert.doesNotMatch(done, /tool-live-output/);
+    assert.match(done, /Output:\nall done/);
+
+    // A result always wins over a stale live text.
+    const stale: AgentToolCall = {
+      ...call("exec_command", "final", {}, "error"),
+      payload: { result: "final", liveOutput: "stale live text" },
+    };
+    assert.doesNotMatch(renderOpen(<ToolCallRow call={stale} />), /stale live text/);
   });
 });
