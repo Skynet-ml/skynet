@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import fcntl
 import gzip
 import hashlib
 import io
@@ -29,7 +30,7 @@ import tempfile
 import threading
 import time
 import zipfile
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
@@ -173,10 +174,29 @@ def kept_snapshot(commit: str) -> Path:
     return Path(settings.local_state_dir) / KEPT_FOLDER / f"{commit}.tgz"
 
 
+@contextlib.contextmanager
+def _kept_lock(kept: Path) -> Iterator[None]:
+    """Hold the lock of the kept packs, which a cleanup and a run share (SKY-1012).
+
+    Args:
+        kept: A kept pack; the lock is ``.lock`` next to it.
+
+    Yields:
+        Nothing, while the lock is held.
+    """
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    # Path.open, not os.open: tests swap this module's os for a fake one.
+    with (kept.parent / ".lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def forget_snapshot(commit: str) -> bool:
     """Delete the kept pack of a commit that no stored run uses any more (SKY-1005).
 
-    A pack written or reused in the last ``FRESH_PACK_SECONDS`` stays.
+    A pack written or reused in the last ``FRESH_PACK_SECONDS`` stays. The
+    check and the delete hold the lock that a run's reuse or write holds, so
+    a run cannot reuse the pack between them.
 
     Args:
         commit: The folder's source id.
@@ -190,9 +210,10 @@ def forget_snapshot(commit: str) -> bool:
     """
     kept = kept_snapshot(commit)
     try:
-        if time.time() - kept.stat().st_mtime < FRESH_PACK_SECONDS:
-            return False
-        kept.unlink()
+        with _kept_lock(kept):
+            if time.time() - kept.stat().st_mtime < FRESH_PACK_SECONDS:
+                return False
+            kept.unlink()
     except FileNotFoundError:
         return False
     except OSError as error:
@@ -222,8 +243,7 @@ def snapshot_folder(path: str | os.PathLike[str], workdir: Path, commit: str | N
     archive = workdir / "tree.tgz"
     if commit:
         kept = kept_snapshot(commit)
-        # A cleanup can delete the pack between the check and the copy; then the folder is packed again.
-        with contextlib.suppress(FileNotFoundError):
+        with _kept_lock(kept):
             if kept.is_file():
                 # The fresh mtime tells a cleanup that this pack is in use again.
                 os.utime(kept)
@@ -1420,8 +1440,10 @@ def _keep(archive: Path, commit: str) -> None:
         partial = Path(handle.name)
     try:
         shutil.copyfile(archive, partial)
-        # A reader never sees half a copy: the rename is atomic on one disk.
-        partial.replace(kept)
+        # A reader never sees half a copy: the rename is atomic on one disk. The lock
+        # keeps a cleanup from deleting the new pack after it checked the old one.
+        with _kept_lock(kept):
+            partial.replace(kept)
     except BaseException:
         partial.unlink(missing_ok=True)
         raise

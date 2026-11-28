@@ -13,6 +13,7 @@ deleted local folder run when no stored run uses its commit (SKY-1005).
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
@@ -42,6 +43,13 @@ from ..constants import TERMINAL_STATUSES
 logger = logging.getLogger(__name__)
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+
+# A run stores its commit minutes after it starts. One without a commit after this long
+# is stuck and writes no pack, so it no longer keeps every pack (SKY-1012).
+UNPINNED_RUN_MAX_AGE = timedelta(hours=24)
+# A failed, stale or rejected hardening job untouched this long is not retried, so it
+# no longer keeps its pack (SKY-1012).
+RETRYABLE_HARDENING_MAX_AGE = timedelta(days=30)
 
 
 def _local_repo(payload: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -92,7 +100,29 @@ def _local_commits(job_store, optimization_ids: list[str]) -> set[str]:
     return {commit for payload in payloads.values() if (repo := _local_repo(payload)) and (commit := _pinned(repo))}
 
 
-def _hardening_repos(job_store) -> list[tuple[str, dict[str, Any]]]:
+def _older_than(moment: Any, age: timedelta) -> bool:
+    """Tell whether a stored time is longer ago than an age.
+
+    Args:
+        moment: A ``datetime`` or an ISO string; a time with no zone is UTC.
+        age: The age.
+
+    Returns:
+        Whether it is older; ``False`` for a missing or unreadable time, so the pack stays.
+    """
+    if isinstance(moment, str):
+        try:
+            moment = datetime.fromisoformat(moment)
+        except ValueError:
+            return False
+    if not isinstance(moment, datetime):
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return datetime.now(UTC) - moment > age
+
+
+def _hardening_repos(job_store) -> list[tuple[str, datetime, dict[str, Any]]]:
     """Read the local repository blocks of the metric-hardening jobs that can still run.
 
     Hardening jobs live in their own table. Their later passes, and a retry of
@@ -102,8 +132,8 @@ def _hardening_repos(job_store) -> list[tuple[str, dict[str, Any]]]:
         job_store: Job-store whose ``engine`` holds the hardening jobs.
 
     Returns:
-        The status and ``target.repo`` block of each job that names a local
-        folder; empty for a store without an engine.
+        The status, last update and ``target.repo`` block of each job that
+        names a local folder; empty for a store without an engine.
     """
     engine = getattr(job_store, "engine", None)
     if engine is None:
@@ -111,9 +141,11 @@ def _hardening_repos(job_store) -> list[tuple[str, dict[str, Any]]]:
     statuses = HARDENING_ACTIVE_STATUSES | HARDENING_RETRYABLE_STATUSES
     with Session(engine) as session:
         rows = session.execute(
-            select(HardeningJobModel.status, HardeningJobModel.job).where(HardeningJobModel.status.in_(statuses))
+            select(HardeningJobModel.status, HardeningJobModel.updated_at, HardeningJobModel.job).where(
+                HardeningJobModel.status.in_(statuses)
+            )
         ).all()
-    return [(status, repo) for status, document in rows if (repo := _local_repo(document))]
+    return [(status, updated, repo) for status, updated, document in rows if (repo := _local_repo(document))]
 
 
 def _forget_unused_packs(job_store, commits: set[str]) -> None:
@@ -132,19 +164,24 @@ def _forget_unused_packs(job_store, commits: set[str]) -> None:
         limit = job_store.count_jobs() + 1
         while len(rows := job_store.list_jobs(limit=limit, with_counts=False)) >= limit:
             limit *= 2
-        statuses = {row["optimization_id"]: row.get("status") for row in rows}
+        by_id = {row["optimization_id"]: row for row in rows}
         in_use: set[str] = set()
-        for optimization_id, payload in job_store.payload_targets(list(statuses)).items():
+        for optimization_id, payload in job_store.payload_targets(list(by_id)).items():
             repo = _local_repo(payload)
             if repo is None:
                 continue
+            row = by_id.get(optimization_id) or {}
             if commit := _pinned(repo):
                 in_use.add(commit)
-            elif status_to_job_status(statuses.get(optimization_id) or "pending") not in TERMINAL_STATUSES:
+            elif status_to_job_status(row.get("status") or "pending") not in TERMINAL_STATUSES and not _older_than(
+                row.get("created_at"), UNPINNED_RUN_MAX_AGE
+            ):
                 # A starting run keeps its pack before it stores the commit, so any pack may be its pack.
                 logger.info("Kept folder packs kept: run %s has not stored its commit yet", optimization_id)
                 return
-        for status, repo in _hardening_repos(job_store):
+        for status, updated, repo in _hardening_repos(job_store):
+            if status in HARDENING_RETRYABLE_STATUSES and _older_than(updated, RETRYABLE_HARDENING_MAX_AGE):
+                continue
             if commit := _pinned(repo):
                 in_use.add(commit)
             elif status in HARDENING_ACTIVE_STATUSES:

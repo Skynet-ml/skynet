@@ -273,6 +273,63 @@ def test_forget_snapshot_deletes_only_the_named_pack(tmp_path: Path, local_state
     assert outside.is_file()
 
 
+def test_a_reuse_between_the_cleanups_check_and_delete_keeps_the_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that reuses the pack while a cleanup checks it waits for the lock, so the pack is there after both."""
+    root = _write(tmp_path / "app", {"main.py": "x = 1\n"})
+    first = tmp_path / "w1"
+    first.mkdir()
+    commit = local_folder.snapshot_folder(root, first).commit
+    kept = local_folder.kept_snapshot(commit)
+    _age(kept)
+    second = tmp_path / "w2"
+    second.mkdir()
+    reused: list[str] = []
+    reuse = threading.Thread(target=lambda: reused.append(local_folder.snapshot_folder(root, second, commit).commit))
+    cleanup = threading.get_ident()
+    real = local_folder.kept_snapshot
+
+    class _Paused(type(kept)):  # type: ignore[misc]
+        """A pack path whose stat starts the reuse, before the cleanup's unlink."""
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            """Stat the pack, then start the reuse and give it time to finish.
+
+            Args:
+                follow_symlinks: Passed on to ``Path.stat``.
+
+            Returns:
+                The pack's status from before the reuse.
+            """
+            status = super().stat(follow_symlinks=follow_symlinks)
+            # Only the pack's own stat; its folder's stat comes before the lock.
+            if self == kept and reuse.ident is None:
+                reuse.start()
+                reuse.join(timeout=1)
+            return status
+
+    def paused(name: str) -> Path:
+        """Give the cleanup the pausing path, and the reuse the plain one.
+
+        Args:
+            name: The commit.
+
+        Returns:
+            The pack's path.
+        """
+        path = real(name)
+        return _Paused(path) if threading.get_ident() == cleanup else path
+
+    monkeypatch.setattr(local_folder, "kept_snapshot", paused)
+    local_folder.forget_snapshot(commit)
+    reuse.join(timeout=10)
+
+    assert reused == [commit]
+    assert kept.is_file()
+    assert (second / "tree.tgz").is_file()
+
+
 def test_the_pack_commit_is_the_folder_source_id(tmp_path: Path) -> None:
     """The run's commit equals the setup agent's draft base for the same folder."""
     root = _write(
