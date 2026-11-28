@@ -113,6 +113,10 @@ type Props = {
   onEdit: (path: string, text: string) => void;
   /** A file tab opened: its repository text is needed. */
   onOpenFile: (path: string) => void;
+  /** The repository files the draft deletes; each lists with a Restore button. */
+  deleted?: readonly string[];
+  /** Take back a delete; absent where no delete can be taken back. */
+  onRestore?: (path: string) => void;
   comments: readonly PaneComment[];
   /** Absent when no chat takes comments. */
   onComment?: (c: Omit<PaneComment, "id">) => void;
@@ -521,6 +525,8 @@ export function ReviewPane({
   readOnly,
   onEdit,
   onOpenFile,
+  deleted,
+  onRestore,
   comments,
   onComment,
   onRemoveComment,
@@ -752,6 +758,9 @@ export function ReviewPane({
   const commentCount = (path: string) =>
     source === "turn" ? 0 : comments.filter((c) => c.path === path).length;
   const matching = filter.trim() ? changed.filter((f) => fuzzyScore(filter, f.path) > 0) : changed;
+  const deletedMatching = (deleted ?? []).filter(
+    (path) => !filter.trim() || fuzzyScore(filter, path) > 0,
+  );
   const newPage = isNewTab(active);
   const tabFile = active === "changes" || newPage ? null : (byPath.get(active) ?? null);
   const plainFile = !!tabFile && statusOf(tabFile) === "unchanged";
@@ -890,6 +899,32 @@ export function ReviewPane({
       </button>
     );
   });
+
+  // A deleted file has no text left to diff: its row shows the path struck through.
+  const deletedRows = deletedMatching.map((path) => (
+    <div
+      key={`deleted:${path}`}
+      title={path}
+      className="flex h-7 w-full shrink-0 items-center gap-1.5 rounded-md ps-5 pe-1 text-[13px]"
+    >
+      <FileGlyph path={path} />
+      <span className="min-w-0 flex-1 truncate text-[var(--destructive)] line-through" dir="ltr">
+        {baseName(path)}
+      </span>
+      <span className="sr-only">{msg("submit.agentic_ide.review.status.deleted")}</span>
+      {onRestore && (
+        <button
+          type="button"
+          onClick={() => onRestore(path)}
+          disabled={readOnly}
+          aria-label={formatMsg("submit.agentic_ide.review.restore_file", { path })}
+          className="h-6 shrink-0 rounded px-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+        >
+          {msg("submit.agentic_ide.review.restore")}
+        </button>
+      )}
+    </div>
+  ));
 
   const body = (f: RepoFile) => {
     if (f.loading || f.issue) return <FileNotice file={f} />;
@@ -1434,10 +1469,13 @@ export function ReviewPane({
                 {!plainFile && (
                   <Section
                     label={msg("submit.agentic_ide.review.changed_files")}
-                    marker={matching.length > 0}
+                    marker={matching.length + deletedRows.length > 0}
                   >
-                    {matching.length ? (
-                      changedRows
+                    {matching.length || deletedRows.length ? (
+                      <>
+                        {changedRows}
+                        {deletedRows}
+                      </>
                     ) : (
                       <p className="px-2 py-2 text-[12.5px] text-muted-foreground">
                         {msg("submit.agentic_ide.review.no_matching")}

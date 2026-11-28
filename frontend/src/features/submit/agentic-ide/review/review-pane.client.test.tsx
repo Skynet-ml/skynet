@@ -66,6 +66,7 @@ dom.window.Range.prototype.getBoundingClientRect = emptyRect as never;
 const { createRoot } = await import("react-dom/client");
 const { AgenticIde } = await import("../AgenticIde");
 const { ReviewPane } = await import("./review-pane");
+const { restoreWorkspaceFile } = await import("../../lib/wizard-v2");
 
 after(() => dom.window.close());
 afterEach(() => {
@@ -295,4 +296,57 @@ void test("the open tabs list shows each open tab and selects it", async () => {
   const selected = pane.container.querySelector('[role="tab"][aria-selected="true"]');
   assert.equal(selected?.textContent?.trim(), "Changes");
   await pane.unmount();
+});
+
+void test("a deleted draft file lists struck through, and Restore takes the delete back", async () => {
+  const restored: string[] = [];
+  let setBusy: (busy: boolean) => void = noop;
+  // The wizard's workspace slice in small: Restore patches its deleted list.
+  function Host() {
+    const [busy, setBusyState] = React.useState(false);
+    setBusy = setBusyState;
+    const [ws, setWs] = React.useState<{ files: Record<string, string>; deleted?: string[] }>({
+      files: { "a.py": "x = 1\n" },
+      deleted: ["src/old.py", "gone.py"],
+    });
+    return (
+      <AgenticIde
+        chat={<div />}
+        texts={ws.files}
+        deleted={ws.deleted}
+        repo={null}
+        busy={busy}
+        onWrite={noop}
+        onRestore={(path) => {
+          restored.push(path);
+          const patch = restoreWorkspaceFile(ws, path);
+          if (patch) setWs({ ...ws, ...patch });
+        }}
+      />
+    );
+  }
+  const view = await mount(<Host />);
+  const row = (path: string) => view.container.querySelector<HTMLElement>(`div[title="${path}"]`);
+  const restore = (path: string) =>
+    byLabel(view.container, `Restore ${path}`)[0] as HTMLButtonElement | undefined;
+
+  const old = row("src/old.py")!;
+  assert.ok(old, "the deleted file has a row in the Changes list");
+  assert.equal(old.querySelector(".line-through")?.textContent, "old.py");
+  assert.ok(old.textContent?.includes("Deleted"));
+  assert.ok(row("gone.py"));
+
+  // While the agent is on a turn, Restore waits.
+  await React.act(async () => setBusy(true));
+  assert.equal(restore("src/old.py")!.disabled, true);
+  await click(restore("src/old.py")!);
+  assert.deepEqual(restored, []);
+  await React.act(async () => setBusy(false));
+
+  assert.equal(restore("src/old.py")!.disabled, false);
+  await click(restore("src/old.py")!);
+  assert.deepEqual(restored, ["src/old.py"]);
+  assert.equal(row("src/old.py"), null);
+  assert.ok(row("gone.py"));
+  await view.unmount();
 });

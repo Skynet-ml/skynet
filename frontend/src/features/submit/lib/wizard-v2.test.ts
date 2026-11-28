@@ -22,6 +22,7 @@ const {
   optimizerModelsReady,
   defaultModels,
   presetEngine,
+  restoreWorkspaceFile,
   taskIssue,
   withRepository,
   withTaskPatch,
@@ -300,6 +301,41 @@ test("deleting the last draft file forgets the commit the drafts were read at", 
   assert.deepEqual(deleteWorkspaceFile(ws, "a.py"), { files: { "b.py": "b = 1\n" } });
   const last = { ...ws, files: { "b.py": "b = 1\n" } };
   assert.deepEqual(deleteWorkspaceFile(last, "b.py"), { files: {}, filesBase: undefined });
+});
+
+test("restoring a deleted file takes it out of the deleted list", () => {
+  const ws = {
+    ...initialWizardV2State().workspace,
+    files: { "a.py": "a = 1\n" },
+    deleted: ["old.py", "gone.py"],
+    filesBase: "c".repeat(40),
+  };
+  assert.deepEqual(restoreWorkspaceFile(ws, "old.py"), { deleted: ["gone.py"] });
+  assert.deepEqual(restoreWorkspaceFile({ ...ws, deleted: ["old.py"] }, "old.py"), {
+    deleted: undefined,
+  });
+  assert.equal(restoreWorkspaceFile(ws, "a.py"), null);
+  assert.equal(restoreWorkspaceFile({ ...ws, deleted: undefined }, "old.py"), null);
+});
+
+test("restoring the last delete with no draft file forgets the draft commit", () => {
+  const ws = {
+    ...initialWizardV2State().workspace,
+    deleted: ["old.py"],
+    filesBase: "c".repeat(40),
+  };
+  assert.deepEqual(restoreWorkspaceFile(ws, "old.py"), {
+    deleted: undefined,
+    filesBase: undefined,
+  });
+});
+
+test("a user's write to a deleted path clears its delete", () => {
+  const ws = { ...initialWizardV2State().workspace, deleted: ["old.py", "gone.py"] };
+  assert.deepEqual(writeWorkspaceFile(ws, "old.py", "x = 1\n"), {
+    files: { "old.py": "x = 1\n" },
+    deleted: ["gone.py"],
+  });
 });
 
 test("a new file's path must be relative, clean, a known suffix and free", () => {

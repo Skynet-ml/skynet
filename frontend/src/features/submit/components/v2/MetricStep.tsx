@@ -26,7 +26,7 @@ import { workspaceTexts } from "../../lib/ide-workspace";
 import { metricCommandText } from "../../lib/repo-run";
 import { withScorerImports } from "../../lib/scorer-dependencies";
 import { metricRepoSource } from "../../lib/metric-repo-source";
-import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
+import { METRIC_FILE, RUN_FILE, repoIssue, restoreWorkspaceFile } from "../../lib/wizard-v2";
 import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
@@ -126,6 +126,13 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     (path: string) => setWorkspaceFile(path, null),
     [setWorkspaceFile],
   );
+  const restoreFile = React.useCallback(
+    (path: string) => {
+      const patch = restoreWorkspaceFile(workspace, path);
+      if (patch) patchWorkspace(patch);
+    },
+    [workspace, patchWorkspace],
+  );
 
   const onStep = state.step === "metric";
   const onScreen = onStep && page === 0;
@@ -198,9 +205,11 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
             <AgenticIde
               chat={onScreen ? <AgentPanelDock className="absolute inset-0" /> : null}
               texts={draftTexts}
+              deleted={workspace.deleted}
               repo={repoFiles}
               busy={agent?.agentBusy ?? false}
               onWrite={setWorkspaceFile}
+              onRestore={restoreFile}
               host={
                 repoName
                   ? { provider: repoHost, url: `${HOST_ORIGIN[repoHost]}/${repoName}` }
