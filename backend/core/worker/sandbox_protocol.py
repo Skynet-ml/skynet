@@ -8,7 +8,7 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 # carries the optimizer itself, so this is the only contract the two share; bump
 # it whenever either shape changes, even by an added field: the image silently
 # drops a field its models do not know (``test_sandbox_protocol`` pins the shapes).
-SANDBOX_PROTOCOL = 22
+SANDBOX_PROTOCOL = 23
 
 # Only the current protocol is readable: every older image must be rebuilt. The
 # notes below record what each older protocol added. Protocol 13 added
@@ -55,6 +55,10 @@ SANDBOX_PROTOCOL = 22
 # transition period. A worker and an image with different names must never run
 # together, so the worker reads no image before 22 (until 22, it read 12-21).
 # The probe refuses every image before 22, so the worker sends no older protocol number.
+# Protocol 23 (SKY-990) added ``target.repo.provider = "local"`` and
+# ``target.repo.path``: a folder on this computer as the run's source. An image
+# at 22 refuses the ``local`` provider when it validates the request, so the
+# worker reads no image before 23.
 READABLE_PROTOCOLS = frozenset({SANDBOX_PROTOCOL})
 
 # The first protocol whose image writes the run end verdict of ``[outcome]``.

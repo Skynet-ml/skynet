@@ -9,7 +9,7 @@ from ....billing.runtime import UsagePendingError
 from ....exceptions import ServiceError
 from ....i18n_en import t_en
 from ....models import BlackboxRunRequest
-from ....models.blackbox import BLACKBOX_TARGET_REPO, TARGET_RETIRED, BlackboxScorer
+from ....models.blackbox import BLACKBOX_TARGET_REPO, STORED_PAYLOAD_CONTEXT, TARGET_RETIRED, BlackboxScorer
 from ....provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..unified.metric_model import resolve_blackbox_metric_model_dict, scan_metric_llm
 from .repo_scorer import REPO_SCORER_URL, SETUP_ALLOWANCE_SECONDS
@@ -115,7 +115,9 @@ def _validate_optimizer(payload: dict[str, Any]) -> None:
         payload: Protected Anything request; only its public keys are read.
     """
     public = {key: value for key, value in payload.items() if not key.startswith("_")}
-    typed = BlackboxRunRequest.model_validate(public)
+    # The guest is not the local stack and has no access to the user's folder. The
+    # parent checked the request already, so the checks that read this computer are skipped.
+    typed = BlackboxRunRequest.model_validate(public, context=STORED_PAYLOAD_CONTEXT)
     validate_blackbox_payload(typed, verify_scorer=False, api_bases=_reflection_bases(typed.reflection_model_settings))
 
 

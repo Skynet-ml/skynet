@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import io
+import zipfile
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlparse
@@ -14,7 +17,9 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from ...config import settings
 from ...connectors.github_repo import RepoFetchError
+from ...worker import local_folder
 from ..auth import AuthenticatedUser
 from ..errors import DomainError
 from ..routers.optimizations import create_optimizations_router
@@ -506,6 +511,98 @@ def test_archive_reports_a_failed_clone(store: FakeJobStore) -> None:
     client = _client(store)
     with patch.object(repository_module, "patched_repo_zip", side_effect=RepoFetchError("git fetch failed: nope")):
         response = client.post("/optimizations/repo-run/repository/archive", json={"patch": ""})
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "optimization.repo_archive_failed"
+
+
+def test_a_local_run_reads_its_kept_folder_copy(
+    store: FakeJobStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The tree, files and download of a local run come from the kept copy, with drafts, and no host read (SKY-990).
+
+    Args:
+        store: Fake job store.
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
+    folder = tmp_path / "app"
+    (folder / "src").mkdir(parents=True)
+    (folder / "src" / "main.py").write_text("x = 1\n")
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(folder, workdir).commit
+    # The folder may change or go away after setup; the run reads its kept copy.
+    (folder / "src" / "main.py").write_text("x = 9\n")
+    patch_text = "--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    store.seed_job(
+        "local-run",
+        payload={
+            "username": "alice",
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "provider": "local",
+                    "repository": "local/app",
+                    "path": str(folder),
+                    "commit": commit,
+                    "editable_paths": ["."],
+                    "draft_files": {"ascent.toml": "[run]\n"},
+                },
+            },
+        },
+        result={"best_candidate": patch_text},
+    )
+    client = _client(store)
+
+    with patch("core.connectors.transport.CLIENT.request", side_effect=AssertionError("no host read")):
+        tree = client.get("/optimizations/local-run/repository/tree")
+        found = client.get("/optimizations/local-run/repository/file", params={"path": "src/main.py"})
+        missing = client.get("/optimizations/local-run/repository/file", params={"path": "src/new.py"})
+        archive = client.post("/optimizations/local-run/repository/archive", json={"patch": patch_text})
+
+    assert tree.status_code == 200, tree.text
+    assert tree.json()["repository"] == "local/app"
+    assert [entry["path"] for entry in tree.json()["entries"]] == ["ascent.toml", "src", "src/main.py"]
+    assert found.json()["content"] == "x = 1\n"
+    assert missing.json()["missing"] is True
+    assert archive.status_code == 200, archive.text
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zipped:
+        assert zipped.read("app/src/main.py") == b"x = 2\n"
+        assert zipped.read("app/ascent.toml") == b"[run]\n"
+
+
+def test_a_local_run_without_its_kept_copy_is_a_502(
+    store: FakeJobStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A run opened on a computer that lacks the kept copy says so, instead of reading a host.
+
+    Args:
+        store: Fake job store.
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path))
+    store.seed_job(
+        "local-run",
+        payload={
+            "username": "alice",
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "provider": "local",
+                    "repository": "local/app",
+                    "path": "/gone",
+                    "commit": COMMIT,
+                    "editable_paths": ["."],
+                },
+            },
+        },
+    )
+
+    response = _client(store).get("/optimizations/local-run/repository/tree")
 
     assert response.status_code == 502
     assert response.json()["code"] == "optimization.repo_archive_failed"

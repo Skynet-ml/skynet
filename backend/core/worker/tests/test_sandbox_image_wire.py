@@ -34,10 +34,10 @@ def test_guest_event_framing_and_protocol_keep_their_image_names() -> None:
     """The guest frames events with the prefix older images print and the worker parses."""
     assert isolated_runner.EVENT_PREFIX == "SKYNET_JOB_EVENT "
     assert vercel_dspy.EVENT_PREFIX == isolated_runner.EVENT_PREFIX
-    assert SANDBOX_PROTOCOL == 22
+    assert SANDBOX_PROTOCOL == 23
     # A bump must decide again which older images can read the new request. An
-    # image before 22 uses the old model variable names (SKY-776).
-    assert {22} == READABLE_PROTOCOLS
+    # image before 23 refuses a local folder source (SKY-990).
+    assert {23} == READABLE_PROTOCOLS
 
 
 def test_payload_route_keys_keep_their_image_names() -> None:
