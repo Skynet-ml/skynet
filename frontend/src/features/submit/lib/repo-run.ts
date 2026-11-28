@@ -320,28 +320,44 @@ export async function withLocalEnvImport(
 /**
  * What a failed run start shows and keeps for a `.env` problem (SKY-994).
  *
- * A late clash joins the draft's clash list, so the Repository screen shows its
- * pick and the setup agent sees it in `env_secret_clashes`.
+ * A late clash returns its names. The wizard merges them into the current
+ * draft with `withEnvClashes`, so the Repository screen shows their picks and
+ * the setup agent sees them in `env_secret_clashes`.
  *
  * Args:
  *   err: The error that stopped the run start.
- *   repo: The wizard's repository draft.
  *
  * Returns:
- *   The toast message and the new draft, or null for any other error.
+ *   The toast message and any late clash names, or null for any other error.
  */
 export function envSubmitFailure(
   err: unknown,
-  repo: RepoDraft,
-): { key: MessageKey; params: Record<string, string | number>; repo?: RepoDraft } | null {
-  if (err instanceof UndecidedEnvClashesError) {
-    const envClashes = [...new Set([...(repo.envClashes ?? []), ...err.names])];
-    return { key: "submit.v2.repo.env.undecided", params: { names: err.names.join(", ") }, repo: { ...repo, envClashes } };
-  }
+): { key: MessageKey; params: Record<string, string | number>; clashes?: string[] } | null {
+  if (err instanceof UndecidedEnvClashesError)
+    return { key: "submit.v2.repo.env.undecided", params: { names: err.names.join(", ") }, clashes: err.names };
   if (err instanceof EnvImportFailedError) return { key: `submit.v2.repo.env.${err.status}`, params: {} };
   if (err instanceof TooManyRunSecretsError)
     return { key: "submit.v2.repo.env.too_many", params: { count: err.count, limit: RUN_SECRETS_MAX } };
   return null;
+}
+
+/**
+ * Add `.env` clash names to a repository draft, keeping every other field.
+ *
+ * The wizard applies it to the draft it reduces, not to a copy from the submit
+ * click, so a setup agent edit during the run start survives (SKY-994).
+ *
+ * Args:
+ *   repo: The current repository draft.
+ *   names: The clash names to add.
+ *
+ * Returns:
+ *   The draft with the names in `envClashes`, or the same draft when none is new.
+ */
+export function withEnvClashes(repo: RepoDraft, names: readonly string[]): RepoDraft {
+  const held = repo.envClashes ?? [];
+  if (names.every((name) => held.includes(name))) return repo;
+  return { ...repo, envClashes: [...new Set([...held, ...names])] };
 }
 
 /** The `.env` clashes the agent must ask about: a local draft's names with no pick yet. */

@@ -16,9 +16,11 @@ name, so:
   every line up to its ``-----END`` line.
 - A line with no ``=`` skips every line up to the next blank or comment line.
 - A line whose value is only ``=`` is base64 padding, not a pair.
-- A base64 tail such as ``Tail12==`` right after a long unquoted base64 value
-  continues that value. Both lines are skipped. An UPPER_SNAKE name such as
-  ``OPT=`` still reads as a pair.
+- After a long unquoted value made only of base64 characters, each next line
+  made only of base64 characters and optional ``=`` padding continues it. The
+  value and every such line are skipped. This rule also skips a long key
+  followed by an empty ``OPT=`` line: a skip with a report is safer than a
+  saved key with its tail cut off.
 
 Those body lines are reported by number only.
 """
@@ -45,10 +47,9 @@ _EXPORT = re.compile(r"^export\s+")
 _PEM_BEGIN = "-----BEGIN"
 _PEM_END = "-----END"
 # A long unquoted value of base64 characters with no padding can be the first
-# line of a wrapped key; a padded base64 line after it is then its tail.
+# line of a wrapped key; a base64 line after it is then more of the same value.
 _WRAPPED_HEAD = re.compile(r"^[A-Za-z0-9+/]{40,}$")
-_BASE64_TAIL = re.compile(r"^[A-Za-z0-9+/]+={1,2}$")
-_UPPER_NAME = re.compile(r"^[A-Z0-9_]+$")
+_CONTINUATION = re.compile(r"^[A-Za-z0-9+/]+=*$")
 _DOUBLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "$": "$"}
 
 
@@ -158,16 +159,17 @@ def parse_env(text: str) -> EnvFile:
         if not line or line.startswith("#"):
             index += 1
             continue
-        line = _EXPORT.sub("", line, count=1)
-        name, equals, raw = line.partition("=")
-        name = name.strip()
-        if equals and before and _BASE64_TAIL.match(line) and not _UPPER_NAME.match(name):
+        if before and _CONTINUATION.match(line):
             head_name, head_number = before
             values.pop(head_name, None)
             skipped.append(EnvSkip(head_number, head_name, "unquoted_multiline"))
-            skipped.append(EnvSkip(number, None, "unquoted_multiline"))
-            index += 1
+            while index < len(lines) and _CONTINUATION.match(lines[index].strip()):
+                skipped.append(EnvSkip(index + 1, None, "unquoted_multiline"))
+                index += 1
             continue
+        line = _EXPORT.sub("", line, count=1)
+        name, equals, raw = line.partition("=")
+        name = name.strip()
         if equals and raw.strip() and not raw.strip().strip("="):
             skipped.append(EnvSkip(number, None, "invalid_line"))
             index += 1

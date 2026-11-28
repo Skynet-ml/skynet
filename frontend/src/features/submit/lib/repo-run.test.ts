@@ -42,6 +42,7 @@ const {
   UndecidedEnvClashesError,
   envSecretClashesState,
   envSubmitFailure,
+  withEnvClashes,
   repoRunRequest,
   withEnvSecrets,
   withLocalEnvImport,
@@ -843,15 +844,22 @@ test("a late .env clash stops the run start, joins the draft and reaches the age
     await withLocalEnvImport(request, state.task.repo, async () => ({ status: "found" as const, kept: ["A", "LATE"], secrets: [] }));
     submitted = true;
   } catch (err) {
-    failure = envSubmitFailure(err, state.task.repo);
+    failure = envSubmitFailure(err);
   }
   assert.equal(submitted, false);
   assert.ok(failure);
   assert.equal(failure.key, "submit.v2.repo.env.undecided");
   assert.deepEqual(failure.params, { names: "LATE" });
-  assert.deepEqual(failure.repo!.envClashes, ["A", "LATE"]);
-  assert.deepEqual(envSecretClashesState(failure.repo!), ["LATE"]);
-  assert.equal(taskIssue({ ...state.task, repo: failure.repo! }), "submit.v2.repo.issue.env_clash");
+  assert.deepEqual(failure.clashes, ["LATE"]);
+  // A setup agent turn changes the draft while the run start waits on the import.
+  const current = { ...state.task.repo, editablePaths: ["lib"], envChoices: { A: "keep" as const, B: "use" as const } };
+  const merged = withEnvClashes(current, failure.clashes!);
+  assert.deepEqual(merged.editablePaths, ["lib"]);
+  assert.deepEqual(merged.envChoices, { A: "keep", B: "use" });
+  assert.deepEqual(merged.envClashes, ["A", "LATE"]);
+  assert.deepEqual(envSecretClashesState(merged), ["LATE"]);
+  assert.equal(taskIssue({ ...state.task, repo: merged }), "submit.v2.repo.issue.env_clash");
+  assert.equal(withEnvClashes(merged, ["LATE"]), merged);
 });
 
 test("a .env that the run start cannot read stops the run, and a missing one does not (SKY-994)", async () => {
@@ -866,7 +874,7 @@ test("a .env that the run start cannot read stops the run, and a missing one doe
       submitted = true;
     } catch (err) {
       assert.ok(err instanceof EnvImportFailedError && err.status === status, status);
-      failure = envSubmitFailure(err, state.task.repo);
+      failure = envSubmitFailure(err);
     }
     assert.equal(submitted, false, status);
     assert.deepEqual(failure, { key: `submit.v2.repo.env.${status}`, params: {} });
@@ -879,14 +887,13 @@ test("a .env that the run start cannot read stops the run, and a missing one doe
   assert.equal(missing.target.repo!.secrets?.length ?? 0, 0);
 });
 
-test("a run start over the secret limit shows the count and keeps the draft (SKY-994)", () => {
-  const repo = { ...emptyRepoDraft(), localPath: "/Users/me/app" };
-  const failure = envSubmitFailure(new TooManyRunSecretsError(RUN_SECRETS_MAX + 1), repo);
+test("a run start over the secret limit shows the count (SKY-994)", () => {
+  const failure = envSubmitFailure(new TooManyRunSecretsError(RUN_SECRETS_MAX + 1));
   assert.deepEqual(failure, {
     key: "submit.v2.repo.env.too_many",
     params: { count: RUN_SECRETS_MAX + 1, limit: RUN_SECRETS_MAX },
   });
-  assert.equal(envSubmitFailure(new Error("network"), repo), null);
+  assert.equal(envSubmitFailure(new Error("network")), null);
 });
 
 test("a local run with an undecided .env clash does not import or submit (SKY-994)", async () => {

@@ -94,6 +94,7 @@ import {
   contractText,
   envSecretClashesState,
   envSubmitFailure,
+  withEnvClashes,
   finishedHardeningJobId,
   repoRunRequest,
   withLocalEnvImport,
@@ -241,7 +242,8 @@ type Action =
   | { type: "level"; level: ExperienceLevel; optimizerBlocked: boolean }
   | { type: "defaultModels"; models: Record<ModelRole, ModelConfig | null> }
   // Applied to the state it reduces, not a copy from the submit click.
-  | { type: "secretHostIssues"; issues: Record<string, string> };
+  | { type: "secretHostIssues"; issues: Record<string, string> }
+  | { type: "envClashes"; names: string[] };
 
 const stepIndex = (step: WizardStepId) => WIZARD_V2_STEPS.indexOf(step);
 
@@ -269,6 +271,10 @@ function reducer(state: WizardV2State, action: Action): WizardV2State {
   if (action.type === "secretHostIssues") {
     const task = withSecretHostIssues(state.task, action.issues);
     return task === state.task ? state : { ...state, task };
+  }
+  if (action.type === "envClashes") {
+    const repo = withEnvClashes(state.task.repo, action.names);
+    return repo === state.task.repo ? state : { ...state, task: { ...state.task, repo } };
   }
   if (action.slice === "optimizer") {
     return { ...state, optimizer: withOptimizerPatch(state.optimizer, action.patch) };
@@ -771,9 +777,9 @@ export function WizardV2Provider({
   };
 
   const submitFailed = (err: unknown) => {
-    const envFailure = envSubmitFailure(err, state.task.repo);
+    const envFailure = envSubmitFailure(err);
     if (envFailure) {
-      if (envFailure.repo) patchTask({ repo: envFailure.repo });
+      if (envFailure.clashes) dispatch({ type: "envClashes", names: envFailure.clashes });
       toast.error(msg(envFailure.key, envFailure.params));
       submittingRef.current = false;
       setSubmitPhase("idle");

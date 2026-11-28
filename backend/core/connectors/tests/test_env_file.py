@@ -97,12 +97,40 @@ def test_parse_never_reads_a_wrapped_base64_tail_as_a_name() -> None:
     assert padding_only.values["NEXT"] == "1"
 
 
-def test_parse_keeps_a_long_key_before_an_upper_case_empty_name() -> None:
-    """An ordinary ``OPT=`` line after a long key does not drop the key."""
-    long_value = "Ab0" * 15
-    parsed = parse_env(f"LONG_VALUE={long_value}\nOPT=\nZ=1\n")
-    assert parsed.values == {"LONG_VALUE": long_value, "Z": "1"}
-    assert parsed.skipped == (EnvSkip(2, "OPT", "empty_value"),)
+@pytest.mark.parametrize("tail", ["QQ==", "QQA=", "Qw==", "ab==", "OPT=", "Tail12"])
+def test_parse_skips_a_long_base64_value_and_its_continuation_line(tail: str) -> None:
+    """A base64 line after a long base64 value continues it: skip both, never truncate."""
+    parsed = parse_env("KEY=" + "A" * 63 + "b\n" + tail + "\n")
+    assert parsed.values == {}
+    assert parsed.skipped == (EnvSkip(1, "KEY", "unquoted_multiline"), EnvSkip(2, None, "unquoted_multiline"))
+    assert tail.rstrip("=") not in repr(parsed)
+
+
+def test_parse_skips_every_line_of_a_three_line_base64_wrap() -> None:
+    """Each continuation line is skipped by number only, and the next pair still reads."""
+    parsed = parse_env("KEY=" + "A" * 64 + "\n" + "Bc" * 32 + "\nTailX9==\nNEXT=value\n")
+    assert parsed.values == {"NEXT": "value"}
+    assert parsed.skipped == (
+        EnvSkip(1, "KEY", "unquoted_multiline"),
+        EnvSkip(2, None, "unquoted_multiline"),
+        EnvSkip(3, None, "unquoted_multiline"),
+    )
+    assert "TailX9" not in repr(parsed)
+
+
+def test_parse_keeps_a_long_base64_value_before_a_line_outside_the_base64_set() -> None:
+    """A pair whose line has a character outside base64 is no continuation."""
+    long_value = "A" * 64
+    parsed = parse_env(f"KEY={long_value}\nNEXT=value-1\nURL=https://x/y?a=b\n")
+    assert parsed.values == {"KEY": long_value, "NEXT": "value-1", "URL": "https://x/y?a=b"}
+    assert parsed.skipped == ()
+
+
+def test_parse_reads_an_ordinary_file() -> None:
+    """Short values never start a continuation."""
+    parsed = parse_env("A=1\nB=two\nURL=https://x/y?a=b\n")
+    assert parsed.values == {"A": "1", "B": "two", "URL": "https://x/y?a=b"}
+    assert parsed.skipped == ()
 
 
 def test_parse_reads_a_one_line_begin_and_end_value_and_the_lines_after_it() -> None:
