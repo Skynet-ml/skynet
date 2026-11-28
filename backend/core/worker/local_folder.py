@@ -158,6 +158,22 @@ def kept_snapshot(commit: str) -> Path:
     return Path(settings.local_state_dir) / KEPT_FOLDER / f"{commit}.tgz"
 
 
+def forget_snapshot(commit: str) -> None:
+    """Delete the kept pack of a commit that no stored run uses any more (SKY-1005).
+
+    Args:
+        commit: The folder's source id.
+
+    Raises:
+        LocalFolderError: When the commit is not a SHA-1, there is no local
+            state folder, or the pack cannot be deleted.
+    """
+    try:
+        kept_snapshot(commit).unlink(missing_ok=True)
+    except OSError as error:
+        raise LocalFolderError(f"The kept folder copy could not be deleted: {error.strerror or error}") from None
+
+
 def snapshot_folder(path: str | os.PathLike[str], workdir: Path, commit: str | None = None) -> RepoSnapshot:
     """Pack a local folder into ``workdir/tree.tgz`` and keep its original copy.
 
@@ -1227,6 +1243,7 @@ __all__ = [
     "applied_record",
     "apply_version",
     "ensure_runs_here",
+    "forget_snapshot",
     "is_applied",
     "is_local",
     "kept_snapshot",

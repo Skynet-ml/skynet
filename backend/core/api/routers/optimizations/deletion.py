@@ -5,15 +5,19 @@ Public dev surface (in ``_SCALAR_PUBLIC_PATHS``):
 
 Internal (dashboard plumbing, hidden from public docs):
 - ``POST /optimizations/bulk-delete`` — multi-select bulk delete.
+
+On the desktop local stack, both routes also delete the kept folder pack of a
+deleted local folder run when no stored run uses its commit (SKY-1005).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
+from ....config import settings
 from ....i18n_en import t_en
 from ....models import (
     BulkDeleteRequest,
@@ -22,6 +26,7 @@ from ....models import (
     JobDeleteResponse,
 )
 from ....storage.tree_purge import TreePurgeError
+from ....worker.local_folder import LocalFolderError, forget_snapshot, is_local
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import status_to_job_status
 from ...errors import DomainError
@@ -32,6 +37,92 @@ from ..constants import TERMINAL_STATUSES
 logger = logging.getLogger(__name__)
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+
+
+def _local_repo(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the repository block of a local folder run.
+
+    Args:
+        payload: A run's payload, or only its ``target`` member.
+
+    Returns:
+        The ``target.repo`` block when it names a local folder, else ``None``.
+    """
+    target = payload.get("target") if isinstance(payload, dict) else None
+    repo = target.get("repo") if isinstance(target, dict) else None
+    return repo if is_local(repo) else None
+
+
+def _pinned(repo: dict[str, Any]) -> str | None:
+    """Return the commit a local folder run stores, if it stores one.
+
+    Args:
+        repo: The run's ``target.repo`` block.
+
+    Returns:
+        The commit, or ``None`` before the run pins it.
+    """
+    commit = repo.get("commit")
+    return commit if isinstance(commit, str) and commit else None
+
+
+def _local_commits(job_store, optimization_ids: list[str]) -> set[str]:
+    """Read the commits of the local folder runs among the runs to delete.
+
+    Args:
+        job_store: Job-store the runs are read from.
+        optimization_ids: The runs to delete.
+
+    Returns:
+        Their pinned commits; empty away from the desktop local stack, or when
+        the read fails, so a pack is kept rather than a delete refused.
+    """
+    if not settings.local_mode:
+        return set()
+    try:
+        payloads = job_store.payload_targets(optimization_ids)
+    except Exception:
+        logger.exception("Kept folder packs not checked: the runs to delete could not be read")
+        return set()
+    return {commit for payload in payloads.values() if (repo := _local_repo(payload)) and (commit := _pinned(repo))}
+
+
+def _forget_unused_packs(job_store, commits: set[str]) -> None:
+    """Delete the kept folder packs that no stored run uses after a delete.
+
+    The run delete already succeeded, so a failure here only keeps a pack.
+
+    Args:
+        job_store: Job-store the remaining runs are read from.
+        commits: The commits of the deleted local folder runs.
+    """
+    if not commits:
+        return
+    try:
+        # One read sees every run at once; pages could skip a row that a parallel delete moves.
+        limit = job_store.count_jobs() + 1
+        while len(rows := job_store.list_jobs(limit=limit)) >= limit:
+            limit *= 2
+        statuses = {row["optimization_id"]: row.get("status") for row in rows}
+        in_use: set[str] = set()
+        for optimization_id, payload in job_store.payload_targets(list(statuses)).items():
+            repo = _local_repo(payload)
+            if repo is None:
+                continue
+            if commit := _pinned(repo):
+                in_use.add(commit)
+            elif status_to_job_status(statuses.get(optimization_id) or "pending") not in TERMINAL_STATUSES:
+                # A starting run keeps its pack before it stores the commit, so any pack may be its pack.
+                logger.info("Kept folder packs kept: run %s has not stored its commit yet", optimization_id)
+                return
+    except Exception:
+        logger.exception("Kept folder packs kept: the stored runs could not be read")
+        return
+    for commit in commits - in_use:
+        try:
+            forget_snapshot(commit)
+        except LocalFolderError:
+            logger.exception("Kept folder pack %s not deleted", commit)
 
 
 def register_deletion_routes(router: APIRouter, *, job_store) -> None:
@@ -78,12 +169,14 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
                 params={"status": status.value},
             )
 
+        commits = _local_commits(job_store, [optimization_id])
         try:
             job_store.delete_job(optimization_id)
         except TreePurgeError as exc:
             logger.exception("Optimization %s not deleted: its stored tree data was not deleted", optimization_id)
             raise DomainError("optimization.deletion_storage_unavailable", status=503) from exc
         logger.info("Optimization %s deleted", optimization_id)
+        _forget_unused_packs(job_store, commits)
         return JobDeleteResponse(optimization_id=optimization_id, deleted=True)
 
     @router.post(
@@ -148,6 +241,7 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
             deletable.append(optimization_id)
 
         if deletable:
+            commits = _local_commits(job_store, deletable)
             try:
                 job_store.delete_jobs(deletable)
             except TreePurgeError:
@@ -171,6 +265,7 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
                 )
             else:
                 deleted.extend(deletable)
+                _forget_unused_packs(job_store, commits)
 
         logger.info(
             "Bulk delete: %d deleted, %d skipped (requested %d)",

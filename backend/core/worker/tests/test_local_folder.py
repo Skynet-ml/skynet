@@ -209,6 +209,25 @@ def test_a_run_without_its_kept_copy_says_so(tmp_path: Path) -> None:
         local_folder.kept_snapshot("../../etc")
 
 
+def test_forget_snapshot_deletes_only_the_named_pack(tmp_path: Path, local_state: Path) -> None:
+    """The kept pack goes, a second call is a no-op, and a commit with a path in it is refused."""
+    root = _write(tmp_path / "app", {"main.py": "x = 1\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    kept = local_folder.kept_snapshot(commit)
+    outside = local_state / "outside.tgz"
+    outside.write_bytes(b"keep")
+
+    local_folder.forget_snapshot(commit)
+    local_folder.forget_snapshot(commit)
+
+    assert not kept.exists()
+    with pytest.raises(LocalFolderError, match="not valid"):
+        local_folder.forget_snapshot("../outside")
+    assert outside.is_file()
+
+
 def test_the_pack_commit_is_the_folder_source_id(tmp_path: Path) -> None:
     """The run's commit equals the setup agent's draft base for the same folder."""
     root = _write(
