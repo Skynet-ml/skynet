@@ -510,7 +510,7 @@ def _folder_root(root: str | Path) -> Path:
     return resolved
 
 
-def _folder_file(base: Path, path: str) -> Path:
+def _folder_file(base: Path, path: str) -> str:
     """Find one file under the folder, and refuse any path that leaves it, has a link or names a ``.env*`` file.
 
     Args:
@@ -518,7 +518,7 @@ def _folder_file(base: Path, path: str) -> Path:
         path: The file path from the folder root.
 
     Returns:
-        The file, with no link in its path.
+        The file's ``/``-joined path below ``base``, with no link in it.
 
     Raises:
         LocalFolderError: For an absolute path, a ``..`` part, a ``.env*`` part, or a link.
@@ -540,7 +540,7 @@ def _folder_file(base: Path, path: str) -> Path:
             raise LocalFolderError(f"{path!r} goes through a link, which is never followed.")
     if not full.is_file():
         raise DomainError("connectors.not_found", status=404, provider=_FOLDER_LABEL)
-    return full
+    return "/".join(parts)
 
 
 def read_folder_text(root: str | Path, path: str, limit: int) -> tuple[str, bool]:
@@ -557,10 +557,11 @@ def read_folder_text(root: str | Path, path: str, limit: int) -> tuple[str, bool
     Raises:
         LocalFolderError: See :func:`_folder_root` and :func:`_folder_file`.
         DomainError: ``connectors.not_found`` when no file is there.
-        OSError: When the file cannot be read, or became a link since the check.
+        OSError: When the file cannot be read, or became a link or a non-regular file since the check.
     """
-    full = _folder_file(_folder_root(root), path)
-    with open_no_follow(full) as handle:
+    base = _folder_root(root)
+    # The checks above can race a swap on disk; open_no_follow walks each part again without following links.
+    with open_no_follow(base, _folder_file(base, path)) as handle:
         content = handle.read(limit + 1)
     return content[:limit].decode("utf-8", errors="replace"), len(content) > limit
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -349,6 +350,32 @@ def test_a_local_folder_never_follows_a_link(tmp_path: Path) -> None:
     assert browser.read_repo_file("leak.txt") == {
         "error": "No file named 'leak.txt' in the folder. Check the tree for the exact path."
     }
+
+
+@pytest.mark.usefixtures("local_mode")
+@pytest.mark.parametrize("swap", ["link", "fifo"])
+def test_a_file_swapped_after_the_check_is_refused_without_a_hang(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, swap: str
+) -> None:
+    """A link or pipe put in place of a checked file fails the open, and never leaks or blocks the read."""
+    outside = _folder(tmp_path / "outside", {"secret.txt": "outside"})
+    root = _folder(tmp_path / "repo", {"app.py": "x = 1\n"})
+    checked = repo_browser._folder_file
+
+    def check_then_swap(base: Path, path: str) -> str:
+        """Pass the checks, then swap the file on disk before the open."""
+        rel = checked(base, path)
+        (base / rel).unlink()
+        if swap == "link":
+            (base / rel).symlink_to(outside / "secret.txt")
+        else:
+            os.mkfifo(base / rel)
+        return rel
+
+    monkeypatch.setattr(repo_browser, "_folder_file", check_then_swap)
+
+    with pytest.raises(OSError):
+        read_folder_text(root, "app.py", 100)
 
 
 @pytest.mark.usefixtures("local_mode")
