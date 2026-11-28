@@ -601,14 +601,26 @@ def test_the_order_hint_asks_a_local_run_for_the_folder_not_a_repository() -> No
 
 
 @pytest.mark.parametrize("screen", ["artifact", "metric"])
-def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(screen: str) -> None:
-    """The repository screens say a local folder has no host parts and its result is applied with Apply."""
-    focus = SCREEN_FOCUS[screen]
+def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(
+    monkeypatch: pytest.MonkeyPatch, screen: str
+) -> None:
+    """In the desktop app the repository screens say a local folder has no host parts and Apply applies it."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    focus = screen_signature(screen).instructions
     assert "When ``repo_provider`` is ``local``" in focus
     assert "A local folder has no branch, no pull request and no host link" in focus
     assert "never ask the user to connect a host" in focus
     assert "the folder stays unchanged" in focus
     assert "with Apply in the app" in focus
+
+
+@pytest.mark.parametrize("screen", ["artifact", "metric"])
+def test_a_web_run_prompt_has_no_local_folder_text(monkeypatch: pytest.MonkeyPatch, screen: str) -> None:
+    """Outside the desktop app no run can use a local folder, so the prompt never names one."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    focus = screen_signature(screen).instructions
+    assert "local folder" not in focus
+    assert "``repo_provider`` is ``local``" not in focus
 
 
 @pytest.mark.parametrize("screen", ["artifact", "metric"])

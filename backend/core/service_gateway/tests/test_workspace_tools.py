@@ -43,6 +43,7 @@ from core.service_gateway.agents.workspace_tools import (
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
+    open_folder,
     open_repo,
 )
 from core.service_gateway.agents.workspace_tools import (
@@ -1827,3 +1828,13 @@ async def test_the_read_tools_strip_a_padded_path(monkeypatch: pytest.MonkeyPatc
 
     assert "intro.md" in await tools[LIST_REPO_TOOL].acall(path=" /docs/ ")
     assert await tools[READ_REPO_TOOL].acall(path=" docs/intro.md ") == "   1 hi"
+
+
+def test_open_folder_refuses_a_nul_byte_in_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NUL in ``repo_path`` gives the agent a clean reason, not a raised ``ValueError``."""
+    monkeypatch.setattr(settings, "local_mode", True)
+
+    browser, reason = open_folder({"repo_path": "/tmp/a\x00b"})
+
+    assert browser is None
+    assert reason == "The folder path must not hold a NUL character."

@@ -375,7 +375,26 @@ def test_a_file_swapped_after_the_check_is_refused_without_a_hang(
     monkeypatch.setattr(repo_browser, "_folder_file", check_then_swap)
 
     with pytest.raises(OSError):
-        read_folder_text(root, "app.py", 100)
+        read_folder_text(root, "app.py", 100, {"app.py"})
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_cut_listing_never_reads_a_file_the_filter_drops(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Past the entry cap, a gitignored file stays unreadable, though the shown tree is cut."""
+    monkeypatch.setattr(repo_browser, "FOLDER_ENTRIES_MAX", 2)
+    root = _folder(
+        tmp_path, {".gitignore": "ascent.toml\n", "ascent.toml": "[run]\n", "a.py": "", "b.py": "", "c.py": ""}
+    )
+
+    browser = LocalFolderBrowser(root)
+
+    assert browser._truncated
+    assert len(browser._entries) == 2
+    assert browser.read_unmetered("ascent.toml", 100) is None
+    assert browser.read_unmetered("c.py", 100) == ("", False)
+    assert "error" in browser.read_repo_file("ascent.toml")
+    with pytest.raises(DomainError):
+        read_folder_text(root, "ascent.toml", 100)
 
 
 @pytest.mark.usefixtures("local_mode")

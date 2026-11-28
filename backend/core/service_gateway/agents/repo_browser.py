@@ -17,7 +17,7 @@ run's commit. :func:`read_folder_text` reads one file of it.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -494,10 +494,14 @@ def _folder_root(root: str | Path) -> Path:
         The resolved folder.
 
     Raises:
-        LocalFolderError: Outside desktop local mode, for a relative path, a linked folder, or when no folder is there.
+        LocalFolderError: Outside desktop local mode, for a NUL in the path, a relative path, a linked
+            folder, or when no folder is there.
     """
     if not settings.local_mode:
         raise LocalFolderError("A local folder can be read only in the desktop app.")
+    if "\x00" in str(root):
+        # Path.resolve raises a bare ValueError on a NUL, which the agent's caller does not expect.
+        raise LocalFolderError("The folder path must not hold a NUL character.")
     path = Path(root)
     if not path.is_absolute():
         raise LocalFolderError("The folder path must be absolute.")
@@ -543,25 +547,32 @@ def _folder_file(base: Path, path: str) -> str:
     return "/".join(parts)
 
 
-def read_folder_text(root: str | Path, path: str, limit: int) -> tuple[str, bool]:
+def read_folder_text(root: str | Path, path: str, limit: int, files: Collection[str] | None = None) -> tuple[str, bool]:
     """Read one text file of a local folder, like a host's ``read_text_file``.
 
     Args:
         root: The folder's absolute path.
         path: The file path from the folder root.
         limit: Most bytes to return.
+        files: The folder's full listing of files; ``None`` lists the folder again.
 
     Returns:
         The text (bad UTF-8 replaced) and whether it was cut at ``limit``.
 
     Raises:
         LocalFolderError: See :func:`_folder_root` and :func:`_folder_file`.
-        DomainError: ``connectors.not_found`` when no file is there.
+        DomainError: ``connectors.not_found`` when no file is there, or the listing leaves it out.
         OSError: When the file cannot be read, or became a link or a non-regular file since the check.
     """
     base = _folder_root(root)
+    rel = _folder_file(base, path)
+    if files is None:
+        files = {str(e["path"]) for e in folder_entries(base, None)[0] if e.get("type") == "file"}
+    # Only what the run would copy is readable, so a gitignored or skipped file stays out (SKY-990's filter).
+    if rel not in files:
+        raise DomainError("connectors.not_found", status=404, provider=_FOLDER_LABEL)
     # The checks above can race a swap on disk; open_no_follow walks each part again without following links.
-    with open_no_follow(base, _folder_file(base, path)) as handle:
+    with open_no_follow(base, rel) as handle:
         content = handle.read(limit + 1)
     return content[:limit].decode("utf-8", errors="replace"), len(content) > limit
 
@@ -586,17 +597,20 @@ class LocalFolderBrowser(RepoBrowser):
         """
         base = _folder_root(root)
         entries, truncated = folder_entries(base, FOLDER_ENTRIES_MAX)
+        # A cut listing gives another id than the run's, and misses files, so the full list backs both.
+        full = folder_entries(base, None)[0] if truncated else entries
         super().__init__(
             token=None,
             repository=str(base),
-            # A cut listing gives another id than the run's, so the id hashes the whole folder then.
-            branch=folder_source_id(base, None if truncated else entries),
+            branch=folder_source_id(base, full),
             editable_paths=[],
             entries=entries,
             truncated=truncated,
             provider=LOCAL_PROVIDER,
         )
         self.root = base
+        # Reads check the full list; only the tree the agent sees is cut.
+        self._files = {str(e["path"]) for e in full if e.get("type") == "file"}
 
     def _read_text(self, path: str, limit: int) -> tuple[str, bool]:
         """Read one file of the folder from disk.
@@ -608,7 +622,7 @@ class LocalFolderBrowser(RepoBrowser):
         Returns:
             The text and whether it was cut at ``limit``.
         """
-        return read_folder_text(self.root, path, limit)
+        return read_folder_text(self.root, path, limit, self._files)
 
     def _header(self) -> str:
         """Name the folder on the summary's first line.

@@ -2781,6 +2781,7 @@ _MODEL_ROLES = (
     "unless the user asks for another model or a lower cost."
 )
 # A local folder has no host, so agents must not offer a branch, a pull request or a host link (SKY-995).
+# Only the desktop app runs a local folder, so only its prompts carry this (see ``screen_signature``).
 _LOCAL_FOLDER = (
     "When ``repo_provider`` is ``local``, the run's source is the local folder at ``repo_path`` on the "
     "user's computer, not a repository on a host. A local folder has no branch, no pull request and no host "
@@ -2788,6 +2789,7 @@ _LOCAL_FOLDER = (
     "are draft files, and the folder stays unchanged. The user applies the run's result to the folder with "
     "Apply in the app."
 )
+_LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric"})
 SCREEN_FOCUS: dict[str, str] = {
     "brief": (
         "Brief: get what the run should improve, in the user's words, into ``task_objective``, and any "
@@ -2820,7 +2822,7 @@ SCREEN_FOCUS: dict[str, str] = {
         "GitHub button on this screen; never ask for a token. "
         "To check a candidate repository or answer a question about its code, read it with the GitHub tools "
         "(``search_repositories``, ``search_code``, ``get_file_contents``, ``list_branches`` and the others); "
-        "they only read. " + _LOCAL_FOLDER
+        "they only read."
     ),
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "
@@ -2854,9 +2856,7 @@ SCREEN_FOCUS: dict[str, str] = {
         "repository run the wizard fills its ``column_mapping``. When ascent.toml sends a secret as "
         "``${NAME}`` in a ``[services.<name>]`` entry, call ``request_secret`` for it with its purpose and "
         "host, one secret per call: the user types the value in a secure card, and you get back only "
-        "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted. "
-        + _LOCAL_FOLDER
-        + "\n"
+        "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted.\n"
         + METRIC_GUIDE
     ),
     "check": (
@@ -2884,6 +2884,8 @@ def screen_signature(screen: str, reply_language: str = "English", cloned: bool 
         place of the full wizard prompt.
     """
     focus = SCREEN_FOCUS.get(screen, f"{screen}: help the user with this screen.")
+    if settings.local_mode and screen in _LOCAL_FOLDER_SCREENS:
+        focus = f"{focus}\n{_LOCAL_FOLDER}"
     if cloned:
         focus = f"{focus}\n* {CLONE_FOCUS}"
     prompt = SCREEN_AGENT_PROMPT.format(
