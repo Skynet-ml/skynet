@@ -28,6 +28,7 @@ void it("RunPlaceCard.client.test.tsx passes", () => {
       {
         cwd: frontend,
         encoding: "utf8",
+        timeout: 60_000,
         env: {
           ...env,
           JITI_JSX: "1",

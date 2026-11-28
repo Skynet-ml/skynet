@@ -79,8 +79,8 @@ void test("a preselected run place does not animate, and a new pick sends one ri
       cards().map((c) => c.getAttribute("aria-checked")),
       ["true", "false"],
     );
-    assert.equal(container.querySelector('[class*="choice-tile-ring"]'), null);
-    assert.equal(container.querySelector('[class*="choice-tile-pop"]'), null);
+    assert.equal(container.querySelectorAll('[class*="choice-tile-ring"]').length, 0);
+    assert.equal(container.querySelectorAll('[class*="choice-tile-pop"]').length, 0);
     await React.act(async () => cards()[1]!.click());
     assert.deepEqual(
       cards().map((c) => c.getAttribute("aria-checked")),

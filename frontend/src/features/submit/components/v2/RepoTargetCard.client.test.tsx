@@ -393,8 +393,8 @@ void test("a picked source card sends one ring, and a card chosen at mount does 
   try {
     const cards = [...chosen.container.querySelectorAll("button[aria-pressed]")];
     assert.ok(cards.some((c) => c.getAttribute("aria-pressed") === "true"), "no chosen card");
-    assert.equal(chosen.container.querySelector('[class*="choice-tile-ring"]'), null);
-    assert.equal(chosen.container.querySelector('[class*="choice-tile-pop"]'), null);
+    assert.equal(chosen.container.querySelectorAll('[class*="choice-tile-ring"]').length, 0);
+    assert.equal(chosen.container.querySelectorAll('[class*="choice-tile-pop"]').length, 0);
   } finally {
     await chosen.unmount();
   }
