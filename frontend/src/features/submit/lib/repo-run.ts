@@ -11,7 +11,15 @@ import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig 
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
 import { runModels, scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
-import { isLocalRepo, LOCAL_SANDBOX_PROVIDER, parseAllowedHosts, type WizardV2State } from "./wizard-v2";
+import {
+  envReplaceNames,
+  isLocalRepo,
+  LOCAL_SANDBOX_PROVIDER,
+  parseAllowedHosts,
+  undecidedEnvClashes,
+  type RepoDraft,
+  type WizardV2State,
+} from "./wizard-v2";
 
 export interface RepoRunOptions {
   username: string;
@@ -204,6 +212,62 @@ export function withEnvSecrets(
     ...request,
     target: { ...request.target, repo: { ...repo, secrets: [...current, ...added] } },
   };
+}
+
+/** Most secrets one run request takes (`BlackboxRepoTarget.secrets` on the server). */
+export const RUN_SECRETS_MAX = 100;
+
+/** A local run that the folder's `.env` gives more secrets than one run takes (SKY-994). */
+export class TooManyRunSecretsError extends Error {
+  readonly count: number;
+
+  /**
+   * Keep the count for the message.
+   *
+   * Args:
+   *   count: How many secrets the run would send.
+   */
+  constructor(count: number) {
+    super("submit.v2.repo.env.too_many");
+    this.count = count;
+    this.name = "TooManyRunSecretsError";
+  }
+}
+
+/**
+ * Import the folder's `.env` at a local run start and add its secrets to the run.
+ *
+ * A clashing name changes only when the user picked Use .env for it. A git run
+ * imports nothing (SKY-994).
+ *
+ * Args:
+ *   request: The run request.
+ *   repo: The wizard's repository draft.
+ *   importEnv: The import call, `importLocalEnvSecrets` in the app.
+ *
+ * Returns:
+ *   The request with the `.env` secrets.
+ *
+ * Throws:
+ *   TooManyRunSecretsError: When the run would send more than `RUN_SECRETS_MAX` secrets.
+ */
+export async function withLocalEnvImport(
+  request: BlackboxRunRequest,
+  repo: RepoDraft,
+  importEnv: (path: string, replace: string[]) => Promise<{ secrets: ReadonlyArray<{ id: string; name: string }> }>,
+): Promise<BlackboxRunRequest> {
+  if (!isLocalRepo(repo)) return request;
+  const imported = await importEnv((repo.localPath ?? "").trim(), envReplaceNames(repo));
+  const sent = withEnvSecrets(request, imported.secrets);
+  const count = sent.target.repo?.secrets?.length ?? 0;
+  if (count > RUN_SECRETS_MAX) throw new TooManyRunSecretsError(count);
+  return sent;
+}
+
+/** The `.env` clashes the agent must ask about: a local draft's names with no pick yet. */
+export function envSecretClashesState(repo: RepoDraft): string[] | undefined {
+  const clashes = isLocalRepo(repo) ? undecidedEnvClashes(repo) : [];
+  return clashes.length > 0 ? clashes : undefined;
 }
 
 const hasModel = (config: ModelConfig | null): config is ModelConfig =>

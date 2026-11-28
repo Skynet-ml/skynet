@@ -346,6 +346,7 @@
   "submit.v2.repo.env.unsafe": "Skynet ne peut pas lire ce fichier .env. Ce n’est pas un fichier normal de ce dossier.",
   "submit.v2.repo.env.too_large": "Ce fichier .env est trop volumineux pour être lu.",
   "submit.v2.repo.env.unreadable": "Skynet ne peut pas lire ce fichier .env.",
+  "submit.v2.repo.env.too_many": "Avec le .env du dossier, cette exécution reçoit {count} secrets. Une exécution en accepte au plus {limit}. Retirez des noms du .env ou des secrets de l’exécution.",
   "submit.v2.repo.issue.local_path": "Choisissez un dossier pour l’exécution.",
   "submit.v2.run_on.blocked.local_folder": "Un dossier de ce Mac ne s’exécute que sur ce Mac. Choisissez un dépôt, ou exécutez sur ce Mac.",
   "submit.v2.repo.new.name_label": "Nom du dépôt",

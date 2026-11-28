@@ -346,6 +346,7 @@
   "submit.v2.repo.env.unsafe": "Skynet はこの .env ファイルを読めません。このフォルダーの通常のファイルではありません。",
   "submit.v2.repo.env.too_large": "この .env ファイルは大きすぎて読めません。",
   "submit.v2.repo.env.unreadable": "Skynet はこの .env ファイルを読めません。",
+  "submit.v2.repo.env.too_many": "フォルダーの .env を含めると、この実行のシークレットは {count} 個です。1 回の実行で使えるのは最大 {limit} 個です。.env または実行のシークレットから名前を削除してください。",
   "submit.v2.repo.issue.local_path": "実行するフォルダを選択してください。",
   "submit.v2.run_on.blocked.local_folder": "この Mac のフォルダはこの Mac でのみ実行できます。リポジトリを選ぶか、この Mac で実行してください。",
   "submit.v2.repo.new.name_label": "リポジトリ名",

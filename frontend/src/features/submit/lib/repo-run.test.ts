@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
@@ -35,8 +36,12 @@ const {
   finishedHardeningJobId,
   metricCommandText,
   repoBaseText,
+  RUN_SECRETS_MAX,
+  TooManyRunSecretsError,
+  envSecretClashesState,
   repoRunRequest,
   withEnvSecrets,
+  withLocalEnvImport,
 } = await import("./repo-run.ts");
 const { BYOK_PROVIDERS, litellmProviderForByok } = await import("../../billing/lib/byok.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
@@ -751,4 +756,73 @@ test("only an explicit Use .env pick replaces a clashing saved secret (SKY-994)"
   assert.equal(moved.envClashes, undefined);
   assert.equal(moved.envChoices, undefined);
   assert.deepEqual(withLocalFolder(repo, "/Users/me/app").envChoices, repo.envChoices);
+});
+
+test("a local run imports the folder's .env with the Use .env picks and sends the ids (SKY-994)", async () => {
+  const state = repoState();
+  state.task.repo = {
+    ...state.task.repo,
+    localPath: " /Users/me/app ",
+    secrets: [],
+    envClashes: ["A", "B", "C"],
+    envChoices: { A: "use", B: "keep" },
+  };
+  const request = repoRunRequest(state, options)!;
+  const calls: Array<[string, string[]]> = [];
+  const sent = await withLocalEnvImport(request, state.task.repo, async (path, replace) => {
+    calls.push([path, replace]);
+    return { secrets: [{ id: "s-a", name: "A" }, { id: "s-db", name: "DB_URL" }] };
+  });
+  assert.deepEqual(calls, [["/Users/me/app", ["A"]]]);
+  assert.deepEqual(sent.target.repo!.secrets, [
+    { name: "A", saved_secret_id: "s-a", allowed_hosts: [] },
+    { name: "DB_URL", saved_secret_id: "s-db", allowed_hosts: [] },
+  ]);
+});
+
+test("a repository run never imports a .env (SKY-994)", async () => {
+  const state = repoState();
+  const request = repoRunRequest(state, options)!;
+  let called = false;
+  const sent = await withLocalEnvImport(request, state.task.repo, async () => {
+    called = true;
+    return { secrets: [] };
+  });
+  assert.equal(called, false);
+  assert.equal(sent, request);
+});
+
+test("the agent state lists only the .env clashes with no pick (SKY-994)", () => {
+  const local = {
+    ...emptyRepoDraft(),
+    localPath: "/Users/me/app",
+    envClashes: ["A", "B", "C"],
+    envChoices: { A: "use" as const, B: "keep" as const },
+  };
+  assert.deepEqual(envSecretClashesState(local), ["C"]);
+  assert.equal(envSecretClashesState({ ...local, envChoices: { ...local.envChoices, C: "keep" as const } }), undefined);
+  assert.equal(envSecretClashesState({ ...local, localPath: undefined }), undefined);
+});
+
+test("a local run with more secrets than a run takes fails with the count before submit (SKY-994)", async () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [] };
+  const request = repoRunRequest(state, options)!;
+  const many = Array.from({ length: RUN_SECRETS_MAX + 1 }, (_, i) => ({ id: `s-${i}`, name: `K_${i}` }));
+  await assert.rejects(
+    withLocalEnvImport(request, state.task.repo, async () => ({ secrets: many })),
+    (err: unknown) => err instanceof TooManyRunSecretsError && err.count === RUN_SECRETS_MAX + 1,
+  );
+  const atLimit = await withLocalEnvImport(request, state.task.repo, async () => ({
+    secrets: many.slice(0, RUN_SECRETS_MAX),
+  }));
+  assert.equal(atLimit.target.repo!.secrets!.length, RUN_SECRETS_MAX);
+});
+
+test("the wizard starts a run through the .env import and shows the secret limit (SKY-994)", () => {
+  const wizard = readFileSync(new URL("../hooks/use-unified-wizard.tsx", import.meta.url), "utf8");
+  assert.ok(wizard.includes("withLocalEnvImport(request, state.task.repo, importLocalEnvSecrets)"));
+  assert.ok(wizard.includes("env_secret_clashes: envSecretClashesState(task.repo)"));
+  assert.ok(wizard.includes("err instanceof TooManyRunSecretsError"));
+  assert.ok(wizard.includes('"submit.v2.repo.env.too_many"'));
 });

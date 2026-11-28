@@ -346,6 +346,7 @@
   "submit.v2.repo.env.unsafe": "Skynet यह .env फ़ाइल नहीं पढ़ सकता। यह इस फ़ोल्डर की सामान्य फ़ाइल नहीं है।",
   "submit.v2.repo.env.too_large": "यह .env फ़ाइल पढ़ने के लिए बहुत बड़ी है।",
   "submit.v2.repo.env.unreadable": "Skynet यह .env फ़ाइल नहीं पढ़ सकता।",
+  "submit.v2.repo.env.too_many": "फ़ोल्डर की .env के साथ, इस रन को {count} सीक्रेट मिलते हैं। एक रन अधिकतम {limit} लेता है। .env से या रन के सीक्रेट से नाम हटाएँ।",
   "submit.v2.repo.issue.local_path": "रन के लिए एक फ़ोल्डर चुनें।",
   "submit.v2.run_on.blocked.local_folder": "इस Mac का फ़ोल्डर केवल इसी Mac पर चलता है। कोई रिपॉज़िटरी चुनें, या इस Mac पर चलाएँ।",
   "submit.v2.repo.new.name_label": "रिपॉज़िटरी का नाम",

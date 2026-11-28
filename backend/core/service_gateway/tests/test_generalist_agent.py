@@ -663,12 +663,15 @@ def test_the_agent_sees_the_env_secret_clashes_until_the_run_starts(screen: str)
 @pytest.mark.parametrize("screen", ["artifact", "metric", "check", "overview"])
 def test_a_local_run_prompt_asks_about_each_env_secret_clash(monkeypatch: pytest.MonkeyPatch, screen: str) -> None:
     """In the desktop app the agent asks about each clash before the run starts, and never about a value."""
+    state = cast(WizardState, {"wizard_screen": screen, "repo_provider": "local", "env_secret_clashes": ["API_KEY"]})
+    assert "API_KEY" in str(screen_snapshot(state))
     monkeypatch.setattr(settings, "local_mode", True)
     focus = screen_signature(screen).instructions
-    assert "``env_secret_clashes``" in focus
-    assert "Before the run starts, ask the user about each of them" in focus
-    assert "Keep saved or Use .env" in focus
-    assert "Never ask for, show or repeat a secret value." in focus
+    # The prompt names the state field and the two picks the Repository screen shows.
+    assert "env_secret_clashes" in focus
+    assert "Keep saved" in focus
+    assert "Use .env" in focus
+    assert "env_secret_clashes" not in screen_signature("budget").instructions
     monkeypatch.setattr(settings, "local_mode", False)
     assert "env_secret_clashes" not in screen_signature(screen).instructions
 

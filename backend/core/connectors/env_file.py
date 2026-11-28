@@ -7,6 +7,12 @@ and blank lines. A line that it cannot use is skipped and reported by line
 number and reason. The report never carries a value, and it carries a name
 only when the name looks like a name, so a value on a broken line never
 leaks into a response.
+
+A value that runs over more lines without quotes (a PEM key pasted as is) has
+body lines that can look like ``NAME=value``. So an unquoted ``-----BEGIN``
+value skips every line up to its ``-----END`` line, and a line with no ``=``
+skips every line up to the next blank or comment line. Those lines are
+reported by number only.
 """
 
 from __future__ import annotations
@@ -28,6 +34,8 @@ _NAME = re.compile(REPO_SECRET_NAME_PATTERN)
 # text before "=" on a broken line can be part of a value.
 _SHOWN_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 _EXPORT = re.compile(r"^export\s+")
+_PEM_BEGIN = "-----BEGIN"
+_PEM_END = "-----END"
 _DOUBLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "$": "$"}
 
 
@@ -137,10 +145,23 @@ def parse_env(text: str) -> EnvFile:
         name, equals, raw = line.partition("=")
         name = name.strip()
         if not equals:
-            skipped.append(EnvSkip(number, None, "invalid_line"))
-            index += 1
+            # The line is likely the body of a broken value, and so may be the
+            # lines after it; none of them is read as a name.
+            while index < len(lines) and lines[index].strip() and not lines[index].strip().startswith("#"):
+                skipped.append(EnvSkip(index + 1, None, "invalid_line"))
+                index += 1
             continue
         raw = raw.lstrip()
+        if raw.startswith(_PEM_BEGIN):
+            skipped.append(EnvSkip(number, _shown(name), "unquoted_multiline"))
+            index += 1
+            while index < len(lines):
+                body = lines[index].strip()
+                skipped.append(EnvSkip(index + 1, None, "unquoted_multiline"))
+                index += 1
+                if body.startswith(_PEM_END):
+                    break
+            continue
         if raw[:1] in ("'", '"'):
             value, index = _quoted(lines, index, raw)
             if value is None:

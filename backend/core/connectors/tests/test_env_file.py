@@ -42,15 +42,15 @@ def test_parse_reads_export_quotes_comments_and_blank_lines() -> None:
 
 def test_parse_skips_and_lists_bad_names_without_values() -> None:
     """List lines with a bad name, and never put a value in the list."""
-    text = "1BAD=sentinel-a\nMY-KEY=sentinel-b\nab+/cd=sentinel-c\nno equals here\nEMPTY=\nGOOD=ok\n"
+    text = "1BAD=sentinel-a\nMY-KEY=sentinel-b\nab+/cd=sentinel-c\nEMPTY=\nno equals here\n\nGOOD=ok\n"
     parsed = parse_env(text)
     assert parsed.values == {"GOOD": "ok"}
     assert parsed.skipped == (
         EnvSkip(1, "1BAD", "invalid_name"),
         EnvSkip(2, "MY-KEY", "invalid_name"),
         EnvSkip(3, None, "invalid_name"),
-        EnvSkip(4, None, "invalid_line"),
-        EnvSkip(5, "EMPTY", "empty_value"),
+        EnvSkip(4, "EMPTY", "empty_value"),
+        EnvSkip(5, None, "invalid_line"),
     )
     assert "sentinel" not in repr(parsed.skipped)
 
@@ -61,6 +61,27 @@ def test_parse_keeps_a_multiline_key_out_of_the_names() -> None:
     parsed = parse_env(text)
     assert parsed.values == {"KEY": "-----BEGIN KEY-----\nMIIEabc=\n-----END KEY-----", "NEXT": "1"}
     assert parsed.skipped == ()
+
+
+def test_parse_never_reads_an_unquoted_key_body_as_names() -> None:
+    """Skip the body of an unquoted PEM value by line number only."""
+    text = "KEY=-----BEGIN KEY-----\nMIIEabcdSENTINEL\nAbCdEfGh12==\nZx9Q=wSENTINEL\n-----END KEY-----\nNEXT=1\n"
+    parsed = parse_env(text)
+    assert parsed.values == {"NEXT": "1"}
+    assert parsed.skipped == (
+        EnvSkip(1, "KEY", "unquoted_multiline"),
+        *(EnvSkip(line, None, "unquoted_multiline") for line in range(2, 6)),
+    )
+
+
+def test_parse_skips_a_broken_block_up_to_the_next_blank_line() -> None:
+    """Skip the lines after a line with no ``=``, so a fragment with one ``=`` is no name."""
+    text = "FIRST=1\nKEY=abc\ndefSENTINEL\nAbCdEfGh12=xySENTINEL\nQRst==\n\nLATER=2\n"
+    parsed = parse_env(text)
+    assert parsed.values == {"FIRST": "1", "KEY": "abc", "LATER": "2"}
+    assert parsed.skipped == tuple(EnvSkip(line, None, "invalid_line") for line in (3, 4, 5))
+    assert "SENTINEL" not in repr(parsed.skipped)
+    assert "AbCdEfGh12" not in repr(parsed)
 
 
 def test_parse_stops_at_an_unclosed_quote() -> None:
