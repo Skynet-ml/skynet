@@ -381,6 +381,7 @@ export function BestVersionTab({
   // diffing two patches against each other reads as noise.
   const canDiff = versions.length > 1 && !repository;
   const pullRequest = repository ? readPullRequest(result.details) : null;
+  const localApply = readLocalApply(result.details);
   const hasRenders = sideInfoImages(current.sideInfo).length > 0;
   const views: View[] = browse
     ? hasRenders
@@ -460,9 +461,11 @@ export function BestVersionTab({
           )}
           {pullRequest && !localFolder && <PullRequestRow pullRequest={pullRequest} />}
           {browse && localFolder && optimizationId && typeof result.best_candidate === "string" && (
+            // The key starts the row again when the run's saved state changes, as from another tab.
             <LocalApplyRow
+              key={`${localApply.applied}-${localApply.applied_at}`}
               optimizationId={optimizationId}
-              initial={readLocalApply(result.details)}
+              initial={localApply}
               source={source}
             />
           )}

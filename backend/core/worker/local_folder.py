@@ -47,7 +47,7 @@ from ..local.folder_tree import (
     source_id,
 )
 from ..models.blackbox import LOCAL_FOLDER_ONLY_HERE, LOCAL_REPO_PROVIDER, REPO_COMMIT_PATTERN
-from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
+from ..service_gateway.optimization.blackbox.repo_tree import apply_patch, fold_case, inside
 
 LOCAL_PROVIDER = LOCAL_REPO_PROVIDER
 LOCAL_SANDBOX_PROVIDER = "docker"
@@ -61,7 +61,12 @@ _FILE_MODE = 0o644
 _NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _FOLDER_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NO_FOLLOW
 # One Apply or Undo at a time on this computer, so two clicks cannot interleave their writes.
-_APPLY_LOCK = threading.Lock()
+# The router also holds it while it saves the run's state, so the state follows the folder's order.
+APPLY_LOCK = threading.RLock()
+# A blocked path matches in every case and Unicode form, as on the macOS disk of the desktop app.
+# On a case-sensitive disk this only refuses more, and no probe file goes into the user's folder.
+_FOLD_BLOCKED = fold_case(True)
+_FOLD_EDITABLE = fold_case(False)
 
 
 class LocalFolderError(RepoFetchError):
@@ -368,6 +373,8 @@ def apply_version(
     *,
     drafts: Mapping[str, str] | None = None,
     readonly_paths: Iterable[str] = (),
+    editable_paths: Iterable[str],
+    blocked_paths: Iterable[str],
 ) -> list[str]:
     """Write one version of a local run into its folder, and keep what Undo needs.
 
@@ -385,6 +392,9 @@ def apply_version(
         run_id: The run, which names the Undo record.
         drafts: The run's ``draft_files``.
         readonly_paths: Paths a draft cannot change.
+        editable_paths: The run's editable paths; every file the patch changes must lie below one.
+        blocked_paths: Read-only, protected and scoring-side paths; no file
+            the patch changes may lie below one, in any case or Unicode form.
 
     Returns:
         The changed files, sorted.
@@ -393,10 +403,11 @@ def apply_version(
         LocalFolderConflictError: When a file to change no longer matches the kept tree.
         LocalFolderError: When the version is already applied, the kept copy
             is missing, the version cannot be built, it changes a path the
-            folder copy leaves out, or a write fails. Files already written
-            are put back first.
+            folder copy leaves out or the run's rules forbid, or a write
+            fails. Files already written are put back first; the Undo record
+            stays when one of them could not be put back.
     """
-    with _APPLY_LOCK:
+    with APPLY_LOCK:
         record = applied_record(run_id)
         if record.is_file():
             raise LocalFolderError("The best version is already in the folder.")
@@ -406,8 +417,9 @@ def apply_version(
             original.mkdir()
             with _open_kept(commit) as packed:
                 packed.extractall(original, filter="data")
-            _build_version(commit, patch, checkout, drafts, readonly_paths)
+            drafted = _build_version(commit, patch, checkout, drafts, readonly_paths)
             changes = _changes(_scan(original), _scan(checkout))
+            _check_rules(changes, drafted, editable_paths, blocked_paths)
             folder = _open_root(root)
             try:
                 conflicts = []
@@ -432,8 +444,9 @@ def apply_version(
                             # Undo must find every folder Apply made, also after a crash.
                             _save_record(record, root, changes, made)
                 except BaseException:
-                    _put_back(folder, done, made)
-                    record.unlink(missing_ok=True)
+                    # A file left half way still needs its kept bytes, so only a full rollback drops the record.
+                    if _put_back(folder, done, made):
+                        record.unlink(missing_ok=True)
                     raise
             finally:
                 os.close(folder)
@@ -462,7 +475,7 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
         LocalFolderError: When the version is not applied, the Undo record
             cannot be read, or a write fails.
     """
-    with _APPLY_LOCK:
+    with APPLY_LOCK:
         record = applied_record(run_id)
         changes, made = _load_record(record)
         try:
@@ -490,7 +503,7 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
 
 def _build_version(
     commit: str, patch: str, checkout: Path, drafts: Mapping[str, str] | None, readonly_paths: Iterable[str]
-) -> None:
+) -> dict[str, _Blob]:
     """Unpack the kept tree into a new folder, then write the drafts and the patch over it.
 
     Args:
@@ -499,6 +512,9 @@ def _build_version(
         checkout: The folder to make; it must not exist.
         drafts: The run's ``draft_files``.
         readonly_paths: Paths a draft cannot change.
+
+    Returns:
+        The tree's files after the drafts and before the patch.
 
     Raises:
         LocalFolderError: When the kept copy is missing, a draft cannot be
@@ -509,9 +525,11 @@ def _build_version(
         packed.extractall(checkout, filter="data")
     try:
         write_to_checkout(checkout, drafts, readonly_paths)
+        drafted = _scan(checkout) if drafts else {}
         apply_patch(checkout, patch)
     except (DraftFileError, RuntimeError) as error:
         raise LocalFolderError(str(error)) from None
+    return drafted
 
 
 def _scan(tree: Path) -> dict[str, _Blob]:
@@ -567,6 +585,38 @@ def _changes(original: dict[str, _Blob], version: dict[str, _Blob]) -> list[_Cha
                 raise LocalFolderError(f"The version changes {path}, which the folder copy leaves out.")
         changes.append(_Change(path, before, after))
     return changes
+
+
+def _check_rules(
+    changes: list[_Change], drafted: Mapping[str, _Blob], editable_paths: Iterable[str], blocked_paths: Iterable[str]
+) -> None:
+    """Refuse a version whose real changed files break the run's editing rules.
+
+    The check runs on the files the built version changes, not on the names
+    in the patch, so a name in another case or Unicode form cannot reach a
+    blocked file on the disk. A file that ends as the setup draft wrote it
+    is the run's own setup, which a pull request also carries, so only the
+    read-only paths, checked when the draft is written, apply to it.
+
+    Args:
+        changes: The version's changes.
+        drafted: The tree's files after the drafts and before the patch.
+        editable_paths: Paths the run may change.
+        blocked_paths: Paths the run may never change.
+
+    Raises:
+        LocalFolderError: When a changed file is blocked or outside the editable paths.
+    """
+    editable = [_FOLD_EDITABLE(path) for path in editable_paths]
+    blocked = [_FOLD_BLOCKED(path.strip("/")) for path in blocked_paths if path.strip("/")]
+    for change in changes:
+        if change.after is not None and drafted.get(change.path) == change.after:
+            continue
+        folded = _FOLD_BLOCKED(change.path)
+        if inside(folded, blocked) or any(root.startswith(folded + "/") for root in blocked):
+            raise LocalFolderError(f"The version changes {change.path}, which the run may not change.")
+        if not inside(_FOLD_EDITABLE(change.path), editable):
+            raise LocalFolderError(f"The version changes {change.path}, which is outside the editable paths.")
 
 
 def _open_root(root: str | os.PathLike[str]) -> int:
@@ -717,7 +767,7 @@ def _put(folder: int, path: str, expected: _Disk, data: bytes | None, mode: int 
         os.close(parent)
 
 
-def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: bool = False) -> None:
+def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: bool = False) -> bool:
     """Return changed files to their state before Apply, then remove the folders Apply made.
 
     Args:
@@ -726,16 +776,21 @@ def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: b
         made: The folders Apply made, highest first.
         strict: Raise on the first failure (Undo); else keep going (rollback of a failed Apply).
 
+    Returns:
+        Whether every file went back; folders that stay do not count.
+
     Raises:
         LocalFolderConflictError: With ``strict``, when a file changed since the check.
         OSError: With ``strict``, when a write fails.
     """
+    restored = True
     for change in changes:
         try:
             _put(folder, change.path, change.after, change.before_data, change.before_mode, [])
         except (OSError, LocalFolderConflictError):
             if strict:
                 raise
+            restored = False
     for path in reversed(made):
         parts = path.split("/")
         with contextlib.suppress(OSError):
@@ -746,6 +801,7 @@ def _put_back(folder: int, changes: list[_Change], made: list[str], *, strict: b
                     os.rmdir(parts[-1], dir_fd=parent)
                 finally:
                     os.close(parent)
+    return restored
 
 
 def _save_record(record: Path, root: str | os.PathLike[str], changes: list[_Change], made: list[str]) -> None:
@@ -967,6 +1023,7 @@ def _keep(archive: Path, commit: str) -> None:
 
 __all__ = [
     "APPLIED_FOLDER",
+    "APPLY_LOCK",
     "KEPT_FOLDER",
     "LOCAL_PROVIDER",
     "LOCAL_SANDBOX_PROVIDER",

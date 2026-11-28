@@ -623,8 +623,20 @@ class _LoggingJobStore(FakeJobStore):
         self._logs.setdefault(optimization_id, []).append(entry)
 
 
+_MAIN_PATCH = (
+    "diff --git a/src/main.py b/src/main.py\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+)
+
+
 def _local_apply_run(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, status: str = "success", editable: list[str] | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    status: str = "success",
+    editable: list[str] | None = None,
+    files: dict[str, str] | None = None,
+    patch: str = _MAIN_PATCH,
+    protected: list[str] | None = None,
 ) -> tuple[_LoggingJobStore, Path]:
     """Seed a stopped local folder run whose best version changes one file.
 
@@ -633,6 +645,9 @@ def _local_apply_run(
         tmp_path: Scratch folder.
         status: The run's status.
         editable: The run's editable paths.
+        files: More files for the folder, by path.
+        patch: The best version.
+        protected: The run's protected paths.
 
     Returns:
         The store and the run's folder.
@@ -640,8 +655,9 @@ def _local_apply_run(
     monkeypatch.setattr(settings, "local_mode", True)
     monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
     folder = tmp_path / "app"
-    (folder / "src").mkdir(parents=True)
-    (folder / "src" / "main.py").write_text("x = 1\n")
+    for name, text in {"src/main.py": "x = 1\n", **(files or {})}.items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(text)
     workdir = tmp_path / "w"
     workdir.mkdir()
     commit = local_folder.snapshot_folder(folder, workdir).commit
@@ -660,15 +676,12 @@ def _local_apply_run(
                     "commit": commit,
                     "editable_paths": editable or ["src"],
                     "draft_files": {"src/cfg.toml": "[run]\n"},
-                    "environment": {"readonly_paths": [], "protected_paths": []},
+                    "environment": {"readonly_paths": [], "protected_paths": protected or []},
                 },
             },
         },
         result={
-            "best_candidate": (
-                "diff --git a/src/main.py b/src/main.py\n--- a/src/main.py\n+++ b/src/main.py\n"
-                "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            ),
+            "best_candidate": patch,
             "details": {"kept": True},
         },
     )
@@ -696,8 +709,8 @@ def test_apply_and_undo_change_the_folder_and_keep_the_first_apply_time(
     assert first_time
     assert (folder / "src" / "main.py").read_text() == "x = 2\n"
     assert (folder / "src" / "cfg.toml").read_text() == "[run]\n"
-    assert again.status_code == 409
-    assert again.json()["code"] == "optimization.local_folder_failed"
+    assert again.status_code == 200, again.text
+    assert again.json() == {"applied": True, "applied_at": first_time}
     stored = jobs.get_job("local-run")["result"]
     assert stored["details"] == {"kept": True, "local_apply": {"applied": True, "applied_at": first_time}}
     assert stored["best_candidate"].startswith("diff --git a/src/main.py")
@@ -791,6 +804,106 @@ def test_apply_and_undo_are_only_for_a_local_run_and_its_editors(
 
     assert hosted.status_code == 404
     assert hidden.status_code == 404
-    assert nothing.status_code == 409
-    assert nothing.json()["code"] == "optimization.local_folder_failed"
+    # Nothing is applied, so Undo has nothing to do, and no Apply time appears.
+    assert nothing.status_code == 200, nothing.text
+    assert nothing.json() == {"applied": False, "applied_at": None}
     assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+
+
+def _edit(path: str, old: str, new: str) -> str:
+    """Return a git-style patch that changes one line of one file.
+
+    Args:
+        path: The file the patch names.
+        old: The line before.
+        new: The line after.
+
+    Returns:
+        The patch.
+    """
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{old}\n+{new}\n"
+
+
+@pytest.mark.parametrize(
+    ("files", "patch", "protected"),
+    [
+        ({"src/eval/metric.py": "score = 1\n"}, _edit("src/EVAL/metric.py", "score = 1", "score = 9"), ["src/eval"]),
+        ({"src/eval/metric.py": "score = 1\n"}, _edit("src/eval/metric.py", "score = 1", "score = 9"), ["SRC/Eval"]),
+        (
+            {
+                "ascent.toml": 'version = 1\n[run]\nentry = "src/main.py:f"\n[metric]\nexploits = "src/attacks"\n',
+                "src/attacks/a.py": "attack = 1\n",
+            },
+            _edit("src/Attacks/a.py", "attack = 1", "attack = 0"),
+            [],
+        ),
+    ],
+)
+def test_apply_refuses_a_case_variant_of_a_protected_or_hidden_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, files: dict[str, str], patch: str, protected: list[str]
+) -> None:
+    """A protected path or the custom exploit folder in another case never reaches the folder.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+        files: The folder's files besides ``src/main.py``.
+        patch: The best version.
+        protected: The run's protected paths.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path, files=files, patch=patch, protected=protected)
+
+    response = _client(jobs).post("/optimizations/local-run/repository/apply")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "optimization.local_folder_failed"
+    for name, text in files.items():
+        assert (folder / name).read_text() == text
+    assert not (folder / "src" / "cfg.toml").exists()
+    assert not local_folder.is_applied("local-run")
+
+
+def test_a_lost_state_save_after_apply_still_leads_to_a_working_undo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Undo record is the one source of the applied state, so a failed row save heals on the next Apply.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    real_update = jobs.update_job
+    calls = {"n": 0}
+
+    def fail_once(optimization_id: str, **fields: Any) -> None:
+        """Fail the first save of the run's state.
+
+        Args:
+            optimization_id: The run.
+            **fields: The fields to save.
+
+        Raises:
+            RuntimeError: On the first call.
+        """
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is gone")
+        real_update(optimization_id, **fields)
+
+    monkeypatch.setattr(jobs, "update_job", fail_once)
+    client = _client(jobs)
+    lost = client.post("/optimizations/local-run/repository/apply")
+    assert lost.status_code == 500
+    assert (folder / "src" / "main.py").read_text() == "x = 2\n"
+    assert "local_apply" not in jobs.get_job("local-run")["result"]["details"]
+
+    repaired = client.post("/optimizations/local-run/repository/apply")
+    undone = client.post("/optimizations/local-run/repository/undo")
+
+    assert repaired.status_code == 200, repaired.text
+    assert repaired.json()["applied"] is True
+    assert undone.status_code == 200, undone.text
+    assert undone.json() == {"applied": False, "applied_at": repaired.json()["applied_at"]}
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+    assert not (folder / "src" / "cfg.toml").exists()
