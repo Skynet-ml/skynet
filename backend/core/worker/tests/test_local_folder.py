@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import os
 import tarfile
 import threading
+import unicodedata
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +17,7 @@ import pytest
 
 from core.config import settings
 from core.local import folder_tree
+from core.service_gateway.optimization.blackbox.repo_tree import case_insensitive
 from core.worker import local_folder
 from core.worker.local_folder import LocalFolderError
 
@@ -399,3 +402,574 @@ def test_a_file_swapped_for_a_pipe_during_the_pack_is_refused_without_blocking(
     assert len(errors) == 1
     assert isinstance(errors[0], LocalFolderError)
     assert "Not a regular file" in str(errors[0])
+
+
+def _fingerprint(root: Path) -> str:
+    """Hash every path below a folder: its kind, permission bits, bytes and link target.
+
+    Args:
+        root: The folder.
+
+    Returns:
+        One SHA-256 over the whole folder, ignored files included.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        status = path.lstat()
+        digest.update(f"{path.relative_to(root)}|{status.st_mode:o}|".encode())
+        if path.is_symlink():
+            digest.update(str(path.readlink()).encode())
+        elif path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+_PATCH = (
+    "--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    "--- /dev/null\n+++ b/src/deep/new.py\n@@ -0,0 +1 @@\n+y = 1\n"
+    "--- a/README.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-hi\n"
+)
+
+
+def _applied_run(tmp_path: Path) -> tuple[Path, str]:
+    """Pack a folder with ignored files, a link and an executable script.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The folder and its commit.
+    """
+    root = _write(
+        tmp_path / "app",
+        {"src/main.py": "x = 1\n", "README.md": "hi\n", ".env": "KEY=1\n", "node_modules/a.js": "1\n", "run.sh": "a\n"},
+    )
+    (root / "run.sh").chmod(0o700)
+    (root / "outside").symlink_to("/etc/hosts")
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    return root, local_folder.snapshot_folder(root, workdir).commit
+
+
+def _apply(root: Path, commit: str, patch: str, run_id: str, **rules: object) -> list[str]:
+    """Apply a version with every path editable and none blocked, unless a test names the rules.
+
+    Args:
+        root: The run's folder.
+        commit: The run's pinned source id.
+        patch: The version's patch.
+        run_id: The run.
+        **rules: ``apply_version`` keywords, such as ``drafts`` or ``blocked_paths``.
+
+    Returns:
+        The changed files.
+    """
+    rules.setdefault("editable_paths", ["."])
+    rules.setdefault("blocked_paths", [])
+    return local_folder.apply_version(root, commit, patch, run_id, **rules)  # type: ignore[arg-type]
+
+
+def test_apply_writes_the_version_and_undo_restores_every_byte_and_mode(tmp_path: Path, local_state: Path) -> None:
+    """Apply writes the drafts and the patch; Undo gives back the same folder hash, created folders removed."""
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+
+    changed = _apply(root, commit, _PATCH, "run-1", drafts={"cfg/a.toml": "[run]\n"})
+
+    assert changed == ["README.md", "cfg/a.toml", "src/deep/new.py", "src/main.py"]
+    assert (root / "src/main.py").read_text() == "x = 2\n"
+    assert (root / "src/deep/new.py").read_text() == "y = 1\n"
+    assert (root / "cfg/a.toml").read_text() == "[run]\n"
+    assert not (root / "README.md").exists()
+    assert (root / "run.sh").stat().st_mode & 0o777 == 0o700
+    assert (root / ".env").read_text() == "KEY=1\n"
+    assert local_folder.is_applied("run-1")
+    local_folder.check_applied(root, "run-1")
+    assert not list(root.rglob("*.apply"))
+    with pytest.raises(LocalFolderError, match="already in the folder"):
+        _apply(root, commit, _PATCH, "run-1")
+
+    restored = local_folder.undo_version(root, "run-1")
+
+    assert restored == changed
+    assert _fingerprint(root) == before
+    assert not (root / "cfg").exists()
+    assert not (root / "src/deep").exists()
+    # The record stays until the caller saves the run, so a repeat Undo finds the files restored.
+    assert local_folder.undo_version(root, "run-1") == changed
+    assert _fingerprint(root) == before
+    local_folder.forget_apply("run-1")
+    assert not local_folder.is_applied("run-1")
+    with pytest.raises(LocalFolderError, match="nothing to undo"):
+        local_folder.undo_version(root, "run-1")
+
+
+def test_apply_writes_nothing_when_a_file_to_change_changed(tmp_path: Path) -> None:
+    """A file the version changes, adds or deletes that no longer matches the kept tree stops Apply before any write."""
+    root, commit = _applied_run(tmp_path)
+    (root / "src/main.py").write_text("x = 9\n")
+    (root / "src/deep").mkdir()
+    (root / "src/deep/new.py").write_text("mine\n")
+    before = _fingerprint(root)
+
+    with pytest.raises(local_folder.LocalFolderConflictError) as caught:
+        _apply(root, commit, _PATCH, "run-1")
+
+    assert caught.value.paths == ["src/deep/new.py", "src/main.py"]
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+
+
+def test_apply_refuses_a_link_on_the_way_and_writes_nothing(tmp_path: Path) -> None:
+    """A folder swapped for a link to somewhere else is a conflict, so no write leaves the folder."""
+    root, commit = _applied_run(tmp_path)
+    elsewhere = _write(tmp_path / "elsewhere", {"main.py": "x = 1\n"})
+    (root / "src/main.py").unlink()
+    (root / "src").rmdir()
+    (root / "src").symlink_to(elsewhere)
+    before, outside = _fingerprint(root), _fingerprint(elsewhere)
+
+    with pytest.raises(local_folder.LocalFolderConflictError) as caught:
+        _apply(root, commit, _PATCH, "run-1")
+
+    assert caught.value.paths == ["src/deep/new.py", "src/main.py"]
+    assert _fingerprint(root) == before
+    assert _fingerprint(elsewhere) == outside
+
+
+def test_apply_refuses_a_file_swapped_for_a_link(tmp_path: Path) -> None:
+    """A file to change that is now a link is a conflict, and the link target is not touched."""
+    root, commit = _applied_run(tmp_path)
+    target = _write(tmp_path / "t", {"main.py": "x = 1\n"}) / "main.py"
+    (root / "src/main.py").unlink()
+    (root / "src/main.py").symlink_to(target)
+
+    with pytest.raises(local_folder.LocalFolderConflictError):
+        _apply(root, commit, _PATCH, "run-1")
+
+    assert target.read_text() == "x = 1\n"
+    assert (root / "src/main.py").is_symlink()
+
+
+def test_apply_refuses_a_version_that_changes_a_path_the_copy_leaves_out(tmp_path: Path) -> None:
+    """A draft at a path the folder copy skips (``node_modules``) is refused, since the kept tree cannot vouch for it."""
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+
+    with pytest.raises(LocalFolderError, match="leaves out"):
+        _apply(root, commit, "", "run-1", drafts={"node_modules/b.js": "2\n"})
+
+    assert _fingerprint(root) == before
+
+
+def test_apply_puts_back_written_files_when_a_later_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails half way rolls back the files already written and keeps no Undo record."""
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(*args: object, **kwargs: object) -> None:
+        """Fail the third rename of an Apply.
+
+        Args:
+            *args: Passed to ``os.replace``.
+            **kwargs: Passed to ``os.replace``.
+
+        Raises:
+            OSError: On the third call.
+        """
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError(28, "No space left on device")
+        real_replace(*args, **kwargs)
+
+    monkeypatch.setattr(local_folder.os, "replace", flaky_replace)
+
+    with pytest.raises(LocalFolderError, match="No space left"):
+        _apply(root, commit, _PATCH, "run-1", drafts={"cfg/a.toml": "[run]\n"})
+
+    monkeypatch.setattr(local_folder.os, "replace", real_replace)
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+
+
+def test_undo_writes_nothing_when_a_file_changed_after_apply(tmp_path: Path) -> None:
+    """A file edited after Apply stops Undo before any write, and the Undo record stays."""
+    root, commit = _applied_run(tmp_path)
+    _apply(root, commit, _PATCH, "run-1")
+    (root / "src/main.py").write_text("edited\n")
+    before = _fingerprint(root)
+
+    with pytest.raises(local_folder.LocalFolderConflictError) as caught:
+        local_folder.undo_version(root, "run-1")
+
+    assert caught.value.paths == ["src/main.py"]
+    assert _fingerprint(root) == before
+    assert local_folder.is_applied("run-1")
+
+
+def test_a_run_id_that_is_not_a_plain_name_is_refused() -> None:
+    """The Undo record's name cannot climb out of the state folder."""
+    with pytest.raises(LocalFolderError, match="not valid"):
+        local_folder.applied_record("../x")
+
+
+def _metric_run(tmp_path: Path, name: str) -> tuple[Path, str]:
+    """Pack a folder whose metric lives at ``src/<name>/metric.py``.
+
+    Args:
+        tmp_path: Scratch folder.
+        name: The metric folder's name.
+
+    Returns:
+        The folder and its commit.
+    """
+    root = _write(tmp_path / "app", {f"src/{name}/metric.py": "score = 1\n", "src/main.py": "x = 1\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    return root, local_folder.snapshot_folder(root, workdir).commit
+
+
+def _metric_patch(path: str) -> str:
+    """Return a patch that raises the score in one metric file.
+
+    Args:
+        path: The file the patch names.
+
+    Returns:
+        A git-style patch.
+    """
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-score = 1\n+score = 999\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "named", "blocked"),
+    [
+        ("eval", "src/EVAL/metric.py", "src/eval"),
+        ("eval", "src/eval/metric.py", "SRC/Eval"),
+        (unicodedata.normalize("NFC", "café"), f"src/{unicodedata.normalize('NFD', 'café')}/metric.py", "src/café"),
+    ],
+)
+def test_apply_refuses_a_case_or_unicode_variant_of_a_blocked_path(
+    tmp_path: Path, name: str, named: str, blocked: str
+) -> None:
+    """A blocked path in another case or Unicode form is still blocked, so the metric file stays as it is.
+
+    On a case-sensitive disk, as on Linux CI, a variant name is another file,
+    so the patch does not apply there; on macOS the rule check refuses it.
+    """
+    root, commit = _metric_run(tmp_path, name)
+    before = _fingerprint(root)
+    real_name = named.startswith(f"src/{name}/") or case_insensitive(tmp_path)
+
+    with pytest.raises(LocalFolderError, match="may not change" if real_name else None):
+        _apply(root, commit, _metric_patch(named), "run-1", editable_paths=["src"], blocked_paths=[blocked])
+
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+
+
+def test_apply_refuses_a_new_file_in_a_case_variant_of_a_blocked_folder(tmp_path: Path) -> None:
+    """A new file under a blocked folder in another case is refused on every disk, case-sensitive or not."""
+    root, commit = _metric_run(tmp_path, "eval")
+    before = _fingerprint(root)
+    patch = (
+        "diff --git a/src/EVAL/new.py b/src/EVAL/new.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/src/EVAL/new.py\n@@ -0,0 +1 @@\n+score = 999\n"
+    )
+
+    with pytest.raises(LocalFolderError, match="may not change"):
+        _apply(root, commit, patch, "run-1", editable_paths=["src"], blocked_paths=["src/eval"])
+
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+
+
+def test_undo_refuses_a_record_for_another_folder(tmp_path: Path) -> None:
+    """The Undo record names the folder Apply wrote, so Undo never writes its bytes into another folder."""
+    root, commit = _applied_run(tmp_path)
+    _apply(root, commit, _PATCH, "run-1")
+    other = _write(tmp_path / "other", {"src/main.py": "x = 2\n"})
+    before = _fingerprint(other)
+
+    with pytest.raises(LocalFolderError, match="another folder"):
+        local_folder.undo_version(other, "run-1")
+
+    assert _fingerprint(other) == before
+    assert local_folder.is_applied("run-1")
+
+
+def test_apply_refuses_a_change_outside_the_editable_paths(tmp_path: Path) -> None:
+    """The editable paths are checked on the files the version really changes."""
+    root, commit = _metric_run(tmp_path, "eval")
+    before = _fingerprint(root)
+    patch = (
+        "diff --git a/docs/a.md b/docs/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/a.md\n@@ -0,0 +1 @@\n+x\n"
+    )
+
+    with pytest.raises(LocalFolderError, match="outside the editable paths"):
+        _apply(root, commit, patch, "run-1", editable_paths=["src"])
+
+    assert _fingerprint(root) == before
+
+
+def test_apply_writes_the_setup_drafts_outside_the_rules_but_not_a_patch_over_them(tmp_path: Path) -> None:
+    """The run's setup drafts go in as the run used them; a patch that changes a draft file is still checked."""
+    root, commit = _metric_run(tmp_path, "eval")
+    drafts = {"ascent.toml": "version = 1\n"}
+    rules = {"drafts": drafts, "editable_paths": ["src"], "blocked_paths": ["ascent.toml"]}
+    over = "diff --git a/ascent.toml b/ascent.toml\n--- a/ascent.toml\n+++ b/ascent.toml\n@@ -1 +1 @@\n-version = 1\n+version = 2\n"
+    before = _fingerprint(root)
+
+    with pytest.raises(LocalFolderError, match="may not change"):
+        _apply(root, commit, over, "run-1", **rules)
+    assert _fingerprint(root) == before
+
+    assert _apply(root, commit, "", "run-1", **rules) == ["ascent.toml"]
+    assert (root / "ascent.toml").read_text() == "version = 1\n"
+
+
+def test_a_failed_rollback_keeps_the_undo_record_so_undo_can_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the disk fills during Apply and its rollback, the record stays, and Undo restores the folder later."""
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+    real_put = local_folder._put
+    calls = {"n": 0}
+
+    def flaky_put(*args: object, **kwargs: object) -> None:
+        """Fail every write after the first, as a full disk does.
+
+        Args:
+            *args: Passed to ``_put``.
+            **kwargs: Passed to ``_put``.
+
+        Raises:
+            OSError: From the second call on.
+        """
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError(28, "No space left on device")
+        real_put(*args, **kwargs)
+
+    monkeypatch.setattr(local_folder, "_put", flaky_put)
+    with pytest.raises(LocalFolderError, match="No space left"):
+        _apply(root, commit, _PATCH, "run-1")
+    assert _fingerprint(root) != before
+    assert local_folder.is_applied("run-1")
+    with pytest.raises(LocalFolderError, match="Undo first"):
+        local_folder.check_applied(root, "run-1")
+
+    monkeypatch.setattr(local_folder, "_put", real_put)
+    local_folder.undo_version(root, "run-1")
+    local_folder.forget_apply("run-1")
+
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+
+
+def test_a_failed_undo_record_write_leaves_no_temporary_file(
+    tmp_path: Path, local_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record write that fails part way removes its temporary file, and Apply writes nothing.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+        monkeypatch: Makes the record write fail.
+    """
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+
+    def broken_dump(*_args: object, **_kwargs: object) -> None:
+        """Fail as a full disk would.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("disk full")
+
+    monkeypatch.setattr(local_folder.json, "dump", broken_dump)
+    with pytest.raises(ValueError, match="disk full"):
+        _apply(root, commit, _PATCH, "run-1")
+
+    assert list((local_state / local_folder.APPLIED_FOLDER).iterdir()) == []
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+
+
+# The test patches ``os.fdopen`` with the class below, which opens the real one.
+_REAL_FDOPEN = os.fdopen
+
+
+class _FullDiskOnClose:
+    """A file whose close fails as a full disk fails the last buffer flush."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        """Open the real file.
+
+        Args:
+            *args: ``os.fdopen`` arguments.
+            **kwargs: ``os.fdopen`` keywords.
+        """
+        self._file = _REAL_FDOPEN(*args, **kwargs)  # type: ignore[arg-type]
+
+    def write(self, text: str) -> int:
+        """Write to the real file.
+
+        Args:
+            text: The text.
+
+        Returns:
+            The characters written.
+        """
+        return self._file.write(text)
+
+    def __enter__(self) -> _FullDiskOnClose:
+        """Use the file in a ``with`` block.
+
+        Returns:
+            This file.
+        """
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Close the real file, then fail as the flush would.
+
+        Raises:
+            OSError: Always, with ``ENOSPC``.
+        """
+        self._file.close()
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def _fdopen_full_on_record_close(descriptor: int, mode: str = "r", *args: object, **kwargs: object) -> object:
+    """Open a file, and make only the Undo record's text file fail at close.
+
+    Apply reads and writes the folder's files in binary mode, so only the record opens as ``"w"``.
+
+    Args:
+        descriptor: The open file descriptor.
+        mode: The open mode.
+        *args: More ``os.fdopen`` arguments.
+        **kwargs: ``os.fdopen`` keywords.
+
+    Returns:
+        The real file, or a ``_FullDiskOnClose`` for the record.
+    """
+    if mode == "w":
+        return _FullDiskOnClose(descriptor, mode, *args, **kwargs)
+    return _REAL_FDOPEN(descriptor, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("failure", ["close", "rename"])
+def test_a_record_write_that_fails_at_close_or_rename_leaves_no_temporary_file(
+    tmp_path: Path, local_state: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A full disk at the flush on close or at the rename removes the temporary file, and Apply writes nothing.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+        monkeypatch: Makes the close or the rename fail.
+        failure: Which step fails.
+    """
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+    if failure == "close":
+        monkeypatch.setattr(local_folder.os, "fdopen", _fdopen_full_on_record_close)
+    else:
+
+        def full_disk_replace(self: Path, target: Path) -> Path:
+            """Fail as a full disk would.
+
+            Raises:
+                OSError: Always, with ``ENOSPC``.
+            """
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(Path, "replace", full_disk_replace)
+
+    with pytest.raises(LocalFolderError, match="No space left"):
+        _apply(root, commit, _PATCH, "run-1")
+
+    assert list((local_state / local_folder.APPLIED_FOLDER).iterdir()) == []
+    assert _fingerprint(root) == before
+
+
+_FOLDER_TO_FILE_PATCH = (
+    "diff --git a/pkg/mod.py b/pkg/mod.py\ndeleted file mode 100644\n"
+    "--- a/pkg/mod.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x = 1\n"
+    "diff --git a/pkg b/pkg\nnew file mode 100644\n"
+    "--- /dev/null\n+++ b/pkg\n@@ -0,0 +1 @@\n+y = 1\n"
+)
+
+
+def test_apply_refuses_a_version_that_turns_a_folder_into_a_file(tmp_path: Path, local_state: Path) -> None:
+    """A folder that becomes a file at the same path is refused with its own reason, not a false conflict.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+    """
+    root = _write(tmp_path / "app", {"pkg/mod.py": "x = 1\n", "README.md": "hi\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    before = _fingerprint(root)
+
+    with pytest.raises(LocalFolderError, match="turns pkg") as caught:
+        _apply(root, commit, _FOLDER_TO_FILE_PATCH, "run-1")
+
+    assert not isinstance(caught.value, local_folder.LocalFolderConflictError)
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+    assert not (local_state / local_folder.APPLIED_FOLDER).exists() or not any(
+        (local_state / local_folder.APPLIED_FOLDER).iterdir()
+    )
+
+
+_FILE_TO_FOLDER_OTHER_CASE_PATCH = (
+    "diff --git a/Pkg b/Pkg\n"
+    "deleted file mode 100644\n"
+    "--- a/Pkg\n"
+    "+++ /dev/null\n"
+    "@@ -1 +0,0 @@\n"
+    "-x = 1\n"
+    "diff --git a/pkg/mod.py b/pkg/mod.py\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n"
+    "+++ b/pkg/mod.py\n"
+    "@@ -0,0 +1 @@\n"
+    "+y = 1\n"
+)
+
+
+def test_apply_refuses_a_version_that_turns_a_file_into_a_folder_in_another_case(
+    tmp_path: Path, local_state: Path
+) -> None:
+    """A file Pkg that becomes a folder pkg/ is the same path on a folded disk, so Apply refuses it.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+    """
+    root = _write(tmp_path / "app", {"Pkg": "x = 1\n", "README.md": "hi\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    before = _fingerprint(root)
+
+    with pytest.raises(LocalFolderError, match="turns") as caught:
+        _apply(root, commit, _FILE_TO_FOLDER_OTHER_CASE_PATCH, "run-1")
+
+    assert not isinstance(caught.value, local_folder.LocalFolderConflictError)
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+    assert not (local_state / local_folder.APPLIED_FOLDER).exists() or not any(
+        (local_state / local_folder.APPLIED_FOLDER).iterdir()
+    )

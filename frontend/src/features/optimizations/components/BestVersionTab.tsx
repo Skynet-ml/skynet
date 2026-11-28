@@ -6,6 +6,7 @@ import { useMemo, useState, type KeyboardEvent } from "react";
 import { toast } from "react-toastify";
 import { motion } from "motion/react";
 import {
+  ArrowCounterClockwise,
   ArrowSquareOut,
   Code,
   Cube,
@@ -31,7 +32,12 @@ import { HelpTip } from "@/shared/ui/help-tip";
 import type { BlackboxRunResult } from "@/shared/types/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
-import { downloadRepositoryArchive } from "@/shared/lib/api";
+import {
+  applyLocalVersion,
+  downloadRepositoryArchive,
+  undoLocalVersion,
+  type LocalApplyState,
+} from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
 import { tip } from "@/shared/lib/tooltips";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
@@ -339,6 +345,8 @@ export function BestVersionTab({
   result,
   jobName,
   repository = false,
+  localFolder = false,
+  localDrafts = false,
   optimizationId,
   source,
 }: {
@@ -346,6 +354,10 @@ export function BestVersionTab({
   jobName?: string | null;
   /** Each version is a patch against the pinned commit, not a text artifact. */
   repository?: boolean;
+  /** The run optimizes a folder on this computer, so its best version can be applied there. */
+  localFolder?: boolean;
+  /** The setup wrote draft files, which Apply writes even when the best version is the start. */
+  localDrafts?: boolean;
   /** Needed to browse a repository version's files at the pinned commit. */
   optimizationId?: string;
   /** Where the run lives; a hosted run reads its repository through the hosted proxy. */
@@ -372,6 +384,7 @@ export function BestVersionTab({
   // diffing two patches against each other reads as noise.
   const canDiff = versions.length > 1 && !repository;
   const pullRequest = repository ? readPullRequest(result.details) : null;
+  const localApply = readLocalApply(result.details);
   const hasRenders = sideInfoImages(current.sideInfo).length > 0;
   const views: View[] = browse
     ? hasRenders
@@ -449,7 +462,16 @@ export function BestVersionTab({
           {result.regression_guard_applied && (
             <InlineWarningRow message={msg("optimization.blackbox.best.regression_guard")} />
           )}
-          {pullRequest && <PullRequestRow pullRequest={pullRequest} />}
+          {pullRequest && !localFolder && <PullRequestRow pullRequest={pullRequest} />}
+          {browse && localFolder && optimizationId && canApplyLocal(result.best_candidate, localDrafts) && (
+            // The key starts the row again when the run's saved state changes, as from another tab.
+            <LocalApplyRow
+              key={`${localApply.applied}-${localApply.applied_at}-${localApply.undo_needed}`}
+              optimizationId={optimizationId}
+              initial={localApply}
+              source={source}
+            />
+          )}
           {!result.versions?.length && versions.length > 1 && (
             <p className="text-xs text-muted-foreground">
               {msg("optimization.blackbox.versions.history_missing")}
@@ -534,6 +556,83 @@ export function BestVersionTab({
         )}
       </section>
     </FadeIn>
+  );
+}
+
+/** Whether Apply has anything to write: the best version's patch, or the setup drafts under a baseline best. */
+function canApplyLocal(bestCandidate: unknown, drafts: boolean): boolean {
+  return typeof bestCandidate === "string" && (bestCandidate !== "" || drafts);
+}
+
+/** Whether the best version is in the run's folder, from the run's details. */
+function readLocalApply(details: Record<string, unknown>): LocalApplyState {
+  const raw = details?.local_apply as Record<string, unknown> | undefined;
+  return {
+    applied: raw?.applied === true,
+    applied_at: typeof raw?.applied_at === "string" ? raw.applied_at : null,
+    undo_needed: raw?.undo_needed === true,
+  };
+}
+
+/**
+ * Show why Apply or Undo failed, and reload the run. A failed Apply can save
+ * that the folder needs Undo, and a stopped run gets no live update.
+ */
+export function reportLocalApplyFailure(optimizationId: string, err: unknown, undo: boolean): void {
+  const fallback = undo
+    ? "optimization.blackbox.repo.undo_failed"
+    : "optimization.blackbox.repo.apply_failed";
+  toast.error(userErrorMessage(err, msg(fallback)));
+  window.dispatchEvent(new CustomEvent("optimization-updated", { detail: { optimizationId } }));
+}
+
+/** Apply the best version to the run's folder on this computer, or Undo it. */
+function LocalApplyRow({
+  optimizationId,
+  initial,
+  source,
+}: {
+  optimizationId: string;
+  initial: LocalApplyState;
+  source?: ApiSource;
+}) {
+  const [state, setState] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  // A failed Apply can leave part of the version in the folder; only Undo can take it back.
+  const undo = state.applied || state.undo_needed === true;
+  const change = async () => {
+    setBusy(true);
+    try {
+      setState(await (undo ? undoLocalVersion : applyLocalVersion)(optimizationId, source));
+    } catch (err) {
+      reportLocalApplyFailure(optimizationId, err, undo);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const Icon = busy ? CircleNotch : undo ? ArrowCounterClockwise : FolderOpen;
+  return (
+    <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-sm">
+      <span className="min-w-0 flex-1 text-muted-foreground" dir="auto" aria-live="polite">
+        {msg(
+          state.applied
+            ? "optimization.blackbox.repo.applied"
+            : undo
+              ? "optimization.blackbox.repo.undo_needed"
+              : "optimization.blackbox.repo.apply_hint",
+        )}
+      </span>
+      <Button
+        type="button"
+        size="sm"
+        variant={undo ? "outline" : "default"}
+        disabled={busy}
+        onClick={change}
+      >
+        <Icon className={cn("size-4", busy && "animate-spin")} aria-hidden="true" />
+        {msg(undo ? "optimization.blackbox.repo.undo" : "optimization.blackbox.repo.apply")}
+      </Button>
+    </div>
   );
 }
 

@@ -2585,6 +2585,41 @@ export async function downloadRepositoryArchive(
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+/** Whether a local folder run's best version is in its folder, and when it was first applied. */
+export interface LocalApplyState {
+  applied: boolean;
+  applied_at: string | null;
+  /** A failed Apply left part of the version in the folder, so the page offers Undo. */
+  undo_needed?: boolean;
+}
+
+/**
+ * Write a local folder run's best version into the folder on this computer.
+ * Nothing is written when a file to change changed since the run started.
+ */
+export function applyLocalVersion(
+  optimizationId: string,
+  source?: ApiSource,
+): Promise<LocalApplyState> {
+  return request<LocalApplyState>(
+    `/optimizations/${encodeURIComponent(optimizationId)}/repository/apply`,
+    { method: "POST" },
+    source,
+  );
+}
+
+/** Put a local folder run's folder back as it was before Apply. */
+export function undoLocalVersion(
+  optimizationId: string,
+  source?: ApiSource,
+): Promise<LocalApplyState> {
+  return request<LocalApplyState>(
+    `/optimizations/${encodeURIComponent(optimizationId)}/repository/undo`,
+    { method: "POST" },
+    source,
+  );
+}
+
 /**
  * Effective/resolved tier on a shared optimization. `owner` is the creator's
  * (and admins') resolved role; it is never a *grantable* member tier — see

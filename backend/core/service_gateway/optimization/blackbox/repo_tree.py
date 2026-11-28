@@ -435,8 +435,8 @@ def patch_violations(
         protected_paths: Files and folders the repository's constraints file
             protects; they win over the editable paths.
         exploit_paths: The configured ``[metric] exploits`` folder, when it
-            differs from ``.optimize/exploits``. No caller passes it yet;
-            SKY-356 part B passes it.
+            differs from ``.optimize/exploits``, and any other scoring-side
+            path the caller hides, such as a local folder's hidden paths.
 
     Returns:
         One readable reason per broken rule; empty when the patch is allowed.

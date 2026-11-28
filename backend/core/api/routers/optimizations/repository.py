@@ -4,13 +4,16 @@ Frontend-only (hidden from public docs):
 - ``GET /optimizations/{id}/repository/tree`` — every file and folder at the commit.
 - ``GET /optimizations/{id}/repository/file`` — one file's text at the commit.
 - ``POST /optimizations/{id}/repository/archive`` — the whole repository with one version applied, as a zip.
+- ``POST /optimizations/{id}/repository/apply`` — write a local run's best version into its folder (SKY-991).
+- ``POST /optimizations/{id}/repository/undo`` — put the folder back as it was before Apply (SKY-991).
 
 Every version of a repository run is a patch against one pinned commit; the
 run page applies the patches itself and only needs the base tree and files.
 The repository host is read with the run owner's connection, since the commit belongs to
 the run rather than to whoever is viewing it, and anonymously when the owner
 has none, so public repositories still open. A local folder run reads the
-copy of the folder that staging kept on this computer (SKY-990).
+copy of the folder that staging kept on this computer (SKY-990), and only a
+local run can Apply its best version to that folder and Undo it.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, TypeVar
 
@@ -27,6 +31,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
+from ....config import settings
 from ....connectors import repo_hosts
 from ....connectors.github_repo import RepoFetchError, github_token, patched_repo_zip
 from ....models import (
@@ -34,12 +39,38 @@ from ....models import (
     BlackboxRepoFileResponse,
     BlackboxRepoTreeEntry,
     BlackboxRepoTreeResponse,
+    OptimizationStatus,
 )
-from ....worker.local_folder import LOCAL_PROVIDER, LocalFolderError, snapshot_file, snapshot_tree, snapshot_zip
+from ....models.blackbox import LOCAL_FOLDER_ONLY_HERE
+from ....service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_FILE,
+    ConstraintsError,
+    parse_constraints,
+    read_constraints,
+)
+from ....service_gateway.optimization.blackbox.repo_tree import patch_violations
+from ....worker.local_folder import (
+    APPLY_LOCK,
+    LOCAL_PROVIDER,
+    LocalFolderConflictError,
+    LocalFolderError,
+    apply_version,
+    check_applied,
+    forget_apply,
+    forget_undone,
+    is_applied,
+    kept_snapshot,
+    snapshot_file,
+    snapshot_tree,
+    snapshot_zip,
+    undo_version,
+)
+from ....worker.repo_staging import hidden_repo_paths
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import job_owner
 from ...errors import DomainError
-from .._helpers import load_job_for_user
+from ...sharing_access import ShareRole
+from .._helpers import load_job_for_user, require_role_at_least
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
@@ -47,6 +78,13 @@ MAX_FILE_BYTES = 1024 * 1024
 _TREE_CACHE_ENTRIES = 32
 _FILE_CACHE_ENTRIES = 2048
 _FILE_CACHE_BYTES = 64 * 1024 * 1024
+# A running run still writes its result, so Apply and Undo wait until it stops.
+_STOPPED = {
+    OptimizationStatus.success.value,
+    OptimizationStatus.failed.value,
+    OptimizationStatus.cancelled.value,
+    OptimizationStatus.stopped.value,
+}
 
 T = TypeVar("T")
 
@@ -305,6 +343,154 @@ def _run_readonly_paths(job_data: dict[str, Any]) -> list[str]:
     return [str(path) for path in paths] if isinstance(paths, list) else []
 
 
+def _hidden_paths(commit: str, drafts: dict[str, str]) -> list[str]:
+    """List the scoring-side paths of a local run, which its best version may never change.
+
+    The worker drops the best version's edits to these paths by exact name
+    only, so Apply checks them again on the real files, in any case.
+
+    Args:
+        commit: The run's pinned source id.
+        drafts: The run's draft files, whose contract file wins over the kept one.
+
+    Returns:
+        The hidden paths of the kept contract file and of a drafted one, and the contract file itself.
+
+    Raises:
+        DomainError: 409 when the kept copy or a contract file cannot be read.
+    """
+    try:
+        found = [*hidden_repo_paths(read_constraints(kept_snapshot(commit), require_version=False, legacy_forms=True))]
+        if CONSTRAINTS_FILE in drafts:
+            drafted = parse_constraints(drafts[CONSTRAINTS_FILE].encode(), require_version=False, legacy_forms=True)
+            found += hidden_repo_paths(drafted)
+    except (ConstraintsError, LocalFolderError, OSError) as error:
+        raise DomainError("optimization.local_folder_failed", status=409, reason=str(error)) from None
+    return [*found, CONSTRAINTS_FILE]
+
+
+def _local_run(job_data: dict[str, Any], optimization_id: str) -> tuple[dict[str, Any], str]:
+    """Check that a run is a stopped local folder run on this computer.
+
+    Args:
+        job_data: The stored job row.
+        optimization_id: The run, for the error message.
+
+    Returns:
+        ``(repo, commit)``: the run's repository target and its pinned commit.
+
+    Raises:
+        DomainError: 404 when the run is not a local folder run; 409 before
+            its commit is pinned, away from the desktop app, or while it runs.
+    """
+    _repo, commit = _repo_target(job_data, optimization_id)
+    if _repo_provider(job_data) != LOCAL_PROVIDER:
+        raise DomainError("optimization.not_found", status=404, optimization_id=optimization_id)
+    if not settings.local_mode:
+        raise DomainError("optimization.local_folder_failed", status=409, reason=LOCAL_FOLDER_ONLY_HERE)
+    if job_data.get("status") not in _STOPPED:
+        raise DomainError("optimization.local_folder_failed", status=409, reason="The run is still running.")
+    return job_data["payload"]["target"]["repo"], commit
+
+
+def _change_folder(change: Callable[[], Any]) -> None:
+    """Run an Apply or an Undo, and turn its refusal into an API error.
+
+    Args:
+        change: The Apply or the Undo.
+
+    Raises:
+        DomainError: 409 with the changed files when the folder changed, or
+            with the reason when the folder cannot be changed.
+    """
+    try:
+        change()
+    except LocalFolderConflictError as error:
+        raise DomainError("optimization.local_folder_conflict", status=409, files=", ".join(error.paths)) from None
+    except LocalFolderError as error:
+        raise DomainError("optimization.local_folder_failed", status=409, reason=str(error)) from None
+
+
+def _record_apply(job_store, optimization_id: str, applied: bool, *, undo_needed: bool = False) -> dict[str, Any]:
+    """Save whether the best version is in the folder, and when it was first applied.
+
+    The Undo record decides ``applied``; the row only shows it. The caller
+    holds ``APPLY_LOCK``, so the row is read again here and two requests
+    cannot save over each other. ``applied_at`` is the feature's metric, so
+    Undo keeps it, and only an Apply sets it.
+
+    Args:
+        job_store: Job-store the run is saved in.
+        optimization_id: The run.
+        applied: Whether the version is in the folder now.
+        undo_needed: A failed Apply kept the Undo record, so the page must offer Undo.
+
+    Returns:
+        ``{"applied", "applied_at"}``, plus ``undo_needed`` when it is set, as the
+        run's ``result.details.local_apply`` now holds it.
+    """
+    result = dict(job_store.get_job(optimization_id).get("result") or {})
+    details = dict(result.get("details") or {})
+    previous = details.get("local_apply") if isinstance(details.get("local_apply"), dict) else {}
+    first = previous.get("applied_at") or (datetime.now(UTC).isoformat() if applied else None)
+    state: dict[str, Any] = {"applied": applied, "applied_at": first}
+    if undo_needed:
+        state["undo_needed"] = True
+    # An Undo on a run never applied changes nothing, so it saves and logs nothing either.
+    if previous == state or (not applied and not undo_needed and not previous):
+        return state
+    details["local_apply"] = state
+    result["details"] = details
+    job_store.update_job(optimization_id, result=result)
+    # The log keeps a trace of each change; the page reloads the row itself, as a stopped run gets no live update.
+    job_store.append_log(
+        optimization_id,
+        level="INFO",
+        logger_name="skynet.local_folder",
+        message="Applied the best version to the folder."
+        if applied
+        else "Apply stopped part way, so Undo must put the folder back."
+        if undo_needed
+        else "Undid the best version in the folder.",
+    )
+    return state
+
+
+def _is_applied(optimization_id: str) -> bool:
+    """Check whether the run's Undo record exists, and turn a refusal into an API error.
+
+    Args:
+        optimization_id: The run.
+
+    Returns:
+        True while the Undo record of the run's Apply exists.
+
+    Raises:
+        DomainError: 409 when the run id is not valid or there is no local state folder.
+    """
+    try:
+        return is_applied(optimization_id)
+    except LocalFolderError as error:
+        raise DomainError("optimization.local_folder_failed", status=409, reason=str(error)) from None
+
+
+def _says_applied(job_store, optimization_id: str) -> bool:
+    """Check whether the run's saved state says its best version is in the folder.
+
+    The caller holds ``APPLY_LOCK``, so the row is read again here.
+
+    Args:
+        job_store: Job-store the run is saved in.
+        optimization_id: The run.
+
+    Returns:
+        True when ``result.details.local_apply.applied`` is true.
+    """
+    result = job_store.get_job(optimization_id).get("result") or {}
+    state = (result.get("details") or {}).get("local_apply")
+    return isinstance(state, dict) and state.get("applied") is True
+
+
 def _tree_with_drafts(tree: BlackboxRepoTreeResponse, drafts: dict[str, str]) -> BlackboxRepoTreeResponse:
     """Show the run's draft files in the commit's tree, as the run started from both.
 
@@ -533,3 +719,106 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
             filename=archive.name,
             background=BackgroundTask(shutil.rmtree, workdir, ignore_errors=True),
         )
+
+    @router.post(
+        "/optimizations/{optimization_id}/repository/apply",
+        summary="Write a local run's best version into its folder",
+    )
+    def apply_to_folder(optimization_id: str, current_user: AuthenticatedUserDep) -> dict[str, Any]:
+        """Write the best version of a local folder run into the folder, and keep what Undo needs.
+
+        Args:
+            optimization_id: The local folder run.
+            current_user: Authenticated caller resolved from the bearer token.
+
+        Returns:
+            ``{"applied": True, "applied_at"}``, also when it was already applied.
+
+        Raises:
+            DomainError: 403 below the editor role; 404 when the run is not a
+                local folder run; 409 away from the desktop app, while the run
+                runs, without a best version or setup drafts, when it breaks the run's editing
+                rules, when a file to change changed, or when an earlier Apply
+                left only part of the version in the folder.
+        """
+        job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
+        repo, commit = _local_run(job_data, optimization_id)
+        result = job_data.get("result")
+        patch = result.get("best_candidate") if isinstance(result, dict) else None
+        drafts = _run_drafts(job_data)
+        # A best version equal to the start still differs from the folder by the setup drafts.
+        if not isinstance(patch, str) or not (patch or drafts):
+            raise DomainError("optimization.no_result_pending", status=409)
+        environment = repo.get("environment") if isinstance(repo.get("environment"), dict) else {}
+        editable = repo.get("editable_paths") or ()
+        readonly = environment.get("readonly_paths") or ()
+        protected = environment.get("protected_paths") or ()
+        hidden = _hidden_paths(commit, drafts)
+        # A local run skips publish, which checks the best version again, so the check runs here.
+        problems = patch_violations(patch, editable, readonly, protected, exploit_paths=hidden)
+        if problems:
+            raise DomainError("optimization.local_folder_failed", status=409, reason=problems[0])
+        with APPLY_LOCK:
+            if _is_applied(optimization_id) and not _says_applied(job_store, optimization_id):
+                # A record delete that failed after a saved Undo leaves the record with every file back.
+                _change_folder(lambda: forget_undone(repo["path"], optimization_id))
+            try:
+                # A repeat Apply only saves the row a failed save missed, and only when
+                # the files hold the version: a failed rollback keeps the record too.
+                if _is_applied(optimization_id):
+                    _change_folder(lambda: check_applied(repo["path"], optimization_id))
+                else:
+                    _change_folder(
+                        lambda: apply_version(
+                            repo["path"],
+                            commit,
+                            patch,
+                            optimization_id,
+                            drafts=drafts,
+                            readonly_paths=_run_readonly_paths(job_data),
+                            editable_paths=editable,
+                            blocked_paths=[*readonly, *protected, *hidden],
+                        )
+                    )
+            except DomainError:
+                # A kept record that the row does not show can mean part of the version is in
+                # the folder, so the row asks for Undo; the page then offers it.
+                if _is_applied(optimization_id) and not _says_applied(job_store, optimization_id):
+                    _record_apply(job_store, optimization_id, applied=False, undo_needed=True)
+                raise
+            return _record_apply(job_store, optimization_id, applied=True)
+
+    @router.post(
+        "/optimizations/{optimization_id}/repository/undo",
+        summary="Put a local run's folder back as it was before Apply",
+    )
+    def undo_in_folder(optimization_id: str, current_user: AuthenticatedUserDep) -> dict[str, Any]:
+        """Restore every file Apply changed in a local folder run's folder.
+
+        Args:
+            optimization_id: The local folder run.
+            current_user: Authenticated caller resolved from the bearer token.
+
+        Returns:
+            ``{"applied": False, "applied_at"}``, which keeps the first Apply's time,
+            also when nothing was applied.
+
+        Raises:
+            DomainError: 403 below the editor role; 404 when the run is not a
+                local folder run; 409 away from the desktop app, while the run
+                runs, when a file changed after Apply, or when the run is
+                applied but its Undo record is gone.
+        """
+        job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
+        repo, _commit = _local_run(job_data, optimization_id)
+        with APPLY_LOCK:
+            if _is_applied(optimization_id):
+                _change_folder(lambda: undo_version(repo["path"], optimization_id))
+                # The record goes only after the row save, so a failed save leaves a repeat Undo that works.
+                state = _record_apply(job_store, optimization_id, applied=False)
+                _change_folder(lambda: forget_apply(optimization_id))
+                return state
+            if _says_applied(job_store, optimization_id):
+                # Saving "not applied" here would hide that the folder still holds the version.
+                raise DomainError("optimization.local_folder_undo_missing", status=409)
+            return _record_apply(job_store, optimization_id, applied=False)
