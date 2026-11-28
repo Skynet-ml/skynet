@@ -369,6 +369,37 @@ void test("after a pick both source cards stay and there is no back button", asy
   }
 });
 
+// SKY-1016: the icon tile animates only on the user's pick, and no card shows a check mark.
+void test("a picked source card sends one ring, and a card chosen at mount does not", async () => {
+  const empty: RepoDraft = { ...repo, provider: undefined, repository: "" };
+  const { container, unmount } = await mount(empty);
+  try {
+    const cards = () => [...container.querySelectorAll<HTMLButtonElement>("button[aria-pressed]")];
+    const rings = (card: Element) => card.querySelectorAll('[class*="choice-tile-ring"]').length;
+    assert.deepEqual(cards().map(rings), [0, 0]);
+    await React.act(async () => cards()[1]!.click());
+    assert.deepEqual(cards().map(rings), [0, 1]);
+    await React.act(async () => cards()[0]!.click());
+    assert.deepEqual(cards().map(rings), [1, 0]);
+    // The tile icon is the only icon on a source card: no check mark.
+    assert.deepEqual(
+      cards().map((c) => c.querySelectorAll("svg").length),
+      [1, 1],
+    );
+  } finally {
+    await unmount();
+  }
+  const chosen = await mount(repo);
+  try {
+    const cards = [...chosen.container.querySelectorAll("button[aria-pressed]")];
+    assert.ok(cards.some((c) => c.getAttribute("aria-pressed") === "true"), "no chosen card");
+    assert.equal(chosen.container.querySelectorAll('[class*="choice-tile-ring"]').length, 0);
+    assert.equal(chosen.container.querySelectorAll('[class*="choice-tile-pop"]').length, 0);
+  } finally {
+    await chosen.unmount();
+  }
+});
+
 // SKY-993: the "Pick a folder" source in the desktop app.
 type Bridge = {
   pickFolder?: () => Promise<string | null>;

@@ -1036,6 +1036,110 @@ html body[data-scroll-locked] {
   }
 }
 
+/* A choice card's icon tile lands when the card is chosen: a press, then a soft overshoot. */
+@keyframes choice-tile-pop {
+  0% {
+    transform: scale(0.86);
+  }
+  55% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* The icon inside the tile turns into place as the tile lands. */
+@keyframes choice-icon-settle {
+  0% {
+    transform: rotate(-24deg) scale(0.6);
+    opacity: 0.4;
+  }
+  60% {
+    transform: rotate(6deg) scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(0) scale(1);
+  }
+}
+
+/* Hover gestures of the choice-card icons. Each plays once and ends at rest. They
+   animate transform, so they add to the icon's own rotate and scale hover pose. */
+
+/* An existing repository: the folder lifts and tips, as if it opens. */
+@keyframes choice-icon-open {
+  0% {
+    transform: translateY(0) rotate(0);
+  }
+  35% {
+    transform: translateY(-3px) rotate(-10deg);
+  }
+  65% {
+    transform: translateY(1px) rotate(3deg);
+  }
+  100% {
+    transform: translateY(0) rotate(0);
+  }
+}
+
+/* A new repository: the plus pulses, as if it adds one. */
+@keyframes choice-icon-add {
+  0% {
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(1.3);
+  }
+  60% {
+    transform: scale(0.9);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Remote: the globe turns once on its axis. */
+@keyframes choice-icon-spin {
+  0% {
+    transform: rotate(0);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* This computer: the screen dims and comes on, as if it boots. */
+@keyframes choice-icon-boot {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+  25% {
+    transform: translateY(1px) scale(0.9);
+    opacity: 0.45;
+  }
+  60% {
+    transform: translateY(-2px) scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* One ring of the tile's color spreads out and fades as the card is chosen. */
+@keyframes choice-tile-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.75);
+    opacity: 0;
+  }
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
