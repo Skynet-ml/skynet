@@ -445,6 +445,23 @@ def _record_apply(job_store, optimization_id: str, applied: bool) -> dict[str, A
     return state
 
 
+def _says_applied(job_store, optimization_id: str) -> bool:
+    """Check whether the run's saved state says its best version is in the folder.
+
+    The caller holds ``APPLY_LOCK``, so the row is read again here.
+
+    Args:
+        job_store: Job-store the run is saved in.
+        optimization_id: The run.
+
+    Returns:
+        True when ``result.details.local_apply.applied`` is true.
+    """
+    result = job_store.get_job(optimization_id).get("result") or {}
+    state = (result.get("details") or {}).get("local_apply")
+    return isinstance(state, dict) and state.get("applied") is True
+
+
 def _tree_with_drafts(tree: BlackboxRepoTreeResponse, drafts: dict[str, str]) -> BlackboxRepoTreeResponse:
     """Show the run's draft files in the commit's tree, as the run started from both.
 
@@ -691,7 +708,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         Raises:
             DomainError: 403 below the editor role; 404 when the run is not a
                 local folder run; 409 away from the desktop app, while the run
-                runs, without a best version, when it breaks the run's editing
+                runs, without a best version or setup drafts, when it breaks the run's editing
                 rules, when a file to change changed, or when an earlier Apply
                 left only part of the version in the folder.
         """
@@ -699,13 +716,14 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         repo, commit = _local_run(job_data, optimization_id)
         result = job_data.get("result")
         patch = result.get("best_candidate") if isinstance(result, dict) else None
-        if not isinstance(patch, str) or not patch:
+        drafts = _run_drafts(job_data)
+        # A best version equal to the start still differs from the folder by the setup drafts.
+        if not isinstance(patch, str) or not (patch or drafts):
             raise DomainError("optimization.no_result_pending", status=409)
         environment = repo.get("environment") if isinstance(repo.get("environment"), dict) else {}
         editable = repo.get("editable_paths") or ()
         readonly = environment.get("readonly_paths") or ()
         protected = environment.get("protected_paths") or ()
-        drafts = _run_drafts(job_data)
         hidden = _hidden_paths(commit, drafts)
         # A local run skips publish, which checks the best version again, so the check runs here.
         problems = patch_violations(patch, editable, readonly, protected, exploit_paths=hidden)
@@ -749,11 +767,15 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         Raises:
             DomainError: 403 below the editor role; 404 when the run is not a
                 local folder run; 409 away from the desktop app, while the run
-                runs, or when a file changed after Apply.
+                runs, when a file changed after Apply, or when the run is
+                applied but its Undo record is gone.
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
         repo, _commit = _local_run(job_data, optimization_id)
         with APPLY_LOCK:
             if is_applied(optimization_id):
                 _change_folder(lambda: undo_version(repo["path"], optimization_id))
+            elif _says_applied(job_store, optimization_id):
+                # Saving "not applied" here would hide that the folder still holds the version.
+                raise DomainError("optimization.local_folder_undo_missing", status=409)
             return _record_apply(job_store, optimization_id, applied=False)

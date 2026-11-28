@@ -299,6 +299,7 @@ class I18nKey(StrEnum):
     OPTIMIZATION_INSUFFICIENT_ROLE = 'optimization.insufficient_role'
     OPTIMIZATION_LOCAL_FOLDER_CONFLICT = 'optimization.local_folder_conflict'
     OPTIMIZATION_LOCAL_FOLDER_FAILED = 'optimization.local_folder_failed'
+    OPTIMIZATION_LOCAL_FOLDER_UNDO_MISSING = 'optimization.local_folder_undo_missing'
     OPTIMIZATION_NO_RESULT_PENDING = 'optimization.no_result_pending'
     OPTIMIZATION_NOT_FOUND = 'optimization.not_found'
     OPTIMIZATION_PAIR_NOT_RERUNNABLE = 'optimization.pair_not_rerunnable'

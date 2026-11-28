@@ -346,6 +346,7 @@ export function BestVersionTab({
   jobName,
   repository = false,
   localFolder = false,
+  localDrafts = false,
   optimizationId,
   source,
 }: {
@@ -355,6 +356,8 @@ export function BestVersionTab({
   repository?: boolean;
   /** The run optimizes a folder on this computer, so its best version can be applied there. */
   localFolder?: boolean;
+  /** The setup wrote draft files, which Apply writes even when the best version is the start. */
+  localDrafts?: boolean;
   /** Needed to browse a repository version's files at the pinned commit. */
   optimizationId?: string;
   /** Where the run lives; a hosted run reads its repository through the hosted proxy. */
@@ -460,7 +463,7 @@ export function BestVersionTab({
             <InlineWarningRow message={msg("optimization.blackbox.best.regression_guard")} />
           )}
           {pullRequest && !localFolder && <PullRequestRow pullRequest={pullRequest} />}
-          {browse && localFolder && optimizationId && typeof result.best_candidate === "string" && (
+          {browse && localFolder && optimizationId && canApplyLocal(result.best_candidate, localDrafts) && (
             // The key starts the row again when the run's saved state changes, as from another tab.
             <LocalApplyRow
               key={`${localApply.applied}-${localApply.applied_at}`}
@@ -554,6 +557,11 @@ export function BestVersionTab({
       </section>
     </FadeIn>
   );
+}
+
+/** Whether Apply has anything to write: the best version's patch, or the setup drafts under a baseline best. */
+function canApplyLocal(bestCandidate: unknown, drafts: boolean): boolean {
+  return typeof bestCandidate === "string" && (bestCandidate !== "" || drafts);
 }
 
 /** Whether the best version is in the run's folder, from the run's details. */

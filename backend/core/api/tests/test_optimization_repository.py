@@ -637,6 +637,7 @@ def _local_apply_run(
     files: dict[str, str] | None = None,
     patch: str = _MAIN_PATCH,
     protected: list[str] | None = None,
+    drafts: dict[str, str] | None = None,
 ) -> tuple[_LoggingJobStore, Path]:
     """Seed a stopped local folder run whose best version changes one file.
 
@@ -648,6 +649,7 @@ def _local_apply_run(
         files: More files for the folder, by path.
         patch: The best version.
         protected: The run's protected paths.
+        drafts: The run's setup drafts; one draft file when not given.
 
     Returns:
         The store and the run's folder.
@@ -675,7 +677,7 @@ def _local_apply_run(
                     "path": str(folder),
                     "commit": commit,
                     "editable_paths": editable or ["src"],
-                    "draft_files": {"src/cfg.toml": "[run]\n"},
+                    "draft_files": {"src/cfg.toml": "[run]\n"} if drafts is None else drafts,
                     "environment": {"readonly_paths": [], "protected_paths": protected or []},
                 },
             },
@@ -975,3 +977,62 @@ def test_apply_without_a_local_state_folder_is_a_409(monkeypatch: pytest.MonkeyP
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "optimization.local_folder_failed"
     assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+
+
+def test_apply_of_a_baseline_best_writes_the_setup_drafts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A best version equal to the start still applies the setup drafts, and Undo takes them back.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path, patch="")
+    client = _client(jobs)
+
+    applied = client.post("/optimizations/local-run/repository/apply")
+
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"] is True
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+    assert (folder / "src" / "cfg.toml").read_text() == "[run]\n"
+    assert client.post("/optimizations/local-run/repository/undo").status_code == 200
+    assert not (folder / "src" / "cfg.toml").exists()
+
+
+def test_apply_of_a_baseline_best_without_drafts_is_a_409(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With no patch and no setup drafts there is nothing to write, so Apply refuses.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path, patch="", drafts={})
+
+    response = _client(jobs).post("/optimizations/local-run/repository/apply")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "optimization.no_result_pending"
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+    assert "local_apply" not in jobs.get_job("local-run")["result"]["details"]
+
+
+def test_undo_with_a_lost_undo_record_is_a_409_and_keeps_the_run_applied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An applied run whose Undo record is gone refuses Undo, so the page does not claim the folder is back.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    client = _client(jobs)
+    applied = client.post("/optimizations/local-run/repository/apply").json()
+    local_folder.applied_record("local-run").unlink()
+
+    response = client.post("/optimizations/local-run/repository/undo")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "optimization.local_folder_undo_missing"
+    assert jobs.get_job("local-run")["result"]["details"]["local_apply"] == applied
+    assert (folder / "src" / "main.py").read_text() == "x = 2\n"

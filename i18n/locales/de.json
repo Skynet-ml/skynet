@@ -268,6 +268,7 @@
     "optimization.repo_archive_failed": "Das Repository konnte nicht gepackt werden: {reason}",
     "optimization.local_folder_conflict": "Diese Dateien haben sich im Ordner geändert, daher wurde nichts geschrieben: {files}",
     "optimization.local_folder_failed": "Der Ordner konnte nicht geändert werden: {reason}",
+    "optimization.local_folder_undo_missing": "Die Rückgängig-Kopie dieses Laufs fehlt, daher wurde nichts wiederhergestellt. Der Ordner enthält weiterhin die beste Version.",
     "optimization.not_found": "Optimierung nicht gefunden: '{optimization_id}'.",
     "optimization.agent_run_not_found": "Agentenlauf {run_id} für Optimierung '{optimization_id}' nicht gefunden.",
     "optimization.pair_not_rerunnable": "Ein Paar kann nicht erneut ausgeführt werden, während sich die Optimierung im Zustand '{status}' befindet.",

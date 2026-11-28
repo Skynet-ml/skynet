@@ -268,6 +268,7 @@
     "optimization.repo_archive_failed": "No se pudo empaquetar el repositorio: {reason}",
     "optimization.local_folder_conflict": "Estos archivos cambiaron en la carpeta, así que no se escribió nada: {files}",
     "optimization.local_folder_failed": "No se pudo cambiar la carpeta: {reason}",
+    "optimization.local_folder_undo_missing": "Falta la copia para deshacer de esta ejecución, así que no se restauró nada. La carpeta todavía contiene la mejor versión.",
     "optimization.not_found": "Optimización no encontrada: '{optimization_id}'.",
     "optimization.agent_run_not_found": "No se encontró la ejecución del agente {run_id} para la optimización '{optimization_id}'.",
     "optimization.pair_not_rerunnable": "No se puede volver a ejecutar un par mientras la optimización está en estado '{status}'.",

@@ -764,3 +764,33 @@ def test_a_failed_rollback_keeps_the_undo_record_so_undo_can_finish(
 
     assert _fingerprint(root) == before
     assert not local_folder.is_applied("run-1")
+
+
+def test_a_failed_undo_record_write_leaves_no_temporary_file(
+    tmp_path: Path, local_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record write that fails part way removes its temporary file, and Apply writes nothing.
+
+    Args:
+        tmp_path: Scratch folder.
+        local_state: The local state folder.
+        monkeypatch: Makes the record write fail.
+    """
+    root, commit = _applied_run(tmp_path)
+    before = _fingerprint(root)
+
+    def broken_dump(*_args: object, **_kwargs: object) -> None:
+        """Fail as a full disk would.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("disk full")
+
+    monkeypatch.setattr(local_folder.json, "dump", broken_dump)
+    with pytest.raises(ValueError, match="disk full"):
+        _apply(root, commit, _PATCH, "run-1")
+
+    assert list((local_state / local_folder.APPLIED_FOLDER).iterdir()) == []
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")

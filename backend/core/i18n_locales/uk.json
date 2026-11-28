@@ -268,6 +268,7 @@
     "optimization.repo_archive_failed": "Не вдалося запакувати репозиторій: {reason}",
     "optimization.local_folder_conflict": "Ці файли в папці змінилися, тому нічого не записано: {files}",
     "optimization.local_folder_failed": "Не вдалося змінити папку: {reason}",
+    "optimization.local_folder_undo_missing": "Копії для скасування цього запуску немає, тому нічого не відновлено. У папці досі найкраща версія.",
     "optimization.not_found": "Оптимізацію не знайдено: '{optimization_id}'.",
     "optimization.agent_run_not_found": "Запуск агента {run_id} для оптимізації '{optimization_id}' не знайдено.",
     "optimization.pair_not_rerunnable": "Неможливо повторно запустити пару, поки оптимізація перебуває у стані '{status}'.",
