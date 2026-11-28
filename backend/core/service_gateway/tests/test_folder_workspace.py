@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from core.config import settings
+from core.local.folder_tree import FolderTreeError, file_digest, folder_entries
 from core.service_gateway.agents import folder_workspace as fw
 from core.service_gateway.agents.apply_patch import apply_patch
 from core.service_gateway.agents.attachment_sandbox import stop_chat_runner
@@ -513,3 +514,33 @@ def test_a_case_only_rename_records_the_old_name_as_deleted(state_dir: Path, sou
 
     assert found.deleted == ["Utils.py"]
     assert found.files == {"utils.py": "u\n"}
+
+
+def test_the_copy_streams_each_file_and_refuses_a_folder_past_its_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Small blocks still give the folder's digests, and files past the cap stop the copy with a clear error."""
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "big.bin").write_bytes(b"a" * 10)
+    (source / "run.sh").write_bytes(b"echo hi\n")
+    (source / "run.sh").chmod(0o755)
+    entries, _ = folder_entries(source, limit=None)
+    monkeypatch.setattr(fw, "COPY_CHUNK_BYTES", 3)
+    monkeypatch.setattr(fw, "COPY_BYTES_MAX", 18)
+
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    digests = fw.copy_folder(source, copy, entries)
+
+    assert digests == {rel: file_digest(source, rel) for rel in ("big.bin", "run.sh")}
+    assert (copy / "big.bin").read_bytes() == b"a" * 10
+    monkeypatch.setattr(fw, "COPY_BYTES_MAX", 17)
+    with pytest.raises(FolderTreeError, match="more than the setup shell can copy"):
+        fw.copy_folder(source, tmp_path / "unused", entries)
+    # A file that grew after the listing is counted while it streams, not only in the listing.
+    (source / "big.bin").write_bytes(b"a" * 20)
+    grown = tmp_path / "grown"
+    grown.mkdir()
+    with pytest.raises(FolderTreeError, match="more than the setup shell can copy"):
+        fw.copy_folder(source, grown, entries)

@@ -56,6 +56,7 @@ from ...models.blackbox import DRAFT_FILE_BYTES, clean_draft_path
 from .apply_patch import apply_patch, remove_inside, write_inside
 from .local_command_runner import LocalCommandRunner
 from .local_egress_proxy import LocalEgressProxy, SetupSecret
+from .repo_browser import LOCAL_FOLDER_READ_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,9 @@ COPY_DIR = "folder"
 ATTACHMENTS_DIR = "attachments"
 CLOSED = "Error: the folder copy is closed. Send the message again to open a new copy."
 _KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# The copy holds the raw files, so it takes the folder browser's raw cap, not the run's 200 MB pack cap.
+COPY_BYTES_MAX = LOCAL_FOLDER_READ_BYTES
+COPY_CHUNK_BYTES = 1024 * 1024
 # The shape of attachment_sandbox.FileLoader; that module imports this one, so the type is named here.
 # It takes the attachment ids the session holds, and gives the ids the chat holds now and its other files.
 AttachmentLoader = Callable[[set[str]], tuple[set[str], Iterable[Any]]]
@@ -110,13 +114,13 @@ class _CopyRunner(LocalCommandRunner):
         return path if path == self.folder or self.folder in path.parents else None
 
 
-def _write_new(root: Path, rel: str, data: bytes, mode: int) -> None:
+def _write_new(root: Path, rel: str, chunks: Iterable[bytes], mode: int) -> None:
     """Write a copied file with ``O_EXCL``, walking from ``root`` without following a link.
 
     Args:
         root: The copy's root.
         rel: The file's ``/``-joined path.
-        data: The bytes.
+        chunks: The bytes, one block at a time.
         mode: The permission bits.
 
     Raises:
@@ -134,7 +138,8 @@ def _write_new(root: Path, rel: str, data: bytes, mode: int) -> None:
             fd = child
         out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
         with os.fdopen(out, "wb") as handle:
-            handle.write(data)
+            for chunk in chunks:
+                handle.write(chunk)
             os.fchmod(handle.fileno(), mode)
     finally:
         os.close(fd)
@@ -145,7 +150,8 @@ def copy_folder(source: Path, folder: Path, entries: list[dict[str, Any]]) -> di
 
     The source is only read: each file opens with
     :func:`~core.local.folder_tree.open_no_follow`, and a file that became a
-    link since the listing is left out.
+    link since the listing is left out. Each file streams in blocks, so a
+    large file never sits in memory whole.
 
     Args:
         source: The user's folder.
@@ -155,8 +161,15 @@ def copy_folder(source: Path, folder: Path, entries: list[dict[str, Any]]) -> di
     Returns:
         Each copied file's path and its :func:`~core.local.folder_tree.file_digest`
         style digest, computed from the copied bytes.
+
+    Raises:
+        FolderTreeError: When the files sum past :data:`COPY_BYTES_MAX`, in the
+            listing or while they are copied.
     """
+    if sum(int(entry.get("size", 0)) for entry in entries if entry["type"] == "file") > COPY_BYTES_MAX:
+        raise FolderTreeError(_too_large())
     digests: dict[str, bytes] = {}
+    copied = [0]
     for entry in entries:
         rel = str(entry["path"])
         if any(is_env_name(part) for part in rel.split("/")):
@@ -165,13 +178,51 @@ def copy_folder(source: Path, folder: Path, entries: list[dict[str, Any]]) -> di
             with contextlib.suppress(OSError):
                 _make_folder(folder, rel)
             continue
-        found = _read_source(source, rel)
-        if found is None:
+        try:
+            handle = open_no_follow(source, rel)
+        except OSError:
             continue
-        data, executable = found
-        _write_new(folder, rel, data, 0o755 if executable else 0o644)
-        digests[rel] = _digest(data, executable)
+        with handle:
+            executable = is_executable(os.fstat(handle.fileno()).st_mode)
+            digest = hashlib.sha1(usedforsecurity=False)
+            _write_new(folder, rel, _blocks(handle, digest, copied), 0o755 if executable else 0o644)
+        digests[rel] = digest.digest() + EXEC_MARKER if executable else digest.digest()
     return digests
+
+
+def _blocks(handle: Any, digest: Any, copied: list[int]) -> Iterable[bytes]:
+    """Read one source file in blocks, hash them and count them toward the copy's cap.
+
+    Args:
+        handle: The open source file.
+        digest: The SHA-1 hash that takes each block.
+        copied: One counter of the bytes the copy holds so far; it grows.
+
+    Yields:
+        Each block.
+
+    Raises:
+        FolderTreeError: When a file grew since the listing and the copy passes
+            :data:`COPY_BYTES_MAX`.
+    """
+    while block := handle.read(COPY_CHUNK_BYTES):
+        copied[0] += len(block)
+        if copied[0] > COPY_BYTES_MAX:
+            raise FolderTreeError(_too_large())
+        digest.update(block)
+        yield block
+
+
+def _too_large() -> str:
+    """Say that the folder is too large to copy.
+
+    Returns:
+        The error text for the agent.
+    """
+    return (
+        f"The folder holds more than {COPY_BYTES_MAX / 1024**3:g} GB of files, "
+        "which is more than the setup shell can copy. Ask the user to pick a smaller folder."
+    )
 
 
 def _read_source(source: Path, rel: str) -> tuple[bytes, bool] | None:
@@ -191,20 +242,6 @@ def _read_source(source: Path, rel: str) -> tuple[bytes, bool] | None:
             return handle.read(), is_executable(mode)
     except OSError:
         return None
-
-
-def _digest(data: bytes, executable: bool) -> bytes:
-    """Hash file bytes the way :func:`~core.local.folder_tree.file_digest` does.
-
-    Args:
-        data: The bytes.
-        executable: Whether the file has an execute bit.
-
-    Returns:
-        The SHA-1 digest, then :data:`~core.local.folder_tree.EXEC_MARKER` for an executable file.
-    """
-    digest = hashlib.sha1(data, usedforsecurity=False).digest()
-    return digest + EXEC_MARKER if executable else digest
 
 
 def _make_folder(root: Path, rel: str) -> None:
