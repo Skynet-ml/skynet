@@ -189,3 +189,97 @@ def test_a_deleted_link_does_not_free_the_path_below_it(tmp_path: Path) -> None:
     with pytest.raises(PatchError):
         apply_patch(root, _patch("*** Delete File: a", "*** Add File: a/b", "+new"))
     assert list(outside.iterdir()) == []
+
+
+def _tree(root: Path) -> list[str]:
+    """List every path below a folder, links and empty folders too.
+
+    Args:
+        root: The folder.
+
+    Returns:
+        The sorted relative paths.
+    """
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def test_one_patch_can_replace_a_folder_with_a_file(tmp_path: Path) -> None:
+    (tmp_path / "pkg" / "sub" / "empty").mkdir(parents=True)
+    (tmp_path / "pkg" / "a.py").write_text("a\n")
+    (tmp_path / "pkg" / "sub" / "b.py").write_text("b\n")
+    summary = apply_patch(
+        tmp_path,
+        _patch("*** Delete File: pkg/a.py", "*** Delete File: pkg/sub/b.py", "*** Add File: pkg", "+new"),
+    )
+    assert summary == ["D pkg/a.py", "D pkg/sub/b.py", "A pkg"]
+    assert _tree(tmp_path) == ["pkg"]
+    assert (tmp_path / "pkg").read_text() == "new\n"
+
+
+def test_a_move_can_replace_the_folder_it_leaves(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("a\n")
+    (tmp_path / "pkg" / "a.py").chmod(0o755)
+    summary = apply_patch(tmp_path, _patch("*** Update File: pkg/a.py", "*** Move to: pkg"))
+    assert summary == ["R pkg/a.py -> pkg"]
+    assert _tree(tmp_path) == ["pkg"]
+    assert (tmp_path / "pkg").read_text() == "a\n"
+    assert (tmp_path / "pkg").stat().st_mode & 0o111
+
+
+def test_a_folder_that_the_patch_does_not_empty_is_refused_and_changes_nothing(tmp_path: Path) -> None:
+    (tmp_path / "pkg" / "sub").mkdir(parents=True)
+    (tmp_path / "pkg" / "a.py").write_text("a\n")
+    (tmp_path / "pkg" / "sub" / "b.py").write_text("b\n")
+    before = _tree(tmp_path)
+    for lines in (
+        ("*** Delete File: pkg/a.py", "*** Add File: pkg", "+new"),
+        ("*** Delete File: pkg/sub/b.py", "*** Add File: pkg", "+new"),
+        # A delete after the add comes too late to empty the folder.
+        ("*** Delete File: pkg/a.py", "*** Add File: pkg", "+new", "*** Delete File: pkg/sub/b.py"),
+    ):
+        with pytest.raises(PatchError, match="pkg"):
+            apply_patch(tmp_path, _patch(*lines))
+        assert _tree(tmp_path) == before
+
+
+def test_a_link_in_the_folder_is_refused_and_never_followed(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.py").write_text("outside\n")
+    root = tmp_path / "root"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "a.py").write_text("a\n")
+    (root / "pkg" / "linked").symlink_to(outside, target_is_directory=True)
+    (root / "pkg" / "file_link").symlink_to(outside / "x.py")
+    before = _tree(root)
+    for lines in (
+        ("*** Delete File: pkg/a.py", "*** Add File: pkg", "+new"),
+        ("*** Delete File: pkg/a.py", "*** Delete File: pkg/linked/x.py", "*** Add File: pkg", "+new"),
+    ):
+        with pytest.raises(PatchError, match="link"):
+            apply_patch(root, _patch(*lines))
+        assert _tree(root) == before
+    assert _snapshot(outside) == {"x.py": b"outside\n"}
+
+
+def test_an_update_or_delete_of_a_folder_is_still_refused(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    for lines in (("*** Delete File: pkg",), ("*** Update File: pkg", "@@", "-a", "+b")):
+        with pytest.raises(PatchError, match="folder"):
+            apply_patch(tmp_path, _patch(*lines))
+    assert _tree(tmp_path) == ["pkg"]
+
+
+def test_a_new_file_at_a_replaced_folder_can_be_deleted_again(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("a\n")
+    apply_patch(tmp_path, _patch("*** Delete File: pkg/a.py", "*** Add File: pkg", "+new", "*** Delete File: pkg"))
+    assert _tree(tmp_path) == []
+
+
+def test_a_move_can_put_a_file_below_its_own_name(tmp_path: Path) -> None:
+    (tmp_path / "a").write_text("old\n")
+    summary = apply_patch(tmp_path, _patch("*** Update File: a", "*** Move to: a/b"))
+    assert summary == ["R a -> a/b"]
+    assert _snapshot(tmp_path) == {"a/b": b"old\n"}
