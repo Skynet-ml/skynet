@@ -732,6 +732,8 @@ def _apply_in_index(checkout: Path, patch: str) -> bool:
         if path in found:
             # --no-filters keeps the bytes exact; a .gitattributes in the tree could change line ends.
             body = run("hash-object", "-w", "--no-filters", "--stdin", data=(checkout / path).read_bytes())
+            if body.returncode:
+                return False
             mode = "100755" if found[path].executable else "100644"
             entries[path] = (mode, body.stdout.decode().strip())
     listing = b"".join(f"{mode} {sha}\t{path}\0".encode() for path, (mode, sha) in entries.items())
@@ -740,8 +742,12 @@ def _apply_in_index(checkout: Path, patch: str) -> bool:
     applied = run("apply", "--cached", "--binary", "--whitespace=nowarn", "-", data=with_git_headers(patch).encode())
     if applied.returncode:
         return False
+    staged = run("ls-files", "--stage", "-z")
+    if staged.returncode:
+        # An empty listing would read as every file deleted.
+        return False
     result = {}
-    for line in run("ls-files", "--stage", "-z").stdout.decode().split("\0"):
+    for line in staged.stdout.decode().split("\0"):
         if line:
             info, path = line.split("\t", 1)
             mode, sha, _ = info.split(" ")

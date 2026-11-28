@@ -1478,7 +1478,7 @@ def test_the_index_path_refuses_a_patch_it_cannot_write(
     assert not local_folder.is_applied("case")
 
 
-@pytest.mark.parametrize("command", ["init", "update-index", "apply", "cat-file"])
+@pytest.mark.parametrize("command", ["init", "hash-object", "update-index", "apply", "ls-files", "cat-file"])
 def test_the_index_path_gives_back_git_applys_error_when_a_git_step_fails(
     tmp_path: Path, folded_disk: None, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
@@ -1500,10 +1500,13 @@ def test_the_index_path_gives_back_git_applys_error_when_a_git_step_fails(
             return subprocess.CompletedProcess(arguments, 1, b"", b"")
         return real(arguments, **options)  # type: ignore[call-overload,no-any-return]
 
+    before = _fingerprint(root)
     monkeypatch.setattr(local_folder.subprocess, "run", fail)
     with pytest.raises(LocalFolderError, match=NOT_CLEAN):
         _apply(root, commit, _CASE_RENAME_PATCHES["rename"], "case")
     assert _listed(root) == ["a.txt"]
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("case")
 
 
 @pytest.mark.parametrize(
