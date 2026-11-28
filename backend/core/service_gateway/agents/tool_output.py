@@ -19,7 +19,9 @@ from collections.abc import Callable
 
 TOOL_OUTPUT_EVENT = "tool_output"
 FLUSH_SECONDS = 0.1
-# The most text in one event; a faster command loses the middle of the batch.
+# The most text in one event. When a command prints more within one batch, the
+# batch keeps its newest text and drops the start: the chat shows the tail, as a
+# terminal does, and ``skipped`` marks the gap.
 MAX_CHUNK_CHARS = 8192
 # The most text one call streams, as the Codex live preview has a budget too;
 # the ``tool_end`` result still shows the rest.

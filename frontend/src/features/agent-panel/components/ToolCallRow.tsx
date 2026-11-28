@@ -63,8 +63,13 @@ export function ToolCallRow({
   const hasArgs = argEntries.length > 0;
   const hasResult = result !== undefined && result !== null && result !== "";
   // SKY-1006: a running command's output, replaced by the result at tool_end.
+  // A dropped stream marks the call failed with no result; keep what the user watched.
   const liveOutput =
-    call.status === "running" && typeof payload.liveOutput === "string" ? payload.liveOutput : "";
+    (call.status === "running" || call.status === "error") &&
+    !hasResult &&
+    typeof payload.liveOutput === "string"
+      ? payload.liveOutput
+      : "";
 
   const triggerText = summary ?? call.reason ?? null;
   const isError = call.status === "error";
@@ -72,7 +77,7 @@ export function ToolCallRow({
   const hasBody =
     customBody !== undefined || showReasonInBody || hasArgs || hasResult || call.status === "running";
 
-  return (
+  const row = (
     <StepRow
       icon={icon ?? meta.icon}
       label={derivedTitle}
@@ -115,11 +120,6 @@ export function ToolCallRow({
                   <ResultBody result={result} isError={isError} />
                 </Section>
               )}
-              {!hasResult && liveOutput && (
-                <Section label={msg("auto.features.agent.panel.components.toolcallrow.literal.5")}>
-                  <LiveOutput text={liveOutput} />
-                </Section>
-              )}
               {!hasArgs && !hasResult && !liveOutput && call.status === "running" && (
                 <div className="italic">
                   {msg("auto.features.agent.panel.components.toolcallrow.2")}
@@ -130,6 +130,18 @@ export function ToolCallRow({
         </>
       )}
     </StepRow>
+  );
+  if (!liveOutput) return row;
+  // The row starts closed, so the live text shows below its line, as the Codex running cell does.
+  return (
+    <>
+      {row}
+      <div className="pb-2 pe-1 ps-5.5 pt-0.5">
+        <Section label={msg("agent.tool.live_output")}>
+          <LiveOutput text={liveOutput} />
+        </Section>
+      </div>
+    </>
   );
 }
 

@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "توقف موقت {p1}",
   "agent.tool.pause_job.description": "اجرا در یک نقطه‌ی بازبینی ذخیره و کارگر آزاد می‌شود. می‌توانید آن را از همان نقطه ادامه دهید.",
   "agent.tool.pause_job.confirm": "توقف",
+  "agent.tool.live_output": "خروجی زنده",
   "agent.tool.github_create_repo.title": "ساخت مخزن GitHub",
   "agent.tool.github_create_repo.description": "Skynet یک مخزن جدید در حساب GitHub شما با وظیفه، داده‌ها و امتیازدهنده می‌سازد.",
   "agent.tool.github_create_repo.confirm": "ساخت",

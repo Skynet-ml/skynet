@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "Duraklat: {p1}",
   "agent.tool.pause_job.description": "Çalıştırma bir kontrol noktasına kaydedilir ve işçi serbest bırakılır. Aynı noktadan devam ettirebilirsiniz.",
   "agent.tool.pause_job.confirm": "Duraklat",
+  "agent.tool.live_output": "Canlı çıktı",
   "agent.tool.github_create_repo.title": "GitHub deposu oluştur",
   "agent.tool.github_create_repo.description": "Skynet, GitHub hesabınızda görev, veri ve puanlayıcı ile yeni bir depo oluşturur.",
   "agent.tool.github_create_repo.confirm": "Oluştur",

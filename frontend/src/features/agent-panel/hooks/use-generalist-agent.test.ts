@@ -143,6 +143,22 @@ test("live command output grows on the running call, and tool_end replaces it wi
   }
 });
 
+test("a dropped stream fails the running call but keeps its live output (SKY-1006)", async () => {
+  const { agent, calls, act, unmount } = await mount();
+  try {
+    await act(() => agent().send("run make"));
+    const h = calls[0]!.handlers;
+    await act(() => h.onToolStart!({ id: "t1", tool: "exec_command", arguments: { cmd: "make" } }));
+    await act(() => h.onToolOutput!({ id: "t1", chunk: "step 1\n", skipped: false }));
+    await act(() => h.onError!("socket closed"));
+    const call = agent().messages[agent().messages.length - 1]?.toolCalls?.[0];
+    assert.equal(call?.status, "error");
+    assert.equal(call?.payload?.liveOutput, "step 1\n");
+  } finally {
+    await unmount();
+  }
+});
+
 test("the live output keeps only its newest LIVE_OUTPUT_MAX_CHARS (SKY-1006)", () => {
   const live = tailOutput("a".repeat(LIVE_OUTPUT_MAX_CHARS), "bcd", false);
   assert.equal(live.length, LIVE_OUTPUT_MAX_CHARS);

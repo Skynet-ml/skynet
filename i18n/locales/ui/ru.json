@@ -1074,6 +1074,7 @@
   "agent.tool.pause_job.title": "Приостановить: {p1}",
   "agent.tool.pause_job.description": "Запуск сохраняется в контрольной точке, а воркер освобождается. Его можно возобновить с того же места.",
   "agent.tool.pause_job.confirm": "Приостановить",
+  "agent.tool.live_output": "Вывод в реальном времени",
   "agent.tool.github_create_repo.title": "Создать репозиторий GitHub",
   "agent.tool.github_create_repo.description": "Skynet создаст в вашем аккаунте GitHub новый репозиторий с задачей, данными и оценщиком.",
   "agent.tool.github_create_repo.confirm": "Создать",

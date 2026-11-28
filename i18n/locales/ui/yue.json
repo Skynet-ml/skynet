@@ -1437,6 +1437,7 @@
   "agent.tool.pause_job.title": "暫停 {p1}",
   "agent.tool.pause_job.description": "今次執行會喺檢查點儲低，並釋放工作節點。你可以喺同一個位置繼續。",
   "agent.tool.pause_job.confirm": "暫停",
+  "agent.tool.live_output": "即時輸出",
   "agent.tool.github_create_repo.title": "建立 GitHub 倉庫",
   "agent.tool.github_create_repo.description": "Skynet 會喺你嘅 GitHub 帳戶建立一個新倉庫，入面有任務、數據同評分器。",
   "agent.tool.github_create_repo.confirm": "建立",

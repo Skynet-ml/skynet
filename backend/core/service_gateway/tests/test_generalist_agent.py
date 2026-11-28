@@ -58,7 +58,7 @@ from core.service_gateway.agents.generalist import (
     validate_wizard_patch_order,
     validate_wizard_screen,
 )
-from core.service_gateway.agents.tool_output import TOOL_OUTPUT_EVENT, ToolOutputStream, tool_stream
+from core.service_gateway.agents.tool_output import FLUSH_SECONDS, TOOL_OUTPUT_EVENT, ToolOutputStream, tool_stream
 from core.service_gateway.agents.workspace_tools import FOLDER_SHELL_TOOLS
 from core.storage.models import AgentConversationModel, AgentFeedbackReportModel, AgentMessageModel, Base
 
@@ -346,6 +346,48 @@ async def test_wrap_closes_the_tool_stream_when_the_tool_fails() -> None:
     assert [e["event"] for e in events] == ["tool_start", TOOL_OUTPUT_EVENT, "tool_end"]
     assert events[1]["data"]["chunk"] == "partial\n"
     assert events[-1]["data"]["status"] == "error"
+    assert tool_stream.get() is None
+
+
+async def test_wrap_sends_no_tool_output_after_the_call_is_cancelled() -> None:
+    """A stopped turn cancels the call; output that comes later never reaches the chat."""
+    events: list[dict] = []
+    started = asyncio.Event()
+    streams: list[ToolOutputStream] = []
+
+    async def slow() -> str:
+        """Write output, then wait until cancelled.
+
+        Returns:
+            Never returns.
+        """
+        stream = tool_stream.get()
+        assert stream is not None
+        streams.append(stream)
+        stream.write("before\n")
+        started.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    tool = _wrap_tool_with_approval(
+        dspy.Tool(slow, name="exec_command"),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        outer_loop=asyncio.get_running_loop(),
+    )
+    task = asyncio.ensure_future(tool.func._async_body())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    seen = len(events)
+    streams[0].write("late\n")
+    await asyncio.sleep(FLUSH_SECONDS * 3)
+    assert len(events) == seen
+    chunks = [e["data"]["chunk"] for e in events if e["event"] == TOOL_OUTPUT_EVENT]
+    assert chunks == ["before\n"]
     assert tool_stream.get() is None
 
 
