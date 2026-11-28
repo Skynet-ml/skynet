@@ -1763,18 +1763,32 @@ def test_open_repo_refuses_a_folder_the_user_did_not_pick_and_reads_no_file(
     root.mkdir()
     state = _local_folder(monkeypatch, root)
     (root / "sub").mkdir()
-    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "inner").mkdir(parents=True)
     (root / "link").symlink_to(tmp_path / "outside", target_is_directory=True)
     digests: list[str] = []
     monkeypatch.setattr(folder_tree, "file_digest", lambda base, rel: digests.append(rel) or b"")
 
     assert open_repo({**state, "repo_path": str(tmp_path / "outside")}, None) == (None, folder_workspace.NOT_PICKED)
     assert open_repo({**state, "repo_path": f"{root}/sub/../../outside"}, None) == (None, folder_workspace.NOT_PICKED)
-    assert open_repo({**state, "repo_path": str(root / "link")}, None) == (None, folder_workspace.NOT_PICKED)
+    assert open_repo({**state, "repo_path": str(root / "link" / "inner")}, None) == (
+        None,
+        folder_workspace.NOT_PICKED,
+    )
     assert digests == []
     browser, reason = open_repo({**state, "repo_path": str(root / "sub")}, None)
     assert isinstance(browser, repo_browser.LocalFolderBrowser)
     assert reason == ""
+
+
+def test_the_hosted_app_gives_the_desktop_only_reason_for_a_local_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Outside the desktop app, with no state folder, a local run gets the desktop-only reason, not the picked one."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+    state = {"repo_provider": "local", "repo_path": str(tmp_path)}
+
+    assert open_repo(state, None) == (None, "A local folder can be read only in the desktop app.")
 
 
 @pytest.mark.asyncio
@@ -1903,26 +1917,24 @@ async def test_the_read_tools_strip_a_padded_path(monkeypatch: pytest.MonkeyPatc
     assert await tools[READ_REPO_TOOL].acall(path=" docs/intro.md ") == "   1 hi"
 
 
-def test_open_folder_refuses_a_nul_byte_in_the_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_open_folder_refuses_a_nul_byte_in_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """A NUL in ``repo_path`` gives the agent a clean reason, not a raised ``ValueError``."""
     monkeypatch.setattr(settings, "local_mode", True)
-    _pick(monkeypatch, tmp_path / "state", Path("/tmp"))
 
     browser, reason = open_folder({"repo_path": "/tmp/a\x00b"})
 
     assert browser is None
-    assert reason == folder_workspace.NOT_PICKED
+    assert reason == "The folder path must not hold a NUL character."
 
 
-def test_open_folder_refuses_a_path_the_disk_cannot_encode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_open_folder_refuses_a_path_the_disk_cannot_encode(monkeypatch: pytest.MonkeyPatch) -> None:
     """A lone surrogate in ``repo_path`` gives the agent a clean reason, not a raised ``UnicodeEncodeError``."""
     monkeypatch.setattr(settings, "local_mode", True)
-    _pick(monkeypatch, tmp_path / "state", Path("/tmp"))
 
     browser, reason = open_folder({"repo_path": "/tmp/\ud800x"})
 
     assert browser is None
-    assert reason == folder_workspace.NOT_PICKED
+    assert reason == "The folder path is not a valid path on this computer."
 
 
 def test_open_folder_refuses_a_folder_larger_than_the_agent_can_read_before_any_hash(
@@ -1963,9 +1975,7 @@ def _shell_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[dict[st
     root = tmp_path / "project"
     root.mkdir()
     state = _local_folder(monkeypatch, root)
-    (tmp_path / "state").mkdir()
-    (tmp_path / "state" / PICKED_FOLDERS_FILE).write_text(json.dumps([str(root)]), encoding="utf-8")
-    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
+    _pick(monkeypatch, tmp_path / "state", root)
     monkeypatch.setattr(folder_workspace, "_WORKSPACES", {})
     monkeypatch.setattr(folder_workspace, "_KEY_LOCKS", {})
     monkeypatch.setattr(folder_workspace, "_ABORTED", set())

@@ -55,6 +55,7 @@ from .repo_browser import (
     LocalFolderBrowser,
     RepoBrowser,
     RepoRead,
+    folder_root,
     source_noun,
 )
 
@@ -273,9 +274,10 @@ def open_folder(state: dict[str, Any]) -> tuple[RepoBrowser | None, str]:
     folder = str(state.get("repo_path") or "").strip()
     if not folder:
         return None, "No folder is chosen yet."
-    if not is_picked(folder, settings.local_state_dir):
-        return None, NOT_PICKED
     try:
+        # The desktop-only and bad-path reasons come first, in the local folder routes' order (SKY-1007).
+        if not is_picked(folder_root(folder), settings.local_state_dir):
+            return None, NOT_PICKED
         browser = LocalFolderBrowser(folder)
     except FolderTreeError as error:
         return None, str(error)
