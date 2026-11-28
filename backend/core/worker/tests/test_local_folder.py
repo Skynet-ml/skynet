@@ -973,3 +973,19 @@ def test_apply_refuses_a_version_that_turns_a_file_into_a_folder_in_another_case
     assert not (local_state / local_folder.APPLIED_FOLDER).exists() or not any(
         (local_state / local_folder.APPLIED_FOLDER).iterdir()
     )
+
+
+def test_apply_and_undo_a_setup_that_renames_a_file_by_case(tmp_path: Path) -> None:
+    if not case_insensitive(tmp_path):
+        pytest.skip("Only a disk that ignores case opens Foo.py for foo.py.")
+    root = _write(tmp_path / "app", {"Foo.py": "old\n", "keep.txt": "k\n"})
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    commit = local_folder.snapshot_folder(root, workdir).commit
+    assert _apply(root, commit, "", "case", drafts={"foo.py": "new\n"}, deleted=["Foo.py"]) == ["Foo.py", "foo.py"]
+    assert sorted(path.name for path in root.iterdir()) == ["foo.py", "keep.txt"]
+    assert (root / "foo.py").read_text() == "new\n"
+    local_folder.check_applied(root, "case")
+    local_folder.undo_version(root, "case")
+    assert sorted(path.name for path in root.iterdir()) == ["Foo.py", "keep.txt"]
+    assert (root / "Foo.py").read_text() == "old\n"
