@@ -17,7 +17,7 @@ import type { BlackboxScorer, BlackboxTarget, CatalogModel, ModelConfig } from "
 import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
 import { hardeningScorer } from "../lib/repo-run";
-import { METRIC_FILE, repoIssue, type RepoDraft } from "../lib/wizard-v2";
+import { METRIC_FILE, isLocalRepo, repoIssue, type RepoDraft } from "../lib/wizard-v2";
 import { useWizardV2 } from "./use-unified-wizard";
 
 const POLL_MS = 4000;
@@ -62,7 +62,8 @@ const HARDENING_NO_SCORER = "submit.v2.harden.no_scorer";
  *   repo: The wizard's repository draft, or none for a setup without a repository.
  *
  * Returns:
- *   The target, or null when the setup has no repository.
+ *   The target, or null when the setup has no repository. A folder source
+ *   sends the folder's path, as the run submit does.
  *
  * Throws:
  *   Error: Its message is the draft's issue key when the repository is not
@@ -72,6 +73,16 @@ export function hardeningTarget(repo: RepoDraft | null | undefined): BlackboxTar
   if (!repo) return null;
   const issue = repoIssue(repo);
   if (issue) throw new Error(issue);
+  const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
+  const setupCommand = repo.setupCommand.trim() || null;
+  // A folder job stages the folder as a folder run does (SKY-1002).
+  if (isLocalRepo(repo)) {
+    return {
+      kind: "repo",
+      repo: { provider: "local", path: (repo.localPath ?? "").trim(), editable_paths: editablePaths },
+      setup_command: setupCommand,
+    };
+  }
   return {
     kind: "repo",
     repo: {
@@ -79,10 +90,10 @@ export function hardeningTarget(repo: RepoDraft | null | undefined): BlackboxTar
       repository: repo.repository.trim(),
       branch: repo.branch.trim() || null,
       commit: repo.commit.trim() || null,
-      editable_paths: repo.editablePaths.map((path) => path.trim()).filter(Boolean),
+      editable_paths: editablePaths,
       ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
     },
-    setup_command: repo.setupCommand.trim() || null,
+    setup_command: setupCommand,
   };
 }
 
