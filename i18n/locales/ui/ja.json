@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "コード",
   "shared.agent.wrap_on": "折り返しを有効にする",
   "shared.agent.wrap_off": "折り返しを無効にする",
+  "shared.agent.show_source": "ソースを表示",
+  "shared.agent.show_preview": "プレビューを表示",
   "shared.agent.copy_table": "表をコピー",
   "shared.agent.scrollable_table": "スクロール可能な表",
   "shared.agent.edit_and_resend": "編集して再送信",

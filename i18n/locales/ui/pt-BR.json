@@ -224,6 +224,8 @@
   "shared.agent.code_block": "Código",
   "shared.agent.wrap_on": "Ativar quebra de linha",
   "shared.agent.wrap_off": "Desativar quebra de linha",
+  "shared.agent.show_source": "Mostrar código-fonte",
+  "shared.agent.show_preview": "Mostrar pré-visualização",
   "shared.agent.copy_table": "Copiar tabela",
   "shared.agent.scrollable_table": "Tabela com rolagem",
   "agent.format.toolbar": "Formatação de texto",

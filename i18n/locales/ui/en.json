@@ -2009,6 +2009,8 @@
   "shared.agent.code_block": "Code",
   "shared.agent.wrap_on": "Enable word wrap",
   "shared.agent.wrap_off": "Disable word wrap",
+  "shared.agent.show_source": "Show source",
+  "shared.agent.show_preview": "Show preview",
   "shared.agent.copy_table": "Copy table",
   "shared.agent.scrollable_table": "Scrollable table",
   "shared.agent.edit_and_resend": "Edit and resend",

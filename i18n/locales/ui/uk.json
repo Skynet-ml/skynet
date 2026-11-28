@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "Код",
   "shared.agent.wrap_on": "Увімкнути перенесення рядків",
   "shared.agent.wrap_off": "Вимкнути перенесення рядків",
+  "shared.agent.show_source": "Показати вихідний код",
+  "shared.agent.show_preview": "Показати попередній перегляд",
   "shared.agent.copy_table": "Скопіювати таблицю",
   "shared.agent.scrollable_table": "Прокручувана таблиця",
   "shared.agent.edit_and_resend": "Редагувати та надіслати знову",

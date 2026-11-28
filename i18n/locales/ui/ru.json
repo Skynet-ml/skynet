@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "Код",
   "shared.agent.wrap_on": "Включить перенос строк",
   "shared.agent.wrap_off": "Выключить перенос строк",
+  "shared.agent.show_source": "Показать исходный код",
+  "shared.agent.show_preview": "Показать предпросмотр",
   "shared.agent.copy_table": "Копировать таблицу",
   "shared.agent.scrollable_table": "Прокручиваемая таблица",
   "shared.agent.edit_and_resend": "Изменить и отправить снова",

@@ -16,8 +16,20 @@ import "katex/dist/katex.min.css";
  *   display: True for a block formula, false for one inside a sentence.
  */
 export default function MarkdownMath({ tex, display }: { tex: string; display: boolean }) {
-  // KaTeX escapes the TeX it emits and runs with trust off, so its HTML is safe.
-  const html = katex.renderToString(tex, { displayMode: display, throwOnError: false });
+  let html: string;
+  try {
+    // KaTeX escapes the TeX it emits and runs with trust off, so its HTML is safe.
+    html = katex.renderToString(tex, { displayMode: display, throwOnError: true });
+  } catch {
+    // As in Codex, a formula KaTeX cannot parse shows its source.
+    return display ? (
+      <pre dir="ltr" className="md-math whitespace-pre-wrap text-left">
+        <code>{tex}</code>
+      </pre>
+    ) : (
+      <code dir="ltr">{tex}</code>
+    );
+  }
   return display ? (
     <div dir="ltr" className="md-math" dangerouslySetInnerHTML={{ __html: html }} />
   ) : (

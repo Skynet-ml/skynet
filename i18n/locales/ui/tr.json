@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "Kod",
   "shared.agent.wrap_on": "Satır kaydırmayı aç",
   "shared.agent.wrap_off": "Satır kaydırmayı kapat",
+  "shared.agent.show_source": "Kaynağı göster",
+  "shared.agent.show_preview": "Önizlemeyi göster",
   "shared.agent.copy_table": "Tabloyu kopyala",
   "shared.agent.scrollable_table": "Kaydırılabilir tablo",
   "shared.agent.edit_and_resend": "Düzenle ve yeniden gönder",

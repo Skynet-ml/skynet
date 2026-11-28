@@ -2109,6 +2109,8 @@
   "shared.agent.code_block": "קוד",
   "shared.agent.wrap_on": "הפעל/הפעילי גלישת שורות",
   "shared.agent.wrap_off": "כבה/כבי גלישת שורות",
+  "shared.agent.show_source": "הצג/הציגי את קוד המקור",
+  "shared.agent.show_preview": "הצג/הציגי תצוגה מקדימה",
   "shared.agent.copy_table": "העתק/העתיקי את הטבלה",
   "shared.agent.scrollable_table": "טבלה עם גלילה",
   "shared.agent.edit_and_resend": "ערוך/ערכי ושלח/שלחי מחדש",

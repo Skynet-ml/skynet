@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "کد",
   "shared.agent.wrap_on": "فعال کردن شکستن خطوط",
   "shared.agent.wrap_off": "غیرفعال کردن شکستن خطوط",
+  "shared.agent.show_source": "نمایش کد منبع",
+  "shared.agent.show_preview": "نمایش پیش‌نمایش",
   "shared.agent.copy_table": "کپی جدول",
   "shared.agent.scrollable_table": "جدول قابل پیمایش",
   "shared.agent.edit_and_resend": "ویرایش و ارسال مجدد",

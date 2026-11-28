@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "كود",
   "shared.agent.wrap_on": "تفعيل التفاف الأسطر",
   "shared.agent.wrap_off": "تعطيل التفاف الأسطر",
+  "shared.agent.show_source": "إظهار المصدر",
+  "shared.agent.show_preview": "إظهار المعاينة",
   "shared.agent.copy_table": "نسخ الجدول",
   "shared.agent.scrollable_table": "جدول قابل للتمرير",
   "shared.agent.edit_and_resend": "تعديل وإعادة الإرسال",

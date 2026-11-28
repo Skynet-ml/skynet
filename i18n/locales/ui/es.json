@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "Código",
   "shared.agent.wrap_on": "Activar ajuste de línea",
   "shared.agent.wrap_off": "Desactivar ajuste de línea",
+  "shared.agent.show_source": "Mostrar código fuente",
+  "shared.agent.show_preview": "Mostrar vista previa",
   "shared.agent.copy_table": "Copiar tabla",
   "shared.agent.scrollable_table": "Tabla desplazable",
   "shared.agent.edit_and_resend": "Editar y reenviar",

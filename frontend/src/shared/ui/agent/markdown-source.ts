@@ -7,6 +7,9 @@
 /** Marks an inline code span that holds TeX, so the renderer draws math. */
 export const INLINE_MATH_MARK = "";
 
+/** The fence language {@link prepareMath} gives `$$…$$` and `\[…\]`: plain display math, no toggle. */
+export const DISPLAY_MATH_LANG = "skynet-display-math";
+
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
 /** Split text into runs outside and inside fenced code blocks. */
@@ -67,7 +70,8 @@ export function prepareMath(text: string): string {
               const before = all.slice(0, offset);
               const after = all.slice(offset + match.length);
               const ownLines = /(^|\n)[ \t]*$/.test(before) && /^[ \t]*(\n|$)/.test(after);
-              if (paren === undefined && ownLines) return `\`\`\`math\n${tex}\n\`\`\``;
+              if (paren === undefined && ownLines)
+                return `\`\`\`${DISPLAY_MATH_LANG}\n${tex}\n\`\`\``;
               return `\`\` ${INLINE_MATH_MARK}${tex.replace(/\s+/g, " ")} \`\``;
             },
           ),
@@ -78,7 +82,8 @@ export function prepareMath(text: string): string {
 /**
  * Fix the end of a reply that is still streaming, so half-typed syntax does
  * not flash: drop a link or image whose `[` has no full target yet, and
- * close a dangling `*` or `**`. An open code fence stays as it is.
+ * close a dangling inline code span, `*` or `**`. An open code fence stays
+ * as it is: the parser already reads it as a code block to the end.
  */
 export function repairStreamingMarkdown(text: string): string {
   const last = splitFences(text).at(-1);
@@ -89,6 +94,9 @@ export function repairStreamingMarkdown(text: string): string {
   let tail = blank < 0 ? prose : prose.slice(blank);
 
   tail = tail.replace(/!?\[[^\]\n]*(\]\([^)\n]*)?$/, "");
+  // Close the code span first, so a `*` inside it does not count as emphasis below.
+  if (tail.replace(/`[^`]*`/g, "").includes("`"))
+    tail = /`\s*$/.test(tail) ? tail.replace(/`\s*$/, "") : `${tail}\``;
   const plain = tail
     .replace(/`[^`\n]*`/g, "")
     .replace(/^[ \t]*[*+-][ \t]+/gm, "")
@@ -129,6 +137,7 @@ const LANGUAGE_NAMES: Record<string, string> = {
   less: "Less",
   lua: "Lua",
   makefile: "Makefile",
+  math: "Math",
   markdown: "Markdown",
   mermaid: "Mermaid",
   objectivec: "Objective-C",
@@ -144,6 +153,7 @@ const LANGUAGE_NAMES: Record<string, string> = {
   scss: "SCSS",
   shell: "Shell",
   sql: "SQL",
+  svg: "SVG",
   swift: "Swift",
   typescript: "TypeScript",
   vbnet: "Visual Basic .NET",
@@ -192,4 +202,110 @@ const DATA_IMAGE = /^data:image\/(png|jpeg|jpg|webp|gif|avif);base64,/i;
 /** Whether an image source is an inline raster image, the only kind chat loads by itself. */
 export function isInlineImageSrc(src: string): boolean {
   return DATA_IMAGE.test(src);
+}
+
+const MATH_FENCES = new Set(["latex", "math", "tex"]);
+
+/** Whether a fence holds TeX that renders as display math with a source toggle. */
+export function isMathFence(language: string): boolean {
+  return MATH_FENCES.has(language.toLowerCase());
+}
+
+/** Whether a fence holds an SVG image: an `svg` fence, or an `xml` or `html` one that starts with `<svg`. */
+export function isSvgFence(language: string, code: string): boolean {
+  const key = language.toLowerCase();
+  if (key === "svg") return true;
+  return (key === "xml" || key === "html") && /^<svg[\s>]/i.test(code.trimStart());
+}
+
+/** The SVG as a data URL for an `<img>`, where its scripts and links never run. */
+export function svgDataUrl(code: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(code.trim())}`;
+}
+
+// Each rule needs a strong sign of its language, so prose in an untagged fence stays plain.
+const GUESSES: Array<[string, (code: string) => boolean]> = [
+  ["diff", (c) => /^(diff --git |@@ -\d)/m.test(c) || /^--- .*\n\+\+\+ /m.test(c)],
+  [
+    "json",
+    (c) => {
+      if (!/^[[{]/.test(c)) return false;
+      try {
+        JSON.parse(c);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  ],
+  ["xml", (c) => /^<\?xml\b|^<svg[\s>]/i.test(c)],
+  [
+    "html",
+    (c) =>
+      /^<(!doctype html|html|head|body|div|span|p|a|ul|ol|table|section|main|form)[\s>]/i.test(c),
+  ],
+  [
+    "bash",
+    (c) =>
+      /^(\$ |#!.*\b(ba|z)?sh\b|(sudo|npm|npx|pnpm|yarn|pip3?|uv|git|cd|ls|curl|wget|brew|docker|kubectl|export|echo|mkdir|chmod|cargo|just)( |$))/.test(
+        c,
+      ),
+  ],
+  [
+    "python",
+    (c) =>
+      /^\s*(def \w+\(.*\)( -> .+)?:|class \w+(\(.*\))?:|from [\w.]+ import |import \w+(\.\w+)*\s*$|if __name__ ==|elif .+:)/m.test(
+        c,
+      ),
+  ],
+  [
+    "typescript",
+    (c) =>
+      /^\s*(export )?(interface \w+|type \w+(<.*>)? =|enum \w+ \{)/m.test(c) ||
+      /\b(const|let|function)\b[^\n]*: (string|number|boolean|unknown)\b/.test(c),
+  ],
+  [
+    "javascript",
+    (c) =>
+      /^\s*(import .+ from ['"]|export (default|const|function)|(const|let|var) \w+ = |function \w*\(|console\.log\()/m.test(
+        c,
+      ),
+  ],
+  ["go", (c) => /^package \w+$/m.test(c) || /^func (\(.+\) )?\w+\(/m.test(c)],
+  ["rust", (c) => /^\s*(pub )?fn \w+(<.*>)?\(/m.test(c) || /\blet mut \w+/.test(c)],
+  [
+    "sql",
+    (c) =>
+      /^\s*(SELECT\b[\s\S]*\bFROM\b|INSERT INTO\b|UPDATE \w+ SET\b|DELETE FROM\b|CREATE (TABLE|INDEX|VIEW)\b)/i.test(
+        c,
+      ),
+  ],
+  ["css", (c) => /^[.#@:\w][^{}\n;=()]*\{\s*[\w-]+\s*:[^;{}]+;/.test(c)],
+  [
+    "yaml",
+    (c) => {
+      const lines = c.split("\n").filter((l) => l.trim() && !/^\s*#/.test(l));
+      return (
+        lines.length >= 2 &&
+        /^[\w.-]+:( |$)/.test(lines[0]!) &&
+        lines.every((l) => /^\s*(- .*|-$|[\w.-]+:( .*)?)$/.test(l))
+      );
+    },
+  ],
+];
+
+/**
+ * Guess the language of a fence that has no tag, as Codex does with
+ * highlight.js `highlightAuto`. "" means no strong sign, so the block stays plain.
+ *
+ * Args:
+ *   code: The fence's text.
+ *
+ * Returns:
+ *   A fence language name, such as "python", or "".
+ */
+export function guessLanguage(code: string): string {
+  const text = code.trim();
+  if (!text) return "";
+  return GUESSES.find(([, test]) => test(text))?.[0] ?? "";
 }

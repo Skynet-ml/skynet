@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "代码",
   "shared.agent.wrap_on": "启用自动换行",
   "shared.agent.wrap_off": "停用自动换行",
+  "shared.agent.show_source": "显示源代码",
+  "shared.agent.show_preview": "显示预览",
   "shared.agent.copy_table": "复制表格",
   "shared.agent.scrollable_table": "可滚动表格",
   "shared.agent.edit_and_resend": "编辑并重新发送",

@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "Code",
   "shared.agent.wrap_on": "Zeilenumbruch aktivieren",
   "shared.agent.wrap_off": "Zeilenumbruch deaktivieren",
+  "shared.agent.show_source": "Quelltext anzeigen",
+  "shared.agent.show_preview": "Vorschau anzeigen",
   "shared.agent.copy_table": "Tabelle kopieren",
   "shared.agent.scrollable_table": "Scrollbare Tabelle",
   "shared.agent.edit_and_resend": "Bearbeiten und erneut senden",

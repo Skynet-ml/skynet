@@ -3040,6 +3040,8 @@
   "shared.agent.code_block": "कोड",
   "shared.agent.wrap_on": "वर्ड रैप चालू करें",
   "shared.agent.wrap_off": "वर्ड रैप बंद करें",
+  "shared.agent.show_source": "सोर्स दिखाएँ",
+  "shared.agent.show_preview": "प्रीव्यू दिखाएँ",
   "shared.agent.copy_table": "तालिका कॉपी करें",
   "shared.agent.scrollable_table": "स्क्रॉल करने योग्य तालिका",
   "shared.agent.edit_and_resend": "संपादित करें और फिर से भेजें",
