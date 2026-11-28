@@ -25,6 +25,7 @@ from typing import Any
 from ...api.errors import DomainError
 from ...config import settings
 from ...connectors import github, repo_hosts
+from ...connectors.repo_drafts import MAX_ARCHIVE_BYTES
 from ...local.folder_tree import (
     FOLDER_ENTRIES_MAX,
     FolderTreeError,
@@ -33,6 +34,7 @@ from ...local.folder_tree import (
     is_env_name,
     open_no_follow,
 )
+from ...models.blackbox import LOCAL_REPO_PROVIDER
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +193,6 @@ def compact_tree(entries: list[dict[str, Any]], editable_paths: list[str]) -> st
     return "\n".join(_render(_build_nodes(entries), max_depth=TREE_DEPTH, line_budget=TREE_LINE_BUDGET, marks=marks))
 
 
-LOCAL_PROVIDER = "local"
-
-
 def _source_noun(provider: str | None) -> str:
     """Name the kind of source the agent reads, for its tool texts.
 
@@ -203,7 +202,7 @@ def _source_noun(provider: str | None) -> str:
     Returns:
         ``"folder"`` for a local folder, else ``"repository"``.
     """
-    return "folder" if provider == LOCAL_PROVIDER else "repository"
+    return "folder" if provider == LOCAL_REPO_PROVIDER else "repository"
 
 
 class RepoBrowser:
@@ -482,7 +481,7 @@ _FOLDER_LABEL = "Local folder"
 _BAD_PATH = "The folder path is not a valid path on this computer."
 
 
-class LocalFolderError(FolderTreeError):
+class FolderReadRefusedError(FolderTreeError):
     """A local folder read that is refused: not in local mode, or a path outside the folder."""
 
 
@@ -496,30 +495,30 @@ def _folder_root(root: str | Path) -> Path:
         The resolved folder.
 
     Raises:
-        LocalFolderError: Outside desktop local mode, for a path the disk cannot take, a relative path, a linked
+        FolderReadRefusedError: Outside desktop local mode, for a path the disk cannot take, a relative path, a linked
             folder, or when no folder is there.
     """
     if not settings.local_mode:
-        raise LocalFolderError("A local folder can be read only in the desktop app.")
+        raise FolderReadRefusedError("A local folder can be read only in the desktop app.")
     # A NUL or a lone surrogate makes the path calls raise a bare ValueError, which the agent's caller does not expect.
     try:
         encoded = os.fsencode(root)
     except ValueError:
-        raise LocalFolderError(_BAD_PATH) from None
+        raise FolderReadRefusedError(_BAD_PATH) from None
     if b"\x00" in encoded:
-        raise LocalFolderError("The folder path must not hold a NUL character.")
+        raise FolderReadRefusedError("The folder path must not hold a NUL character.")
     path = Path(root)
     if not path.is_absolute():
-        raise LocalFolderError("The folder path must be absolute.")
+        raise FolderReadRefusedError("The folder path must be absolute.")
     # The run refuses a linked root, so the agent must not read one either; a link above it is fine.
     if path.is_symlink():
-        raise LocalFolderError("The folder is a link, which is never followed.")
+        raise FolderReadRefusedError("The folder is a link, which is never followed.")
     try:
         resolved = path.resolve()
     except ValueError:
-        raise LocalFolderError(_BAD_PATH) from None
+        raise FolderReadRefusedError(_BAD_PATH) from None
     if not resolved.is_dir():
-        raise LocalFolderError(f"No folder at {root}.")
+        raise FolderReadRefusedError(f"No folder at {root}.")
     return resolved
 
 
@@ -534,23 +533,23 @@ def _folder_file(base: Path, path: str) -> str:
         The file's ``/``-joined path below ``base``, with no link in it.
 
     Raises:
-        LocalFolderError: For an absolute path, a ``..`` part, a ``.env*`` part, or a link.
+        FolderReadRefusedError: For an absolute path, a ``..`` part, a ``.env*`` part, or a link.
         DomainError: ``connectors.not_found`` when no file is there.
     """
     clean = path.replace("\\", "/")
     if not clean or clean.startswith("/") or PureWindowsPath(clean).drive:
-        raise LocalFolderError(f"{path!r} is not a path inside the folder.")
+        raise FolderReadRefusedError(f"{path!r} is not a path inside the folder.")
     parts = PurePosixPath(clean).parts
     if ".." in parts:
-        raise LocalFolderError(f"{path!r} leaves the folder.")
+        raise FolderReadRefusedError(f"{path!r} leaves the folder.")
     if any(is_env_name(part) for part in parts):
-        raise LocalFolderError(f"{path!r} is a .env file, which can hold secrets, so it is never read.")
+        raise FolderReadRefusedError(f"{path!r} is a .env file, which can hold secrets, so it is never read.")
     full = base
     for part in parts:
         full = full / part
         # The listing leaves every link out, so a read never goes through one either.
         if full.is_symlink():
-            raise LocalFolderError(f"{path!r} goes through a link, which is never followed.")
+            raise FolderReadRefusedError(f"{path!r} goes through a link, which is never followed.")
     if not full.is_file():
         raise DomainError("connectors.not_found", status=404, provider=_FOLDER_LABEL)
     return "/".join(parts)
@@ -569,7 +568,7 @@ def read_folder_text(root: str | Path, path: str, limit: int, files: Collection[
         The text (bad UTF-8 replaced) and whether it was cut at ``limit``.
 
     Raises:
-        LocalFolderError: See :func:`_folder_root` and :func:`_folder_file`.
+        FolderReadRefusedError: See :func:`_folder_root` and :func:`_folder_file`.
         DomainError: ``connectors.not_found`` when no file is there, or the listing leaves it out.
         OSError: When the file cannot be read, or became a link or a non-regular file since the check.
     """
@@ -601,12 +600,18 @@ class LocalFolderBrowser(RepoBrowser):
             root: The folder's absolute path.
 
         Raises:
-            LocalFolderError: See :func:`_folder_root`.
+            FolderReadRefusedError: See :func:`_folder_root`, and when the files sum past ``MAX_ARCHIVE_BYTES``.
             FolderTreeError: When the folder cannot be listed.
         """
         base = _folder_root(root)
         # The cut walk is a prefix of the full one, so one full walk gives the tree, the id and the reads.
         full, _ = folder_entries(base, None)
+        # Hashing reads every byte, so a folder the run could never pack is refused before the first read.
+        if sum(int(e.get("size", 0)) for e in full) > MAX_ARCHIVE_BYTES:
+            raise FolderReadRefusedError(
+                f"The folder holds more than {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB of files, "
+                "which is too large for a run. Ask the user to pick a smaller folder."
+            )
         entries, truncated = full[:FOLDER_ENTRIES_MAX], len(full) > FOLDER_ENTRIES_MAX
         super().__init__(
             token=None,
@@ -615,7 +620,7 @@ class LocalFolderBrowser(RepoBrowser):
             editable_paths=[],
             entries=entries,
             truncated=truncated,
-            provider=LOCAL_PROVIDER,
+            provider=LOCAL_REPO_PROVIDER,
         )
         self.root = base
         # Reads check the full list; only the tree the agent sees is cut.

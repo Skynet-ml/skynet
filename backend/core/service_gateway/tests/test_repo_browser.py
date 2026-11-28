@@ -12,12 +12,12 @@ from ...api.errors import DomainError
 from ...config import settings
 from ...local.folder_tree import folder_entries, folder_source_id
 from ...local.tests.test_folder_tree import SHARED_VECTOR_ID
+from ...models.blackbox import LOCAL_REPO_PROVIDER
 from ..agents import repo_browser
 from ..agents.repo_browser import (
     KEY_FILE_BYTES,
-    LOCAL_PROVIDER,
+    FolderReadRefusedError,
     LocalFolderBrowser,
-    LocalFolderError,
     RepoBrowser,
     read_folder_text,
 )
@@ -254,7 +254,7 @@ def test_a_local_folder_gives_the_same_tree_and_file_output_as_a_host(
     )
 
     assert _paths(local._entries) == ["README.md", "pyproject.toml", "src/", "src/app.py"]
-    assert local.provider == LOCAL_PROVIDER
+    assert local.provider == LOCAL_REPO_PROVIDER
     assert local._token is None
     assert local.read_repo_file("src/app.py") == hosted.read_repo_file("src/app.py") == "   1 x = 1\n   2 y = 2"
     assert local.list_repo_folder("src") == hosted.list_repo_folder("src")
@@ -328,7 +328,7 @@ def test_a_local_read_refuses_a_path_that_leaves_the_folder(tmp_path: Path, path
     (tmp_path / "outside.txt").write_text("outside", encoding="utf-8")
     root = _folder(tmp_path / "repo", {"src/app.py": "x = 1\n"})
 
-    with pytest.raises(LocalFolderError):
+    with pytest.raises(FolderReadRefusedError):
         read_folder_text(root, path, 100)
 
 
@@ -344,7 +344,7 @@ def test_a_local_folder_never_follows_a_link(tmp_path: Path) -> None:
 
     assert _paths(folder_entries(root)[0]) == ["src/", "src/app.py", "src/inner.py"]
     for path in ("leak.txt", "leakdir/x.txt", "srclink/app.py", "alias.py"):
-        with pytest.raises(LocalFolderError, match="goes through a link"):
+        with pytest.raises(FolderReadRefusedError, match="goes through a link"):
             read_folder_text(root, path, 100)
     browser = LocalFolderBrowser(root)
     assert browser.read_repo_file("leak.txt") == {
@@ -430,9 +430,9 @@ def test_a_local_folder_never_returns_env_file_content(tmp_path: Path) -> None:
 
     assert _paths(folder_entries(root)[0]) == ["app.py"]
     for path in (".env", "./.env", ".Env.local", ".envs/prod.txt"):
-        with pytest.raises(LocalFolderError, match=r"\.env file"):
+        with pytest.raises(FolderReadRefusedError, match=r"\.env file"):
             read_folder_text(root, path, 100)
-    with pytest.raises(LocalFolderError, match="goes through a link"):
+    with pytest.raises(FolderReadRefusedError, match="goes through a link"):
         read_folder_text(root, "settings.txt", 100)
     browser = LocalFolderBrowser(root)
     browser.preload_key_files()
@@ -461,12 +461,12 @@ def test_a_local_folder_is_refused_outside_local_mode(monkeypatch: pytest.Monkey
         lambda: LocalFolderBrowser(root),
         lambda: read_folder_text(root, "app.py", 9),
     ):
-        with pytest.raises(LocalFolderError, match="only in the desktop app"):
+        with pytest.raises(FolderReadRefusedError, match="only in the desktop app"):
             read()
     monkeypatch.setattr(settings, "local_mode", True)
-    with pytest.raises(LocalFolderError, match="absolute"):
+    with pytest.raises(FolderReadRefusedError, match="absolute"):
         LocalFolderBrowser("relative/folder")
-    with pytest.raises(LocalFolderError, match="No folder"):
+    with pytest.raises(FolderReadRefusedError, match="No folder"):
         LocalFolderBrowser(root / "app.py")
 
 
@@ -536,9 +536,9 @@ def test_a_linked_folder_root_is_refused_and_a_linked_parent_is_not(tmp_path: Pa
     (tmp_path / "shop-link").symlink_to(root)
     (tmp_path / "parent-link").symlink_to(tmp_path / "real")
 
-    with pytest.raises(LocalFolderError, match="The folder is a link"):
+    with pytest.raises(FolderReadRefusedError, match="The folder is a link"):
         LocalFolderBrowser(tmp_path / "shop-link")
-    with pytest.raises(LocalFolderError, match="The folder is a link"):
+    with pytest.raises(FolderReadRefusedError, match="The folder is a link"):
         read_folder_text(tmp_path / "shop-link", "app.py", 100)
     assert LocalFolderBrowser(tmp_path / "parent-link" / "shop").branch == folder_source_id(root)
 
@@ -547,7 +547,7 @@ def test_a_git_source_names_itself_a_repository_and_a_local_one_a_folder() -> No
     """The agent's error texts say "repository" for a host and "folder" for a local folder."""
     assert repo_browser._source_noun("github") == "repository"
     assert repo_browser._source_noun(None) == "repository"
-    assert repo_browser._source_noun(LOCAL_PROVIDER) == "folder"
+    assert repo_browser._source_noun(LOCAL_REPO_PROVIDER) == "folder"
     assert _browser([]).read_repo_file("a.py") == {
         "error": "No file named 'a.py' in the repository. Check the tree for the exact path."
     }

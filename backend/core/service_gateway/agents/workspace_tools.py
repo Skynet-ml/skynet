@@ -33,12 +33,12 @@ from ...models.blackbox import (
     DRAFT_FILE_BYTES,
     DRAFT_FILES_MAX,
     DRAFT_FILES_TOTAL_BYTES,
+    LOCAL_REPO_PROVIDER,
     REPO_COMMIT_PATTERN,
     clean_draft_path,
 )
 from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, parse_constraints, rule_file_settings
 from .repo_browser import (
-    LOCAL_PROVIDER,
     LocalFolderBrowser,
     RepoBrowser,
     RepoRead,
@@ -272,7 +272,7 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
         repository rather than failing the turn.
     """
     provider = str(state.get("repo_provider") or github.PROVIDER)
-    if provider == LOCAL_PROVIDER:
+    if provider == LOCAL_REPO_PROVIDER:
         return open_folder(state)
     repository = str(state.get("repository") or "").strip()
     if not repository:
@@ -784,7 +784,7 @@ def workspace_tools(
         except Exception as exc:  # a failed host read refuses the write, not the turn
             logger.info("Setup agent cannot read ascent.toml of %s: %s", browser.repository, type(exc).__name__)
             # A failed read is not cached, so a retry can work.
-            refuser = "folder" if browser.provider == LOCAL_PROVIDER else "host"
+            refuser = "folder" if browser.provider == LOCAL_REPO_PROVIDER else "host"
             return {"error": f"the {refuser} refused the read.", "advice": "Try again, or ask the user."}
         if read is None:
             return ""
@@ -805,7 +805,7 @@ def workspace_tools(
         text = str(current.get("ascent_toml") or "")
         if text.strip():
             return text
-        source = "repo_path" if current.get("repo_provider") == LOCAL_PROVIDER else "repository"
+        source = "repo_path" if current.get("repo_provider") == LOCAL_REPO_PROVIDER else "repository"
         if not str(current.get(source) or "").strip():
             return ""
         if not repo_toml:

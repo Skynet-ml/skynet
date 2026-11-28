@@ -582,6 +582,22 @@ def test_a_local_folder_run_completes_the_task_step_with_its_folder_alone() -> N
     assert _screen_problems("artifact", git) == ["repository must be set as owner/name"]
 
 
+def test_a_local_run_refuses_a_repository_write() -> None:
+    """A ``repository`` would turn a local run into a git run, so the write is refused; a git run keeps it."""
+    ready = {"job_name": "Bot", "task_objective": "Fix flaky tests"}
+    local = cast(WizardState, {**ready, "repo_provider": "local", "repo_path": "/Users/me/shop"})
+
+    err = validate_wizard_patch_order({"repository": "o/r"}, local)
+
+    assert err is not None
+    assert "local folder" in err
+    assert validate_wizard_patch_order({"repository": "o/r"}, cast(WizardState, ready)) is None
+    assert (
+        validate_wizard_patch_order({"repository": "o/r"}, cast(WizardState, {**ready, "repo_provider": "github"}))
+        is None
+    )
+
+
 def test_the_order_hint_asks_a_local_run_for_the_folder_not_a_repository() -> None:
     """A local run's Task hint asks the user for the folder and never asks for ``repository``."""
     local = cast(WizardState, {"job_name": "Bot", "repo_provider": "local"})
