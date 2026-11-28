@@ -1873,19 +1873,20 @@ def test_open_folder_refuses_a_path_the_disk_cannot_encode(monkeypatch: pytest.M
     assert reason == "The folder path is not a valid path on this computer."
 
 
-def test_open_folder_refuses_a_folder_larger_than_the_run_pack_before_any_hash(
+def test_open_folder_refuses_a_folder_larger_than_the_agent_can_read_before_any_hash(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A folder the run could never pack is refused before the agent hashes every byte of it."""
+    """A folder past the agent's raw read limit is refused before the agent hashes every byte of it."""
     monkeypatch.setattr(settings, "local_mode", True)
     (tmp_path / "a.py").write_text("x" * 6, encoding="utf-8")
     (tmp_path / "b.py").write_text("y" * 6, encoding="utf-8")
-    monkeypatch.setattr(repo_browser, "MAX_ARCHIVE_BYTES", 10)
+    monkeypatch.setattr(repo_browser, "LOCAL_FOLDER_READ_BYTES", 10)
     digests: list[str] = []
     monkeypatch.setattr(folder_tree, "file_digest", lambda root, rel: digests.append(rel) or b"")
 
     browser, reason = open_folder({"repo_path": str(tmp_path)})
 
     assert browser is None
-    assert "too large" in reason
+    assert "more than the setup agent can read" in reason
+    assert "for a run" not in reason
     assert digests == []

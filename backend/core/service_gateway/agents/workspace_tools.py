@@ -42,7 +42,7 @@ from .repo_browser import (
     LocalFolderBrowser,
     RepoBrowser,
     RepoRead,
-    _source_noun,
+    source_noun,
 )
 
 if TYPE_CHECKING:
@@ -608,7 +608,7 @@ def workspace_tools(
     opened: list[tuple[RepoBrowser | None, str]] = []
     # Pi may run tool calls at the same time; one lock keeps one repository open and the read count exact.
     lock = asyncio.Lock()
-    noun = _source_noun(state.get("repo_provider"))
+    noun = source_noun(state.get("repo_provider"))
     # The repository's ascent.toml, read once a turn for the rules-file guard.
     repo_toml: list[str] = []
 

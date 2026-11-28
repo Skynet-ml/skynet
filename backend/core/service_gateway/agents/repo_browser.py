@@ -25,7 +25,6 @@ from typing import Any
 from ...api.errors import DomainError
 from ...config import settings
 from ...connectors import github, repo_hosts
-from ...connectors.repo_drafts import MAX_ARCHIVE_BYTES
 from ...local.folder_tree import (
     FOLDER_ENTRIES_MAX,
     FolderTreeError,
@@ -46,6 +45,8 @@ FILE_BYTES = 40_000
 FILE_LINES = 400
 READS_PER_TURN = 10
 KEY_FILE_BYTES = 6_000
+# The run's 200 MB cap is on the gzip pack, so the raw files the agent hashes may sum far above it.
+LOCAL_FOLDER_READ_BYTES = 1024 * 1024 * 1024
 
 # A read's result: the text, ``{"error": ...}`` when the read failed, or
 # ``{"note": ...}`` for an empty folder. The chat card reads the key, never the wording.
@@ -193,7 +194,7 @@ def compact_tree(entries: list[dict[str, Any]], editable_paths: list[str]) -> st
     return "\n".join(_render(_build_nodes(entries), max_depth=TREE_DEPTH, line_budget=TREE_LINE_BUDGET, marks=marks))
 
 
-def _source_noun(provider: str | None) -> str:
+def source_noun(provider: str | None) -> str:
     """Name the kind of source the agent reads, for its tool texts.
 
     Args:
@@ -367,7 +368,7 @@ class RepoBrowser:
             """Fetch the whole file."""
             if path not in self._files:
                 return {
-                    "error": f"No file named {path!r} in the {_source_noun(self.provider)}. "
+                    "error": f"No file named {path!r} in the {source_noun(self.provider)}. "
                     "Check the tree for the exact path."
                 }
             text, truncated = self._read_text(path, limit)
@@ -434,7 +435,7 @@ class RepoBrowser:
             for part in [p for p in clean.split("/") if p]:
                 node = node.get(part) if isinstance(node, dict) else None
             if not isinstance(node, dict):
-                return {"error": f"No folder named {clean!r} in the {_source_noun(self.provider)}."}
+                return {"error": f"No folder named {clean!r} in the {source_noun(self.provider)}."}
             marks = {p.strip("/") for p in self.editable_paths}
             lines = _render(node, max_depth=FOLDER_DEPTH, line_budget=TREE_LINE_BUDGET, marks=marks, base=clean)
             return "\n".join(lines) if lines else {"note": "The folder is empty."}
@@ -462,7 +463,7 @@ class RepoBrowser:
             """Fetch the file."""
             if clean not in self._files:
                 return {
-                    "error": f"No file named {clean!r} in the {_source_noun(self.provider)}. "
+                    "error": f"No file named {clean!r} in the {source_noun(self.provider)}. "
                     "Check the tree for the exact path."
                 }
             text, truncated = self._read_text(clean, FILE_BYTES)
@@ -600,17 +601,17 @@ class LocalFolderBrowser(RepoBrowser):
             root: The folder's absolute path.
 
         Raises:
-            FolderReadRefusedError: See :func:`_folder_root`, and when the files sum past ``MAX_ARCHIVE_BYTES``.
+            FolderReadRefusedError: See :func:`_folder_root`, and when the files sum past ``LOCAL_FOLDER_READ_BYTES``.
             FolderTreeError: When the folder cannot be listed.
         """
         base = _folder_root(root)
         # The cut walk is a prefix of the full one, so one full walk gives the tree, the id and the reads.
         full, _ = folder_entries(base, None)
-        # Hashing reads every byte, so a folder the run could never pack is refused before the first read.
-        if sum(int(e.get("size", 0)) for e in full) > MAX_ARCHIVE_BYTES:
+        # Hashing reads every byte, so a folder too large to read is refused before the first read.
+        if sum(int(e.get("size", 0)) for e in full) > LOCAL_FOLDER_READ_BYTES:
             raise FolderReadRefusedError(
-                f"The folder holds more than {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB of files, "
-                "which is too large for a run. Ask the user to pick a smaller folder."
+                f"The folder holds more than {LOCAL_FOLDER_READ_BYTES // (1024 * 1024)} MB of files, "
+                "which is more than the setup agent can read. Ask the user to pick a smaller folder."
             )
         entries, truncated = full[:FOLDER_ENTRIES_MAX], len(full) > FOLDER_ENTRIES_MAX
         super().__init__(

@@ -10,6 +10,7 @@ import pytest
 
 from ...api.errors import DomainError
 from ...config import settings
+from ...connectors import repo_drafts
 from ...local.folder_tree import folder_entries, folder_source_id
 from ...local.tests.test_folder_tree import SHARED_VECTOR_ID
 from ...models.blackbox import LOCAL_REPO_PROVIDER
@@ -543,11 +544,41 @@ def test_a_linked_folder_root_is_refused_and_a_linked_parent_is_not(tmp_path: Pa
     assert LocalFolderBrowser(tmp_path / "parent-link" / "shop").branch == folder_source_id(root)
 
 
+@pytest.mark.usefixtures("local_mode")
+def test_a_folder_above_the_pack_cap_but_below_the_read_limit_opens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The run's cap is on the compressed pack, so raw files above it still open for the agent."""
+    monkeypatch.setattr(repo_drafts, "MAX_ARCHIVE_BYTES", 1000)
+    # raising=False: the browser must not take the pack cap back, by import or by name.
+    monkeypatch.setattr(repo_browser, "MAX_ARCHIVE_BYTES", 1000, raising=False)
+    monkeypatch.setattr(repo_browser, "LOCAL_FOLDER_READ_BYTES", 4000)
+    root = _folder(tmp_path, {"big.txt": "a" * 2000})
+
+    browser = LocalFolderBrowser(root)
+
+    assert browser.branch == folder_source_id(root)
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_a_folder_above_the_read_limit_is_refused_as_too_much_for_the_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The refusal names the setup agent's read limit, not a run limit."""
+    monkeypatch.setattr(repo_browser, "LOCAL_FOLDER_READ_BYTES", 4000)
+    root = _folder(tmp_path, {"big.txt": "a" * 5000})
+
+    with pytest.raises(FolderReadRefusedError, match="more than the setup agent can read") as refused:
+        LocalFolderBrowser(root)
+
+    assert "for a run" not in str(refused.value)
+
+
 def test_a_git_source_names_itself_a_repository_and_a_local_one_a_folder() -> None:
     """The agent's error texts say "repository" for a host and "folder" for a local folder."""
-    assert repo_browser._source_noun("github") == "repository"
-    assert repo_browser._source_noun(None) == "repository"
-    assert repo_browser._source_noun(LOCAL_REPO_PROVIDER) == "folder"
+    assert repo_browser.source_noun("github") == "repository"
+    assert repo_browser.source_noun(None) == "repository"
+    assert repo_browser.source_noun(LOCAL_REPO_PROVIDER) == "folder"
     assert _browser([]).read_repo_file("a.py") == {
         "error": "No file named 'a.py' in the repository. Check the tree for the exact path."
     }
