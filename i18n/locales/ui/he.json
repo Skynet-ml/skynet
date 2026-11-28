@@ -3892,6 +3892,7 @@
   "submit.v2.repo.env.unsafe": "Skynet לא יכול לקרוא את קובץ ה‑‎.env הזה. הוא לא קובץ רגיל בתיקייה הזו.",
   "submit.v2.repo.env.too_large": "קובץ ה‑‎.env הזה גדול מדי לקריאה.",
   "submit.v2.repo.env.unreadable": "Skynet לא יכול לקרוא את קובץ ה‑‎.env הזה.",
+  "submit.v2.repo.env.not_picked": "Skynet קורא רק תיקייה שבחרתם באפליקציה. בחרו את התיקייה שוב.",
   "submit.v2.repo.env.too_many": "עם קובץ ה‑‎.env של התיקייה, ההרצה הזו מקבלת {count} סודות. הרצה מקבלת לכל היותר {limit}. הסירו שמות מקובץ ה‑‎.env או מהסודות של ההרצה.",
   "submit.v2.repo.issue.local_path": "בחרו תיקייה להרצה.",
   "submit.v2.run_on.blocked.local_folder": "תיקייה ב-Mac הזה רצה רק ב-Mac הזה. בחרו מאגר, או הריצו ב-Mac הזה.",

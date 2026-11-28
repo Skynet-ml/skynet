@@ -258,7 +258,7 @@ def test_preview_reports_a_folder_without_env(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("local_mode")
-def test_preview_and_import_treat_a_folder_the_user_did_not_pick_as_missing(tmp_path: Path) -> None:
+def test_preview_and_import_refuse_a_folder_the_user_did_not_pick(tmp_path: Path) -> None:
     """Read no ``.env`` outside the picked folders, also through a link out of one, and save nothing (SKY-1007)."""
     _env_folder(tmp_path, "A=1\n")
     other = tmp_path / "other"
@@ -268,9 +268,9 @@ def test_preview_and_import_treat_a_folder_the_user_did_not_pick_as_missing(tmp_
     client = _client(_MemStore(), _ALICE)
     for folder in (other, tmp_path, tmp_path / "project" / "up" / "other"):
         preview = client.get("/secrets/local-env", params={"path": str(folder)})
-        assert preview.json() == {"status": "missing", "entries": [], "skipped": []}, folder
+        assert preview.json() == {"status": "not_picked", "entries": [], "skipped": []}, folder
         imported = client.post("/secrets/local-env/import", json={"path": str(folder)})
-        assert imported.json()["status"] == "missing", folder
+        assert imported.json()["status"] == "not_picked", folder
         assert "SENTINEL" not in preview.text + imported.text
     assert client.get("/secrets").json()["secrets"] == []
 

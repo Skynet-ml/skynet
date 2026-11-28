@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "Dieser Mac ist nicht verknüpft",
     "hosted_link.linked_unknown_account": "Ihr Konto",
     "local.not_available": "Diese Funktion gibt es nur in der {term.appName}-App für Mac.",
+    "local.folder_not_picked": "{term.appName} liest nur einen Ordner, den Sie in der App ausgewählt haben. Wählen Sie den Ordner erneut aus.",
     "models.subscription_local_only": "Abo-Modelle und lokale CLI-Proposer laufen nur in der {term.appName}-App für Mac.",
     "models.managed_unavailable_local": "Die Mac-App kann keine verwalteten Modelle nutzen. Wählen Sie ein Abo-Modell oder Ihren eigenen Anbieterschlüssel.",
     "sync.import_local_only_disabled": "Der Import funktioniert nur im gehosteten {term.appName}-Konto, nicht in der Mac-App.",

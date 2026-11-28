@@ -25,7 +25,8 @@ def _picked_roots(state_dir: str) -> list[Path]:
     """
     try:
         entries = json.loads((Path(state_dir) / PICKED_FOLDERS_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    # A deeply nested list makes the parser raise RecursionError.
+    except (OSError, ValueError, RecursionError):
         return []
     if not isinstance(entries, list):
         return []

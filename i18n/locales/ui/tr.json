@@ -348,6 +348,7 @@
   "submit.v2.repo.env.unsafe": "Skynet bu .env dosyasını okuyamıyor. Bu klasörde normal bir dosya değil.",
   "submit.v2.repo.env.too_large": "Bu .env dosyası okunamayacak kadar büyük.",
   "submit.v2.repo.env.unreadable": "Skynet bu .env dosyasını okuyamıyor.",
+  "submit.v2.repo.env.not_picked": "Skynet yalnızca uygulamada seçtiğiniz bir klasörü okur. Klasörü yeniden seçin.",
   "submit.v2.repo.env.too_many": "Klasörün .env dosyasıyla bu çalıştırma {count} gizli anahtar alır. Bir çalıştırma en fazla {limit} alır. .env dosyasından veya çalıştırmanın gizli anahtarlarından ad kaldırın.",
   "submit.v2.repo.issue.local_path": "Çalıştırma için bir klasör seçin.",
   "submit.v2.run_on.blocked.local_folder": "Bu Mac’teki bir klasör yalnızca bu Mac’te çalışır. Bir depo seçin veya bu Mac’te çalıştırın.",

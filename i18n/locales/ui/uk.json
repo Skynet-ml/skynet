@@ -348,6 +348,7 @@
   "submit.v2.repo.env.unsafe": "Skynet не може прочитати цей файл .env. Це не звичайний файл у цій папці.",
   "submit.v2.repo.env.too_large": "Цей файл .env завеликий для читання.",
   "submit.v2.repo.env.unreadable": "Skynet не може прочитати цей файл .env.",
+  "submit.v2.repo.env.not_picked": "Skynet читає лише папку, яку ви вибрали в застосунку. Виберіть папку ще раз.",
   "submit.v2.repo.env.too_many": "З файлом .env папки цей запуск отримує {count} секретів. Запуск приймає не більше {limit}. Видаліть імена з .env або із секретів запуску.",
   "submit.v2.repo.issue.local_path": "Виберіть папку для запуску.",
   "submit.v2.run_on.blocked.local_folder": "Папка на цьому Mac запускається лише на цьому Mac. Виберіть репозиторій або запустіть на цьому Mac.",

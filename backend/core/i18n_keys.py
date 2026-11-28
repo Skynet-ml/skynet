@@ -224,6 +224,7 @@ class I18nKey(StrEnum):
     HOSTED_LINK_REVOKED = 'hosted_link.revoked'
     HOSTED_LINK_STATE_INVALID = 'hosted_link.state_invalid'
     HOSTED_LINK_UNREACHABLE = 'hosted_link.unreachable'
+    LOCAL_FOLDER_NOT_PICKED = 'local.folder_not_picked'
     LOCAL_NOT_AVAILABLE = 'local.not_available'
     MCP_CONNECTION_BLOCKED_ADDRESS = 'mcp_connection.blocked_address'
     MCP_CONNECTION_DECLINED = 'mcp_connection.declined'

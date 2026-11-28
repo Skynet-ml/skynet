@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "Цей Mac не прив'язано",
     "hosted_link.linked_unknown_account": "ваш акаунт",
     "local.not_available": "Ця функція доступна лише в застосунку {term.appName} для Mac.",
+    "local.folder_not_picked": "{term.appName} читає лише папку, яку ви вибрали в застосунку. Виберіть папку ще раз.",
     "models.subscription_local_only": "Моделі за підпискою та локальні CLI-генератори пропозицій працюють лише в застосунку {term.appName} для Mac.",
     "models.managed_unavailable_local": "Застосунок для Mac не може використовувати керовані моделі. Виберіть модель за підпискою або власний ключ постачальника.",
     "sync.import_local_only_disabled": "Імпорт працює лише в хмарному акаунті {term.appName}, а не в застосунку для Mac.",

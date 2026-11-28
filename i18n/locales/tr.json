@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "Bu Mac bağlı değil",
     "hosted_link.linked_unknown_account": "hesabınız",
     "local.not_available": "Bu özellik yalnızca {term.appName} Mac uygulamasında kullanılabilir.",
+    "local.folder_not_picked": "{term.appName} yalnızca uygulamada seçtiğiniz bir klasörü okur. Klasörü yeniden seçin.",
     "models.subscription_local_only": "Abonelik modelleri ve yerel CLI önericileri yalnızca {term.appName} Mac uygulamasında çalışır.",
     "models.managed_unavailable_local": "Mac uygulaması yönetilen modelleri kullanamaz. Bir abonelik modeli veya kendi sağlayıcı anahtarınızı seçin.",
     "sync.import_local_only_disabled": "İçe aktarma yalnızca barındırılan {term.appName} hesabında çalışır, Mac uygulamasında çalışmaz.",

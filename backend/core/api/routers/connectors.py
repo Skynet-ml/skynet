@@ -332,8 +332,8 @@ def local_folder(path: str) -> Path:
 
     Raises:
         DomainError: 404 ``local.not_available`` outside desktop local mode;
-            400 ``connectors.invalid_ref`` for a relative, linked or missing folder,
-            or one the user did not pick in the app (SKY-1007).
+            400 ``connectors.invalid_ref`` for a relative, linked or missing folder;
+            400 ``local.folder_not_picked`` for one the user did not pick in the app (SKY-1007).
     """
     if not settings.local_mode:
         raise DomainError("local.not_available", status=404)
@@ -342,7 +342,7 @@ def local_folder(path: str) -> Path:
     except FolderTreeError:
         raise DomainError("connectors.invalid_ref", status=400) from None
     if not is_picked(root, settings.local_state_dir):
-        raise DomainError("connectors.invalid_ref", status=400)
+        raise DomainError("local.folder_not_picked", status=400)
     return root
 
 

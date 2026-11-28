@@ -34,7 +34,7 @@ from ..errors import DomainError
 from .local_runtime import require_local_mode
 
 _FOLDER_PATH_MAX = 4096
-LocalEnvStatus = Literal["found", "missing", "unsafe", "too_large", "unreadable"]
+LocalEnvStatus = Literal["found", "missing", "unsafe", "too_large", "unreadable", "not_picked"]
 
 
 class SavedSecret(BaseModel):
@@ -148,10 +148,10 @@ def _read_local_env(path: str) -> tuple[LocalEnvStatus, EnvFile | None]:
 
     Returns:
         The status and, when the file was read, its parsed content. A folder
-        the user did not pick in the app reads as ``missing`` (SKY-1007).
+        the user did not pick in the app gives ``not_picked`` (SKY-1007).
     """
     if not is_picked(path, settings.local_state_dir):
-        return "missing", None
+        return "not_picked", None
     try:
         return "found", read_env_file(path)
     except EnvFileError as exc:

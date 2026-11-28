@@ -453,6 +453,7 @@
     "hosted_link.page_failed_title": "ה-Mac הזה לא מקושר",
     "hosted_link.linked_unknown_account": "החשבון שלכם",
     "local.not_available": "התכונה הזו זמינה רק באפליקציית {term.appName} ל-Mac.",
+    "local.folder_not_picked": "{term.appName} קורא רק תיקייה שבחרתם באפליקציה. בחרו את התיקייה שוב.",
     "models.subscription_local_only": "מודלים של מנוי ומציעי CLI מקומיים פועלים רק באפליקציית {term.appName} ל-Mac.",
     "models.managed_unavailable_local": "אפליקציית ה-Mac לא יכולה להשתמש במודלים מנוהלים. בחר/י מודל של מנוי או מפתח ספק משלך.",
     "sync.import_local_only_disabled": "ייבוא פועל רק בחשבון {term.appName} המתארח, לא באפליקציית Mac.",

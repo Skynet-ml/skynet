@@ -1936,7 +1936,7 @@ export async function deleteSavedSecret(id: string): Promise<void> {
 }
 
 /** How reading a local folder's root `.env` file went; only `found` carries names. */
-export type LocalEnvStatus = "found" | "missing" | "unsafe" | "too_large" | "unreadable";
+export type LocalEnvStatus = "found" | "missing" | "unsafe" | "too_large" | "unreadable" | "not_picked";
 
 /** A `.env` line the import does not use; `name` is null when it could be part of a value. */
 export interface LocalEnvSkipped {

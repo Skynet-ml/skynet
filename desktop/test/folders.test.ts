@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createFolderIn,
   isAppPageSender,
@@ -9,6 +9,7 @@ import {
   MAX_PICKED_FOLDERS,
   PICKED_FOLDERS_FILE,
   recordPickedFolder,
+  rememberPickedFolder,
   type FolderSender,
 } from "../src/main/folders";
 
@@ -150,5 +151,42 @@ describe("recordPickedFolder", () => {
     const a = folder("a");
     recordPickedFolder(stateDir, a);
     expect(read()).toEqual([a]);
+  });
+});
+
+describe("rememberPickedFolder", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skynet-remember-")));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("records a picked or created folder and returns it", () => {
+    const stateDir = path.join(tmp, "state");
+    const created = createFolderIn(path.join(tmp, "Skynet"), "my-app");
+    const log = vi.fn();
+    expect(rememberPickedFolder(stateDir, created, log)).toBe(created);
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, PICKED_FOLDERS_FILE), "utf8"))).toEqual([created]);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("returns nothing and records nothing for a cancelled pick", () => {
+    const stateDir = path.join(tmp, "state");
+    expect(rememberPickedFolder(stateDir, null, vi.fn())).toBeNull();
+    expect(fs.existsSync(stateDir)).toBe(false);
+  });
+
+  it("still returns a created folder when the record fails, and logs the error", () => {
+    // A file where the state folder must be makes the record fail.
+    const stateDir = path.join(tmp, "state");
+    fs.writeFileSync(stateDir, "");
+    const created = createFolderIn(path.join(tmp, "Skynet"), "my-app");
+    const log = vi.fn();
+    expect(rememberPickedFolder(stateDir, created, log)).toBe(created);
+    expect(log).toHaveBeenCalledOnce();
   });
 });

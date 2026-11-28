@@ -81,3 +81,23 @@ export function recordPickedFolder(stateDir: string, folder: string): void {
   fs.writeFileSync(tmp, JSON.stringify(next));
   fs.renameSync(tmp, file);
 }
+
+/**
+ * Record `folder` on the picked-folder list and return it. A record error is
+ * logged, not thrown: the folder exists already, so the user must still get
+ * it (a new create with the same name would fail). The backend then asks the
+ * user to pick the folder again.
+ */
+export function rememberPickedFolder(
+  stateDir: string,
+  folder: string | null,
+  log: (message: string, error: unknown) => void = console.error,
+): string | null {
+  if (!folder) return null;
+  try {
+    recordPickedFolder(stateDir, folder);
+  } catch (error) {
+    log("Could not record the picked folder", error);
+  }
+  return folder;
+}

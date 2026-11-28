@@ -348,6 +348,7 @@
   "submit.v2.repo.env.unsafe": "O Skynet não consegue ler este arquivo .env. Ele não é um arquivo normal desta pasta.",
   "submit.v2.repo.env.too_large": "Este arquivo .env é grande demais para ler.",
   "submit.v2.repo.env.unreadable": "O Skynet não consegue ler este arquivo .env.",
+  "submit.v2.repo.env.not_picked": "O Skynet lê apenas uma pasta que você escolheu no app. Escolha a pasta novamente.",
   "submit.v2.repo.env.too_many": "Com o .env da pasta, esta execução recebe {count} segredos. Uma execução aceita no máximo {limit}. Remova nomes do .env ou dos segredos da execução.",
   "submit.v2.repo.issue.local_path": "Escolha uma pasta para a execução.",
   "submit.v2.run_on.blocked.local_folder": "Uma pasta deste Mac só é executada neste Mac. Escolha um repositório ou execute neste Mac.",

@@ -348,6 +348,7 @@
   "submit.v2.repo.env.unsafe": "Skynet 讀唔到呢個 .env 檔案。佢唔係呢個資料夾入面嘅普通檔案。",
   "submit.v2.repo.env.too_large": "呢個 .env 檔案太大，讀唔到。",
   "submit.v2.repo.env.unreadable": "Skynet 讀唔到呢個 .env 檔案。",
+  "submit.v2.repo.env.not_picked": "Skynet 只會讀取你喺 app 入面揀過嘅資料夾。請再揀一次資料夾。",
   "submit.v2.repo.env.too_many": "加埋資料夾嘅 .env，呢個執行會收到 {count} 個密鑰。每個執行最多收 {limit} 個。請喺 .env 或者執行嘅密鑰度移除名稱。",
   "submit.v2.repo.issue.local_path": "揀一個資料夾嚟執行。",
   "submit.v2.run_on.blocked.local_folder": "呢部 Mac 上面嘅資料夾淨係可以喺呢部 Mac 執行。揀一個儲存庫，或者喺呢部 Mac 執行。",

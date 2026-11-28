@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, screen, shell, type IpcMainInvokeEvent } from "electron";
 import { APP_SCHEME, appUrlFromArgv, appWindowUrl, HOSTED_APP_ORIGINS, hostedAppOrigin, parseLinkCallback, webDocsUrl } from "./app-url";
-import { createFolderIn, isAppPageSender, recordPickedFolder } from "./folders";
+import { createFolderIn, isAppPageSender, rememberPickedFolder } from "./folders";
 import { HostedLinkClient, type LinkCheck, watchLink } from "./hosted-link";
 import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
@@ -796,15 +796,11 @@ function fromAppPage(event: IpcMainInvokeEvent): boolean {
 ipcMain.handle("folders:pick", async (event) => {
   if (!win || !fromAppPage(event)) return null;
   const result = await dialog.showOpenDialog(win, { properties: ["openDirectory", "createDirectory"] });
-  const folder = result.canceled ? null : (result.filePaths[0] ?? null);
-  if (folder) recordPickedFolder(localStateDir, folder);
-  return folder;
+  return rememberPickedFolder(localStateDir, result.canceled ? null : (result.filePaths[0] ?? null));
 });
 ipcMain.handle("folders:create", (event, name: unknown) => {
   if (!fromAppPage(event)) return null;
-  const folder = createFolderIn(path.join(app.getPath("documents"), "Skynet"), name);
-  if (folder) recordPickedFolder(localStateDir, folder);
-  return folder;
+  return rememberPickedFolder(localStateDir, createFolderIn(path.join(app.getPath("documents"), "Skynet"), name));
 });
 
 /**

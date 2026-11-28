@@ -3892,6 +3892,7 @@
   "submit.v2.repo.env.unsafe": "Skynet cannot read this .env file. It is not a plain file in this folder.",
   "submit.v2.repo.env.too_large": "This .env file is too large to read.",
   "submit.v2.repo.env.unreadable": "Skynet cannot read this .env file.",
+  "submit.v2.repo.env.not_picked": "Skynet reads only a folder that you picked in the app. Pick the folder again.",
   "submit.v2.repo.env.too_many": "With the folder's .env, this run gets {count} secrets. A run takes at most {limit}. Remove names from the .env or from the run's secrets.",
   "submit.v2.repo.issue.local_path": "Choose a folder for the run.",
   "submit.v2.run_on.blocked.local_folder": "A folder on this Mac runs only on this Mac. Choose a repository, or run on This Mac.",

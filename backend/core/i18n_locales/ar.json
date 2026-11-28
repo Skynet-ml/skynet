@@ -433,6 +433,7 @@
     "hosted_link.page_failed_title": "جهاز Mac هذا غير مرتبط",
     "hosted_link.linked_unknown_account": "حسابك",
     "local.not_available": "هذه الميزة متاحة فقط في تطبيق {term.appName} لنظام Mac.",
+    "local.folder_not_picked": "لا يقرأ {term.appName} إلا مجلدًا اخترته في التطبيق. اختر المجلد مرة أخرى.",
     "models.subscription_local_only": "نماذج الاشتراك ومقترحات CLI على الجهاز تعمل فقط في تطبيق {term.appName} لنظام Mac.",
     "models.managed_unavailable_local": "لا يمكن لتطبيق Mac استخدام النماذج المُدارة. اختر نموذج اشتراك أو مفتاح المزوّد الخاص بك.",
     "sync.import_local_only_disabled": "يعمل الاستيراد فقط في حساب {term.appName} المستضاف، وليس في تطبيق Mac.",

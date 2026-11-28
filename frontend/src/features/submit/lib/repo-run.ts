@@ -255,7 +255,7 @@ export class UndecidedEnvClashesError extends Error {
 
 /** A local run whose folder `.env` the run start could not read, so no secret came from it (SKY-994). */
 export class EnvImportFailedError extends Error {
-  readonly status: "unsafe" | "too_large" | "unreadable";
+  readonly status: "unsafe" | "too_large" | "unreadable" | "not_picked";
 
   /**
    * Keep the import status for the message.
@@ -263,7 +263,7 @@ export class EnvImportFailedError extends Error {
    * Args:
    *   status: Why the import read no `.env`.
    */
-  constructor(status: "unsafe" | "too_large" | "unreadable") {
+  constructor(status: "unsafe" | "too_large" | "unreadable" | "not_picked") {
     super(`submit.v2.repo.env.${status}`);
     this.status = status;
     this.name = "EnvImportFailedError";

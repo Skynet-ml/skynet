@@ -84,7 +84,11 @@ def test_a_link_to_a_picked_folder_passes_because_it_resolves_inside(tmp_path: P
     assert is_picked(picked / "sub", _pick(tmp_path / "state2", alias))
 
 
-@pytest.mark.parametrize("content", [None, "", "not json", '{"folders": []}', '[1, null, "relative"]'])
+@pytest.mark.parametrize(
+    "content",
+    [None, "", "not json", '{"folders": []}', '[1, null, "relative"]', "[" * 100_000],
+    ids=lambda c: "none" if c is None else f"len{len(c)}",
+)
 def test_a_missing_damaged_or_empty_list_refuses_every_path(tmp_path: Path, picked: Path, content: str | None) -> None:
     """Refuse every path when the list is missing, is not a list, or holds no usable entry."""
     state = tmp_path / "state"

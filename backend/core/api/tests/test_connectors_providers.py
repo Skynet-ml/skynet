@@ -47,6 +47,7 @@ from ...connectors import (
 )
 from ...connectors.registry import OAUTH_PROVIDERS, oauth_config_problems
 from ...connectors.vault import ConnectorSecret, ConnectorVault
+from ...i18n import t_locale
 from ...local import folder_tree
 from ...local.picked_folders import PICKED_FOLDERS_FILE
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
@@ -2225,6 +2226,12 @@ def test_local_folder_routes_refuse_a_bad_folder(local_folder: Path, route: str)
         assert response.json()["code"] == "connectors.invalid_ref"
 
 
+def test_the_not_picked_message_tells_the_user_to_pick_the_folder_again() -> None:
+    """The refusal code reads as an instruction to pick the folder again (SKY-1007)."""
+    assert "Pick the folder again." in t_locale("en", "local.folder_not_picked")
+    assert "בחרו את התיקייה שוב" in t_locale("he", "local.folder_not_picked")
+
+
 @pytest.mark.parametrize("route", ["tree", "file"])
 def test_local_folder_routes_refuse_a_folder_the_user_did_not_pick(local_folder: Path, route: str) -> None:
     """A real folder that is not on the picked list, or is reached through a link out of it, is refused (SKY-1007)."""
@@ -2235,7 +2242,7 @@ def test_local_folder_routes_refuse_a_folder_the_user_did_not_pick(local_folder:
     for folder in (str(outside), str(local_folder.parent), str(local_folder / "src" / "up" / "outside")):
         response = client.get(f"/connectors/local/{route}", params={"path": folder, "file": "README.md"})
         assert response.status_code == 400, (folder, response.text)
-        assert response.json()["code"] == "connectors.invalid_ref"
+        assert response.json()["code"] == "local.folder_not_picked"
         assert "outside readme" not in response.text
 
 
