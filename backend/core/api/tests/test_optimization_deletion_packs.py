@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +16,12 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.hardening import HardeningJobModel
+from ...storage.models import JobModel
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore
 from ...storage.tree_purge import TreePurgeError
 from ...worker.local_folder import FRESH_PACK_SECONDS, kept_snapshot
 from ..routers.optimizations import create_optimizations_router
+from ..routers.optimizations.deletion import RETRYABLE_HARDENING_MAX_AGE, UNPINNED_RUN_MAX_AGE
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
 
@@ -165,6 +168,55 @@ def test_a_starting_local_run_without_a_commit_keeps_every_pack(client: TestClie
     """A run that has not stored its commit yet may use any pack, so none is deleted."""
     _local_run(store, "done", COMMIT)
     _local_run(store, "starting", None, status="running")
+    kept = _pack(COMMIT)
+
+    assert client.delete("/optimizations/done").status_code == 200
+
+    assert kept.is_file()
+
+
+@pytest.mark.parametrize(
+    ("age", "kept"),
+    [
+        (UNPINNED_RUN_MAX_AGE + timedelta(hours=1), False),
+        (UNPINNED_RUN_MAX_AGE - timedelta(hours=1), True),
+    ],
+    ids=["older-than-a-day", "younger-than-a-day"],
+)
+@pytest.mark.parametrize("zone", [UTC, None], ids=["aware", "naive"])
+def test_a_local_run_without_a_commit_keeps_the_packs_only_for_a_day(
+    client: TestClient, store: _BaseFakeJobStore, age: timedelta, kept: bool, zone: Any
+) -> None:
+    """A run that has not stored its commit after a day is stuck, so it no longer keeps every pack."""
+    created = (datetime.now(UTC) - age).replace(tzinfo=zone).isoformat()
+    _local_run(store, "done", COMMIT)
+    _local_run(store, "stuck", None, status="running", created_at=created)
+    pack = _pack(COMMIT)
+
+    assert client.delete("/optimizations/done").status_code == 200
+
+    assert pack.is_file() is kept
+
+
+def test_a_long_queued_run_keeps_the_pack_it_just_wrote(client: TestClient, store: _BaseFakeJobStore) -> None:
+    """A run created over a day ago that packs the folder only now keeps its fresh pack."""
+    created = (datetime.now(UTC) - UNPINNED_RUN_MAX_AGE - timedelta(hours=1)).isoformat()
+    _local_run(store, "done", COMMIT)
+    _local_run(store, "queued", None, status="pending", created_at=created)
+    kept = _pack(COMMIT, fresh=True)
+
+    assert client.delete("/optimizations/done").status_code == 200
+
+    assert kept.is_file()
+
+
+@pytest.mark.parametrize("created", ["not a time", None, 0], ids=["unreadable", "missing", "not-a-string"])
+def test_a_local_run_without_a_commit_or_a_readable_start_time_keeps_every_pack(
+    client: TestClient, store: _BaseFakeJobStore, created: Any
+) -> None:
+    """A start time the cleanup cannot read counts as recent, so the pack stays."""
+    _local_run(store, "done", COMMIT)
+    _local_run(store, "starting", None, status="running", created_at=created)
     kept = _pack(COMMIT)
 
     assert client.delete("/optimizations/done").status_code == 200
@@ -360,13 +412,37 @@ def test_the_real_store_keeps_a_used_pack_and_deletes_it_with_the_last_run(sqlit
     assert not kept.exists()
 
 
-def _hardening_job(store: SQLiteJobStore, status: str, commit: str | None) -> None:
+@pytest.mark.parametrize(("fresh", "kept"), [(False, False), (True, True)], ids=["old-pack", "fresh-pack"])
+def test_the_real_store_drops_a_stuck_run_after_a_day(sqlite_store: SQLiteJobStore, fresh: bool, kept: bool) -> None:
+    """The SQL store's ``created_at`` ends the hold of a running run that never stored its commit."""
+    _sqlite_local_run(sqlite_store, "done", COMMIT)
+    sqlite_store.create_job("stuck")
+    sqlite_store.update_job(
+        "stuck",
+        status="running",
+        username="alice",
+        payload={"target": {"kind": "repo", "repo": {"provider": "local", "repository": "app", "path": "/tmp/app"}}},
+    )
+    with Session(sqlite_store.engine) as session:
+        session.query(JobModel).filter_by(optimization_id="stuck").update(
+            {"created_at": datetime.now(UTC) - UNPINNED_RUN_MAX_AGE - timedelta(hours=1)}
+        )
+        session.commit()
+    pack = _pack(COMMIT, fresh=fresh)
+
+    assert _client(sqlite_store).delete("/optimizations/done").status_code == 200
+
+    assert pack.is_file() is kept
+
+
+def _hardening_job(store: SQLiteJobStore, status: str, commit: str | None, age: timedelta = timedelta()) -> None:
     """Store a metric-hardening job on a local folder.
 
     Args:
         store: The SQLite job store.
         status: The job status.
         commit: The commit its first pass pinned, or ``None`` before it.
+        age: How long ago the job last changed.
     """
     repo: dict[str, Any] = {"provider": "local", "repository": "app", "path": "/tmp/app"}
     if commit is not None:
@@ -378,6 +454,7 @@ def _hardening_job(store: SQLiteJobStore, status: str, commit: str | None) -> No
                 draft_id=f"draft-{status}",
                 status=status,
                 job={"target": {"kind": "repo", "repo": repo}},
+                updated_at=datetime.now(UTC) - age,
             )
         )
         session.commit()
@@ -421,3 +498,42 @@ def test_a_retryable_hardening_job_without_a_commit_keeps_no_pack(sqlite_store: 
     assert _client(sqlite_store).delete("/optimizations/done").status_code == 200
 
     assert not pack.exists()
+
+
+@pytest.mark.parametrize("status", ["failed", "preflight_failed", "stale", "rejected"])
+@pytest.mark.parametrize(
+    ("age", "kept"),
+    [
+        (RETRYABLE_HARDENING_MAX_AGE + timedelta(days=1), False),
+        (RETRYABLE_HARDENING_MAX_AGE - timedelta(days=1), True),
+    ],
+    ids=["older-than-30-days", "younger-than-30-days"],
+)
+def test_a_retryable_hardening_job_keeps_its_pack_for_30_days(
+    sqlite_store: SQLiteJobStore, status: str, age: timedelta, kept: bool
+) -> None:
+    """A failed, stale or rejected job untouched for 30 days is not retried, so its pack can go."""
+    _sqlite_local_run(sqlite_store, "done", COMMIT)
+    _hardening_job(sqlite_store, status, COMMIT, age)
+    pack = _pack(COMMIT)
+
+    assert _client(sqlite_store).delete("/optimizations/done").status_code == 200
+
+    assert pack.is_file() is kept
+
+
+@pytest.mark.parametrize(
+    ("status", "commit"),
+    [("waiting_review", COMMIT), ("waiting_fix", COMMIT), ("running", COMMIT), ("preflight", None)],
+)
+def test_an_active_hardening_job_keeps_the_pack_at_any_age(
+    sqlite_store: SQLiteJobStore, status: str, commit: str | None
+) -> None:
+    """The 30-day bound is only for retryable jobs; a working job keeps the pack however old it is."""
+    _sqlite_local_run(sqlite_store, "done", COMMIT)
+    _hardening_job(sqlite_store, status, commit, RETRYABLE_HARDENING_MAX_AGE + timedelta(days=1))
+    pack = _pack(COMMIT)
+
+    assert _client(sqlite_store).delete("/optimizations/done").status_code == 200
+
+    assert pack.is_file()
