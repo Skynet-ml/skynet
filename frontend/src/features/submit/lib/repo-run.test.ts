@@ -409,7 +409,7 @@ test("a repository run sends each secret with its allowed hosts as a list", () =
 const SERVICES_TOML = [
   "[services.geocode]",
   'url = "https://Maps.GoogleApis.com/maps/api/geocode/json"',
-  'query = { key = "${MAPS_KEY}" }',
+  'headers = { X-Goog-Api-Key = "${MAPS_KEY}" }',
   "",
   "[services.search]",
   'url = "https://api.search.example/v1"',
