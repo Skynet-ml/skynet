@@ -9,10 +9,18 @@ only when the name looks like a name, so a value on a broken line never
 leaks into a response.
 
 A value that runs over more lines without quotes (a PEM key pasted as is) has
-body lines that can look like ``NAME=value``. So an unquoted ``-----BEGIN``
-value skips every line up to its ``-----END`` line, and a line with no ``=``
-skips every line up to the next blank or comment line. Those lines are
-reported by number only.
+body lines that can look like ``NAME=value``. Value text must never become a
+name, so:
+
+- An unquoted ``-----BEGIN`` value with no ``-----END`` on the same line skips
+  every line up to its ``-----END`` line.
+- A line with no ``=`` skips every line up to the next blank or comment line.
+- A line whose value is only ``=`` is base64 padding, not a pair.
+- A base64 tail such as ``Tail12==`` right after a long unquoted base64 value
+  continues that value. Both lines are skipped. An UPPER_SNAKE name such as
+  ``OPT=`` still reads as a pair.
+
+Those body lines are reported by number only.
 """
 
 from __future__ import annotations
@@ -36,6 +44,11 @@ _SHOWN_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 _EXPORT = re.compile(r"^export\s+")
 _PEM_BEGIN = "-----BEGIN"
 _PEM_END = "-----END"
+# A long unquoted value of base64 characters with no padding can be the first
+# line of a wrapped key; a padded base64 line after it is then its tail.
+_WRAPPED_HEAD = re.compile(r"^[A-Za-z0-9+/]{40,}$")
+_BASE64_TAIL = re.compile(r"^[A-Za-z0-9+/]+={1,2}$")
+_UPPER_NAME = re.compile(r"^[A-Z0-9_]+$")
 _DOUBLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "$": "$"}
 
 
@@ -134,25 +147,44 @@ def parse_env(text: str) -> EnvFile:
     lines = text.splitlines()
     values: dict[str, str] = {}
     skipped: list[EnvSkip] = []
+    # The name and line number of the value on the line before, when that value
+    # could be the head of a wrapped base64 key.
+    head: tuple[str, int] | None = None
     index = 0
     while index < len(lines):
         number = index + 1
         line = lines[index].strip()
+        before, head = head, None
         if not line or line.startswith("#"):
             index += 1
             continue
         line = _EXPORT.sub("", line, count=1)
         name, equals, raw = line.partition("=")
         name = name.strip()
+        if equals and before and _BASE64_TAIL.match(line) and not _UPPER_NAME.match(name):
+            head_name, head_number = before
+            values.pop(head_name, None)
+            skipped.append(EnvSkip(head_number, head_name, "unquoted_multiline"))
+            skipped.append(EnvSkip(number, None, "unquoted_multiline"))
+            index += 1
+            continue
+        if equals and raw.strip() and not raw.strip().strip("="):
+            skipped.append(EnvSkip(number, None, "invalid_line"))
+            index += 1
+            continue
         if not equals:
             # The line is likely the body of a broken value, and so may be the
             # lines after it; none of them is read as a name.
+            if before:
+                values.pop(before[0], None)
+                skipped.append(EnvSkip(before[1], before[0], "unquoted_multiline"))
             while index < len(lines) and lines[index].strip() and not lines[index].strip().startswith("#"):
                 skipped.append(EnvSkip(index + 1, None, "invalid_line"))
                 index += 1
             continue
+        spaced = raw[:1].isspace()
         raw = raw.lstrip()
-        if raw.startswith(_PEM_BEGIN):
+        if raw.startswith(_PEM_BEGIN) and _PEM_END not in raw:
             skipped.append(EnvSkip(number, _shown(name), "unquoted_multiline"))
             index += 1
             while index < len(lines):
@@ -167,8 +199,13 @@ def parse_env(text: str) -> EnvFile:
             if value is None:
                 skipped.append(EnvSkip(number, _shown(name), "unclosed_quote"))
                 break
+        elif spaced and raw.startswith("#"):
+            # ``NAME= # note`` is an empty value with a comment, as in common dotenv loaders.
+            value = ""
         else:
             value = re.split(r"\s#", raw, maxsplit=1)[0].rstrip()
+            if _NAME.match(name) and _WRAPPED_HEAD.match(value):
+                head = (name, number)
         index += 1
         if not _NAME.match(name):
             skipped.append(EnvSkip(number, _shown(name), "invalid_name"))

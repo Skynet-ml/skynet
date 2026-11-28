@@ -93,11 +93,9 @@ import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate
 import {
   contractText,
   envSecretClashesState,
+  envSubmitFailure,
   finishedHardeningJobId,
   repoRunRequest,
-  RUN_SECRETS_MAX,
-  TooManyRunSecretsError,
-  UndecidedEnvClashesError,
   withLocalEnvImport,
 } from "../lib/repo-run";
 import {
@@ -773,17 +771,10 @@ export function WizardV2Provider({
   };
 
   const submitFailed = (err: unknown) => {
-    if (err instanceof UndecidedEnvClashesError) {
-      // A clash the .env got after the preview joins the list, so the user can pick for it.
-      const repo = state.task.repo;
-      patchTask({ repo: { ...repo, envClashes: [...new Set([...(repo.envClashes ?? []), ...err.names])] } });
-      toast.error(msg("submit.v2.repo.env.undecided", { names: err.names.join(", ") }));
-      submittingRef.current = false;
-      setSubmitPhase("idle");
-      return;
-    }
-    if (err instanceof TooManyRunSecretsError) {
-      toast.error(msg("submit.v2.repo.env.too_many", { count: err.count, limit: RUN_SECRETS_MAX }));
+    const envFailure = envSubmitFailure(err, state.task.repo);
+    if (envFailure) {
+      if (envFailure.repo) patchTask({ repo: envFailure.repo });
+      toast.error(msg(envFailure.key, envFailure.params));
       submittingRef.current = false;
       setSubmitPhase("idle");
       return;

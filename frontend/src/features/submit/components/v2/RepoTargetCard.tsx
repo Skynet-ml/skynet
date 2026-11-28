@@ -174,6 +174,9 @@ export function RepoTargetCard({
       previewLocalEnvSecrets(folderPath, controller.signal)
         .then((preview) => {
           setEnvPreview(preview);
+          // Only a read of the file changes the clashes. A missing or failed read
+          // keeps a clash the run start found, because that clash still needs a pick.
+          if (preview.status !== "found") return;
           const current = latestRepo.current;
           if (!isLocalRepo(current) || (current.localPath ?? "").trim() !== folderPath) return;
           const clashes = preview.entries.filter((entry) => entry.clash).map((entry) => entry.name);
@@ -477,7 +480,7 @@ export function RepoTargetCard({
               </Button>
             </div>
           )}
-          {envPreview && folderPath && (
+          {folderPath && (envPreview || (repo.envClashes ?? []).length > 0) && (
             <EnvSecrets
               preview={envPreview}
               clashes={repo.envClashes ?? []}
@@ -736,6 +739,8 @@ export function RepoTargetCard({
  * What the run start does with the folder's root `.env` file (SKY-994): it
  * saves each pair as a saved secret. A name already saved with another value
  * changes only when the user picks Use .env. Names only; never a value.
+ * The clash picks show whatever the preview says: a clash that the run start
+ * found later still blocks the run, so its pick must stay on screen.
  */
 function EnvSecrets({
   preview,
@@ -744,20 +749,23 @@ function EnvSecrets({
   onChoose,
   t,
 }: {
-  preview: LocalEnvPreview;
+  preview: LocalEnvPreview | null;
   clashes: string[];
   choices: Record<string, "keep" | "use">;
   onChoose: (name: string, choice: "keep" | "use") => void;
   t: (key: string, params?: Record<string, string | number>) => string;
 }) {
-  if (preview.status === "missing") return null;
-  if (preview.status !== "found")
-    return (
+  const found = preview?.status === "found" ? preview : null;
+  const note =
+    preview && preview.status !== "found" && preview.status !== "missing" ? (
       <p role="status" className="text-xs text-muted-foreground">
         {t(`submit.v2.repo.env.${preview.status}`)}
       </p>
-    );
-  if (preview.entries.length === 0 && preview.skipped.length === 0) return null;
+    ) : null;
+  if (clashes.length === 0) {
+    if (!found) return note;
+    if (found.entries.length === 0 && found.skipped.length === 0) return null;
+  }
   const options = [
     { value: "keep" as const, label: t("submit.v2.repo.env.keep") },
     { value: "use" as const, label: t("submit.v2.repo.env.use") },
@@ -766,7 +774,8 @@ function EnvSecrets({
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
       <span className="text-sm font-medium text-foreground">{t("submit.v2.repo.env.title")}</span>
-      {preview.entries.length > 0 && (
+      {note}
+      {found && found.entries.length > 0 && (
         <p className="text-xs text-muted-foreground">{t("submit.v2.repo.env.intro")}</p>
       )}
       {clashes.length > 0 && (
@@ -795,10 +804,10 @@ function EnvSecrets({
           )}
         </div>
       )}
-      {preview.skipped.length > 0 && (
+      {found && found.skipped.length > 0 && (
         <p className="text-xs text-muted-foreground">
           {t("submit.v2.repo.env.skipped", {
-            lines: preview.skipped
+            lines: found.skipped
               .map((skip) => (skip.name ? `${skip.line} (${skip.name})` : String(skip.line)))
               .join(", "),
           })}

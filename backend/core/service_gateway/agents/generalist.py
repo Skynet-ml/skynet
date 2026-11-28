@@ -2818,7 +2818,10 @@ _LOCAL_FOLDER = (
     "the names that are already saved with another value and that the user has not decided on yet. Before "
     "the run starts, ask the user about each of them: keep the saved value, or use the ``.env`` value. The "
     "user picks Keep saved or Use .env for each name on the Repository screen; the run cannot start until "
-    "each name has a pick. Never ask for, show or repeat a secret value."
+    "each name has a pick. The ``.env`` can get a new clashing name after the folder check. Then the run "
+    "start stops, the app names the new clash, and ``env_secret_clashes`` lists it. Ask the user to pick Keep "
+    "saved or Use .env for that name, then tell them to start the run again. Never ask for, show or repeat "
+    "a secret value."
 )
 _LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric", "check", "overview"})
 SCREEN_FOCUS: dict[str, str] = {

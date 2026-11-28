@@ -588,6 +588,43 @@ void test("a folder draft without the folder card asks for a repository instead"
   }
 });
 
+void test("the folder card keeps a run-start .env clash pick when the preview finds no file (SKY-994)", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  const linkedFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!url.includes("/secrets/local-env?")) return linkedFetch(input);
+    return new Response(JSON.stringify({ status: "missing", entries: [], skipped: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled(
+      { ...repo, localPath: "/Users/me/app", envClashes: ["DB_URL"] },
+      sent,
+    );
+    try {
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.ok(!sent.some((draft) => (draft.envClashes ?? []).length === 0), "the preview dropped the clash");
+      const text = container.textContent ?? "";
+      assert.ok(text.includes("DB_URL"));
+      assert.ok(buttonWithText(container, "Keep saved"), "no Keep saved choice");
+      const use = buttonWithText(container, "Use .env");
+      assert.ok(use, "no Use .env choice");
+      assert.ok(text.includes("Pick Keep saved or Use .env for: DB_URL."), "no undecided notice");
+      await React.act(async () => use.click());
+      assert.deepEqual(sent.at(-1)!.envChoices, { DB_URL: "use" });
+    } finally {
+      await unmount();
+      globalThis.fetch = linkedFetch;
+    }
+  });
+});
+
 void test("the folder card lists .env clashes and a pick goes into the draft (SKY-994)", async () => {
   const bridge: Bridge = { pickFolder: async () => null };
   const linkedFetch = globalThis.fetch;

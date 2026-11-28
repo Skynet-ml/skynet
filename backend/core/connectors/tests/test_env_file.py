@@ -84,6 +84,42 @@ def test_parse_skips_a_broken_block_up_to_the_next_blank_line() -> None:
     assert "AbCdEfGh12" not in repr(parsed)
 
 
+def test_parse_never_reads_a_wrapped_base64_tail_as_a_name() -> None:
+    """A base64 tail with ``=`` padding after a long key line is value text, not a pair."""
+    wrapped = "CERT=MIICijCCAXKgAwIBAgIURu1abcdefghijklmnopqrstuv\nSecretTailAbc12==\nNEXT=1\n"
+    parsed = parse_env(wrapped)
+    assert parsed.values == {"NEXT": "1"}
+    assert parsed.skipped == (EnvSkip(1, "CERT", "unquoted_multiline"), EnvSkip(2, None, "unquoted_multiline"))
+    assert "SecretTailAbc12" not in repr(parsed)
+    padding_only = parse_env("CERT=TUlJ...Ru1\nSecretTailAbc12==\nNEXT=1\n")
+    assert "SecretTailAbc12" not in padding_only.values
+    assert "SecretTailAbc12" not in repr(padding_only)
+    assert padding_only.values["NEXT"] == "1"
+
+
+def test_parse_keeps_a_long_key_before_an_upper_case_empty_name() -> None:
+    """An ordinary ``OPT=`` line after a long key does not drop the key."""
+    long_value = "Ab0" * 15
+    parsed = parse_env(f"LONG_VALUE={long_value}\nOPT=\nZ=1\n")
+    assert parsed.values == {"LONG_VALUE": long_value, "Z": "1"}
+    assert parsed.skipped == (EnvSkip(2, "OPT", "empty_value"),)
+
+
+def test_parse_reads_a_one_line_begin_and_end_value_and_the_lines_after_it() -> None:
+    """A ``-----BEGIN`` value that holds its ``-----END`` on the same line starts no skip."""
+    parsed = parse_env("KEY=-----BEGIN KEY-----\\nabc\\n-----END KEY-----\nA=1\nB=2\n")
+    assert parsed.values["A"] == "1"
+    assert parsed.values["B"] == "2"
+    assert parsed.skipped == ()
+
+
+def test_parse_reads_a_comment_after_an_empty_value_as_empty() -> None:
+    """``OPT= # set this`` has no value, as in common dotenv loaders."""
+    parsed = parse_env("OPT= # set this\nHASH=a#b\n")
+    assert parsed.values == {"HASH": "a#b"}
+    assert parsed.skipped == (EnvSkip(1, "OPT", "empty_value"),)
+
+
 def test_parse_stops_at_an_unclosed_quote() -> None:
     """Skip the rest of the file when a quote never closes."""
     parsed = parse_env('FIRST=1\nOPEN="never closes\nLATER=2\n')

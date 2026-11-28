@@ -7,6 +7,7 @@
  * the run needs data.
  */
 import type { ApiSource } from "@/shared/lib/api-route";
+import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
 import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig } from "@/shared/types/api";
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
@@ -289,6 +290,32 @@ export async function withLocalEnvImport(
   const count = sent.target.repo?.secrets?.length ?? 0;
   if (count > RUN_SECRETS_MAX) throw new TooManyRunSecretsError(count);
   return sent;
+}
+
+/**
+ * What a failed run start shows and keeps for a `.env` problem (SKY-994).
+ *
+ * A late clash joins the draft's clash list, so the Repository screen shows its
+ * pick and the setup agent sees it in `env_secret_clashes`.
+ *
+ * Args:
+ *   err: The error that stopped the run start.
+ *   repo: The wizard's repository draft.
+ *
+ * Returns:
+ *   The toast message and the new draft, or null for any other error.
+ */
+export function envSubmitFailure(
+  err: unknown,
+  repo: RepoDraft,
+): { key: MessageKey; params: Record<string, string | number>; repo?: RepoDraft } | null {
+  if (err instanceof UndecidedEnvClashesError) {
+    const envClashes = [...new Set([...(repo.envClashes ?? []), ...err.names])];
+    return { key: "submit.v2.repo.env.undecided", params: { names: err.names.join(", ") }, repo: { ...repo, envClashes } };
+  }
+  if (err instanceof TooManyRunSecretsError)
+    return { key: "submit.v2.repo.env.too_many", params: { count: err.count, limit: RUN_SECRETS_MAX } };
+  return null;
 }
 
 /** The `.env` clashes the agent must ask about: a local draft's names with no pick yet. */

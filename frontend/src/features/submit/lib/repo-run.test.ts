@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
@@ -41,6 +40,7 @@ const {
   TooManyRunSecretsError,
   UndecidedEnvClashesError,
   envSecretClashesState,
+  envSubmitFailure,
   repoRunRequest,
   withEnvSecrets,
   withLocalEnvImport,
@@ -830,14 +830,35 @@ test("a local run with more secrets than a run takes fails with the count before
   assert.equal(atLimit.target.repo!.secrets!.length, RUN_SECRETS_MAX);
 });
 
-test("the wizard starts a run through the .env import and shows the secret limit (SKY-994)", () => {
-  const wizard = readFileSync(new URL("../hooks/use-unified-wizard.tsx", import.meta.url), "utf8");
-  assert.ok(wizard.includes("withLocalEnvImport(request, state.task.repo, importLocalEnvSecrets)"));
-  assert.ok(wizard.includes("env_secret_clashes: envSecretClashesState(task.repo)"));
-  assert.ok(wizard.includes("err instanceof TooManyRunSecretsError"));
-  assert.ok(wizard.includes("err instanceof UndecidedEnvClashesError"));
-  assert.ok(wizard.includes('"submit.v2.repo.env.undecided"'));
-  assert.ok(wizard.includes('"submit.v2.repo.env.too_many"'));
+test("a late .env clash stops the run start, joins the draft and reaches the agent state (SKY-994)", async () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [], envClashes: ["A"], envChoices: { A: "keep" } };
+  const request = repoRunRequest(state, options)!;
+  let submitted = false;
+  let failure: ReturnType<typeof envSubmitFailure> = null;
+  try {
+    await withLocalEnvImport(request, state.task.repo, async () => ({ kept: ["A", "LATE"], secrets: [] }));
+    submitted = true;
+  } catch (err) {
+    failure = envSubmitFailure(err, state.task.repo);
+  }
+  assert.equal(submitted, false);
+  assert.ok(failure);
+  assert.equal(failure.key, "submit.v2.repo.env.undecided");
+  assert.deepEqual(failure.params, { names: "LATE" });
+  assert.deepEqual(failure.repo!.envClashes, ["A", "LATE"]);
+  assert.deepEqual(envSecretClashesState(failure.repo!), ["LATE"]);
+  assert.equal(taskIssue({ ...state.task, repo: failure.repo! }), "submit.v2.repo.issue.env_clash");
+});
+
+test("a run start over the secret limit shows the count and keeps the draft (SKY-994)", () => {
+  const repo = { ...emptyRepoDraft(), localPath: "/Users/me/app" };
+  const failure = envSubmitFailure(new TooManyRunSecretsError(RUN_SECRETS_MAX + 1), repo);
+  assert.deepEqual(failure, {
+    key: "submit.v2.repo.env.too_many",
+    params: { count: RUN_SECRETS_MAX + 1, limit: RUN_SECRETS_MAX },
+  });
+  assert.equal(envSubmitFailure(new Error("network"), repo), null);
 });
 
 test("a local run with an undecided .env clash does not import or submit (SKY-994)", async () => {
