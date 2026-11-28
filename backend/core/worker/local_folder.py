@@ -26,6 +26,7 @@ import stat
 import tarfile
 import tempfile
 import threading
+import time
 import zipfile
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
@@ -54,6 +55,9 @@ LOCAL_SANDBOX_PROVIDER = "docker"
 KEPT_FOLDER = "local-folders"
 APPLIED_FOLDER = "local-applies"
 _LARGEST_SHOWN = 5
+# A cleanup reads the stored runs before it deletes a pack. A run that wrote or reused the pack
+# since then stores its commit only later, so a pack this recent is never deleted (SKY-1005).
+FRESH_PACK_SECONDS = 15 * 60
 # Only the execute bit reaches the pack and the id, so umask and group bits do not move them.
 _DIR_MODE = 0o755
 _EXEC_MODE = 0o755
@@ -158,6 +162,33 @@ def kept_snapshot(commit: str) -> Path:
     return Path(settings.local_state_dir) / KEPT_FOLDER / f"{commit}.tgz"
 
 
+def forget_snapshot(commit: str) -> bool:
+    """Delete the kept pack of a commit that no stored run uses any more (SKY-1005).
+
+    A pack written or reused in the last ``FRESH_PACK_SECONDS`` stays.
+
+    Args:
+        commit: The folder's source id.
+
+    Returns:
+        Whether the pack was deleted; False when it is missing or recent.
+
+    Raises:
+        LocalFolderError: When the commit is not a SHA-1, there is no local
+            state folder, or the pack cannot be deleted.
+    """
+    kept = kept_snapshot(commit)
+    try:
+        if time.time() - kept.stat().st_mtime < FRESH_PACK_SECONDS:
+            return False
+        kept.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise LocalFolderError(f"The kept folder copy could not be deleted: {error.strerror or error}") from None
+    return True
+
+
 def snapshot_folder(path: str | os.PathLike[str], workdir: Path, commit: str | None = None) -> RepoSnapshot:
     """Pack a local folder into ``workdir/tree.tgz`` and keep its original copy.
 
@@ -180,9 +211,15 @@ def snapshot_folder(path: str | os.PathLike[str], workdir: Path, commit: str | N
     archive = workdir / "tree.tgz"
     if commit:
         kept = kept_snapshot(commit)
-        if kept.is_file():
-            shutil.copyfile(kept, archive)
-            return RepoSnapshot(commit=commit, archive=archive, readonly_paths=(), size_bytes=archive.stat().st_size)
+        # A cleanup can delete the pack between the check and the copy; then the folder is packed again.
+        with contextlib.suppress(FileNotFoundError):
+            if kept.is_file():
+                # The fresh mtime tells a cleanup that this pack is in use again.
+                os.utime(kept)
+                shutil.copyfile(kept, archive)
+                return RepoSnapshot(
+                    commit=commit, archive=archive, readonly_paths=(), size_bytes=archive.stat().st_size
+                )
     root = Path(path)
     try:
         entries = folder_entries(root, limit=None)[0]
@@ -1219,6 +1256,7 @@ def _keep(archive: Path, commit: str) -> None:
 __all__ = [
     "APPLIED_FOLDER",
     "APPLY_LOCK",
+    "FRESH_PACK_SECONDS",
     "KEPT_FOLDER",
     "LOCAL_PROVIDER",
     "LOCAL_SANDBOX_PROVIDER",
@@ -1227,6 +1265,7 @@ __all__ = [
     "applied_record",
     "apply_version",
     "ensure_runs_here",
+    "forget_snapshot",
     "is_applied",
     "is_local",
     "kept_snapshot",
