@@ -58,7 +58,10 @@ export function KpiCard({
     >
       <div className="flex min-w-0 items-center gap-2">
         <span className={`size-1.5 shrink-0 rounded-full ${ACCENT_DOT[accent]}`} aria-hidden />
-        <p className="truncate text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70">
+        <p
+          className="truncate text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70"
+          title={typeof label === "string" ? label : undefined}
+        >
           {label}
         </p>
       </div>

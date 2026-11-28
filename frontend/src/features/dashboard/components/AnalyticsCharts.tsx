@@ -4,7 +4,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  ComposedChart,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -41,11 +40,6 @@ function axisTitle(value: string, position: AxisTitlePosition) {
 }
 const CURSOR_FILL = { fill: "var(--color-chart-5)", fillOpacity: 0.12 };
 
-function formatPoints(value: number | null | undefined): string {
-  if (value == null) return "—";
-  return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
-}
-
 type TooltipRow = { label: string; value: string; color?: string };
 
 function TooltipCard({ title, rows }: { title: string; rows: TooltipRow[] }) {
@@ -79,29 +73,23 @@ function TooltipCard({ title, rows }: { title: string; rows: TooltipRow[] }) {
 }
 
 /**
- * Fixed-edge histogram (improvement, run time or dataset size). The buckets
- * are computed server-side, so the chart has the same handful of bars whether
- * the user has three runs or three thousand. When `withAverage` is set (the
- * dataset-size breakdown) a line traces the mean improvement per bucket so the
- * "does more data help?" question is answered on the same axis. Clicking a
- * bar hands its bucket edges to `onBucketClick` so the dashboard can narrow
- * to that range.
+ * Fixed-edge histogram (improvement or run time). The buckets are computed
+ * server-side, so the chart has the same handful of bars whether the user has
+ * three runs or three thousand. Clicking a bar hands its bucket edges to
+ * `onBucketClick` so the dashboard can narrow to that range.
  */
 export function RangeHistogram({
   data,
   unitLabel,
-  withAverage = false,
   emptyMessage,
   onBucketClick,
 }: {
   data: HistogramBar[];
   unitLabel: string;
-  withAverage?: boolean;
   emptyMessage?: string;
   onBucketClick?: (bar: HistogramBar) => void;
 }) {
   const runsLabel = msg("dashboard.analytics.runs");
-  const avgLabel = msg("auto.features.dashboard.components.analyticstab.8");
 
   if (data.length === 0) return <ChartEmptyState message={emptyMessage} />;
 
@@ -122,13 +110,6 @@ export function RangeHistogram({
         const rows: TooltipRow[] = [
           { label: runsLabel, value: String(row.count), color: "var(--primary-fill)" },
         ];
-        if (withAverage) {
-          rows.push({
-            label: avgLabel,
-            value: formatPoints(row.avgImprovement),
-            color: "var(--color-primary)",
-          });
-        }
         return <TooltipCard title={`${row.label} ${unitLabel}`} rows={rows} />;
       }}
     />
@@ -162,61 +143,21 @@ export function RangeHistogram({
   return (
     <div className="h-[240px] min-w-0" dir="ltr">
       <ResponsiveContainer width="100%" height="100%">
-        {withAverage ? (
-          <ComposedChart data={data} margin={{ left: 4, right: 4, top: 10, bottom: 20 }}>
-            {axes}
-            <YAxis
-              yAxisId="avg"
-              orientation="right"
-              tickLine={AXIS_LINE}
-              axisLine={AXIS_LINE}
-              tick={AXIS_TICK}
-              width={52}
-              tickFormatter={(v: number) => `${v}%`}
-              className="fill-muted-foreground"
-              label={axisTitle(avgLabel, "insideRight")}
-            />
-            {tooltip}
-            <Bar
-              yAxisId="count"
-              dataKey="count"
-              name={runsLabel}
-              fill="var(--primary-fill)"
-              radius={[4, 4, 0, 0]}
-              maxBarSize={48}
-              animationDuration={300}
-              cursor={clickable ? "pointer" : "default"}
-              onClick={handleClick}
-            />
-            <Line
-              yAxisId="avg"
-              type="monotone"
-              dataKey="avgImprovement"
-              name={avgLabel}
-              stroke="var(--color-primary)"
-              strokeWidth={2}
-              dot={{ r: 3, strokeWidth: 0, fill: "var(--color-primary)" }}
-              connectNulls={false}
-              animationDuration={300}
-            />
-          </ComposedChart>
-        ) : (
-          <BarChart data={data} margin={{ left: 4, right: 8, top: 10, bottom: 20 }}>
-            {axes}
-            {tooltip}
-            <Bar
-              yAxisId="count"
-              dataKey="count"
-              name={runsLabel}
-              fill="var(--primary-fill)"
-              radius={[4, 4, 0, 0]}
-              maxBarSize={48}
-              animationDuration={300}
-              cursor={clickable ? "pointer" : "default"}
-              onClick={handleClick}
-            />
-          </BarChart>
-        )}
+        <BarChart data={data} margin={{ left: 4, right: 8, top: 10, bottom: 20 }}>
+          {axes}
+          {tooltip}
+          <Bar
+            yAxisId="count"
+            dataKey="count"
+            name={runsLabel}
+            fill="var(--primary-fill)"
+            radius={[4, 4, 0, 0]}
+            maxBarSize={48}
+            animationDuration={300}
+            cursor={clickable ? "pointer" : "default"}
+            onClick={handleClick}
+          />
+        </BarChart>
       </ResponsiveContainer>
     </div>
   );

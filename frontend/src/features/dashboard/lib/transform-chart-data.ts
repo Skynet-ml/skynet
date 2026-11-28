@@ -49,11 +49,8 @@ export type ChartData = {
   kpis: null | {
     total: number;
     successRate: number;
-    successCount: number;
-    terminalCount: number;
     runningCount: number;
     avgImprovement: number | null;
-    medianImprovement: number | null;
     bestImprovement: number | null;
     avgRuntimeSeconds: number | null;
     totalRows: number;
@@ -132,11 +129,8 @@ export function transformChartData(analyticsData: DashboardAnalytics | null): Ch
   const kpis = {
     total: analyticsData.filtered_total,
     successRate: analyticsData.success_rate * 100,
-    successCount: analyticsData.success_count,
-    terminalCount: analyticsData.terminal_count,
     runningCount: analyticsData.running_count,
     avgImprovement: analyticsData.avg_improvement,
-    medianImprovement: analyticsData.median_improvement,
     bestImprovement: analyticsData.best_improvement,
     avgRuntimeSeconds: analyticsData.avg_runtime_seconds,
     totalRows: analyticsData.total_dataset_rows,

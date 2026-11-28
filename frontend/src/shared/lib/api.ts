@@ -2350,7 +2350,6 @@ export interface DashboardAnalytics {
   single_run_count: number;
   improvement_histogram: DashboardAnalyticsRangeBucket[];
   runtime_histogram: DashboardAnalyticsRangeBucket[];
-  dataset_size_buckets: DashboardAnalyticsRangeBucket[];
   optimizer_stats: DashboardAnalyticsOptimizerStat[];
   model_stats: DashboardAnalyticsModelStat[];
   top_jobs_by_improvement: DashboardAnalyticsJob[];
@@ -2379,8 +2378,6 @@ export function getDashboardAnalytics(params?: {
   improvement_max?: number | null;
   runtime_min?: number | null;
   runtime_max?: number | null;
-  dataset_min?: number | null;
-  dataset_max?: number | null;
 }) {
   const q = new URLSearchParams();
   // The web account scopes its rows by the linked token, not by the Mac's username.
@@ -2401,8 +2398,6 @@ export function getDashboardAnalytics(params?: {
     "improvement_max",
     "runtime_min",
     "runtime_max",
-    "dataset_min",
-    "dataset_max",
   ] as const) {
     const value = params?.[key];
     if (value != null) q.set(key, String(value));
