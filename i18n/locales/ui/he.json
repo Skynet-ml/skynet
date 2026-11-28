@@ -3827,6 +3827,7 @@
   "submit.v2.task.desc.guided": "ספרו לעוזר בצ'אט מה תרצו לשפר. הוא ימלא את הדף בשבילכם.",
   "submit.v2.task.objective_label": "מטרה",
   "submit.v2.task.objective_label.guided": "המטרה",
+  "submit.v2.task.objective_hint_auto": "נכתב מתוך הצ'אט. אפשר לערוך בחופשיות; העוזר לא ידרוס את העריכות שלכם.",
   "submit.v2.task.objective_placeholder": "במה התוצר המיועל צריך להצטיין",
   "submit.v2.task.background_label": "רקע",
   "submit.v2.task.background_label.guided": "הקשר נוסף",

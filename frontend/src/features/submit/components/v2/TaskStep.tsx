@@ -61,6 +61,7 @@ export function TaskStep({ page }: { page: number }) {
           id="v2-objective"
           field="task_objective"
           label={t("submit.v2.task.objective_label")}
+          hint={t("submit.v2.task.objective_hint_auto")}
           placeholder={t("submit.v2.task.objective_placeholder")}
           value={task.objective}
           onChange={(objective) => patchTask({ objective })}
@@ -101,6 +102,7 @@ function TaskField({
   id,
   field,
   label,
+  hint,
   placeholder,
   value,
   onChange,
@@ -109,6 +111,7 @@ function TaskField({
   id: string;
   field: Parameters<typeof useAgentFieldLock>[0];
   label: string;
+  hint?: string;
   placeholder: string;
   value: string;
   onChange: (value: string) => void;
@@ -135,6 +138,7 @@ function TaskField({
             </div>
             {trigger}
           </div>
+          {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
           {textarea}
         </div>
       )}

@@ -369,6 +369,7 @@
   "submit.v2.task.background_placeholder": "Contexto, restricciones y cómo es un buen resultado",
   "submit.v2.task.desc": "Describe la tarea en el chat. El asistente escribe el objetivo y el contexto y determina qué se optimizará.",
   "submit.v2.task.desc.guided": "Habla con el asistente sobre lo que quieres mejorar. Él completa esta página por ti.",
+  "submit.v2.task.objective_hint_auto": "Escrito a partir del chat. Edítalo libremente; el asistente no sobrescribirá tus cambios.",
   "submit.v2.task.objective_label": "Objetivo",
   "submit.v2.task.objective_label.guided": "Meta",
   "submit.v2.task.objective_placeholder": "Qué debe hacer bien el artefacto optimizado",

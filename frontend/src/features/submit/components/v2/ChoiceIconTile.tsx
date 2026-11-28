@@ -22,10 +22,11 @@ export type ChoiceIconGesture = keyof typeof GESTURES;
  * source cards). It must sit inside the card's `group` element.
  *
  * Hover lifts and tilts the tile, casts an orange shadow, sweeps a light
- * across it and plays the icon's own gesture once. Choosing the card pops the tile,
- * turns the icon into place and sends out one ring. A card that is already
- * chosen when it mounts does not animate. With reduced motion only the
- * colors change.
+ * across it and plays the icon's own gesture once. When the card becomes the
+ * chosen one, the tile pops, turns the icon into place and sends out one ring.
+ * This also happens when the step restores a choice after mount (a sign-in
+ * redirect reopens "Create new"). A card that is already chosen when it mounts
+ * does not animate. With reduced motion only the colors change.
  *
  * Args:
  *   selected: Whether the card is the chosen one.
@@ -44,8 +45,8 @@ export function ChoiceIconTile({
   gesture: ChoiceIconGesture;
   children: ReactNode;
 }) {
-  // The animations play only when the user picks the card, not when the step
-  // mounts with a card already chosen (the wizard preselects a run place).
+  // The animations play when the choice changes, not when the step mounts
+  // with a card already chosen (the wizard preselects a run place).
   const [prevSelected, setPrevSelected] = useState(selected);
   const [picked, setPicked] = useState(false);
   if (selected !== prevSelected) {

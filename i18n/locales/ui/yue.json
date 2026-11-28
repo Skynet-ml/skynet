@@ -369,6 +369,7 @@
   "submit.v2.task.background_placeholder": "背景、限制，同好嘅結果係點樣",
   "submit.v2.task.desc": "喺對話入面描述你嘅任務。助手會寫低目標同背景，再判斷要優化啲咩。",
   "submit.v2.task.desc.guided": "同助手傾吓你想改善啲咩。佢會幫你填呢一頁。",
+  "submit.v2.task.objective_hint_auto": "根據你嘅對話寫成。隨便改，助手唔會覆蓋你嘅修改。",
   "submit.v2.task.objective_label": "目標",
   "submit.v2.task.objective_label.guided": "你嘅目標",
   "submit.v2.task.objective_placeholder": "優化後嘅成品應該做好啲咩",

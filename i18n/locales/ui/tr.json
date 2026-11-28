@@ -369,6 +369,7 @@
   "submit.v2.task.background_placeholder": "Bağlam, kısıtlar ve iyi bir sonucun neye benzediği",
   "submit.v2.task.desc": "Görevi sohbette anlatın. Asistan amacı ve arka planı yazar, neyin optimize edileceğini belirler.",
   "submit.v2.task.desc.guided": "Neyi iyileştirmek istediğinizi asistanla konuşun. Bu sayfayı sizin için doldurur.",
+  "submit.v2.task.objective_hint_auto": "Sohbetten yazıldı. Dilediğiniz gibi düzenleyin; asistan düzenlemelerinizin üzerine yazmaz.",
   "submit.v2.task.objective_label": "Amaç",
   "submit.v2.task.objective_label.guided": "Hedef",
   "submit.v2.task.objective_placeholder": "Optimize edilmiş yapıtın iyi yapması gereken şey",

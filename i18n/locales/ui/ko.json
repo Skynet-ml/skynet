@@ -369,6 +369,7 @@
   "submit.v2.task.background_placeholder": "맥락, 제약 조건, 그리고 좋은 결과의 모습",
   "submit.v2.task.desc": "채팅으로 작업을 설명하세요. 어시스턴트가 목표와 배경을 작성하고 최적화할 대상을 파악합니다.",
   "submit.v2.task.desc.guided": "개선하고 싶은 것에 대해 어시스턴트와 이야기하세요. 이 페이지를 대신 채워 줍니다.",
+  "submit.v2.task.objective_hint_auto": "채팅 내용을 바탕으로 작성되었습니다. 자유롭게 편집하세요. 어시스턴트가 편집 내용을 덮어쓰지 않습니다.",
   "submit.v2.task.objective_label": "목표",
   "submit.v2.task.objective_label.guided": "목적",
   "submit.v2.task.objective_placeholder": "최적화된 아티팩트가 잘 해내야 하는 것",

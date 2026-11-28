@@ -369,6 +369,7 @@
   "submit.v2.task.background_placeholder": "संदर्भ, सीमाएँ, और अच्छा नतीजा कैसा दिखता है",
   "submit.v2.task.desc": "चैट में अपना टास्क बताएँ। सहायक लक्ष्य और पृष्ठभूमि लिखता है और तय करता है कि क्या ऑप्टिमाइज़ होगा।",
   "submit.v2.task.desc.guided": "सहायक से बात करें कि आप क्या बेहतर करना चाहते हैं। वह आपके लिए यह पेज भर देता है।",
+  "submit.v2.task.objective_hint_auto": "आपकी चैट से लिखा गया। बेझिझक संपादित करें; सहायक आपके बदलाव नहीं मिटाएगा।",
   "submit.v2.task.objective_label": "लक्ष्य",
   "submit.v2.task.objective_label.guided": "उद्देश्य",
   "submit.v2.task.objective_placeholder": "ऑप्टिमाइज़ किए गए आर्टिफ़ैक्ट को क्या अच्छी तरह करना चाहिए",
