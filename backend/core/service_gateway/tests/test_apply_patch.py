@@ -160,3 +160,32 @@ def test_an_update_of_a_missing_file_is_refused(tmp_path: Path) -> None:
 def test_a_patch_that_breaks_the_format_is_refused(text: str) -> None:
     with pytest.raises(PatchError):
         parse_patch(text)
+
+
+def test_one_patch_can_replace_a_file_with_a_folder(tmp_path: Path) -> None:
+    (tmp_path / "a").write_text("old\n")
+    summary = apply_patch(tmp_path, _patch("*** Delete File: a", "*** Add File: a/b", "+new"))
+    assert summary == ["D a", "A a/b"]
+    assert _snapshot(tmp_path) == {"a/b": b"new\n"}
+
+
+def test_a_file_and_a_file_below_it_in_one_patch_are_refused_and_change_nothing(tmp_path: Path) -> None:
+    (tmp_path / "keep.txt").write_text("keep\n")
+    for lines in (
+        ("*** Add File: a", "+x", "*** Add File: a/b", "+y"),
+        ("*** Add File: a/b", "+y", "*** Add File: a", "+x"),
+    ):
+        with pytest.raises(PatchError, match="a"):
+            apply_patch(tmp_path, _patch(*lines))
+        assert _snapshot(tmp_path) == {"keep.txt": b"keep\n"}
+
+
+def test_a_deleted_link_does_not_free_the_path_below_it(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a").symlink_to(outside)
+    with pytest.raises(PatchError):
+        apply_patch(root, _patch("*** Delete File: a", "*** Add File: a/b", "+new"))
+    assert list(outside.iterdir()) == []

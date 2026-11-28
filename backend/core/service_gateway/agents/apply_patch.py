@@ -32,7 +32,7 @@ import contextlib
 import errno
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -349,19 +349,32 @@ def remove_inside(root: Path, rel: str) -> None:
         os.unlink(name, dir_fd=fd)
 
 
-def _check_parents(root: Path, rel: str) -> None:
+def _check_parents(root: Path, rel: str, planned: Mapping[str, tuple[bytes, int] | None]) -> None:
     """Check that no existing folder on a path is a link, before the patch writes there.
 
     Args:
         root: The copy's root.
         rel: The clean ``/``-joined path.
+        planned: The patch's earlier ops: path to new bytes and mode, or None for a delete.
 
     Raises:
-        PatchError: When a part is a link or a file.
+        PatchError: When a part is a link or a file, or the patch also writes a
+            file at a part or below the path.
     """
+    if any(other.startswith(f"{rel}/") and item is not None for other, item in planned.items()):
+        raise PatchError(f"{rel}: the patch also writes a file below this path.")
     current = root
+    prefix = ""
     for part in rel.split("/")[:-1]:
         current = current / part
+        prefix = f"{prefix}{part}"
+        if prefix in planned:
+            if planned[prefix] is not None:
+                raise PatchError(f"{rel}: the patch also writes the file {prefix}.")
+            # The patch read this part as a regular file and deletes it, and the
+            # deletes run before the writes, so the rest of the path is free.
+            return
+        prefix += "/"
         if not os.path.lexists(current):
             return
         if current.is_symlink() or not current.is_dir():
@@ -439,7 +452,7 @@ def apply_patch(root: Path, patch: str) -> list[str]:
         return _read(root, rel)
 
     for op in ops:
-        _check_parents(root, op.path)
+        _check_parents(root, op.path, planned)
         if op.kind == "add":
             planned[op.path] = (("\n".join(op.lines) + "\n").encode("utf-8"), NEW_FILE_MODE)
             summary.append(f"A {op.path}")
@@ -454,18 +467,20 @@ def apply_patch(root: Path, patch: str) -> list[str]:
             continue
         new_text = updated_text(op.path, text, op.chunks) if op.chunks else text
         if op.move_to is not None and op.move_to != op.path:
-            _check_parents(root, op.move_to)
+            _check_parents(root, op.move_to, planned)
             planned[op.path] = None
             planned[op.move_to] = (new_text.encode("utf-8"), mode)
             summary.append(f"R {op.path} -> {op.move_to}")
         else:
             planned[op.path] = (new_text.encode("utf-8"), mode)
             summary.append(f"M {op.path}")
+    # Deletes run first, so a file the patch deletes frees its name for a folder.
     for rel, item in planned.items():
         if item is None:
             with contextlib.suppress(FileNotFoundError):
                 remove_inside(root, rel)
-        else:
+    for rel, item in planned.items():
+        if item is not None:
             write_inside(root, rel, item[0], item[1])
     return summary
 
