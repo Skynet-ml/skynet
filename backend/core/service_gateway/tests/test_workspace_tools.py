@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, cast
 
 import dspy
@@ -18,6 +20,8 @@ from core.api.errors import DomainError
 from core.api.routers.generalist_agent import _merge_wizard_patch
 from core.config import settings
 from core.connectors.github_repo import RepoRateLimitError
+from core.local import folder_tree
+from core.local.folder_tree import folder_source_id
 from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
 from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents import pi_react, repo_browser, workspace_tools
@@ -41,6 +45,7 @@ from core.service_gateway.agents.workspace_tools import (
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
+    open_folder,
     open_repo,
 )
 from core.service_gateway.agents.workspace_tools import (
@@ -1670,3 +1675,218 @@ def test_the_router_merges_each_written_file_into_the_draft_files() -> None:
     _merge_wizard_patch(state, {"wizard_state": {"workspace_files": {"a.py": "3"}, "job_name": "y"}})
 
     assert state == {"workspace_files": {"a.py": "3", "b.py": "2"}, "job_name": "y"}
+
+
+def _local_folder(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, Any]:
+    """Make a local folder run in desktop local mode; no host may be asked anything.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        root: The folder the run optimizes.
+
+    Returns:
+        The Metric screen state of the run.
+    """
+
+    def no_host(*_args: Any, **_kwargs: Any) -> Any:
+        """Fail the test on any host call."""
+        raise AssertionError("a local folder run asked a repository host")
+
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(workspace_tools.github, "tree_entries", no_host)
+    monkeypatch.setattr(repo_browser.github, "read_text_file", no_host)
+    monkeypatch.setattr(workspace_tools.repo_hosts, "resolve_commit", no_host)
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "README.md").write_text("# Shop\n", encoding="utf-8")
+    (root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    return {
+        "wizard_screen": "metric",
+        "job_name": "Faster tests",
+        "task_objective": "Make the test suite pass faster",
+        "repo_provider": "local",
+        "repo_path": str(root),
+    }
+
+
+def test_open_repo_picks_the_local_folder_with_no_host_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A local run opens the folder at ``repo_path`` and never asks for a token."""
+    state = _local_folder(monkeypatch, tmp_path)
+
+    def no_token() -> str | None:
+        """Fail the test when the token is asked for."""
+        raise AssertionError("a local folder run asked for a host token")
+
+    browser, reason = open_repo(state, no_token)
+
+    assert isinstance(browser, repo_browser.LocalFolderBrowser)
+    assert reason == ""
+    assert browser.branch == folder_source_id(tmp_path)
+    assert "already read for you" in browser.summary()
+    assert open_repo({**state, "repo_path": ""}, no_token) == (None, "No folder is chosen yet.")
+    assert open_repo({**state, "repo_path": " "}, no_token) == (None, "No folder is chosen yet.")
+    monkeypatch.setattr(settings, "local_mode", False)
+    assert open_repo(state, no_token) == (None, "A local folder can be read only in the desktop app.")
+
+
+@pytest.mark.asyncio
+async def test_the_agent_reads_a_local_folder_and_never_sees_env_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The read tools list and read the folder, and a .env file stays out of both."""
+    state = _local_folder(monkeypatch, tmp_path)
+    tools = _tools(state, _TurnAuthoringFlag())
+
+    tree = await tools[LIST_REPO_TOOL].acall()
+    read = await tools[READ_REPO_TOOL].acall(path="src/app.py")
+    env = await tools[READ_REPO_TOOL].acall(path=".env")
+
+    assert "Local folder" in tree
+    assert "app.py" in tree
+    assert ".env" not in tree
+    assert "SECRET" not in tree
+    assert read == "   1 x = 1"
+    assert "error" in env
+    assert "SECRET" not in str(env)
+
+
+@pytest.mark.asyncio
+async def test_a_local_draft_records_the_folder_snapshot_and_leaves_the_folder_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Draft files after a read pin ``workspace_base`` to the snapshot id, not a commit; the disk keeps its text."""
+    state = _local_folder(monkeypatch, tmp_path)
+    snapshot = folder_source_id(tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _tools(state, turn)
+
+    edited = await tools[EDIT_FILE_TOOL].acall(path="src/app.py", old_text="x = 1", new_text="x = 2")
+
+    assert edited == {"wizard_state": {"workspace_base": snapshot, "workspace_files": {"src/app.py": "x = 2\n"}}}
+    assert turn.wizard_patch["workspace_base"] == snapshot != _HEAD
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    again = _tools({**state, **turn.wizard_patch}, _TurnAuthoringFlag())
+    assert await again[READ_REPO_TOOL].acall(path="src/app.py") == "   1 x = 1"
+
+
+@pytest.mark.asyncio
+async def test_a_local_folder_that_changed_after_the_drafts_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drafts based on an older folder state cannot read the new one, because the run would refuse them."""
+    state = _local_folder(monkeypatch, tmp_path)
+    drafted = {**state, "workspace_base": "b" * 40, "workspace_files": {"src/app.py": "x = 2\n"}}
+
+    result = await _tools(drafted, _TurnAuthoringFlag())[READ_REPO_TOOL].acall(path="README.md")
+
+    assert result == {
+        "error": "The folder changed after the draft files were written, so the run would refuse them. "
+        "Ask the user to discard the changed files in the editor, then read the folder again."
+    }
+    stale_base_no_drafts = {**state, "workspace_base": "b" * 40}
+    assert isinstance(
+        await _tools(stale_base_no_drafts, _TurnAuthoringFlag())[READ_REPO_TOOL].acall(path="README.md"), str
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_rules_file_guard_reads_the_ascent_toml_of_a_local_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no draft ascent.toml, a write is checked against the folder's own file, as for a repository."""
+    state = _local_folder(monkeypatch, tmp_path)
+    (tmp_path / "ascent.toml").write_text(ASCENT_TOML_EXAMPLE, encoding="utf-8")
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(state, turn)[WRITE_FILE_TOOL].acall(path="ascent.toml", text=_NO_RULES_TOML)
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file with no read permission")
+async def test_an_unreadable_ascent_toml_in_a_local_folder_names_no_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A local folder has no host, so a refused read of its ``ascent.toml`` names the folder."""
+    state = _local_folder(monkeypatch, tmp_path)
+    toml = tmp_path / "ascent.toml"
+    toml.write_text(ASCENT_TOML_EXAMPLE, encoding="utf-8")
+    toml.chmod(0)
+    try:
+        result = await _tools(state, _TurnAuthoringFlag())[WRITE_FILE_TOOL].acall(
+            path="ascent.toml", text=_NO_RULES_TOML
+        )
+    finally:
+        toml.chmod(0o644)
+
+    assert "host" not in result["error"]
+    assert "the folder refused the read." in result["error"]
+
+
+def test_the_tool_texts_say_folder_for_a_local_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A local run's tools describe a folder; a git run's tools still describe a repository."""
+    local = _tools(_local_folder(monkeypatch, tmp_path), _TurnAuthoringFlag())
+    git = _tools(_REPO_METRIC, _TurnAuthoringFlag())
+
+    for name in (LIST_REPO_TOOL, READ_REPO_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL):
+        local_desc, git_desc = local[name].desc or "", git[name].desc or ""
+        assert "repository" not in local_desc
+        assert "folder" in local_desc or "folder" in json.dumps(local[name].arg_desc)
+        assert "repository" in git_desc
+    assert (local[READ_REPO_TOOL].arg_desc or {})[
+        "path"
+    ] == "File path inside the folder, exactly as the tree shows it."
+
+
+@pytest.mark.asyncio
+async def test_the_read_tools_strip_a_padded_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The read tools strip spaces like the draft tools, so a padded path reads the file a draft edits."""
+    state = _local_folder(monkeypatch, tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "intro.md").write_text("hi\n", encoding="utf-8")
+    tools = _tools(state, _TurnAuthoringFlag())
+
+    assert "intro.md" in await tools[LIST_REPO_TOOL].acall(path=" /docs/ ")
+    assert await tools[READ_REPO_TOOL].acall(path=" docs/intro.md ") == "   1 hi"
+
+
+def test_open_folder_refuses_a_nul_byte_in_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NUL in ``repo_path`` gives the agent a clean reason, not a raised ``ValueError``."""
+    monkeypatch.setattr(settings, "local_mode", True)
+
+    browser, reason = open_folder({"repo_path": "/tmp/a\x00b"})
+
+    assert browser is None
+    assert reason == "The folder path must not hold a NUL character."
+
+
+def test_open_folder_refuses_a_path_the_disk_cannot_encode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lone surrogate in ``repo_path`` gives the agent a clean reason, not a raised ``UnicodeEncodeError``."""
+    monkeypatch.setattr(settings, "local_mode", True)
+
+    browser, reason = open_folder({"repo_path": "/tmp/\ud800x"})
+
+    assert browser is None
+    assert reason == "The folder path is not a valid path on this computer."
+
+
+def test_open_folder_refuses_a_folder_larger_than_the_agent_can_read_before_any_hash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A folder past the agent's raw read limit is refused before the agent hashes every byte of it."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    (tmp_path / "a.py").write_text("x" * 6, encoding="utf-8")
+    (tmp_path / "b.py").write_text("y" * 6, encoding="utf-8")
+    monkeypatch.setattr(repo_browser, "LOCAL_FOLDER_READ_BYTES", 10)
+    digests: list[str] = []
+    monkeypatch.setattr(folder_tree, "file_digest", lambda root, rel: digests.append(rel) or b"")
+
+    browser, reason = open_folder({"repo_path": str(tmp_path)})
+
+    assert browser is None
+    assert "more than the setup agent can read" in reason
+    assert "for a run" not in reason
+    assert digests == []

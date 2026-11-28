@@ -28,15 +28,22 @@ from ...brand import APP_NAME
 from ...connectors import github, repo_hosts
 from ...connectors.github_repo import RepoRateLimitError, rate_limit_message
 from ...connectors.transport import label
+from ...local.folder_tree import FolderTreeError
 from ...models.blackbox import (
     DRAFT_FILE_BYTES,
     DRAFT_FILES_MAX,
     DRAFT_FILES_TOTAL_BYTES,
+    LOCAL_REPO_PROVIDER,
     REPO_COMMIT_PATTERN,
     clean_draft_path,
 )
 from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, parse_constraints, rule_file_settings
-from .repo_browser import RepoBrowser, RepoRead
+from .repo_browser import (
+    LocalFolderBrowser,
+    RepoBrowser,
+    RepoRead,
+    source_noun,
+)
 
 if TYPE_CHECKING:
     from .generalist import WizardState, _TurnAuthoringFlag
@@ -220,6 +227,36 @@ def has_drafts(state: dict[str, Any]) -> bool:
     return bool(state.get(DRAFT_FILES_FIELD)) or bool(str(state.get("ascent_toml") or "").strip())
 
 
+def open_folder(state: dict[str, Any]) -> tuple[RepoBrowser | None, str]:
+    """Open the local folder a local-folder run optimizes, for the agent's read tools; it needs no host token.
+
+    Args:
+        state: The wizard snapshot with this turn's writes merged in.
+
+    Returns:
+        The browser, or ``None`` with the reason the agent cannot read the folder.
+    """
+    folder = str(state.get("repo_path") or "").strip()
+    if not folder:
+        return None, "No folder is chosen yet."
+    try:
+        browser = LocalFolderBrowser(folder)
+    except FolderTreeError as error:
+        return None, str(error)
+    except OSError as exc:  # an unreadable folder leaves the agent without it, not the turn
+        logger.info("Setup agent cannot open the local folder: %s", type(exc).__name__)
+        return None, "The folder cannot be read."
+    base = str(state.get(DRAFT_BASE_FIELD) or "")
+    if base and has_drafts(state) and base != browser.branch:
+        # A disk folder has no old state to read, and a draft copied from it would undo the newer change.
+        return None, (
+            "The folder changed after the draft files were written, so the run would refuse them. "
+            "Ask the user to discard the changed files in the editor, then read the folder again."
+        )
+    browser.preload_key_files()
+    return browser, ""
+
+
 def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | None) -> tuple[RepoBrowser | None, str]:
     """Open the repository a repository run optimizes, for the agent's read tools.
 
@@ -234,10 +271,12 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
         repository. A failed host read leaves the agent without the
         repository rather than failing the turn.
     """
+    provider = str(state.get("repo_provider") or github.PROVIDER)
+    if provider == LOCAL_REPO_PROVIDER:
+        return open_folder(state)
     repository = str(state.get("repository") or "").strip()
     if not repository:
         return None, "No repository is chosen yet."
-    provider = str(state.get("repo_provider") or github.PROVIDER)
     if provider not in repo_hosts.HOSTS:
         return None, "The repository host is not supported."
     host = label(provider)
@@ -569,6 +608,7 @@ def workspace_tools(
     opened: list[tuple[RepoBrowser | None, str]] = []
     # Pi may run tool calls at the same time; one lock keeps one repository open and the read count exact.
     lock = asyncio.Lock()
+    noun = source_noun(state.get("repo_provider"))
     # The repository's ascent.toml, read once a turn for the rules-file guard.
     repo_toml: list[str] = []
 
@@ -635,7 +675,7 @@ def workspace_tools(
         except ValueError as error:
             return str(error)
         if clean in UNWRITABLE_PATHS:
-            return f"{clean} cannot be written in a repository run. Write the metric in metric.py."
+            return f"{clean} cannot be written in a {noun} run. Write the metric in metric.py."
         return clean, WORKSPACE_FILES.get(clean)
 
     def drafts() -> dict[str, str]:
@@ -744,7 +784,8 @@ def workspace_tools(
         except Exception as exc:  # a failed host read refuses the write, not the turn
             logger.info("Setup agent cannot read ascent.toml of %s: %s", browser.repository, type(exc).__name__)
             # A failed read is not cached, so a retry can work.
-            return {"error": "the host refused the read.", "advice": "Try again, or ask the user."}
+            refuser = "folder" if browser.provider == LOCAL_REPO_PROVIDER else "host"
+            return {"error": f"the {refuser} refused the read.", "advice": "Try again, or ask the user."}
         if read is None:
             return ""
         text, truncated = read
@@ -764,7 +805,8 @@ def workspace_tools(
         text = str(current.get("ascent_toml") or "")
         if text.strip():
             return text
-        if not str(current.get("repository") or "").strip():
+        source = "repo_path" if current.get("repo_provider") == LOCAL_REPO_PROVIDER else "repository"
+        if not str(current.get(source) or "").strip():
             return ""
         if not repo_toml:
             read = await browse(read_repo_toml)
@@ -772,7 +814,7 @@ def workspace_tools(
                 reason = read.get("error", "")
                 # A repository that cannot open stays closed for the turn, so a retry cannot work.
                 advice = read.get("advice", "Ask the user.")
-                return {"error": f"ascent.toml cannot be checked against the repository's file: {reason} {advice}"}
+                return {"error": f"ascent.toml cannot be checked against the {noun}'s file: {reason} {advice}"}
             # A refusal leaves the draft empty, so a retry must not ask the host for the file again.
             repo_toml.append(read)
         return repo_toml[0]
@@ -845,32 +887,32 @@ def workspace_tools(
             return {"error": refusal}
         return save(clean, field, edited)
 
-    file_arg = "metric.py, or the path of any file of the repository, relative to its root, for example ascent.toml."
+    file_arg = f"metric.py, or the path of any file of the {noun}, relative to its root, for example ascent.toml."
     return [
         dspy.Tool(
             list_repo_folder,
             name=LIST_REPO_TOOL,
             desc=(
-                'List one folder of the run\'s repository two levels deep. Use "" for the root: it also '
+                f'List one folder of the run\'s {noun} two levels deep. Use "" for the root: it also '
                 "returns the README and the build manifest. Reads count toward the turn's read limit."
             ),
-            arg_desc={"path": 'Folder path inside the repository; "" for the root.'},
+            arg_desc={"path": f'Folder path inside the {noun}; "" for the root.'},
         ),
         dspy.Tool(
             read_repo_file,
             name=READ_REPO_TOOL,
             desc=(
-                "Read one file of the run's repository, with line numbers. Long files come back cut. Reads "
+                f"Read one file of the run's {noun}, with line numbers. Long files come back cut. Reads "
                 "count toward the turn's read limit."
             ),
-            arg_desc={"path": "File path inside the repository, exactly as the tree shows it."},
+            arg_desc={"path": f"File path inside the {noun}, exactly as the tree shows it."},
         ),
         dspy.Tool(
             write_workspace_file,
             name=WRITE_FILE_TOOL,
             desc=(
-                "Write one file whole: metric.py, or any file of the run's repository, such as ascent.toml. "
-                "It goes into the editor at once, and the run uses it in place of the repository's file. For "
+                f"Write one file whole: metric.py, or any file of the run's {noun}, such as ascent.toml. "
+                f"It goes into the editor at once, and the run uses it in place of the {noun}'s file. For "
                 "ascent.toml the result has ascent_toml_diagnostics: the parser's errors, then its warnings, "
                 "each with its level, line, section, key and message. It holds at most 20; "
                 "ascent_toml_diagnostics_omitted counts the rest. Fix every error in one write; a warning "
@@ -882,9 +924,9 @@ def workspace_tools(
             edit_workspace_file,
             name=EDIT_FILE_TOOL,
             desc=(
-                "Change part of one file: metric.py, or any file of the run's repository. Replace old_text, "
+                f"Change part of one file: metric.py, or any file of the run's {noun}. Replace old_text, "
                 "which must be in the file exactly once, with new_text. A file you did not write yet starts "
-                "from the repository's text. It goes into the editor at once, like write_workspace_file."
+                f"from the {noun}'s text. It goes into the editor at once, like write_workspace_file."
             ),
             arg_desc={
                 "path": file_arg,

@@ -566,6 +566,90 @@ def test_prompts_offer_no_dspy_targets_or_optimizers() -> None:
     assert "create_github_repository" in SCREEN_FOCUS["artifact"]
 
 
+def test_a_local_folder_run_completes_the_task_step_with_its_folder_alone() -> None:
+    """A local run needs ``repo_path``, not ``repository``; a git run still needs ``repository``."""
+    local = cast(
+        WizardState,
+        {"job_name": "Bot", "task_objective": "Fix flaky tests", "wizard_screen": "artifact", "repo_provider": "local"},
+    )
+    assert _screen_problems("artifact", local) == ["repo_path must name the local folder; the user picks it in the app"]
+    assert _screen_problems("artifact", cast(WizardState, {**local, "repo_path": "  "})) != []
+    chosen = cast(WizardState, {**local, "repo_path": "/Users/me/shop"})
+    assert _screen_problems("artifact", chosen) == []
+    assert validate_wizard_patch_order({"data_mode": "single"}, chosen) is None
+    assert validate_wizard_patch_order({"data_mode": "single"}, local) is not None
+    git = cast(WizardState, {**chosen, "repo_provider": "github"})
+    assert _screen_problems("artifact", git) == ["repository must be set as owner/name"]
+
+
+def test_a_local_run_refuses_a_repository_write() -> None:
+    """A ``repository`` would turn a local run into a git run, so the write is refused; a git run keeps it."""
+    ready = {"job_name": "Bot", "task_objective": "Fix flaky tests"}
+    local = cast(WizardState, {**ready, "repo_provider": "local", "repo_path": "/Users/me/shop"})
+
+    err = validate_wizard_patch_order({"repository": "o/r"}, local)
+
+    assert err is not None
+    assert "local folder" in err
+    assert validate_wizard_patch_order({"repository": "o/r"}, cast(WizardState, ready)) is None
+    assert (
+        validate_wizard_patch_order({"repository": "o/r"}, cast(WizardState, {**ready, "repo_provider": "github"}))
+        is None
+    )
+
+
+def test_the_order_hint_asks_a_local_run_for_the_folder_not_a_repository() -> None:
+    """A local run's Task hint asks the user for the folder and never asks for ``repository``."""
+    local = cast(WizardState, {"job_name": "Bot", "repo_provider": "local"})
+
+    local_err = validate_wizard_patch_order({"data_mode": "single"}, local)
+    git_err = validate_wizard_patch_order({"data_mode": "single"}, cast(WizardState, {"job_name": "Bot"}))
+
+    assert local_err is not None
+    assert "repo_path" in local_err
+    assert "never set ``repository``" in local_err
+    assert "(owner/name)" not in local_err
+    assert git_err is not None
+    assert "``repository`` (owner/name)" in git_err
+    patched = validate_wizard_patch_order({"repo_provider": "local", "data_mode": "single"}, local)
+    assert patched is not None
+    assert "repo_path" in patched
+
+
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check"])
+def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(
+    monkeypatch: pytest.MonkeyPatch, screen: str
+) -> None:
+    """In the desktop app the repository screens say a local folder has no host parts and Apply applies it."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    focus = screen_signature(screen).instructions
+    assert "When ``repo_provider`` is ``local``" in focus
+    assert "A local folder has no branch, no pull request and no host link" in focus
+    assert "never ask the user to connect a host" in focus
+    assert "the folder stays unchanged" in focus
+    assert "with Apply in the app" in focus
+    assert "Never set ``repository`` in a local run: it turns the run into a git run." in focus
+
+
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check"])
+def test_a_web_run_prompt_has_no_local_folder_text(monkeypatch: pytest.MonkeyPatch, screen: str) -> None:
+    """Outside the desktop app no run can use a local folder, so the prompt never names one."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    focus = screen_signature(screen).instructions
+    assert "local folder" not in focus
+    assert "``repo_provider`` is ``local``" not in focus
+    assert "Never set ``repository`` in a local run" not in focus
+
+
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check"])
+def test_the_repository_screens_show_the_local_folder_path(screen: str) -> None:
+    """The agent sees which folder a local run reads, beside its provider."""
+    state = {"wizard_screen": screen, "repo_provider": "local", "repo_path": "/Users/me/shop"}
+    trimmed = screen_snapshot(cast(WizardState, state))
+    assert (trimmed["repo_provider"], trimmed["repo_path"]) == ("local", "/Users/me/shop")
+    assert "repo_path" not in screen_snapshot(cast(WizardState, {**state, "wizard_screen": "budget"}))
+
+
 def test_screen_prompts_forbid_unconfirmed_claims() -> None:
     """Both prompts tell the agent not to claim writes or screen moves a tool did not confirm."""
     assert "Say only what a tool result confirms." in (GENERALIST_SYSTEM_PROMPT or "")

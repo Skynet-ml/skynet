@@ -65,6 +65,7 @@ from ...exceptions import ServiceError
 from ...local.cli_catalog import CliProvider
 from ...local.managed_models import HOSTED_INFERENCE_KEY
 from ...models import ModelConfig
+from ...models.blackbox import LOCAL_REPO_PROVIDER
 from ...storage.models import AgentApprovalModel
 from ..language_models import (
     SUBSCRIPTION_ROLE_KEY,
@@ -1056,9 +1057,13 @@ class WizardState(TypedDict, total=False):
     starting_version: str | dict[str, str]
     # The repository the run optimizes, as ``owner/name`` (GitLab adds subgroups).
     repository: str
-    # Host of ``repository``: ``github``, ``gitlab`` or ``bitbucket``. The
-    # user picks it in the repository picker; the agent only reads it.
+    # Host of ``repository``: ``github``, ``gitlab`` or ``bitbucket``, or
+    # ``local`` for a local folder in the desktop app. The user picks it in
+    # the repository picker; the agent only reads it.
     repo_provider: str
+    # The local folder's absolute path when ``repo_provider`` is ``local``
+    # (SKY-995). The user picks it; the agent only reads the folder.
+    repo_path: str
     # The ref the run starts from: the pinned commit, else the branch; empty for the default branch.
     # The agent reads and edits files at this ref, so its drafts match the run's tree.
     repo_branch: str
@@ -1227,15 +1232,17 @@ def _name_set(state: WizardState) -> bool:
 
 
 def _task_ready(state: WizardState) -> bool:
-    """Return True when the Task step has an objective and a repository.
+    """Return True when the Task step has an objective and a source: a repository, or a local folder.
 
-    Every run optimizes a repository, and its checkout is the starting
-    version, so no starting version is needed.
+    The run's checkout (or the folder) is the starting version, so no
+    starting version is needed. A local folder run (SKY-995) has
+    ``repo_path`` and no ``repository``.
     """
     objective = state.get("task_objective") or ""
     if not (isinstance(objective, str) and objective.strip()):
         return False
-    return bool(str(state.get("repository") or "").strip())
+    source = "repo_path" if state.get("repo_provider") == LOCAL_REPO_PROVIDER else "repository"
+    return bool(str(state.get(source) or "").strip())
 
 
 def _dataset_ready(state: WizardState) -> bool:
@@ -1317,6 +1324,25 @@ _STEP_FIX_HINT = {
 }
 
 
+def _step_fix_hint(step: int, state: dict[str, Any]) -> str:
+    """Name what the agent must do to complete a gating step, for this run's source.
+
+    Args:
+        step: Wizard step index (see ``_WIZARD_STEP_LABELS``).
+        state: The wizard snapshot merged with this call's patch.
+
+    Returns:
+        The fix hint for the order error.
+    """
+    if step == 1 and state.get("repo_provider") == LOCAL_REPO_PROVIDER:
+        # The agent cannot pick a disk folder, and a ``repository`` would turn the run into a git run.
+        return (
+            "set ``task_objective`` via update_wizard_state, and ask the user to pick the folder "
+            "in the app (``repo_path``); never set ``repository``"
+        )
+    return _STEP_FIX_HINT[step]
+
+
 def _step_satisfied(step: int, state: WizardState, patch: dict[str, Any]) -> bool:
     """Return True when wizard ``step`` is complete in ``state`` or this ``patch``.
 
@@ -1356,8 +1382,15 @@ def validate_wizard_patch_order(patch: dict[str, Any], state: WizardState) -> st
 
     Returns:
         ``None`` when the patch respects the order; otherwise a one-line
-        English error naming the blocked field and the steps to do first.
+        English error naming the blocked field and the steps to do first,
+        or refusing a ``repository`` for a local-folder run.
     """
+    if "repository" in patch and {**state, **patch}.get("repo_provider") == LOCAL_REPO_PROVIDER:
+        # The run's source follows ``repository``, so setting it would turn the local run into a git run.
+        return (
+            "Refused: this run uses the local folder at ``repo_path``, so ``repository`` must stay unset. "
+            "Nothing was saved."
+        )
     touched = [(_FIELD_STEP[f], f) for f in patch if f in _FIELD_STEP]
     if not touched:
         return None
@@ -1366,7 +1399,8 @@ def validate_wizard_patch_order(patch: dict[str, Any], state: WizardState) -> st
     missing = [step for step in _PREREQ_STEPS if step < target_step and not _step_satisfied(step, state, patch)]
     if not missing:
         return None
-    steps_txt = "; ".join(f"{_WIZARD_STEP_LABELS[s]} — {_STEP_FIX_HINT[s]}" for s in missing)
+    merged = {**state, **patch}
+    steps_txt = "; ".join(f"{_WIZARD_STEP_LABELS[s]} — {_step_fix_hint(s, merged)}" for s in missing)
     return (
         f"Out of order: ``{blocked_field}`` belongs to the "
         f"{_WIZARD_STEP_LABELS[target_step]} step, but earlier required steps are "
@@ -1460,7 +1494,7 @@ def validate_wizard_screen(
 # agent can see what is already there: the budget is stored as cents, and the
 # metric screen needs the task and the data its code runs on.
 _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
-    "artifact": frozenset({"task_objective", "github_connected", "repo_provider"}),
+    "artifact": frozenset({"task_objective", "github_connected", "repo_provider", "repo_path"}),
     "source": frozenset({"task_objective", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}),
     "plan": frozenset({"task_objective", "data_mode", "model_configured", "max_cost_cents", "spending_floor_cents"}),
     "optimizer": frozenset({"data_mode"}),
@@ -1479,12 +1513,13 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
             "dataset_columns",
             "ascent_toml",
             "repo_provider",
+            "repo_path",
             "github_connected",
             "run_code",
             "metric_code",
         }
     ),
-    "check": frozenset({"input_fields", "expected_field", "run_code", "metric_code"}),
+    "check": frozenset({"input_fields", "expected_field", "run_code", "metric_code", "repo_provider", "repo_path"}),
     "overview": frozenset().union(*(fields for fields in _SCREEN_FIELDS.values()))
     | frozenset({"job_name", "job_description", "is_private", "max_cost_cents", "run_code", "metric_code"}),
 }
@@ -1696,6 +1731,8 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     if screen == "brief" and not str(state.get("task_objective") or "").strip():
         return ["task_objective is empty"]
     if screen == "artifact" and not _task_ready(state):
+        if state.get("repo_provider") == LOCAL_REPO_PROVIDER:
+            return ["repo_path must name the local folder; the user picks it in the app"]
         return ["repository must be set as owner/name"]
     if screen == "source" and not _inputs_ready(state):
         return ["data_mode must be set, and pairs need a dataset attached"]
@@ -2734,6 +2771,16 @@ _MODEL_ROLES = (
     "next versions. Prefer the newest generation ``list_models_for_agent`` lists in a family (5.5 over 4.5) "
     "unless the user asks for another model or a lower cost."
 )
+# A local folder has no host, so agents must not offer a branch, a pull request or a host link (SKY-995).
+# Only the desktop app runs a local folder, so only its prompts carry this (see ``screen_signature``).
+_LOCAL_FOLDER = (
+    "When ``repo_provider`` is ``local``, the run's source is the local folder at ``repo_path`` on the "
+    "user's computer, not a repository on a host. A local folder has no branch, no pull request and no host "
+    "link: never offer one, and never ask the user to connect a host. You only read the folder; your writes "
+    "are draft files, and the folder stays unchanged. The user applies the run's result to the folder with "
+    "Apply in the app. Never set ``repository`` in a local run: it turns the run into a git run."
+)
+_LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric", "check"})
 SCREEN_FOCUS: dict[str, str] = {
     "brief": (
         "Brief: get what the run should improve, in the user's words, into ``task_objective``, and any "
@@ -2828,6 +2875,8 @@ def screen_signature(screen: str, reply_language: str = "English", cloned: bool 
         place of the full wizard prompt.
     """
     focus = SCREEN_FOCUS.get(screen, f"{screen}: help the user with this screen.")
+    if settings.local_mode and screen in _LOCAL_FOLDER_SCREENS:
+        focus = f"{focus}\n{_LOCAL_FOLDER}"
     if cloned:
         focus = f"{focus}\n* {CLONE_FOCUS}"
     prompt = SCREEN_AGENT_PROMPT.format(
