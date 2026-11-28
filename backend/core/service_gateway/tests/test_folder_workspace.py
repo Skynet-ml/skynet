@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -17,6 +19,7 @@ import pytest
 
 from core.config import settings
 from core.local.folder_tree import FolderTreeError, file_digest, folder_entries
+from core.local.picked_folders import PICKED_FOLDERS_FILE
 from core.service_gateway.agents import folder_workspace as fw
 from core.service_gateway.agents.apply_patch import apply_patch
 from core.service_gateway.agents.attachment_sandbox import stop_chat_runner
@@ -56,6 +59,17 @@ def tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
+def pick(state: Path, *folders: Path | str) -> None:
+    """Write the picked-folder list as the desktop app does.
+
+    Args:
+        state: The app's state folder.
+        folders: The picked folders.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    (state / PICKED_FOLDERS_FILE).write_text(json.dumps([str(f) for f in folders]), encoding="utf-8")
+
+
 @pytest.fixture
 def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Point the app's state folder at a test folder and empty the workspace registry.
@@ -79,11 +93,12 @@ def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
 
 
 @pytest.fixture
-def source(tmp_path: Path) -> Path:
-    """Make a user folder with files that must and must not reach the copy.
+def source(tmp_path: Path, state_dir: Path) -> Path:
+    """Make a picked user folder with files that must and must not reach the copy.
 
     Args:
         tmp_path: The test's folder.
+        state_dir: The app's state folder, which gets the folder as picked.
 
     Returns:
         The folder.
@@ -110,6 +125,7 @@ def source(tmp_path: Path) -> Path:
     (outside / "secret.txt").write_text("outside\n")
     (root / "linked_dir").symlink_to(outside, target_is_directory=True)
     (root / "linked_file.txt").symlink_to(outside / "secret.txt")
+    pick(state_dir, root)
     return root
 
 
@@ -252,6 +268,40 @@ def test_a_folder_that_is_a_link_is_refused(state_dir: Path, source: Path, tmp_p
     with pytest.raises(fw.FolderTreeError):
         FolderWorkspace(link, tmp_path / "session", tmp_path / "egress")
     assert not (tmp_path / "session").exists()
+
+
+def test_a_folder_the_user_did_not_pick_is_refused_with_no_copy(state_dir: Path, source: Path, tmp_path: Path) -> None:
+    pick(state_dir, tmp_path / "elsewhere")
+    with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
+        open_workspace("chat1", source)
+    assert live_workspace("chat1") is None
+    assert not session_folder("chat1").exists()
+
+
+def test_no_picked_list_refuses_every_folder(state_dir: Path, source: Path) -> None:
+    (state_dir / PICKED_FOLDERS_FILE).unlink()
+    with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
+        open_workspace("chat1", source)
+    assert not session_folder("chat1").exists()
+
+
+def test_a_folder_below_a_picked_folder_opens(state_dir: Path, source: Path) -> None:
+    workspace, new = open_workspace("chat1", source / "src")
+    assert new
+    assert (workspace.folder / "app.py").read_text() == "def main():\n    return 1\n"
+
+
+def test_a_dot_dot_path_out_of_the_picked_folder_is_refused(state_dir: Path, source: Path) -> None:
+    with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
+        open_workspace("chat1", f"{source}/src/../../outside")
+    assert not session_folder("chat1").exists()
+
+
+def test_a_path_through_a_link_to_a_folder_outside_is_refused(state_dir: Path, source: Path, tmp_path: Path) -> None:
+    (tmp_path / "outside" / "inner").mkdir()
+    with pytest.raises(FolderTreeError, match=f"^{re.escape(fw.NOT_PICKED)}$"):
+        open_workspace("chat1", source / "linked_dir" / "inner")
+    assert not session_folder("chat1").exists()
 
 
 @on_mac

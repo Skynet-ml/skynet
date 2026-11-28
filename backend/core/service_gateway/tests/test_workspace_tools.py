@@ -25,6 +25,7 @@ from core.config import settings
 from core.connectors.github_repo import RepoRateLimitError
 from core.local import folder_tree
 from core.local.folder_tree import folder_source_id
+from core.local.picked_folders import PICKED_FOLDERS_FILE
 from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
 from core.service_gateway.agents import apply_patch as apply_patch_module
 from core.service_gateway.agents import folder_workspace, pi_bridge, pi_react, repo_browser, workspace_tools
@@ -1918,11 +1919,13 @@ def _shell_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[dict[st
         tmp_path: The test's folder.
 
     Returns:
-        The Metric screen state and the user's folder.
+        The Metric screen state and the user's folder, which the user picked in the app.
     """
     root = tmp_path / "project"
     root.mkdir()
     state = _local_folder(monkeypatch, root)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / PICKED_FOLDERS_FILE).write_text(json.dumps([str(root)]), encoding="utf-8")
     monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
     monkeypatch.setattr(folder_workspace, "_WORKSPACES", {})
     monkeypatch.setattr(folder_workspace, "_KEY_LOCKS", {})
@@ -1999,6 +2002,26 @@ async def test_an_apply_patch_edit_becomes_a_draft_and_the_folder_stays(
     }
     assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
     assert (root / "README.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_shell_tools_refuse_a_folder_the_user_did_not_pick(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A folder the user never picked gives every shell tool a short reason, and no copy opens (SKY-1013)."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    (tmp_path / "state" / PICKED_FOLDERS_FILE).write_text(json.dumps([str(tmp_path / "other")]), encoding="utf-8")
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    patched = await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    ran = await tools["exec_command"].acall(cmd="ls")
+
+    assert patched == {"error": folder_workspace.NOT_PICKED}
+    assert folder_workspace.NOT_PICKED in str(ran)
+    assert turn.wizard_patch == {}
+    assert folder_workspace.live_workspace("chat-1") is None
+    assert not folder_workspace.session_folder("chat-1").exists()
 
 
 @pytest.mark.asyncio
