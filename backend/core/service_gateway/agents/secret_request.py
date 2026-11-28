@@ -1,7 +1,8 @@
 """The chat tool that asks the user for a saved secret through a secure card (SKY-641).
 
-The agent names the secret, says what it is for and which host gets it. The
-call pauses on the approval flow, and the chat shows a password card instead
+The agent names the secret, says what it is for and which host gets it, or
+gives no host for a secret that a run only reads as an environment variable
+(SKY-994). The call pauses on the approval flow, and the chat shows a password card instead
 of the usual approval card. The browser saves the typed value with
 ``PUT /secrets`` and only then confirms. The value never passes through this
 module: the tool's arguments, its stream events and its result carry the
@@ -30,14 +31,15 @@ def secret_request_problem(arguments: dict[str, Any]) -> str | None:
     """Check a ``request_secret`` call before the chat shows its card.
 
     Args:
-        arguments: The call's ``name``, ``purpose`` and ``host``.
+        arguments: The call's ``name``, ``purpose`` and ``host``; an empty
+            host means the secret goes to no host.
 
     Returns:
         What to fix, for the agent, or ``None`` when the card can show.
     """
     name = str(arguments.get("name") or "")
     purpose = str(arguments.get("purpose") or "").strip()
-    host = str(arguments.get("host") or "")
+    host = str(arguments.get("host") or "").strip()
     if not _NAME.fullmatch(name):
         return (
             "Not shown: name must be an environment variable name (letters, digits and _, not starting "
@@ -45,8 +47,11 @@ def secret_request_problem(arguments: dict[str, Any]) -> str | None:
         )
     if not purpose or len(purpose) > _MAX_PURPOSE_CHARS:
         return f"Not shown: purpose must say in one short line (at most {_MAX_PURPOSE_CHARS} characters) what the secret is for."
-    if not _HOST.fullmatch(host):
-        return "Not shown: host must be the bare host name the secret goes to, for example api.example.com."
+    if host and not _HOST.fullmatch(host):
+        return (
+            "Not shown: host must be the bare host name the secret goes to, for example api.example.com, "
+            "or empty when the secret goes to no host."
+        )
     return None
 
 
@@ -73,7 +78,7 @@ def secret_request_tool() -> dspy.Tool:
         The tool, unwrapped.
     """
 
-    async def request_secret(name: str, purpose: str, host: str) -> Any:
+    async def request_secret(name: str, purpose: str, host: str = "") -> Any:
         """Report the secret the user saved in the card."""
         return secret_request_result(name, saved=True)
 
@@ -90,6 +95,9 @@ def secret_request_tool() -> dspy.Tool:
         arg_desc={
             "name": "The environment variable name, exactly as in the ${NAME} placeholder, e.g. MAPS_KEY.",
             "purpose": "What the secret is for, in one short line in the reply language.",
-            "host": "The bare host the secret goes to, e.g. maps.googleapis.com.",
+            "host": (
+                "The bare host the secret goes to, e.g. maps.googleapis.com. Leave it empty when the run only "
+                "reads the secret as an environment variable and sends it to no host."
+            ),
         },
     )

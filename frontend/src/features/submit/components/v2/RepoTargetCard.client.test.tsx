@@ -494,8 +494,9 @@ void test("Choose folder sets the picked path, drops the git fields and shows th
       assert.equal(path?.getAttribute("aria-live"), "polite");
       assert.ok(path?.textContent?.includes("/Users/me/app"));
       // A folder source reads no branch, commit or file list from a repository host.
+      // It reads only the names in the folder's .env (SKY-994).
       assert.deepEqual(
-        calls.filter((url) => !url.endsWith("/connectors")),
+        calls.filter((url) => !url.endsWith("/connectors") && !url.includes("/secrets/local-env?")),
         [],
       );
     } finally {
@@ -585,4 +586,57 @@ void test("a folder draft without the folder card asks for a repository instead"
   } finally {
     await unmount();
   }
+});
+
+void test("the folder card lists .env clashes and a pick goes into the draft (SKY-994)", async () => {
+  const bridge: Bridge = { pickFolder: async () => null };
+  const linkedFetch = globalThis.fetch;
+  const previews: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!url.includes("/secrets/local-env?")) return linkedFetch(input);
+    previews.push(new URL(url, "https://api.example.test").searchParams.get("path") ?? "");
+    return new Response(
+      JSON.stringify({
+        status: "found",
+        entries: [
+          { name: "DB_URL", clash: true },
+          { name: "NEW_KEY", clash: false },
+        ],
+        skipped: [{ line: 4, name: "MY-KEY", reason: "invalid_name" }],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+  await asDesktop(bridge, true, async () => {
+    const sent: RepoDraft[] = [];
+    const { container, unmount } = await mountControlled({ ...repo, localPath: "/Users/me/app" }, sent);
+    try {
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.deepEqual(previews, ["/Users/me/app"]);
+      assert.deepEqual(sent.at(-1)!.envClashes, ["DB_URL"]);
+      assert.deepEqual(sent.at(-1)!.envChoices, {});
+      const text = container.textContent ?? "";
+      assert.ok(text.includes("DB_URL"));
+      assert.ok(text.includes("4 (MY-KEY)"));
+      const use = buttonWithText(container, "Use .env");
+      assert.ok(use, "no Use .env choice");
+      assert.ok(buttonWithText(container, "Keep saved"), "no Keep saved choice");
+      await React.act(async () => use.click());
+      assert.deepEqual(sent.at(-1)!.envChoices, { DB_URL: "use" });
+      // The same preview again changes nothing, so the draft does not loop.
+      const count = sent.length;
+      await React.act(async () => {
+        dom.window.dispatchEvent(new dom.window.Event("saved-secrets-changed"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.equal(previews.length, 2);
+      assert.equal(sent.length, count);
+    } finally {
+      await unmount();
+      globalThis.fetch = linkedFetch;
+    }
+  });
 });

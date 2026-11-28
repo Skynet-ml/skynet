@@ -154,6 +154,32 @@ async def test_saved_secret_value_reaches_no_agent_event_or_stored_turn(monkeypa
         assert session.scalars(select(UserSecretModel.name)).all() == ["MAPS_KEY"]
 
 
+@pytest.mark.parametrize("host", ["", "  "])
+async def test_a_secret_with_no_host_shows_the_card_and_saves_with_no_host(
+    host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty host shows the card, and the saved secret goes to no host (SKY-994)."""
+    store = _MemStore()
+    client = _secrets_client(store)
+    events: list[dict[str, Any]] = []
+    arguments = {**_ARGS, "host": host}
+
+    def browser_saves() -> bool:
+        """Save the value with no host, as the card does for an empty host."""
+        assert client.put("/secrets", json={"name": "MAPS_KEY", "value": _VALUE}).status_code == 200
+        return True
+
+    result = await _run_card(events, browser_saves, arguments)
+
+    assert result == {"name": "MAPS_KEY", "status": "saved"}
+    pending = next(e for e in events if e["event"] == "pending_approval")
+    assert pending["data"]["arguments"] == arguments
+    await _persist(store, events, monkeypatch)
+    for text in (json.dumps(result), json.dumps(events), _stored_rows(store)):
+        assert _VALUE not in text
+    assert client.get("/secrets").json()["secrets"][0]["allowed_hosts"] == []
+
+
 async def test_skipped_card_tells_the_agent_skipped() -> None:
     """A skipped card returns the name and ``skipped`` and does not read as a failure."""
     events: list[dict[str, Any]] = []

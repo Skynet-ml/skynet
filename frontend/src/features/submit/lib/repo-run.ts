@@ -176,6 +176,36 @@ function savedServiceSecrets(
   });
 }
 
+/**
+ * Add the secrets that a local folder's `.env` import saved to a local run
+ * (SKY-994). Each goes by id as an environment variable only, with no host.
+ * A secret that the request already sends, typed or saved, keeps its entry.
+ *
+ * Args:
+ *   request: The run request.
+ *   saved: The saved secrets the import returned; names and ids only.
+ *
+ * Returns:
+ *   The request with the `.env` secrets, or the same request for a git run.
+ */
+export function withEnvSecrets(
+  request: BlackboxRunRequest,
+  saved: ReadonlyArray<{ id: string; name: string }>,
+): BlackboxRunRequest {
+  const repo = request.target.repo;
+  if (!repo || repo.provider !== "local") return request;
+  const current = repo.secrets ?? [];
+  const sent = new Set(current.map((secret) => secret.name));
+  const added = saved
+    .filter((secret) => !sent.has(secret.name))
+    .map((secret) => ({ name: secret.name, saved_secret_id: secret.id, allowed_hosts: [] }));
+  if (added.length === 0) return request;
+  return {
+    ...request,
+    target: { ...request.target, repo: { ...repo, secrets: [...current, ...added] } },
+  };
+}
+
 const hasModel = (config: ModelConfig | null): config is ModelConfig =>
   Boolean(config?.name.trim());
 

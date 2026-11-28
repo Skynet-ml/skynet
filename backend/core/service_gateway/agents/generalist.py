@@ -1115,6 +1115,9 @@ class WizardState(TypedDict, total=False):
     workspace_base: str
     # The folder files the Mac setup agent's shell deleted (SKY-997); the run removes them from its tree.
     workspace_deleted: list[str]
+    # The names in a local folder's .env that are saved with another value and
+    # that the user has not decided on yet (SKY-994). Names only, never values.
+    env_secret_clashes: list[str]
     # The wizard screen on view (see ``_SCREEN_FIELDS``). Absent when the
     # wizard is not on screen, which leaves the agent unscoped.
     wizard_screen: str
@@ -1513,7 +1516,7 @@ def validate_wizard_screen(
 # agent can see what is already there: the budget is stored as cents, and the
 # metric screen needs the task and the data its code runs on.
 _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
-    "artifact": frozenset({"task_objective", "github_connected", "repo_provider", "repo_path"}),
+    "artifact": frozenset({"task_objective", "github_connected", "repo_provider", "repo_path", "env_secret_clashes"}),
     "source": frozenset({"task_objective", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}),
     "plan": frozenset({"task_objective", "data_mode", "model_configured", "max_cost_cents", "spending_floor_cents"}),
     "optimizer": frozenset({"data_mode"}),
@@ -1533,14 +1536,27 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
             "ascent_toml",
             "repo_provider",
             "repo_path",
+            "env_secret_clashes",
             "github_connected",
             "run_code",
             "metric_code",
         }
     ),
-    "check": frozenset({"input_fields", "expected_field", "run_code", "metric_code", "repo_provider", "repo_path"}),
+    "check": frozenset(
+        {
+            "input_fields",
+            "expected_field",
+            "run_code",
+            "metric_code",
+            "repo_provider",
+            "repo_path",
+            "env_secret_clashes",
+        }
+    ),
     "overview": frozenset().union(*(fields for fields in _SCREEN_FIELDS.values()))
-    | frozenset({"job_name", "job_description", "is_private", "max_cost_cents", "run_code", "metric_code"}),
+    | frozenset(
+        {"job_name", "job_description", "is_private", "max_cost_cents", "run_code", "metric_code", "env_secret_clashes"}
+    ),
 }
 
 
@@ -2797,9 +2813,14 @@ _LOCAL_FOLDER = (
     "user's computer, not a repository on a host. A local folder has no branch, no pull request and no host "
     "link: never offer one, and never ask the user to connect a host. You only read the folder; your writes "
     "are draft files, and the folder stays unchanged. The user applies the run's result to the folder with "
-    "Apply in the app. Never set ``repository`` in a local run: it turns the run into a git run."
+    "Apply in the app. Never set ``repository`` in a local run: it turns the run into a git run. "
+    "At run start, the app saves each pair in the folder's ``.env`` as a saved secret. ``env_secret_clashes`` lists "
+    "the names that are already saved with another value and that the user has not decided on yet. Before "
+    "the run starts, ask the user about each of them: keep the saved value, or use the ``.env`` value. The "
+    "user picks Keep saved or Use .env for each name on the Repository screen; a name with no pick keeps the "
+    "saved value. Never ask for, show or repeat a secret value."
 )
-_LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric", "check"})
+_LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric", "check", "overview"})
 SCREEN_FOCUS: dict[str, str] = {
     "brief": (
         "Brief: get what the run should improve, in the user's words, into ``task_objective``, and any "

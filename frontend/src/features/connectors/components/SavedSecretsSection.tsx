@@ -56,7 +56,9 @@ export function SavedSecretsSection() {
 
   const validName = SECRET_NAME.test(name);
   const cleanHost = cleanSecretHost(host);
-  const validHost = SECRET_HOST.test(cleanHost);
+  // The host is optional (SKY-994): a secret with no host reaches a run only
+  // as an environment variable.
+  const validHost = cleanHost === "" || SECRET_HOST.test(cleanHost);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -66,7 +68,7 @@ export function SavedSecretsSection() {
     // Saving again keeps the hosts already approved for the name and adds this one.
     const approved = secrets?.find((secret) => secret.name === name)?.allowed_hosts ?? [];
     try {
-      await saveSecret(name, value, [...new Set([...approved, cleanHost])]);
+      await saveSecret(name, value, cleanHost ? [...new Set([...approved, cleanHost])] : approved);
       setValue("");
       setName("");
       setHost("");

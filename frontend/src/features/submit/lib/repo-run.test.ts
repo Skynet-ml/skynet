@@ -16,7 +16,16 @@ registerHooks({
   },
 });
 
-const { initialWizardV2State, emptyRepoDraft, fileProposerCommand, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
+const {
+  initialWizardV2State,
+  emptyRepoDraft,
+  envReplaceNames,
+  fileProposerCommand,
+  parseAllowedHosts,
+  repoIssue,
+  undecidedEnvClashes,
+  withLocalFolder,
+} = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
 const {
@@ -27,6 +36,7 @@ const {
   metricCommandText,
   repoBaseText,
   repoRunRequest,
+  withEnvSecrets,
 } = await import("./repo-run.ts");
 const { BYOK_PROVIDERS, litellmProviderForByok } = await import("../../billing/lib/byok.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
@@ -698,4 +708,47 @@ test("a setup with only a chosen folder is worth keeping (SKY-993)", async () =>
   assert.equal(setupWorthKeeping(state), false);
   state.task.repo = { ...state.task.repo, localPath: "/Users/me/app" };
   assert.equal(setupWorthKeeping(state), true);
+});
+
+test("a local run sends each imported .env secret by its saved id, with no host (SKY-994)", () => {
+  const state = repoState();
+  state.task.repo = {
+    ...state.task.repo,
+    localPath: "/Users/me/app",
+    secrets: [{ name: "TYPED", value: "typed", allowedHosts: "api.example.com" }],
+  };
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  const sent = withEnvSecrets(request, [
+    { id: "s-typed-env", name: "TYPED" },
+    { id: "s-db", name: "DB_URL" },
+  ]);
+  const secrets = sent.target.repo!.secrets!;
+  assert.equal(secrets.length, 2);
+  assert.equal(secrets[0].name, "TYPED");
+  assert.deepEqual(secrets[1], { name: "DB_URL", saved_secret_id: "s-db", allowed_hosts: [] });
+});
+
+test("a repository run and an empty import keep the request as it is (SKY-994)", () => {
+  const git = repoRunRequest(repoState(), options)!;
+  assert.equal(withEnvSecrets(git, [{ id: "s-db", name: "DB_URL" }]), git);
+  const state = repoState();
+  state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [] };
+  const local = repoRunRequest(state, options)!;
+  assert.equal(withEnvSecrets(local, []), local);
+});
+
+test("only an explicit Use .env pick replaces a clashing saved secret (SKY-994)", () => {
+  const repo = {
+    ...emptyRepoDraft(),
+    localPath: "/Users/me/app",
+    envClashes: ["A", "B", "C"],
+    envChoices: { A: "use" as const, B: "keep" as const },
+  };
+  assert.deepEqual(envReplaceNames(repo), ["A"]);
+  assert.deepEqual(undecidedEnvClashes(repo), ["C"]);
+  const moved = withLocalFolder(repo, "/Users/me/other");
+  assert.equal(moved.envClashes, undefined);
+  assert.equal(moved.envChoices, undefined);
+  assert.deepEqual(withLocalFolder(repo, "/Users/me/app").envChoices, repo.envChoices);
 });

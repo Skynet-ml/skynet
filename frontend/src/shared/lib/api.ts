@@ -1935,6 +1935,52 @@ export async function deleteSavedSecret(id: string): Promise<void> {
   announceSavedSecretsChange();
 }
 
+/** How reading a local folder's root `.env` file went; only `found` carries names. */
+export type LocalEnvStatus = "found" | "missing" | "unsafe" | "too_large" | "unreadable";
+
+/** A `.env` line the import does not use; `name` is null when it could be part of a value. */
+export interface LocalEnvSkipped {
+  line: number;
+  name: string | null;
+  reason: string;
+}
+
+/** The names in a local folder's `.env` file, never values. `clash` is true when the name is saved with another value. */
+export interface LocalEnvPreview {
+  status: LocalEnvStatus;
+  entries: Array<{ name: string; clash: boolean }>;
+  skipped: LocalEnvSkipped[];
+}
+
+/** What a `.env` import saved; `secrets` holds every `.env` name that is saved now. */
+export interface LocalEnvImport {
+  status: LocalEnvStatus;
+  imported: string[];
+  replaced: string[];
+  kept: string[];
+  secrets: SavedSecret[];
+  skipped: LocalEnvSkipped[];
+}
+
+/** List the names in a local folder's root `.env` file (desktop app only, SKY-994). */
+export function previewLocalEnvSecrets(path: string, signal?: AbortSignal) {
+  return request<LocalEnvPreview>(`/secrets/local-env?path=${encodeURIComponent(path)}`, { signal });
+}
+
+/**
+ * Save a local folder's `.env` pairs as saved secrets (desktop app only, SKY-994).
+ * The server reads the file, so no value passes through the browser. A name
+ * saved with another value changes only when `replace` names it.
+ */
+export async function importLocalEnvSecrets(path: string, replace: string[]) {
+  const result = await request<LocalEnvImport>("/secrets/local-env/import", {
+    method: "POST",
+    body: JSON.stringify({ path, replace }),
+  });
+  if (result.imported.length + result.replaced.length > 0) announceSavedSecretsChange();
+  return result;
+}
+
 /**
  * Link Hugging Face with a pasted access token. The token is verified against
  * the Hub and encrypted at rest on the backend; it is never echoed back.

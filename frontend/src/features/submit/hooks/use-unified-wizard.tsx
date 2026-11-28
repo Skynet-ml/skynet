@@ -45,6 +45,7 @@ import {
   isStorageQuotaError,
   setupDraftApi,
   submitRepoRun,
+  importLocalEnvSecrets,
   listSavedSecrets,
   SAVED_SECRETS_CHANGED_EVENT,
   type SavedSecret,
@@ -89,7 +90,7 @@ import {
   type Row,
 } from "../lib/inputs-mode";
 import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate-reasons";
-import { contractText, finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
+import { contractText, finishedHardeningJobId, repoRunRequest, withEnvSecrets } from "../lib/repo-run";
 import {
   WIZARD_HARDENING_KEY,
   WIZARD_SESSION_KEY,
@@ -117,6 +118,8 @@ import {
   isLocalRepo,
   presetEngine,
   sandboxCatalogForRepo,
+  undecidedEnvClashes,
+  envReplaceNames,
   withRepository,
   withTaskPatch,
   type InputsSlice,
@@ -803,9 +806,18 @@ export function WizardV2Provider({
         metricCommand,
       );
       const conversationId = runSetupChatId(readSessionValue(SETUP_CHAT_KEY), runOn);
+      // Every local run start imports the folder's .env, so the run gets its
+      // current values; a clash changes only when the user chose Use .env (SKY-994).
+      const repo = state.task.repo;
+      const runRequest = isLocalRepo(repo)
+        ? withEnvSecrets(
+            request,
+            (await importLocalEnvSecrets((repo.localPath ?? "").trim(), envReplaceNames(repo))).secrets,
+          )
+        : request;
       const result = await submitRepoRun(
         {
-          ...request,
+          ...runRequest,
           ...(hardeningJobId ? { hardening_job_id: hardeningJobId } : {}),
           ...(conversationId ? { conversation_id: conversationId } : {}),
         },
@@ -1193,6 +1205,9 @@ export function WizardV2Provider({
       // ascent.toml has its own field; the agent sees the other repo files here.
       workspace_files: otherFiles(workspace.files),
       workspace_deleted: workspace.deleted?.length ? workspace.deleted : undefined,
+      env_secret_clashes: isLocalRepo(task.repo) && undecidedEnvClashes(task.repo).length > 0
+        ? undecidedEnvClashes(task.repo)
+        : undefined,
       // Only while drafts exist: the agent pins the first new draft to the commit it reads then.
       workspace_base:
         Object.keys(workspace.files).length > 0 || workspace.deleted?.length

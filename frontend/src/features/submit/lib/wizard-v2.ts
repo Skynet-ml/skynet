@@ -58,6 +58,20 @@ export interface RepoDraft {
    * local source; `provider`, `repository`, `branch` and `commit` are then unused.
    */
   localPath?: string;
+  /** The names in the folder's root `.env` that are saved with another value (SKY-994); names only. */
+  envClashes?: string[];
+  /** The user's pick per clash: keep the saved value, or use the `.env` value. No pick keeps the saved one. */
+  envChoices?: Record<string, "keep" | "use">;
+}
+
+/** The `.env` clashes the user has not decided on yet. */
+export function undecidedEnvClashes(repo: RepoDraft): string[] {
+  return (repo.envClashes ?? []).filter((name) => !repo.envChoices?.[name]);
+}
+
+/** The `.env` clashes whose saved value the user chose to replace with the `.env` value. */
+export function envReplaceNames(repo: RepoDraft): string[] {
+  return (repo.envClashes ?? []).filter((name) => repo.envChoices?.[name] === "use");
 }
 
 /** Whether the draft runs on a folder of this computer, not on a hosted repository. */
@@ -79,8 +93,10 @@ export function isLocalRepo(repo: RepoDraft): boolean {
  *   The draft with the folder and no repository, host, branch or commit.
  */
 export function withLocalFolder(repo: RepoDraft, path: string): RepoDraft {
-  const { provider: _provider, ...rest } = repo;
-  return { ...rest, repository: "", branch: "", commit: "", createdBySkynet: false, localPath: path };
+  const { provider: _provider, envClashes, envChoices, ...rest } = repo;
+  // Another folder has another `.env`, so its clashes and picks do not carry over.
+  const env = repo.localPath === path ? { envClashes, envChoices } : {};
+  return { ...rest, ...env, repository: "", branch: "", commit: "", createdBySkynet: false, localPath: path };
 }
 
 /** The sandbox provider id of the local Docker box, the only box a local folder may run in. */

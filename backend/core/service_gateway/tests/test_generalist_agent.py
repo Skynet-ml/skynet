@@ -652,6 +652,27 @@ def test_the_repository_screens_show_the_local_folder_path(screen: str) -> None:
     assert "repo_path" not in screen_snapshot(cast(WizardState, {**state, "wizard_screen": "budget"}))
 
 
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check", "overview"])
+def test_the_agent_sees_the_env_secret_clashes_until_the_run_starts(screen: str) -> None:
+    """The screens up to the run start show the undecided .env clashes, names only (SKY-994)."""
+    state = {"wizard_screen": screen, "repo_provider": "local", "env_secret_clashes": ["API_KEY"]}
+    assert screen_snapshot(cast(WizardState, state))["env_secret_clashes"] == ["API_KEY"]
+    assert "env_secret_clashes" not in screen_snapshot(cast(WizardState, {**state, "wizard_screen": "budget"}))
+
+
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check", "overview"])
+def test_a_local_run_prompt_asks_about_each_env_secret_clash(monkeypatch: pytest.MonkeyPatch, screen: str) -> None:
+    """In the desktop app the agent asks about each clash before the run starts, and never about a value."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    focus = screen_signature(screen).instructions
+    assert "``env_secret_clashes``" in focus
+    assert "Before the run starts, ask the user about each of them" in focus
+    assert "Keep saved or Use .env" in focus
+    assert "Never ask for, show or repeat a secret value." in focus
+    monkeypatch.setattr(settings, "local_mode", False)
+    assert "env_secret_clashes" not in screen_signature(screen).instructions
+
+
 def test_screen_prompts_forbid_unconfirmed_claims() -> None:
     """Both prompts tell the agent not to claim writes or screen moves a tool did not confirm."""
     assert "Say only what a tool result confirms." in (GENERALIST_SYSTEM_PROMPT or "")
