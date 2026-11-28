@@ -50,6 +50,7 @@ from ..local.folder_tree import (
 )
 from ..models.blackbox import LOCAL_FOLDER_ONLY_HERE, LOCAL_REPO_PROVIDER, REPO_COMMIT_PATTERN
 from ..service_gateway.optimization.blackbox.repo_tree import (
+    NOT_CLEAN,
     SAFE_GIT,
     apply_patch,
     case_insensitive,
@@ -80,7 +81,6 @@ APPLY_LOCK = threading.RLock()
 # On a case-sensitive disk this only refuses more, and no probe file goes into the user's folder.
 _FOLD_BLOCKED = fold_case(True)
 _FOLD_EDITABLE = fold_case(False)
-_NOT_CLEAN = "The change does not apply cleanly"
 _GIT_FILE_MODES = {"100644": _FILE_MODE, "100755": _EXEC_MODE}
 
 
@@ -684,7 +684,7 @@ def _build_version(
         except RuntimeError as error:
             # git apply refuses A.txt while a.txt is on a disk that ignores case, also when the
             # patch moves a.txt away (SKY-1010). An index keeps every case apart, so try there.
-            if not str(error).startswith(_NOT_CLEAN) or not case_insensitive(checkout.parent):
+            if not str(error).startswith(NOT_CLEAN) or not case_insensitive(checkout.parent):
                 raise
             if not _apply_in_index(checkout, patch):
                 raise
@@ -750,13 +750,18 @@ def _apply_in_index(checkout: Path, patch: str) -> bool:
             result[path] = (mode, sha)
     gone = entries.keys() - result.keys()
     # The disk keeps one form of each name, so a version with two forms of a path cannot be written.
+    # The index holds only the patch's files, so it also misses a new file below a kept file.
     forms: dict[str, set[str]] = {}
+    files, folders = set(), set()
     for path in (found.keys() - gone) | result.keys():
         parts = path.split("/")
+        files.add(_FOLD_BLOCKED(path))
         for depth in range(1, len(parts) + 1):
             name = "/".join(parts[:depth])
             forms.setdefault(_FOLD_BLOCKED(name), set()).add(name)
-    if any(len(names) > 1 for names in forms.values()):
+            if depth < len(parts):
+                folders.add(_FOLD_BLOCKED(name))
+    if any(len(names) > 1 for names in forms.values()) or files & folders:
         return False
     blobs: dict[str, tuple[bytes, int]] = {}
     for path, (mode, sha) in result.items():
@@ -920,16 +925,15 @@ def _walk(
         prefix: The ``/``-joined path of ``folder`` below the root, for ``made``.
         exact: Take a folder only under its exact name. A folder that a disk
             which ignores case opens under another form counts as missing
-            without ``made``; with ``made``, an empty one gets the exact name.
+            without ``made``; with ``made``, it is renamed to the exact name,
+            with everything in it.
         names: When given, the name each part has on the disk is added to it.
 
     Returns:
         The open folder; ``None`` when a part is missing and ``made`` is ``None``.
 
     Raises:
-        LocalFolderConflictError: With ``exact`` and ``made``, when a folder
-            under another form still holds files.
-        OSError: When a part is a link or a file, or cannot be opened or made.
+        OSError: When a part is a link or a file, or cannot be opened, made or renamed.
     """
     current = os.dup(folder)
     try:
@@ -946,15 +950,13 @@ def _walk(
             if exact or names is not None:
                 name = _disk_name(current, part)
                 if exact and name != part:
-                    # A folder rename by case only: the files under the old form went first,
-                    # so the empty folder takes the new form; a disk keeps one form per folder.
-                    held = made is None or bool(os.listdir(below))  # noqa: PTH208
                     os.close(below)
                     if made is None:
                         os.close(current)
                         return None
-                    if held:
-                        raise LocalFolderConflictError(["/".join(parts[: index + 1])])
+                    # A folder rename by case only. The disk keeps one form per folder, so the
+                    # folder itself takes the new form, and the files the copy leaves out
+                    # (.DS_Store), the user's files and the version's other new files move with it.
                     os.rename(name, part, src_dir_fd=current, dst_dir_fd=current)
                     below = os.open(part, _FOLDER_FLAGS, dir_fd=current)
                     name = part
@@ -1095,12 +1097,11 @@ def _put(
         made: The folders made so far, which a write extends.
         exact: Check only the exact path, and count a file under another case
             or Unicode form as a conflict; for a path with twins. A folder
-            under another form counts as missing for a delete, and an empty
-            one takes the exact form for a write.
+            under another form counts as missing for a delete, and is renamed
+            to the exact form, with everything in it, for a write.
 
     Raises:
-        LocalFolderConflictError: When the path changed since the check, or
-            with ``exact``, a folder under another form still holds files.
+        LocalFolderConflictError: When the path changed since the check.
         OSError: When a part on the way is a link or a file, or the write fails.
     """
     parts = path.split("/")
