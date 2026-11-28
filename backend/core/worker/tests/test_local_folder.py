@@ -483,6 +483,7 @@ def test_apply_writes_the_version_and_undo_restores_every_byte_and_mode(tmp_path
     assert (root / "run.sh").stat().st_mode & 0o777 == 0o700
     assert (root / ".env").read_text() == "KEY=1\n"
     assert local_folder.is_applied("run-1")
+    local_folder.check_applied(root, "run-1")
     assert not list(root.rglob("*.apply"))
     with pytest.raises(LocalFolderError, match="already in the folder"):
         _apply(root, commit, _PATCH, "run-1")
@@ -666,6 +667,36 @@ def test_apply_refuses_a_case_or_unicode_variant_of_a_blocked_path(
     assert not local_folder.is_applied("run-1")
 
 
+def test_apply_refuses_a_new_file_in_a_case_variant_of_a_blocked_folder(tmp_path: Path) -> None:
+    """A new file under a blocked folder in another case is refused on every disk, case-sensitive or not."""
+    root, commit = _metric_run(tmp_path, "eval")
+    before = _fingerprint(root)
+    patch = (
+        "diff --git a/src/EVAL/new.py b/src/EVAL/new.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/src/EVAL/new.py\n@@ -0,0 +1 @@\n+score = 999\n"
+    )
+
+    with pytest.raises(LocalFolderError, match="may not change"):
+        _apply(root, commit, patch, "run-1", editable_paths=["src"], blocked_paths=["src/eval"])
+
+    assert _fingerprint(root) == before
+    assert not local_folder.is_applied("run-1")
+
+
+def test_undo_refuses_a_record_for_another_folder(tmp_path: Path) -> None:
+    """The Undo record names the folder Apply wrote, so Undo never writes its bytes into another folder."""
+    root, commit = _applied_run(tmp_path)
+    _apply(root, commit, _PATCH, "run-1")
+    other = _write(tmp_path / "other", {"src/main.py": "x = 2\n"})
+    before = _fingerprint(other)
+
+    with pytest.raises(LocalFolderError, match="another folder"):
+        local_folder.undo_version(other, "run-1")
+
+    assert _fingerprint(other) == before
+    assert local_folder.is_applied("run-1")
+
+
 def test_apply_refuses_a_change_outside_the_editable_paths(tmp_path: Path) -> None:
     """The editable paths are checked on the files the version really changes."""
     root, commit = _metric_run(tmp_path, "eval")
@@ -725,6 +756,8 @@ def test_a_failed_rollback_keeps_the_undo_record_so_undo_can_finish(
         _apply(root, commit, _PATCH, "run-1")
     assert _fingerprint(root) != before
     assert local_folder.is_applied("run-1")
+    with pytest.raises(LocalFolderError, match="Undo first"):
+        local_folder.check_applied(root, "run-1")
 
     monkeypatch.setattr(local_folder, "_put", real_put)
     local_folder.undo_version(root, "run-1")

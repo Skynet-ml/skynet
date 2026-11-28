@@ -907,3 +907,71 @@ def test_a_lost_state_save_after_apply_still_leads_to_a_working_undo(
     assert undone.json() == {"applied": False, "applied_at": repaired.json()["applied_at"]}
     assert (folder / "src" / "main.py").read_text() == "x = 1\n"
     assert not (folder / "src" / "cfg.toml").exists()
+
+
+def test_a_repeat_apply_after_a_failed_rollback_does_not_report_applied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A kept Undo record with a half-applied folder makes a repeat Apply a 409, and Undo still restores the folder.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    real_put = local_folder._put
+    calls = {"n": 0}
+
+    def flaky_put(*args: object, **kwargs: object) -> None:
+        """Fail every write after the first, as a full disk does.
+
+        Args:
+            *args: Passed to ``_put``.
+            **kwargs: Passed to ``_put``.
+
+        Raises:
+            OSError: From the second call on.
+        """
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError(28, "No space left on device")
+        real_put(*args, **kwargs)
+
+    monkeypatch.setattr(local_folder, "_put", flaky_put)
+    client = _client(jobs)
+    failed = client.post("/optimizations/local-run/repository/apply")
+    monkeypatch.setattr(local_folder, "_put", real_put)
+
+    assert failed.status_code == 409, failed.text
+    assert local_folder.is_applied("local-run")
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+
+    again = client.post("/optimizations/local-run/repository/apply")
+
+    assert again.status_code == 409, again.text
+    assert again.json()["code"] == "optimization.local_folder_failed"
+    assert "local_apply" not in jobs.get_job("local-run")["result"]["details"]
+
+    undone = client.post("/optimizations/local-run/repository/undo")
+
+    assert undone.status_code == 200, undone.text
+    assert undone.json() == {"applied": False, "applied_at": None}
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"
+    assert not (folder / "src" / "cfg.toml").exists()
+
+
+def test_apply_without_a_local_state_folder_is_a_409(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A computer with no local state folder cannot read the kept copy, so Apply refuses with a 409, not a 500.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
+    jobs, folder = _local_apply_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+
+    response = _client(jobs).post("/optimizations/local-run/repository/apply")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "optimization.local_folder_failed"
+    assert (folder / "src" / "main.py").read_text() == "x = 1\n"

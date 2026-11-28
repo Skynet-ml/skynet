@@ -55,6 +55,7 @@ from ....worker.local_folder import (
     LocalFolderConflictError,
     LocalFolderError,
     apply_version,
+    check_applied,
     is_applied,
     kept_snapshot,
     snapshot_file,
@@ -354,14 +355,14 @@ def _hidden_paths(commit: str, drafts: dict[str, str]) -> list[str]:
         The hidden paths of the kept contract file and of a drafted one, and the contract file itself.
 
     Raises:
-        DomainError: 409 when a contract file cannot be read.
+        DomainError: 409 when the kept copy or a contract file cannot be read.
     """
     try:
         found = [*hidden_repo_paths(read_constraints(kept_snapshot(commit), require_version=False, legacy_forms=True))]
         if CONSTRAINTS_FILE in drafts:
             drafted = parse_constraints(drafts[CONSTRAINTS_FILE].encode(), require_version=False, legacy_forms=True)
             found += hidden_repo_paths(drafted)
-    except (ConstraintsError, OSError) as error:
+    except (ConstraintsError, LocalFolderError, OSError) as error:
         raise DomainError("optimization.local_folder_failed", status=409, reason=str(error)) from None
     return [*found, CONSTRAINTS_FILE]
 
@@ -691,7 +692,8 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
             DomainError: 403 below the editor role; 404 when the run is not a
                 local folder run; 409 away from the desktop app, while the run
                 runs, without a best version, when it breaks the run's editing
-                rules, or when a file to change changed.
+                rules, when a file to change changed, or when an earlier Apply
+                left only part of the version in the folder.
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
         repo, commit = _local_run(job_data, optimization_id)
@@ -710,8 +712,11 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         if problems:
             raise DomainError("optimization.local_folder_failed", status=409, reason=problems[0])
         with APPLY_LOCK:
-            # The Undo record is the applied state, so a repeat Apply only saves the row a failed save missed.
-            if not is_applied(optimization_id):
+            # A repeat Apply only saves the row a failed save missed, and only when
+            # the files hold the version: a failed rollback keeps the record too.
+            if is_applied(optimization_id):
+                _change_folder(lambda: check_applied(repo["path"], optimization_id))
+            else:
                 _change_folder(
                     lambda: apply_version(
                         repo["path"],

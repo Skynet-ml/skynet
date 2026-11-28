@@ -473,11 +473,11 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
     Raises:
         LocalFolderConflictError: When a file changed after Apply; nothing is restored then.
         LocalFolderError: When the version is not applied, the Undo record
-            cannot be read, or a write fails.
+            cannot be read or is for another folder, or a write fails.
     """
     with APPLY_LOCK:
         record = applied_record(run_id)
-        changes, made = _load_record(record)
+        changes, made = _load_record(record, root)
         try:
             folder = _open_root(root)
             try:
@@ -499,6 +499,36 @@ def undo_version(root: str | os.PathLike[str], run_id: str) -> list[str]:
             raise LocalFolderError(f"The folder could not be written: {error.strerror or error}") from None
         record.unlink()
     return [change.path for change in changes]
+
+
+def check_applied(root: str | os.PathLike[str], run_id: str) -> None:
+    """Check that every file a run's Apply changes holds the version, not only that the Undo record exists.
+
+    A failed rollback keeps the record on purpose, and a stop during Apply
+    leaves it too, so the folder can hold only part of the version.
+
+    Args:
+        root: The run's folder.
+        run_id: The run.
+
+    Raises:
+        LocalFolderError: When the record is missing, damaged or for another
+            folder, the folder cannot be read, or a file does not hold the version.
+    """
+    with APPLY_LOCK:
+        changes, _made = _load_record(applied_record(run_id), root)
+        try:
+            folder = _open_root(root)
+        except OSError as error:
+            raise LocalFolderError(f"The folder could not be read: {error.strerror or error}") from None
+        try:
+            missing = [change.path for change in changes if _read_disk(folder, change.path)[0] != change.after]
+        finally:
+            os.close(folder)
+    if missing:
+        raise LocalFolderError(
+            f"These files do not hold the best version: {', '.join(missing)}. Undo first, then Apply again."
+        )
 
 
 def _build_version(
@@ -834,20 +864,22 @@ def _save_record(record: Path, root: str | os.PathLike[str], changes: list[_Chan
     partial.replace(record)
 
 
-def _load_record(record: Path) -> tuple[list[_Change], list[str]]:
-    """Read Undo's record of an Apply.
+def _load_record(record: Path, root: str | os.PathLike[str]) -> tuple[list[_Change], list[str]]:
+    """Read Undo's record of an Apply into one folder.
 
     Args:
         record: The record's path.
+        root: The run's folder, which must be the folder Apply wrote.
 
     Returns:
         The changes, with the bytes before Apply, and the folders Apply made.
 
     Raises:
-        LocalFolderError: When there is no record, or it cannot be read.
+        LocalFolderError: When there is no record, it cannot be read, or it is for another folder.
     """
     try:
         body = json.loads(record.read_text())
+        recorded_root = str(body["root"])
         changes = [
             _Change(
                 str(item["path"]),
@@ -858,11 +890,14 @@ def _load_record(record: Path) -> tuple[list[_Change], list[str]]:
             )
             for item in body["changes"]
         ]
-        return changes, [str(path) for path in body["made"]]
+        made = [str(path) for path in body["made"]]
     except FileNotFoundError:
         raise LocalFolderError("The best version is not in the folder, so there is nothing to undo.") from None
     except (OSError, ValueError, KeyError, TypeError):
         raise LocalFolderError("The Undo copy of this run is damaged.") from None
+    if recorded_root != str(root):
+        raise LocalFolderError("The Undo copy of this run is for another folder.")
+    return changes, made
 
 
 def _blob_json(blob: _Blob | None) -> dict[str, Any] | None:
