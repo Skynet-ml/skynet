@@ -49,6 +49,8 @@ CONNECTOR_ROUTES_KEY = "_skynet_connector_routes"
 USER_BINDING = "user"
 MANAGED_BINDING = "managed"
 _PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Each pass decodes one layer; an unbounded loop let a box stall the worker with "%2525..." (SKY-1000).
+_DECODE_PASSES = 3
 
 
 @dataclass(frozen=True)
@@ -514,12 +516,13 @@ def host_allowed(host: str, allowed: Collection[str]) -> bool:
 
 
 def _misplaced_secret(url: str, body: bytes, names: Collection[str]) -> str | None:
-    """Return a run secret whose ``${NAME}`` is in the url or the body (SKY-1000).
+    """Return why the url or the body holds a run secret's ``${NAME}`` (SKY-1000).
 
     The relay fills secrets in headers only. A url reaches logs that Skynet
     cannot mask, so a placeholder there or in a body is refused with a reason,
     not sent on as literal text. A box may percent-encode the url or a form
-    body, so each decoded form counts too.
+    body, so each decoded form counts too, up to ``_DECODE_PASSES`` layers.
+    Text that still decodes after that is refused, because it cannot be checked.
 
     Args:
         url: The request url, with the guest's path and query.
@@ -527,17 +530,21 @@ def _misplaced_secret(url: str, body: bytes, names: Collection[str]) -> str | No
         names: The run's secret names.
 
     Returns:
-        The first misplaced secret name, or None.
+        The refusal reason without the host, or None.
     """
+    if not names:
+        return None
     for text in (url, body.decode("latin-1")):
-        while True:
+        for _ in range(_DECODE_PASSES + 1):
             for name in _PLACEHOLDER.findall(text):
                 if name in names:
-                    return name
+                    return f"secret {name} can go only in a request header, not in the url or body"
             decoded = unquote_plus(text)
             if decoded == text:
                 break
             text = decoded
+        else:
+            return "a secret can go only in a request header, and the url or body is encoded too many times to check"
     return None
 
 
@@ -720,9 +727,7 @@ def _relay(
     host = (urlsplit(url).hostname or "").rstrip(".").lower()
     misplaced = _misplaced_secret(url, body, {*user_secrets, *bindings, *secret_hosts})
     if misplaced is not None:
-        raise ValueError(
-            f"secret {misplaced} can go only in a request header, not in the url or body of a request to {host}."
-        )
+        raise ValueError(f"{misplaced} of a request to {host}.")
     names = tuple(dict.fromkeys(name for value in headers.values() for name in _PLACEHOLDER.findall(value)))
     for name in names:
         if secret_hosts.get(name) != host:

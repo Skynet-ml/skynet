@@ -3327,6 +3327,40 @@ def test_a_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo, loc
     assert (call["kind"], call["target"], call["status"]) == ("host", "judge.example.test", "ok")
 
 
+def test_a_header_secret_in_a_redirect_location_comes_back_redacted(echo: _Echo) -> None:
+    """A 302 whose Location repeats the header key reaches the box without the key (SKY-1000)."""
+    echo.location = "/leak?key=judge-secret-value"
+    workspace = _Workspace()
+
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="redirect", method="GET")
+
+    assert answer["status"] == 302
+    assert ["Location", "/leak?key=[REDACTED]"] in answer["headers"]
+    assert "judge-secret-value" not in json.dumps(answer)
+
+
+def test_an_unreachable_header_service_keeps_the_secret_out_of_errors_and_logs(
+    echo: _Echo, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed connect returns a plain 502, and neither the record nor a log line holds the header key (SKY-1000)."""
+    sink = _CallSink()
+    workspace = _Workspace()
+    port = echo.port
+    echo.close()
+    relay = _echo_relay(workspace, port, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
+
+    with caplog.at_level(logging.DEBUG):
+        answer = _service_answer(relay, workspace, "judge", path="echo", method="GET")
+
+    assert answer == {"status": 502, "error": "Service 'judge' could not be reached."}
+    logged = "\n".join(record.getMessage() + str(record.exc_info or "") for record in caplog.records)
+    assert "judge-secret-value" not in logged
+    [(_, call, secrets)] = sink.calls
+    assert call["status"] == "failed"
+    assert "judge-secret-value" not in str(call.get("failure_reason"))
+    assert "judge-secret-value" in secrets
+
+
 def test_a_key_split_across_two_streamed_chunks_comes_back_redacted(echo: _Echo) -> None:
     """The relay reads the whole answer before it redacts, so a key cut across two chunks is still hidden (E56)."""
     workspace = _Workspace()
