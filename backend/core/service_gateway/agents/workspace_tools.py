@@ -932,7 +932,7 @@ def workspace_tools(
     shell_on = bool(
         settings.local_mode
         and session_key
-        and state.get("repo_provider") == LOCAL_PROVIDER
+        and state.get("repo_provider") == LOCAL_REPO_PROVIDER
         and str(state.get("repo_path") or "").strip()
     )
     shell: list[FolderWorkspace | str] = []

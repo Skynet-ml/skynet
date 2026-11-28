@@ -8,7 +8,7 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 # carries the optimizer itself, so this is the only contract the two share; bump
 # it whenever either shape changes, even by an added field: the image silently
 # drops a field its models do not know (``test_sandbox_protocol`` pins the shapes).
-SANDBOX_PROTOCOL = 23
+SANDBOX_PROTOCOL = 24
 
 # Only the current protocol is readable: every older image must be rebuilt. The
 # notes below record what each older protocol added. Protocol 13 added
@@ -59,6 +59,11 @@ SANDBOX_PROTOCOL = 23
 # ``target.repo.path``: a folder on this computer as the run's source. An image
 # at 22 refuses the ``local`` provider when it validates the request, so the
 # worker reads no image before 23.
+# Protocol 24 (SKY-997) added ``target.repo.draft_deleted``: the folder files
+# the setup agent's shell deleted. The new field changed the request shape.
+# Staging removes the files from the staged tree and removes
+# ``draft_deleted`` before the image gets the request, so an older image never
+# sees it.
 READABLE_PROTOCOLS = frozenset({SANDBOX_PROTOCOL})
 
 # The first protocol whose image writes the run end verdict of ``[outcome]``.
