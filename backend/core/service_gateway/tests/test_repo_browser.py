@@ -202,6 +202,18 @@ def local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "local_mode", True)
 
 
+def _files(root: Path) -> set[str]:
+    """List a folder's files as the browser does, for a direct ``read_folder_text`` call.
+
+    Args:
+        root: The folder.
+
+    Returns:
+        The file paths from the folder root.
+    """
+    return {str(e["path"]) for e in folder_entries(root, None)[0] if e.get("type") == "file"}
+
+
 def _folder(root: Path, files: dict[str, str]) -> Path:
     """Write files under a folder.
 
@@ -330,7 +342,7 @@ def test_a_local_read_refuses_a_path_that_leaves_the_folder(tmp_path: Path, path
     root = _folder(tmp_path / "repo", {"src/app.py": "x = 1\n"})
 
     with pytest.raises(FolderReadRefusedError):
-        read_folder_text(root, path, 100)
+        read_folder_text(root, path, 100, _files(root))
 
 
 @pytest.mark.usefixtures("local_mode")
@@ -346,7 +358,7 @@ def test_a_local_folder_never_follows_a_link(tmp_path: Path) -> None:
     assert _paths(folder_entries(root)[0]) == ["src/", "src/app.py", "src/inner.py"]
     for path in ("leak.txt", "leakdir/x.txt", "srclink/app.py", "alias.py"):
         with pytest.raises(FolderReadRefusedError, match="goes through a link"):
-            read_folder_text(root, path, 100)
+            read_folder_text(root, path, 100, _files(root))
     browser = LocalFolderBrowser(root)
     assert browser.read_repo_file("leak.txt") == {
         "error": "No file named 'leak.txt' in the folder. Check the tree for the exact path."
@@ -395,7 +407,7 @@ def test_a_cut_listing_never_reads_a_file_the_filter_drops(monkeypatch: pytest.M
     assert browser.read_unmetered("c.py", 100) == ("", False)
     assert "error" in browser.read_repo_file("ascent.toml")
     with pytest.raises(DomainError):
-        read_folder_text(root, "ascent.toml", 100)
+        read_folder_text(root, "ascent.toml", 100, _files(root))
 
 
 @pytest.mark.usefixtures("local_mode")
@@ -432,9 +444,9 @@ def test_a_local_folder_never_returns_env_file_content(tmp_path: Path) -> None:
     assert _paths(folder_entries(root)[0]) == ["app.py"]
     for path in (".env", "./.env", ".Env.local", ".envs/prod.txt"):
         with pytest.raises(FolderReadRefusedError, match=r"\.env file"):
-            read_folder_text(root, path, 100)
+            read_folder_text(root, path, 100, _files(root))
     with pytest.raises(FolderReadRefusedError, match="goes through a link"):
-        read_folder_text(root, "settings.txt", 100)
+        read_folder_text(root, "settings.txt", 100, _files(root))
     browser = LocalFolderBrowser(root)
     browser.preload_key_files()
     assert "SECRET" not in browser.summary()
@@ -447,10 +459,10 @@ def test_a_local_read_of_a_missing_file_is_not_found_and_a_long_file_is_cut(tmp_
     root = _folder(tmp_path, {"big.txt": "abcdef"})
 
     with pytest.raises(DomainError) as missing:
-        read_folder_text(root, "none.txt", 100)
+        read_folder_text(root, "none.txt", 100, _files(root))
     assert (missing.value.code, missing.value.status_code) == ("connectors.not_found", 404)
-    assert read_folder_text(root, "big.txt", 4) == ("abcd", True)
-    assert read_folder_text(root, "big.txt", 6) == ("abcdef", False)
+    assert read_folder_text(root, "big.txt", 4, _files(root)) == ("abcd", True)
+    assert read_folder_text(root, "big.txt", 6, _files(root)) == ("abcdef", False)
 
 
 def test_a_local_folder_is_refused_outside_local_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -460,7 +472,7 @@ def test_a_local_folder_is_refused_outside_local_mode(monkeypatch: pytest.Monkey
 
     for read in (
         lambda: LocalFolderBrowser(root),
-        lambda: read_folder_text(root, "app.py", 9),
+        lambda: read_folder_text(root, "app.py", 9, _files(root)),
     ):
         with pytest.raises(FolderReadRefusedError, match="only in the desktop app"):
             read()
@@ -540,7 +552,7 @@ def test_a_linked_folder_root_is_refused_and_a_linked_parent_is_not(tmp_path: Pa
     with pytest.raises(FolderReadRefusedError, match="The folder is a link"):
         LocalFolderBrowser(tmp_path / "shop-link")
     with pytest.raises(FolderReadRefusedError, match="The folder is a link"):
-        read_folder_text(tmp_path / "shop-link", "app.py", 100)
+        read_folder_text(tmp_path / "shop-link", "app.py", 100, {"app.py"})
     assert LocalFolderBrowser(tmp_path / "parent-link" / "shop").branch == folder_source_id(root)
 
 
@@ -572,6 +584,23 @@ def test_a_folder_above_the_read_limit_is_refused_as_too_much_for_the_agent(
         LocalFolderBrowser(root)
 
     assert "for a run" not in str(refused.value)
+
+
+@pytest.mark.usefixtures("local_mode")
+def test_the_read_limit_refusal_names_the_real_limit_in_gigabytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The refusal shows the real limit as "1 GB", not as a count of megabytes."""
+    big = {"path": "big.bin", "type": "file", "size": repo_browser.LOCAL_FOLDER_READ_BYTES + 1}
+    monkeypatch.setattr(repo_browser, "folder_entries", lambda root, limit: ([big], False))
+
+    with pytest.raises(FolderReadRefusedError) as refused:
+        LocalFolderBrowser(tmp_path)
+
+    assert str(refused.value) == (
+        "The folder holds more than 1 GB of files, which is more than the setup agent can read. "
+        "Ask the user to pick a smaller folder."
+    )
 
 
 def test_a_git_source_names_itself_a_repository_and_a_local_one_a_folder() -> None:

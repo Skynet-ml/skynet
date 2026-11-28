@@ -556,14 +556,14 @@ def _folder_file(base: Path, path: str) -> str:
     return "/".join(parts)
 
 
-def read_folder_text(root: str | Path, path: str, limit: int, files: Collection[str] | None = None) -> tuple[str, bool]:
+def read_folder_text(root: str | Path, path: str, limit: int, files: Collection[str]) -> tuple[str, bool]:
     """Read one text file of a local folder, like a host's ``read_text_file``.
 
     Args:
         root: The folder's absolute path.
         path: The file path from the folder root.
         limit: Most bytes to return.
-        files: The folder's full listing of files; ``None`` lists the folder again.
+        files: The folder's full listing of files.
 
     Returns:
         The text (bad UTF-8 replaced) and whether it was cut at ``limit``.
@@ -575,8 +575,6 @@ def read_folder_text(root: str | Path, path: str, limit: int, files: Collection[
     """
     base = _folder_root(root)
     rel = _folder_file(base, path)
-    if files is None:
-        files = {str(e["path"]) for e in folder_entries(base, None)[0] if e.get("type") == "file"}
     # Only what the run would copy is readable, so a gitignored or skipped file stays out (SKY-990's filter).
     if rel not in files:
         raise DomainError("connectors.not_found", status=404, provider=_FOLDER_LABEL)
@@ -610,7 +608,7 @@ class LocalFolderBrowser(RepoBrowser):
         # Hashing reads every byte, so a folder too large to read is refused before the first read.
         if sum(int(e.get("size", 0)) for e in full) > LOCAL_FOLDER_READ_BYTES:
             raise FolderReadRefusedError(
-                f"The folder holds more than {LOCAL_FOLDER_READ_BYTES // (1024 * 1024)} MB of files, "
+                f"The folder holds more than {LOCAL_FOLDER_READ_BYTES / 1024**3:g} GB of files, "
                 "which is more than the setup agent can read. Ask the user to pick a smaller folder."
             )
         entries, truncated = full[:FOLDER_ENTRIES_MAX], len(full) > FOLDER_ENTRIES_MAX

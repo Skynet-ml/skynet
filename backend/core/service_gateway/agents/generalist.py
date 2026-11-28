@@ -2797,7 +2797,7 @@ _LOCAL_FOLDER = (
     "are draft files, and the folder stays unchanged. The user applies the run's result to the folder with "
     "Apply in the app. Never set ``repository`` in a local run: it turns the run into a git run."
 )
-_LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric"})
+_LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric", "check"})
 SCREEN_FOCUS: dict[str, str] = {
     "brief": (
         "Brief: get what the run should improve, in the user's words, into ``task_objective``, and any "

@@ -616,7 +616,7 @@ def test_the_order_hint_asks_a_local_run_for_the_folder_not_a_repository() -> No
     assert "repo_path" in patched
 
 
-@pytest.mark.parametrize("screen", ["artifact", "metric"])
+@pytest.mark.parametrize("screen", ["artifact", "metric", "check"])
 def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(
     monkeypatch: pytest.MonkeyPatch, screen: str
 ) -> None:
