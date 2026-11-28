@@ -2787,7 +2787,7 @@ _LOCAL_FOLDER = (
     "user's computer, not a repository on a host. A local folder has no branch, no pull request and no host "
     "link: never offer one, and never ask the user to connect a host. You only read the folder; your writes "
     "are draft files, and the folder stays unchanged. The user applies the run's result to the folder with "
-    "Apply in the app."
+    "Apply in the app. Never set ``repository`` in a local run: it turns the run into a git run."
 )
 _LOCAL_FOLDER_SCREENS = frozenset({"artifact", "metric"})
 SCREEN_FOCUS: dict[str, str] = {

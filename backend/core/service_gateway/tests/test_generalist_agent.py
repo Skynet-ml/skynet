@@ -612,6 +612,7 @@ def test_a_local_folder_run_offers_no_branch_pull_request_or_host_link(
     assert "never ask the user to connect a host" in focus
     assert "the folder stays unchanged" in focus
     assert "with Apply in the app" in focus
+    assert "Never set ``repository`` in a local run: it turns the run into a git run." in focus
 
 
 @pytest.mark.parametrize("screen", ["artifact", "metric"])
@@ -621,6 +622,7 @@ def test_a_web_run_prompt_has_no_local_folder_text(monkeypatch: pytest.MonkeyPat
     focus = screen_signature(screen).instructions
     assert "local folder" not in focus
     assert "``repo_provider`` is ``local``" not in focus
+    assert "Never set ``repository`` in a local run" not in focus
 
 
 @pytest.mark.parametrize("screen", ["artifact", "metric"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -1801,6 +1802,27 @@ async def test_the_rules_file_guard_reads_the_ascent_toml_of_a_local_folder(
     assert list(result) == ["error"]
     assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
     assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file with no read permission")
+async def test_an_unreadable_ascent_toml_in_a_local_folder_names_no_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A local folder has no host, so a refused read of its ``ascent.toml`` names the folder."""
+    state = _local_folder(monkeypatch, tmp_path)
+    toml = tmp_path / "ascent.toml"
+    toml.write_text(ASCENT_TOML_EXAMPLE, encoding="utf-8")
+    toml.chmod(0)
+    try:
+        result = await _tools(state, _TurnAuthoringFlag())[WRITE_FILE_TOOL].acall(
+            path="ascent.toml", text=_NO_RULES_TOML
+        )
+    finally:
+        toml.chmod(0o644)
+
+    assert "host" not in result["error"]
+    assert "the folder refused the read." in result["error"]
 
 
 def test_the_tool_texts_say_folder_for_a_local_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

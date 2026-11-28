@@ -784,7 +784,8 @@ def workspace_tools(
         except Exception as exc:  # a failed host read refuses the write, not the turn
             logger.info("Setup agent cannot read ascent.toml of %s: %s", browser.repository, type(exc).__name__)
             # A failed read is not cached, so a retry can work.
-            return {"error": "the host refused the read.", "advice": "Try again, or ask the user."}
+            refuser = "folder" if browser.provider == LOCAL_PROVIDER else "host"
+            return {"error": f"the {refuser} refused the read.", "advice": "Try again, or ask the user."}
         if read is None:
             return ""
         text, truncated = read
