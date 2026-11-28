@@ -37,6 +37,7 @@ const {
   metricCommandText,
   repoBaseText,
   RUN_SECRETS_MAX,
+  EnvImportFailedError,
   TooManyRunSecretsError,
   UndecidedEnvClashesError,
   envSecretClashesState,
@@ -774,6 +775,7 @@ test("a local run imports the folder's .env with the Use .env picks and sends th
   const sent = await withLocalEnvImport(request, state.task.repo, async (path, replace) => {
     calls.push([path, replace]);
     return {
+      status: "found" as const,
       kept: ["B"],
       secrets: [
         { id: "s-a", name: "A" },
@@ -796,7 +798,7 @@ test("a repository run never imports a .env (SKY-994)", async () => {
   let called = false;
   const sent = await withLocalEnvImport(request, state.task.repo, async () => {
     called = true;
-    return { kept: [], secrets: [] };
+    return { status: "found" as const, kept: [], secrets: [] };
   });
   assert.equal(called, false);
   assert.equal(sent, request);
@@ -820,10 +822,11 @@ test("a local run with more secrets than a run takes fails with the count before
   const request = repoRunRequest(state, options)!;
   const many = Array.from({ length: RUN_SECRETS_MAX + 1 }, (_, i) => ({ id: `s-${i}`, name: `K_${i}` }));
   await assert.rejects(
-    withLocalEnvImport(request, state.task.repo, async () => ({ kept: [], secrets: many })),
+    withLocalEnvImport(request, state.task.repo, async () => ({ status: "found" as const, kept: [], secrets: many })),
     (err: unknown) => err instanceof TooManyRunSecretsError && err.count === RUN_SECRETS_MAX + 1,
   );
   const atLimit = await withLocalEnvImport(request, state.task.repo, async () => ({
+    status: "found" as const,
     kept: [],
     secrets: many.slice(0, RUN_SECRETS_MAX),
   }));
@@ -837,7 +840,7 @@ test("a late .env clash stops the run start, joins the draft and reaches the age
   let submitted = false;
   let failure: ReturnType<typeof envSubmitFailure> = null;
   try {
-    await withLocalEnvImport(request, state.task.repo, async () => ({ kept: ["A", "LATE"], secrets: [] }));
+    await withLocalEnvImport(request, state.task.repo, async () => ({ status: "found" as const, kept: ["A", "LATE"], secrets: [] }));
     submitted = true;
   } catch (err) {
     failure = envSubmitFailure(err, state.task.repo);
@@ -849,6 +852,31 @@ test("a late .env clash stops the run start, joins the draft and reaches the age
   assert.deepEqual(failure.repo!.envClashes, ["A", "LATE"]);
   assert.deepEqual(envSecretClashesState(failure.repo!), ["LATE"]);
   assert.equal(taskIssue({ ...state.task, repo: failure.repo! }), "submit.v2.repo.issue.env_clash");
+});
+
+test("a .env that the run start cannot read stops the run, and a missing one does not (SKY-994)", async () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [] };
+  const request = repoRunRequest(state, options)!;
+  for (const status of ["unreadable", "too_large", "unsafe"] as const) {
+    let submitted = false;
+    let failure: ReturnType<typeof envSubmitFailure> = null;
+    try {
+      await withLocalEnvImport(request, state.task.repo, async () => ({ status, kept: [], secrets: [] }));
+      submitted = true;
+    } catch (err) {
+      assert.ok(err instanceof EnvImportFailedError && err.status === status, status);
+      failure = envSubmitFailure(err, state.task.repo);
+    }
+    assert.equal(submitted, false, status);
+    assert.deepEqual(failure, { key: `submit.v2.repo.env.${status}`, params: {} });
+  }
+  const missing = await withLocalEnvImport(request, state.task.repo, async () => ({
+    status: "missing" as const,
+    kept: [],
+    secrets: [],
+  }));
+  assert.equal(missing.target.repo!.secrets?.length ?? 0, 0);
 });
 
 test("a run start over the secret limit shows the count and keeps the draft (SKY-994)", () => {
@@ -876,7 +904,7 @@ test("a local run with an undecided .env clash does not import or submit (SKY-99
   await assert.rejects(
     withLocalEnvImport(request, state.task.repo, async () => {
       called = true;
-      return { kept: [], secrets: [] };
+      return { status: "found" as const, kept: [], secrets: [] };
     }),
     (err: unknown) => err instanceof UndecidedEnvClashesError && err.names.join() === "B",
   );
@@ -891,6 +919,7 @@ test("a clash that the .env got after the preview stops the run with its name (S
   const request = repoRunRequest(state, options)!;
   await assert.rejects(
     withLocalEnvImport(request, state.task.repo, async () => ({
+      status: "found" as const,
       kept: ["A", "LATE"],
       secrets: [
         { id: "s-a", name: "A" },

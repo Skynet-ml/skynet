@@ -6,6 +6,7 @@
  * no artifact or run code, and carries cases only when the interview found
  * the run needs data.
  */
+import type { LocalEnvStatus } from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
 import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
 import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig } from "@/shared/types/api";
@@ -252,13 +253,31 @@ export class UndecidedEnvClashesError extends Error {
   }
 }
 
+/** A local run whose folder `.env` the run start could not read, so no secret came from it (SKY-994). */
+export class EnvImportFailedError extends Error {
+  readonly status: "unsafe" | "too_large" | "unreadable";
+
+  /**
+   * Keep the import status for the message.
+   *
+   * Args:
+   *   status: Why the import read no `.env`.
+   */
+  constructor(status: "unsafe" | "too_large" | "unreadable") {
+    super(`submit.v2.repo.env.${status}`);
+    this.status = status;
+    this.name = "EnvImportFailedError";
+  }
+}
+
 /**
  * Import the folder's `.env` at a local run start and add its secrets to the run.
  *
  * Every clashing name needs a pick first: Use .env replaces the saved value,
  * Keep saved keeps it. A clash that the `.env` got after the preview stops the
- * run too; the import then saved no value for it. A git run imports nothing
- * (SKY-994).
+ * run too; the import then saved no value for it. A `.env` that the run
+ * start cannot read stops the run, so the run never starts without its secrets.
+ * A git run imports nothing (SKY-994).
  *
  * Args:
  *   request: The run request.
@@ -270,6 +289,7 @@ export class UndecidedEnvClashesError extends Error {
  *
  * Throws:
  *   UndecidedEnvClashesError: When a clashing name has no pick.
+ *   EnvImportFailedError: When the import cannot read the `.env`.
  *   TooManyRunSecretsError: When the run would send more than `RUN_SECRETS_MAX` secrets.
  */
 export async function withLocalEnvImport(
@@ -278,12 +298,17 @@ export async function withLocalEnvImport(
   importEnv: (
     path: string,
     replace: string[],
-  ) => Promise<{ kept: readonly string[]; secrets: ReadonlyArray<{ id: string; name: string }> }>,
+  ) => Promise<{
+    status: LocalEnvStatus;
+    kept: readonly string[];
+    secrets: ReadonlyArray<{ id: string; name: string }>;
+  }>,
 ): Promise<BlackboxRunRequest> {
   if (!isLocalRepo(repo)) return request;
   const undecided = undecidedEnvClashes(repo);
   if (undecided.length > 0) throw new UndecidedEnvClashesError(undecided);
   const imported = await importEnv((repo.localPath ?? "").trim(), envReplaceNames(repo));
+  if (imported.status !== "found" && imported.status !== "missing") throw new EnvImportFailedError(imported.status);
   const late = imported.kept.filter((name) => repo.envChoices?.[name] !== "keep");
   if (late.length > 0) throw new UndecidedEnvClashesError(late);
   const sent = withEnvSecrets(request, imported.secrets);
@@ -313,6 +338,7 @@ export function envSubmitFailure(
     const envClashes = [...new Set([...(repo.envClashes ?? []), ...err.names])];
     return { key: "submit.v2.repo.env.undecided", params: { names: err.names.join(", ") }, repo: { ...repo, envClashes } };
   }
+  if (err instanceof EnvImportFailedError) return { key: `submit.v2.repo.env.${err.status}`, params: {} };
   if (err instanceof TooManyRunSecretsError)
     return { key: "submit.v2.repo.env.too_many", params: { count: err.count, limit: RUN_SECRETS_MAX } };
   return null;

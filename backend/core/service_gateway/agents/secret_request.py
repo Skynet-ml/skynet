@@ -2,12 +2,12 @@
 
 The agent names the secret, says what it is for and which host gets it, or
 gives no host for a secret that a local folder's ``.env`` names; Skynet uses a
-secret with no host only then (SKY-994). The call pauses on the approval flow, and the chat shows a password card instead
-of the usual approval card. The browser saves the typed value with
-``PUT /secrets`` and only then confirms. The value never passes through this
-module: the tool's arguments, its stream events and its result carry the
-name, the purpose and the host only, so no model, log or stored chat turn
-ever holds it.
+secret with no host only then (SKY-994). The call pauses on the approval flow,
+and the chat shows a password card instead of the usual approval card. The
+browser saves the typed value with ``PUT /secrets`` and only then confirms.
+The value never passes through this module: the tool's arguments, its stream
+events and its result carry the name, the purpose and the host only, so no
+model, log or stored chat turn ever holds it.
 """
 
 from __future__ import annotations
