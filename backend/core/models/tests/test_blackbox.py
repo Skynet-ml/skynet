@@ -366,6 +366,17 @@ def test_a_local_source_is_refused_when_it_cannot_run_here(
         BlackboxRepoSource.model_validate({**_local_source(str(tmp_path)), **fields})
 
 
+def test_a_linked_local_folder_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """Staging never follows a linked root, so the request check refuses one too."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", True)
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "alias").symlink_to(real)
+
+    with pytest.raises(ValidationError, match="does not exist or is not a folder"):
+        BlackboxRepoSource.model_validate(_local_source(str(tmp_path / "alias")))
+
+
 def test_a_stored_local_run_loads_after_its_folder_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     """History still loads on another deployment or after the folder moved."""
     monkeypatch.setattr(blackbox_models.settings, "local_mode", False)

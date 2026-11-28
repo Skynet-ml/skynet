@@ -79,7 +79,7 @@ def test_the_walk_skips_every_link(tmp_path: Path) -> None:
 
     assert _names(root) == ["src", "src/main.py"]
     with pytest.raises(OSError):
-        folder_tree.file_digest(root / "inside.py")
+        folder_tree.file_digest(root, "inside.py")
 
 
 def test_a_linked_root_is_refused(tmp_path: Path) -> None:
@@ -172,10 +172,10 @@ def test_the_digest_is_cached_until_the_file_changes(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(folder_tree.hashlib, "file_digest", counting)
 
-    first = folder_tree.file_digest(path)
-    second = folder_tree.file_digest(path)
+    first = folder_tree.file_digest(tmp_path, "big.bin")
+    second = folder_tree.file_digest(tmp_path, "big.bin")
     path.write_text("b" * 101)
-    third = folder_tree.file_digest(path)
+    third = folder_tree.file_digest(tmp_path, "big.bin")
 
     assert first == second == hashlib.sha1(b"a" * 100, usedforsecurity=False).digest()
     assert third == hashlib.sha1(b"b" * 101, usedforsecurity=False).digest()
@@ -259,7 +259,29 @@ def test_the_execute_bit_moves_the_id_even_with_a_cached_digest(tmp_path: Path) 
     script.chmod(0o755)
     os.utime(script, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
 
-    assert folder_tree.file_digest(script).endswith(folder_tree.EXEC_MARKER)
+    assert folder_tree.file_digest(root, "run.sh").endswith(folder_tree.EXEC_MARKER)
     assert folder_tree.folder_source_id(root) != plain
     script.chmod(0o640)
     assert folder_tree.folder_source_id(root) == plain
+
+
+def test_the_digest_never_leaves_the_folder_through_a_parent_swapped_for_a_link(tmp_path: Path) -> None:
+    """A listed subfolder that becomes a link to an outside folder is refused, not followed."""
+    root = _write(tmp_path / "app", {"sub/hosts": "inside\n"})
+    outside = _write(tmp_path / "secret", {"hosts": "outside\n"})
+    (root / "sub" / "hosts").unlink()
+    (root / "sub").rmdir()
+    (root / "sub").symlink_to(outside)
+
+    with pytest.raises(OSError):
+        folder_tree.file_digest(root, "sub/hosts")
+
+
+def test_the_digest_refuses_a_pipe_without_blocking(tmp_path: Path) -> None:
+    """A file swapped for a pipe with no writer is refused at once."""
+    root = tmp_path / "app"
+    root.mkdir()
+    os.mkfifo(root / "a.txt")
+
+    with pytest.raises(OSError, match="Not a regular file"):
+        folder_tree.file_digest(root, "a.txt")

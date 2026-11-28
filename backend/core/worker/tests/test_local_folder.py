@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import tarfile
+import threading
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -260,7 +261,7 @@ def _pack_while_changing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change
     root = tmp_path / "app"
     root.mkdir()
     (root / "big.bin").write_bytes(b"a" * 65_536)
-    monkeypatch.setattr(local_folder, "open_no_follow", lambda path: _ChangingFile(path, change))
+    monkeypatch.setattr(local_folder, "open_no_follow", lambda folder, rel: _ChangingFile(folder / rel, change))
     workdir = tmp_path / "w"
     workdir.mkdir()
     snapshot = local_folder.snapshot_folder(root, workdir)
@@ -322,3 +323,79 @@ def test_the_pack_keeps_only_the_execute_bit_and_the_id_follows_it(tmp_path: Pat
     assert modes == {"lib": 0o755, "lib/a.py": 0o644, "run.sh": 0o755}
     assert first.commit != second.commit
     assert second.commit == folder_tree.folder_source_id(root)
+
+
+def _pack_after_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: Callable[[Path], None]) -> Path:
+    """Change a folder between its listing and its pack.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch fixture.
+        swap: Changes the folder right after the listing.
+
+    Returns:
+        The work folder that the pack writes into.
+    """
+    real = local_folder.folder_entries
+
+    def list_then_swap(root: Path, limit: int | None = None) -> tuple:
+        """List the folder, then change it before the pack reads it."""
+        listed = real(root, limit=limit)
+        swap(root)
+        return listed
+
+    monkeypatch.setattr(local_folder, "folder_entries", list_then_swap)
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    return workdir
+
+
+def test_a_subfolder_swapped_for_a_link_during_the_pack_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listed subfolder that becomes a link to an outside folder never leads the pack out."""
+    root = _write(tmp_path / "app", {"sub/hosts": "inside\n"})
+    outside = _write(tmp_path / "secret", {"hosts": "outside\n"})
+
+    def swap(folder: Path) -> None:
+        """Turn the listed subfolder into a link out of the folder."""
+        (folder / "sub" / "hosts").unlink()
+        (folder / "sub").rmdir()
+        (folder / "sub").symlink_to(outside)
+
+    workdir = _pack_after_swap(tmp_path, monkeypatch, swap)
+
+    with pytest.raises(LocalFolderError, match="could not be read"):
+        local_folder.snapshot_folder(root, workdir)
+    assert not (workdir / "tree.tgz").exists()
+
+
+def test_a_file_swapped_for_a_pipe_during_the_pack_is_refused_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listed file that becomes a pipe with no writer is refused at once, not waited on."""
+    root = _write(tmp_path / "app", {"a.txt": "x"})
+
+    def swap(folder: Path) -> None:
+        """Turn the listed file into a pipe."""
+        (folder / "a.txt").unlink()
+        os.mkfifo(folder / "a.txt")
+
+    workdir = _pack_after_swap(tmp_path, monkeypatch, swap)
+    errors: list[BaseException] = []
+
+    def pack() -> None:
+        """Pack the folder and record its error."""
+        try:
+            local_folder.snapshot_folder(root, workdir)
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=pack, daemon=True)
+    worker.start()
+    worker.join(10)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], LocalFolderError)
+    assert "Not a regular file" in str(errors[0])

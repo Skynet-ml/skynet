@@ -326,7 +326,7 @@ def _pack(root: Path, entries: list[dict[str, Any]], archive: Path) -> str:
 
     Raises:
         LocalFolderError: When the archive grows past ``MAX_ARCHIVE_BYTES``.
-        OSError: When a path cannot be read, or turned into a link since the listing.
+        OSError: When a path cannot be read, is no longer a regular file, or has a link on it since the listing.
     """
     with (
         archive.open("wb") as raw,
@@ -335,14 +335,13 @@ def _pack(root: Path, entries: list[dict[str, Any]], archive: Path) -> str:
     ):
         hashed: list[tuple[str, bytes]] = []
         for entry in entries:
-            path = root / entry["path"]
             info = tarfile.TarInfo(entry["path"])
             if entry["type"] == "dir":
                 info.type = tarfile.DIRTYPE
                 info.mode = _DIR_MODE
                 packed.addfile(info)
             else:
-                with open_no_follow(path) as body:
+                with open_no_follow(root, entry["path"]) as body:
                     status = os.fstat(body.fileno())
                     executable = is_executable(status.st_mode)
                     info.mode = _EXEC_MODE if executable else _FILE_MODE

@@ -13,10 +13,12 @@ always leaves out git data, installed packages, Python virtual environments,
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import os
 import re
+import stat
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -160,7 +162,7 @@ def folder_source_id(root: str | os.PathLike[str], entries: list[dict[str, Any]]
         if entry.get("type") != "file":
             continue
         try:
-            digest = file_digest(base / entry["path"])
+            digest = file_digest(base, str(entry["path"]))
         except OSError:
             # A file that changed or went away since the listing still moves the id.
             digest = UNREADABLE_DIGEST
@@ -184,26 +186,28 @@ def source_id(files: Iterable[tuple[str, bytes]]) -> str:
     return digest.hexdigest()
 
 
-def file_digest(path: Path) -> bytes:
+def file_digest(root: Path, rel: str) -> bytes:
     """Hash one file's content and execute bit, reusing the digest while the file's stat stays the same.
 
     The setup agent asks for the id on every turn, so a big file is hashed
     only once until it changes.
 
     Args:
-        path: The file; a link is refused, not followed.
+        root: The folder.
+        rel: The file's ``/``-joined path below ``root``; no link on the way is followed.
 
     Returns:
         The 20-byte SHA-1 digest of the content, then :data:`EXEC_MARKER`
         when the file has an execute bit.
 
     Raises:
-        OSError: When the file cannot be opened or read, or is a link.
+        OSError: When the file cannot be opened or read, is not a regular
+            file, or a link is on its path below ``root``.
     """
-    with open_no_follow(path) as body:
+    with open_no_follow(root, rel) as body:
         info = os.fstat(body.fileno())
         # A chmod, or a rewrite that restores the old time, changes only the ctime.
-        key = (str(path), info.st_size, info.st_mtime_ns, info.st_ino, info.st_ctime_ns)
+        key = (str(root / rel), info.st_size, info.st_mtime_ns, info.st_ino, info.st_ctime_ns)
         with _digests_lock:
             cached = _digests.get(key)
         if cached is not None:
@@ -218,19 +222,43 @@ def file_digest(path: Path) -> bytes:
     return digest
 
 
-def open_no_follow(path: Path) -> io.BufferedReader:
-    """Open a file for reading without following a link at its last part.
+def open_no_follow(root: Path, rel: str) -> io.BufferedReader:
+    """Open a regular file below a folder for reading, without following a link at any part.
+
+    Each folder on the way is opened from the one above it, so a listed
+    folder that became a link since the listing cannot lead out of ``root``.
 
     Args:
-        path: The file.
+        root: The folder; a link at its last part is refused.
+        rel: The file's ``/``-joined path below ``root``.
 
     Returns:
         The open file; the caller closes it.
 
     Raises:
-        OSError: When the file cannot be opened, or is a link.
+        OSError: When a part cannot be opened or is a link, or the file is
+            not a regular file.
     """
-    return os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb")
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    folder_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | no_follow
+    parts = rel.split("/")
+    folder = os.open(root, folder_flags)
+    try:
+        for part in parts[:-1]:
+            below = os.open(part, folder_flags, dir_fd=folder)
+            os.close(folder)
+            folder = below
+        # Without O_NONBLOCK, a pipe swapped in since the listing blocks the open until a writer comes.
+        handle = os.open(parts[-1], os.O_RDONLY | no_follow | getattr(os, "O_NONBLOCK", 0), dir_fd=folder)
+    finally:
+        os.close(folder)
+    try:
+        if not stat.S_ISREG(os.fstat(handle).st_mode):
+            raise OSError(errno.EINVAL, "Not a regular file", str(root / rel))
+        return os.fdopen(handle, "rb")
+    except BaseException:
+        os.close(handle)
+        raise
 
 
 def _visit(

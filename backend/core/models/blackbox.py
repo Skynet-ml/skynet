@@ -442,7 +442,7 @@ class BlackboxRepoSource(BaseModel):
         Raises:
             ValueError: When a hosted source names a path, or a local source has
                 no absolute path, names a branch, runs outside local mode, or
-                its path is not an existing folder.
+                its path is not an existing folder or is a link.
         """
         if self.provider != LOCAL_REPO_PROVIDER:
             if self.path is not None:
@@ -457,7 +457,8 @@ class BlackboxRepoSource(BaseModel):
             return self
         if not settings.local_mode:
             raise ValueError(LOCAL_FOLDER_ONLY_HERE)
-        if not Path(self.path).is_dir():
+        # Staging never follows a linked root, so a link is refused here too.
+        if Path(self.path).is_symlink() or not Path(self.path).is_dir():
             raise ValueError(f"The folder {self.path} does not exist or is not a folder.")
         return self
 
