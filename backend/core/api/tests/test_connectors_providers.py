@@ -47,6 +47,7 @@ from ...connectors import (
 )
 from ...connectors.registry import OAUTH_PROVIDERS, oauth_config_problems
 from ...connectors.vault import ConnectorSecret, ConnectorVault
+from ...local import folder_tree
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ...storage.models import UserConnectorModel
 from ..auth import get_authenticated_user
@@ -2112,6 +2113,77 @@ def test_local_folder_file_reads_text_and_flags_the_rest(local_folder: Path, mon
     assert read("gone.py") == {**flags, "path": "gone.py", "missing": True}
     assert read("ignored.txt") == {**flags, "path": "ignored.txt", "missing": True}
     assert read(".git/config") == {**flags, "path": ".git/config", "missing": True}
+
+
+def test_local_folder_file_keeps_a_real_replacement_char_as_text(local_folder: Path) -> None:
+    """Valid UTF-8 that holds a real U+FFFD reads as text, as the GitHub route decodes strictly (SKY-1001)."""
+    client, _ = _make_client()
+    (local_folder / "fffd.txt").write_text("bad \ufffd char\n", encoding="utf-8")
+    response = client.get("/connectors/local/file", params={"path": str(local_folder), "file": "fffd.txt"})
+    assert response.status_code == 200, response.text
+    assert response.json()["binary"] is False
+    assert response.json()["text"] == "bad \ufffd char\n"
+
+
+def test_local_folder_file_reads_without_a_full_walk(local_folder: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two file reads walk the folder zero times: each read checks only its own path (SKY-1001)."""
+    client, _ = _make_client()
+    walks: list[str] = []
+    visit = folder_tree._visit
+
+    def counted_visit(folder: Path, rel: str, *args: Any) -> bool:
+        """Count each top-level walk, then walk as before."""
+        if not rel:
+            walks.append(str(folder))
+        return visit(folder, rel, *args)
+
+    monkeypatch.setattr(folder_tree, "_visit", counted_visit)
+    for file in ("src/app.py", "README.md"):
+        response = client.get("/connectors/local/file", params={"path": str(local_folder), "file": file})
+        assert response.status_code == 200, response.text
+        assert response.json()["text"] is not None
+    assert walks == []
+
+
+def test_local_folder_file_serves_only_what_the_full_listing_keeps(local_folder: Path) -> None:
+    """The one-path check agrees with the full walk for kept, ignored, skipped and case-changed paths."""
+    (local_folder / "node_modules").mkdir()
+    (local_folder / "node_modules" / "dep.js").write_text("dep\n")
+    (local_folder / "venv").mkdir()
+    (local_folder / "venv" / "pyvenv.cfg").write_text("home = /usr\n")
+    (local_folder / "venv" / "lib.py").write_text("lib\n")
+    (local_folder / "src" / ".gitignore").write_text("*.log\n")
+    (local_folder / "src" / "debug.log").write_text("log\n")
+    (local_folder / "src" / "nested").mkdir()
+    (local_folder / "src" / "nested" / "run.log").write_text("log\n")
+    (local_folder / "src" / "nested" / "keep.py").write_text("keep\n")
+    (local_folder / ".DS_Store").write_bytes(b"os")
+    listed, _ = folder_tree.folder_entries(local_folder, None)
+    files = {str(entry["path"]) for entry in listed if entry["type"] == "file"}
+    candidates = [
+        *files,
+        "ignored.txt",
+        "IGNORED.TXT",
+        "Src/App.py",
+        "node_modules/dep.js",
+        "venv/lib.py",
+        "src/debug.log",
+        "src/nested/run.log",
+        ".DS_Store",
+        ".env",
+        "linked.txt",
+        "src",
+        "src/",
+        "src//app.py",
+        "./README.md",
+    ]
+    for candidate in candidates:
+        assert folder_tree.is_listed_file(local_folder, candidate) is (candidate in files), candidate
+    client, _ = _make_client()
+    for candidate in ("IGNORED.TXT", "Src/App.py", "src/nested/run.log", "node_modules/dep.js"):
+        response = client.get("/connectors/local/file", params={"path": str(local_folder), "file": candidate})
+        assert response.status_code == 200, response.text
+        assert response.json()["missing"] is True, candidate
 
 
 @pytest.mark.parametrize(

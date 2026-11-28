@@ -25,7 +25,8 @@ import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-f
 import { workspaceTexts } from "../../lib/ide-workspace";
 import { metricCommandText } from "../../lib/repo-run";
 import { withScorerImports } from "../../lib/scorer-dependencies";
-import { METRIC_FILE, RUN_FILE, isLocalRepo, repoIssue } from "../../lib/wizard-v2";
+import { metricRepoSource } from "../../lib/metric-repo-source";
+import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
 import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
@@ -102,10 +103,11 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   const { task, workspace } = state;
 
   const repoDraft = !repoIssue(task.repo) ? task.repo : null;
-  const repoName = repoDraft?.repository.trim() ?? "";
-  const repoRef = repoDraft ? repoDraft.commit.trim() || repoDraft.branch.trim() : "";
-  const repoHost = repoDraft?.provider ?? "github";
-  const localPath = repoDraft && isLocalRepo(repoDraft) ? (repoDraft.localPath ?? "").trim() : "";
+  const source = metricRepoSource(repoDraft);
+  const localPath = source?.kind === "local" ? source.folder : "";
+  const repoName = source?.kind === "host" ? source.repository : "";
+  const repoRef = source?.kind === "host" ? source.ref : "";
+  const repoHost = source?.kind === "host" ? source.host : "github";
   const repoFiles = React.useMemo(
     () =>
       localPath

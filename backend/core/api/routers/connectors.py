@@ -37,7 +37,7 @@ from ...connectors.transport import label
 from ...connectors.vault import ConnectorSecret, ConnectorVault
 from ...local import connector_relay, hosted_link
 from ...local.folder_tree import FolderTreeError, folder_entries
-from ...service_gateway.agents.repo_browser import _folder_root, read_folder_text
+from ...service_gateway.agents.repo_browser import folder_root, read_folder_bytes
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..dataset_access import ShareRole
@@ -336,7 +336,7 @@ def local_folder(path: str) -> Path:
     if not settings.local_mode:
         raise DomainError("local.not_available", status=404)
     try:
-        return _folder_root(path)
+        return folder_root(path)
     except FolderTreeError:
         raise DomainError("connectors.invalid_ref", status=400) from None
 
@@ -1040,10 +1040,8 @@ def create_connectors_router(*, job_store) -> APIRouter:
         """
         base = local_folder(path)
         try:
-            # The reader serves only what the full listing keeps, as the run copies it.
-            listed, _ = folder_entries(base, None)
-            files = {str(e["path"]) for e in listed if e.get("type") == "file"}
-            text, cut = read_folder_text(base, file, GITHUB_FILE_MAX_BYTES, files)
+            # The reader checks this one path against the run's copy filter, so a click never walks the whole folder.
+            content, cut = read_folder_bytes(base, file, GITHUB_FILE_MAX_BYTES)
         except DomainError as error:
             if error.code != "connectors.not_found":
                 raise
@@ -1052,8 +1050,12 @@ def create_connectors_router(*, job_store) -> APIRouter:
             raise DomainError("connectors.invalid_ref", status=400) from None
         if cut:
             return GithubFileResponse(path=file, too_large=True)
-        # The reader replaces bad UTF-8 with U+FFFD, so a replaced byte marks the file as binary.
-        if "\x00" in text or "\ufffd" in text:
+        # Strict decoding, as the GitHub route does, so a real U+FFFD in valid UTF-8 stays text.
+        if b"\x00" in content:
+            return GithubFileResponse(path=file, binary=True)
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
             return GithubFileResponse(path=file, binary=True)
         return GithubFileResponse(path=file, text=text)
 
