@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.hardening import HardeningJobModel
+from ...storage.models import JobModel
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore
 from ...storage.tree_purge import TreePurgeError
 from ...worker.local_folder import FRESH_PACK_SECONDS, kept_snapshot
@@ -408,6 +409,29 @@ def test_the_real_store_keeps_a_used_pack_and_deletes_it_with_the_last_run(sqlit
 
     assert client.delete("/optimizations/second").status_code == 200
     assert not kept.exists()
+
+
+@pytest.mark.parametrize(("fresh", "kept"), [(False, False), (True, True)], ids=["old-pack", "fresh-pack"])
+def test_the_real_store_drops_a_stuck_run_after_a_day(sqlite_store: SQLiteJobStore, fresh: bool, kept: bool) -> None:
+    """The SQL store's ``created_at`` ends the hold of a running run that never stored its commit."""
+    _sqlite_local_run(sqlite_store, "done", COMMIT)
+    sqlite_store.create_job("stuck")
+    sqlite_store.update_job(
+        "stuck",
+        status="running",
+        username="alice",
+        payload={"target": {"kind": "repo", "repo": {"provider": "local", "repository": "app", "path": "/tmp/app"}}},
+    )
+    with Session(sqlite_store.engine) as session:
+        session.query(JobModel).filter_by(optimization_id="stuck").update(
+            {"created_at": datetime.now(UTC) - UNPINNED_RUN_MAX_AGE - timedelta(hours=1)}
+        )
+        session.commit()
+    pack = _pack(COMMIT, fresh=fresh)
+
+    assert _client(sqlite_store).delete("/optimizations/done").status_code == 200
+
+    assert pack.is_file() is kept
 
 
 def _hardening_job(store: SQLiteJobStore, status: str, commit: str | None, age: timedelta = timedelta()) -> None:
