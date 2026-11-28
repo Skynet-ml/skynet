@@ -1547,19 +1547,23 @@ mcp = "eval/.mcp.json"
 - Secrets appear only as `${NAME}` in `headers`. A value that looks like a real key fails with a message that says
   to use a placeholder. The old `secrets = [...]` key fails with a message
   that says to move each name into `headers`.
-- An API that reads its key from the URL query gets a `query` table. Each
-  value must be exactly one `${NAME}`; any other value fails the setup
-  check. For `[run]` and `[metric]` calls, the relay adds the filled
-  parameters to the URL in the parent. It drops any parameter of the same
-  name that the code sends, and it removes the value from the answer, as
-  for headers. Only `[run]` and `[metric]` can list a service with a
-  `query`; the setup check refuses it in `[proposer]` and `[target.<name>]`.
+- A secret goes only in a request header, never in a URL (SKY-1000). A URL
+  goes into logs that Skynet cannot mask. Put the key of an API in
+  `headers`, also when the API can read it from the URL query.
 
   ```toml
   [services.geocode]
   url = "https://maps.googleapis.com/maps/api/geocode"
-  query = { key = "${GOOGLE_MAPS_KEY}" }
+  headers = { X-Goog-Api-Key = "${GOOGLE_MAPS_KEY}" }
   ```
+- A `query` table holds plain values only, such as `{ format = "json" }`.
+  A `${NAME}` in a `query` value fails the setup check. The relay adds the
+  parameters to the URL in the parent, and drops any parameter of the same
+  name that the code sends.
+- The relay refuses a request whose URL or body holds `${NAME}` for a
+  secret of the run, also to the secret's own host. The call fails with
+  "secret NAME can go only in a request header" and the host name. The run
+  record shows the call as `refused`.
 - Each secret goes to one host only: the host of the `url` that uses it. A
   file that sends the same `${NAME}` to two hosts fails.
 - A `[proposer] mcp` server with `headers` owns its host alone. The edge

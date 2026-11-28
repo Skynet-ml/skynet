@@ -22,7 +22,7 @@ from urllib.parse import quote, quote_plus, unquote, urlsplit
 import httpx
 
 from ..billing.budgets import BudgetError
-from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms, relay_request
+from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, _misplaced_secret, escaped_forms, relay_request
 from ..billing.guest_model_proxy import MCP_PATH, METHOD_HEADER, SERVICE_PATH
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.mcp_broker import _pinned_address, _PinnedTransport
@@ -39,13 +39,12 @@ from ..service_gateway.optimization.blackbox.repo_scorer import (
     _HOP_HEADERS,
     _HTTP_METHOD,
     _MCP_STREAMS,
-    _QUERY_MARK,
     _SERVICE_BODY_BYTES,
     _SERVICE_TIMEOUT_SECONDS,
     SETUP_ALLOWANCE_SECONDS,
     _AnswerTooLargeError,
+    _DeclaredQueryTransport,
     _json_object,
-    _SecretQueryTransport,
     _streamed,
     _under,
     _UnreachableError,
@@ -425,13 +424,14 @@ class McpRelay:
             base, target = httpx.URL(origin), httpx.URL(url)
         except httpx.InvalidURL:
             base = target = None
+        # A run secret in the path gets relay_request's header-only refusal and record, not a path error (SKY-1000).
+        secret_in_path = _misplaced_secret(path, b"", {*self._secrets, *self._bindings, *self._secret_hosts})
         if (
             not _HTTP_METHOD.fullmatch(method)
-            or _unsafe_path(path)
             or base is None
             or target is None
             or (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
-            or not _under(target, base)
+            or (secret_in_path is None and (_unsafe_path(path) or not _under(target, base)))
         ):
             return self._refused(recorder, name, 400, f"{label} got a malformed request or a path outside its url.")
         return self._request(
@@ -494,8 +494,8 @@ class McpRelay:
             kind: ``mcp`` for an MCP server, ``host`` for a service. A service
                 gets the guest's own headers, never streams, and answers with
                 its own headers.
-            query: A service's declared query parameters, with ``${SECRET}``
-                placeholders; the relay fills them and adds them to the url.
+            query: A service's declared plain query parameters; the relay
+                adds them to the url.
 
         Returns:
             The masked answer.
@@ -518,8 +518,7 @@ class McpRelay:
 
             Args:
                 address: The declared url.
-                filled: The declared headers with their secrets filled in, and
-                    the filled query parameters under ``_QUERY_MARK``.
+                filled: The declared headers with their secrets filled in.
                 content: The guest's body.
 
             Returns:
@@ -536,11 +535,9 @@ class McpRelay:
             except ValueError as error:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
-            secret_query = {key[1:]: value for key, value in filled.items() if key.startswith(_QUERY_MARK)}
-            filled = {key: value for key, value in filled.items() if not key.startswith(_QUERY_MARK)}
             transport: httpx.BaseTransport = _PinnedTransport(url, pinned)
-            if secret_query:
-                transport = _SecretQueryTransport(transport, secret_query)
+            if query:
+                transport = _DeclaredQueryTransport(transport, query)
             with contextlib.ExitStack() as stack:
                 stack.callback(transport.close)
                 client = stack.enter_context(
@@ -576,8 +573,7 @@ class McpRelay:
         try:
             answer = relay_request(
                 url=url,
-                # relay_request fills and masks headers only, so the query rides as marked headers (SKY-638).
-                headers={**declared, **{_QUERY_MARK + key: value for key, value in (query or {}).items()}},
+                headers=declared,
                 body=body,
                 user_secrets=self._secrets,
                 bindings=self._bindings,

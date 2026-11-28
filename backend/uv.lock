@@ -3316,11 +3316,11 @@ wheels = [
 
 [[package]]
 name = "openascent"
-version = "0.4.5"
+version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/bb/14/55378f78125a5b2b4d4e597774017ac85cfe05defe33f671fc9148589cef/openascent-0.4.5.tar.gz", hash = "sha256:b08a935f7a8f0e2f465b45169950d13899bbc9cc86e455610dce3ca64582855f", size = 92211, upload-time = "2026-11-21T03:50:19.113Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/71/2d/e41b97b78ae28646a2fa30e62aeda4c7eb91eed51d16972e19e9ae0a1687/openascent-0.4.6.tar.gz", hash = "sha256:055606e59fe3a05a98a18a65702be25377ec12afbc971dc47e39e48d4bbc665c", size = 92479, upload-time = "2026-11-27T23:44:19.796Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/c3/35d3aa614a5db93446a99f8960e8aef13ee072876b144bb5f8d993ac53c3/openascent-0.4.5-py3-none-any.whl", hash = "sha256:0f8e27473bd1688569e2ab30ede5504b544cca5945472b46ea71b958d7e7b899", size = 87026, upload-time = "2026-11-21T03:50:17.687Z" },
+    { url = "https://files.pythonhosted.org/packages/71/66/4b521856b6cb0c37d94010e520abef0af972e26675542036ad9dadf5e9af/openascent-0.4.6-py3-none-any.whl", hash = "sha256:54cc2e242aae2a9e22bd95e2e05d6f3fff63de63bf8e62fb042278b3d5e568ed", size = 87310, upload-time = "2026-11-27T23:44:18.541Z" },
 ]
 
 [[package]]
@@ -5592,7 +5592,7 @@ requires-dist = [
     { name = "networkx", marker = "extra == 'render'", specifier = ">=3" },
     { name = "novita-sandbox", marker = "extra == 'novita'", specifier = ">=2.1.4" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "openascent", specifier = "==0.4.5" },
+    { name = "openascent", specifier = "==0.4.6" },
     { name = "pgvector", specifier = ">=0.3" },
     { name = "pillow", marker = "extra == 'render'", specifier = ">=13.0.0" },
     { name = "pip", specifier = "==26.2.1" },

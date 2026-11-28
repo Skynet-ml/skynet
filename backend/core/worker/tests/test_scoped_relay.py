@@ -392,48 +392,106 @@ def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) 
     assert client.timeouts == []
 
 
-_QUERY_SECRET = "query-secret-value-6161"
+_HEADER_SECRET = "header-secret-value-6161"
 
 
-def test_a_proposer_service_gets_its_query_secret_and_the_box_never_sees_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The relay adds the filled ``?key=``, drops the guest's own ``key``, and masks it in the answer and record (SKY-638).
+def _geo_relay(monkeypatch: pytest.MonkeyPatch, seen: list[httpx.Request]) -> scoped_relay.McpRelay:
+    """Build a proposer relay to an in-memory ``geo`` service with a plain query and ``MAPS_KEY`` in a header.
+
+    Args:
+        monkeypatch: Sends the pinned request to the in-memory upstream.
+        seen: Gets each request the upstream receives.
+
+    Returns:
+        The relay.
+    """
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        """Echo the query and the key header the upstream got, in a header and the body."""
+        seen.append(request)
+        echoed = f"{request.url.query.decode('ascii')} {request.headers.get('x-goog-api-key', '')}"
+        return httpx.Response(200, headers={"X-Echo": echoed}, content=echoed.encode())
+
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    monkeypatch.setattr(scoped_relay, "_PinnedTransport", lambda url, pinned: httpx.MockTransport(upstream))
+    return scoped_relay.McpRelay(
+        "[proposer]",
+        RoleEnvironment(services=("geo",)),
+        secrets={"MAPS_KEY": _HEADER_SECRET},
+        secret_hosts={"MAPS_KEY": "maps.example.com"},
+        allowed_hosts={"MAPS_KEY": ("maps.example.com",)},
+        services={
+            "geo": ServiceSpec(
+                secrets=("MAPS_KEY",),
+                url="https://maps.example.com/v1",
+                headers={"X-Goog-Api-Key": "${MAPS_KEY}"},
+                query={"key": "plain-value"},
+            )
+        },
+    )
+
+
+def test_a_proposer_service_gets_its_header_secret_and_plain_query_and_the_box_never_sees_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The relay fills the header, adds the plain ``?key=``, drops the guest's own ``key``, and masks the secret (SKY-1000).
 
     Args:
         monkeypatch: Sends the pinned request to an in-memory upstream.
     """
-    seen: list[str] = []
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        """Echo the query the upstream got, in a header and the body."""
-        query = request.url.query.decode("ascii")
-        seen.append(query)
-        return httpx.Response(200, headers={"X-Query": query}, content=query.encode())
-
-    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
-    monkeypatch.setattr(scoped_relay, "_PinnedTransport", lambda url, pinned: httpx.MockTransport(upstream))
-    relay = scoped_relay.McpRelay(
-        "[proposer]",
-        RoleEnvironment(services=("geo",)),
-        secrets={"MAPS_KEY": _QUERY_SECRET},
-        secret_hosts={"MAPS_KEY": "maps.example.com"},
-        allowed_hosts={"MAPS_KEY": ("maps.example.com",)},
-        services={
-            "geo": ServiceSpec(secrets=("MAPS_KEY",), url="https://maps.example.com/v1", query={"key": "${MAPS_KEY}"})
-        },
-    )
+    seen: list[httpx.Request] = []
+    relay = _geo_relay(monkeypatch, seen)
     sink = _Sink()
 
     answer = relay.service(
         "geo", "lookup?q=1&KEY=guest", "GET", b"", {}, scoped_relay.CallRecorder(sink, "job-1", "", "")
     )
 
-    assert seen == [f"q=1&key={_QUERY_SECRET}"]
+    [request] = seen
+    assert request.url.query.decode("ascii") == "q=1&key=plain-value"
+    assert request.headers["x-goog-api-key"] == _HEADER_SECRET
     assert answer.status == 200
-    assert _QUERY_SECRET not in answer.body.decode() + str(answer.headers)
+    assert _HEADER_SECRET not in answer.body.decode() + str(answer.headers)
     assert "[REDACTED]" in answer.body.decode()
     [(_, call, secrets)] = sink.calls
-    assert _QUERY_SECRET in secrets
-    assert _QUERY_SECRET not in strip_secrets(json.dumps(call, default=str), secrets)
+    assert _HEADER_SECRET in secrets
+    assert _HEADER_SECRET not in strip_secrets(json.dumps(call, default=str), secrets)
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("lookup?key=${MAPS_KEY}", b""),
+        ("lookup", b"key=%24%7BMAPS_KEY%7D"),
+        ("v1/${MAPS_KEY}/x", b""),
+        ("bot%24%7BMAPS_KEY%7D/send", b""),
+    ],
+    ids=["url", "form-body", "path", "encoded-path"],
+)
+def test_a_proposer_secret_outside_a_header_is_refused_with_a_reason(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: bytes
+) -> None:
+    """A guest ``${MAPS_KEY}`` in the url or body gets a 403 that names the secret and host, and nothing goes out (SKY-1000).
+
+    Args:
+        monkeypatch: Sends the pinned request to an in-memory upstream.
+        path: The guest's path, with its query.
+        body: The guest's body.
+    """
+    seen: list[httpx.Request] = []
+    relay = _geo_relay(monkeypatch, seen)
+    sink = _Sink()
+
+    answer = relay.service("geo", path, "POST", body, {}, scoped_relay.CallRecorder(sink, "job-1", "", ""))
+
+    assert seen == []
+    assert answer.status == 403
+    error = answer.body.decode()
+    assert "secret MAPS_KEY can go only in a request header" in error
+    assert "maps.example.com" in error
+    assert _HEADER_SECRET not in error
+    [(_, call, _)] = sink.calls
+    assert call["status"] == "refused"
 
 
 def test_box_mcp_urls_name_each_server_and_hold_no_secret() -> None:

@@ -7,6 +7,7 @@ import json
 import logging
 import socket
 import threading
+import time
 import urllib.request
 from collections.abc import Callable, Iterator
 from decimal import Decimal
@@ -1071,6 +1072,118 @@ def test_relay_records_a_refused_call_with_its_reason(calls: PostgresRunCallStor
     assert (record["kind"], record["target"], record["status"]) == ("mcp", "evil.example", "refused")
     assert "may not go to evil.example" in record["failure_reason"]
     _assert_no_secret([record], "user-judge-key-000")
+
+
+@pytest.mark.parametrize(
+    ("url", "body"),
+    [
+        ("https://api.judge.example/v1", b'{"key": "${JUDGE_KEY}"}'),
+        ("https://api.judge.example/v1", b"key=%24%7BJUDGE_KEY%7D"),
+        ("https://api.judge.example/v1?key=${JUDGE_KEY}", b"{}"),
+        ("https://api.judge.example/v1?key=%2524%257BJUDGE_KEY%257D", b"{}"),
+        ("https://api.judge.example/v1", b"key=%252524%25257BJUDGE_KEY%25257D"),
+    ],
+    ids=["json-body", "form-body", "url", "url-encoded-twice", "body-encoded-three-times"],
+)
+def test_relay_refuses_a_secret_in_the_url_or_body_of_its_own_host(
+    calls: PostgresRunCallStore, url: str, body: bytes
+) -> None:
+    """Refuse ``${JUDGE_KEY}`` outside a header, even to its own host, and record it as refused (SKY-1000)."""
+
+    def send(*_args: object) -> bytes:
+        """Fail the test when the refused call goes out."""
+        raise AssertionError("refused call was sent")
+
+    with pytest.raises(ValueError, match=r"^secret JUDGE_KEY can go only in a request header") as refusal:
+        relay_request(
+            url=url,
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+            body=body,
+            user_secrets={"JUDGE_KEY": "user-judge-key-000"},
+            bindings={},
+            secret_hosts={"JUDGE_KEY": "api.judge.example"},
+            allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+            send=send,
+            recorder=_recorder(calls),
+        )
+    assert "api.judge.example" in str(refusal.value)
+    assert "user-judge-key-000" not in str(refusal.value)
+    [record] = _stored(calls)
+    assert (record["target"], record["status"]) == ("api.judge.example", "refused")
+    assert "secret JUDGE_KEY can go only in a request header" in record["failure_reason"]
+    _assert_no_secret([record], "user-judge-key-000")
+
+
+_DEEP = "%" + "25" * 200_000
+
+
+@pytest.mark.parametrize(
+    ("url", "body"),
+    [("https://api.judge.example/v1", _DEEP.encode()), (f"https://api.judge.example/v1?q={_DEEP}", b"{}")],
+    ids=["body", "url"],
+)
+def test_relay_refuses_a_deeply_encoded_url_or_body_fast(calls: PostgresRunCallStore, url: str, body: bytes) -> None:
+    """Refuse text still encoded after three decode passes in under one second, not in quadratic time (SKY-1000)."""
+
+    def send(*_args: object) -> bytes:
+        """Fail the test when the refused call goes out."""
+        raise AssertionError("refused call was sent")
+
+    started = time.monotonic()
+    with pytest.raises(ValueError, match=r"^a secret can go only in a request header") as refusal:
+        relay_request(
+            url=url,
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+            body=body,
+            user_secrets={"JUDGE_KEY": "user-judge-key-000"},
+            bindings={},
+            secret_hosts={"JUDGE_KEY": "api.judge.example"},
+            allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+            send=send,
+            recorder=_recorder(calls),
+        )
+    assert time.monotonic() - started < 1
+    assert "encoded too many times to check" in str(refusal.value)
+    assert "user-judge-key-000" not in str(refusal.value)
+    [record] = _stored(calls)
+    assert record["status"] == "refused"
+
+
+@pytest.mark.parametrize(
+    "body", [b'{"path": "${HOME}/data"}', b"%252525"], ids=["placeholder-not-a-secret", "encoded-three-times"]
+)
+def test_relay_fills_a_header_secret_next_to_a_body_placeholder_that_is_not_a_run_secret(
+    echo: Callable[[str, dict[str, str], bytes], bytes], body: bytes
+) -> None:
+    """Fill the header placeholder, and send as it is a body with no run secret in its first three layers (SKY-1000)."""
+    sent: list[tuple[dict[str, str], bytes]] = []
+
+    def send(url: str, headers: dict[str, str], body: bytes) -> bytes:
+        """Keep the filled headers and the body, then echo.
+
+        Args:
+            url: The request url.
+            headers: The filled headers.
+            body: The request body.
+
+        Returns:
+            The echo.
+        """
+        sent.append((headers, body))
+        return echo(url, headers, body)
+
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=body,
+        user_secrets={"JUDGE_KEY": "user-judge-key-123"},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=send,
+    )
+    assert sent == [({"Authorization": "Bearer user-judge-key-123"}, body)]
+    assert "user-judge-key-123" not in answer.decode()
 
 
 def test_relay_records_the_managed_tool_price_and_hides_the_key(
