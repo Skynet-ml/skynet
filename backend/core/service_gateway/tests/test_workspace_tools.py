@@ -6,7 +6,9 @@ import asyncio
 import importlib
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -24,7 +26,8 @@ from core.connectors.github_repo import RepoRateLimitError
 from core.local import folder_tree
 from core.local.folder_tree import folder_source_id
 from core.models.blackbox import DRAFT_FILE_BYTES, DRAFT_FILES_TOTAL_BYTES
-from core.service_gateway.agents import folder_workspace, pi_react, repo_browser, workspace_tools
+from core.service_gateway.agents import apply_patch as apply_patch_module
+from core.service_gateway.agents import folder_workspace, pi_bridge, pi_react, repo_browser, workspace_tools
 from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents.feedback import FeedbackTarget
 from core.service_gateway.agents.generalist import (
@@ -44,6 +47,8 @@ from core.service_gateway.agents.workspace_tools import (
     ASCENT_TOML_EXAMPLE,
     EDIT_FILE_TOOL,
     FOLDER_CHANGED,
+    FOLDER_COPY_CLOSED,
+    FOLDER_FILES_PROMPT,
     FOLDER_SHELL_TOOLS,
     LIST_REPO_TOOL,
     METRIC_GUIDE,
@@ -1916,7 +1921,8 @@ def _shell_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[dict[st
     state = _local_folder(monkeypatch, root)
     monkeypatch.setattr(settings, "local_state_dir", str(tmp_path / "state"))
     monkeypatch.setattr(folder_workspace, "_WORKSPACES", {})
-    monkeypatch.setattr(folder_workspace, "_swept", [])
+    monkeypatch.setattr(folder_workspace, "_KEY_LOCKS", {})
+    monkeypatch.setattr(folder_workspace, "_ABORTED", set())
     return state, root
 
 
@@ -2149,3 +2155,206 @@ async def test_a_setup_turn_runs_the_folder_shell_in_ask_mode_with_no_card(
     end = next(e for e in events if e["event"] == "tool_end" and e["data"]["tool"] == "apply_patch")
     assert end["data"]["result"]["wizard_state"]["workspace_files"] == {"src/app.py": "x = 2\n"}
     assert (root / "src" / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+    system = next(m["content"] for m in lm.requests[0]["messages"] if m["role"] == "system")
+    assert FOLDER_FILES_PROMPT in system
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_shell_delete_lasts_into_the_next_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file a command deletes goes into ``workspace_deleted``, and the next turn's copy starts without it."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["exec_command"].acall(cmd="rm README.md && echo done")
+
+    assert result["wizard_state"]["workspace_deleted"] == ["README.md"]
+    assert turn.wizard_patch["workspace_deleted"] == ["README.md"]
+    next_state = {**state, **turn.wizard_patch}
+    next_turn = _TurnAuthoringFlag()
+    again = await _shell_tools(next_state, next_turn)["exec_command"].acall(cmd="ls")
+    assert "README.md" not in again["output"]
+    assert "workspace_deleted" not in again.get("wizard_state", {})
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert not (workspace.folder / "README.md").exists()
+    assert (root / "README.md").exists()
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_a_shell_delete_of_a_new_draft_file_drops_the_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A file apply_patch added and a command then deletes leaves ``workspace_files``."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: notes.txt\n+n\n*** End Patch")
+    assert turn.wizard_patch["workspace_files"] == {"notes.txt": "n\n"}
+    await tools["exec_command"].acall(cmd="rm notes.txt")
+
+    assert turn.wizard_patch["workspace_files"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_patch_that_deletes_ascent_toml_is_refused_and_the_copy_keeps_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The contract file cannot be deleted, so the copy gets the folder's file back."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "ascent.toml").write_text(_VALID_TOML, encoding="utf-8")
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools(state, turn)["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Delete File: ascent.toml\n*** End Patch"
+    )
+
+    assert "cannot be deleted" in result["skipped_files"]["ascent.toml"]
+    assert "workspace_deleted" not in turn.wizard_patch
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert (workspace.folder / "ascent.toml").read_text(encoding="utf-8") == _VALID_TOML
+
+
+@pytest.mark.asyncio
+async def test_a_refused_ascent_toml_gets_the_folder_bytes_back_when_they_are_not_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A change to an unreadable folder ascent.toml is refused, and the copy holds the folder's bytes, not an empty file."""
+    state, root = _shell_run(monkeypatch, tmp_path)
+    (root / "ascent.toml").write_bytes(b"\xff\xfe bad")
+    tools = _shell_tools(state, _TurnAuthoringFlag())
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    (workspace.folder / "ascent.toml").write_text(_VALID_TOML, encoding="utf-8")
+
+    result = await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: b.txt\n+b\n*** End Patch")
+
+    assert "cannot be read" in result["skipped_files"]["ascent.toml"]
+    assert (workspace.folder / "ascent.toml").read_bytes() == b"\xff\xfe bad"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_ascent_toml_gets_the_draft_text_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """When the draft holds an ascent.toml, a refused change puts the draft's text back in the copy."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    removed = next(line for line in ASCENT_TOML_EXAMPLE.splitlines() if line.startswith("instructions = "))
+    turn = _TurnAuthoringFlag()
+
+    result = await _shell_tools({**state, "ascent_toml": ASCENT_TOML_EXAMPLE}, turn)["apply_patch"].acall(
+        patch=f"*** Begin Patch\n*** Update File: ascent.toml\n@@\n-{removed}\n*** End Patch"
+    )
+
+    assert "drops instructions" in result["skipped_files"]["ascent.toml"]
+    workspace = folder_workspace.live_workspace("chat-1")
+    assert workspace is not None
+    assert (workspace.folder / "ascent.toml").read_text(encoding="utf-8") == ASCENT_TOML_EXAMPLE
+
+
+@pytest.mark.asyncio
+async def test_a_patch_write_that_fails_part_way_keeps_the_earlier_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """The second write fails; the call gives a clear error and the first file still becomes a draft."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    real_write = apply_patch_module.write_inside
+    calls: list[str] = []
+
+    def failing_write(root: Path, rel: str, *args: Any) -> None:
+        """Fail the second write.
+
+        Args:
+            root: The folder.
+            rel: The file path.
+            args: The other :func:`write_inside` arguments.
+
+        Raises:
+            OSError: On the second call.
+        """
+        calls.append(rel)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        real_write(root, rel, *args)
+
+    monkeypatch.setattr(apply_patch_module, "write_inside", failing_write)
+    result = await _shell_tools(state, turn)["apply_patch"].acall(
+        patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** Add File: b.txt\n+b\n*** End Patch"
+    )
+
+    assert result["error"].startswith("The call failed part way:")
+    assert "stay changed" in result["error"]
+    assert result["wizard_state"]["workspace_files"] == {"a.txt": "a\n"}
+    assert turn.wizard_patch["workspace_files"] == {"a.txt": "a\n"}
+
+
+@pytest.mark.asyncio
+async def test_a_closed_copy_gives_a_clear_error_to_every_shell_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """After the chat's copy closes, apply_patch and write_stdin say so and change no draft."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    turn = _TurnAuthoringFlag()
+    tools = _shell_tools(state, turn)
+    await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch")
+    folder_workspace.close_workspace("chat-1")
+    before = dict(turn.wizard_patch)
+
+    patched = await tools["apply_patch"].acall(patch="*** Begin Patch\n*** Add File: b.txt\n+b\n*** End Patch")
+    read = await tools["write_stdin"].acall(session_id=1)
+
+    assert patched == {"error": FOLDER_COPY_CLOSED}
+    assert read == {"error": FOLDER_COPY_CLOSED}
+    assert turn.wizard_patch == before
+
+
+@on_mac
+@pytest.mark.asyncio
+async def test_the_stop_button_ends_a_folder_command_through_the_wrapped_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, close_copies: None
+) -> None:
+    """A stopped turn cancels the wrapped exec_command, and the command's process ends."""
+    state, _ = _shell_run(monkeypatch, tmp_path)
+    marker = f"sleep {500 + os.getpid() % 89}"
+    tool = _wrap_tool_with_approval(
+        _shell_tools(state, _TurnAuthoringFlag())["exec_command"],
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _event: None,
+        outer_loop=asyncio.get_running_loop(),
+    )
+    stop = threading.Event()
+    token = pi_bridge._TURN_STOP.set((stop,))
+    try:
+        call = asyncio.ensure_future(asyncio.to_thread(tool.func, cmd=marker, yield_time_ms=30000))
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+
+    def running() -> bool:
+        """Say whether the marker command runs.
+
+        Returns:
+            True when pgrep finds it.
+        """
+        return subprocess.run(["pgrep", "-f", marker], capture_output=True, check=False).returncode == 0
+
+    for _ in range(500):
+        if running():
+            break
+        await asyncio.sleep(0.01)
+    assert running()
+    stop.set()
+    with pytest.raises(RuntimeError, match="turn stopped"):
+        await asyncio.wait_for(call, timeout=10)
+    for _ in range(500):
+        if not running():
+            break
+        await asyncio.sleep(0.01)
+    assert not running()

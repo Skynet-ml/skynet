@@ -199,3 +199,41 @@ def test_drafts_that_push_the_tree_over_the_size_cap_are_refused(tmp_path: Path)
 
     assert archive.read_bytes() == before
     assert sorted(path.name for path in tmp_path.iterdir()) == ["tree.tgz"]
+
+
+def test_deleted_paths_leave_the_packed_tree_and_a_missing_one_is_no_error(tmp_path: Path) -> None:
+    """A deleted draft path is removed with the drafts written; a path the tree lacks changes nothing (SKY-997)."""
+    archive = _archive(tmp_path, {"a.py": "a\n", "src/b.py": "b\n"})
+
+    apply_to_archive(archive, {"c.py": "c\n"}, deleted=["src/b.py", "missing.py"])
+
+    assert set(_read(archive)) == {"a.py", "c.py"}
+
+
+def test_a_deleted_path_that_is_read_only_a_link_or_written_is_refused(tmp_path: Path) -> None:
+    """Only a regular file the draft does not write can be deleted."""
+    archive = _archive(tmp_path, {"a.py": "a\n", "lfs/big.bin": "x"}, links={"link.py": "a.py"})
+    for deleted, drafts, readonly in [
+        (["lfs/big.bin"], {}, ["lfs"]),
+        (["link.py"], {}, []),
+        (["a.py"], {"a.py": "b\n"}, []),
+        (["src"], {"src/x.py": "x\n"}, []),
+    ]:
+        with pytest.raises(DraftFileError):
+            apply_to_archive(archive, drafts, readonly, deleted=deleted)
+    assert set(_read(archive)) == {"a.py", "lfs/big.bin"}
+
+
+def test_deleted_paths_leave_a_checkout(tmp_path: Path) -> None:
+    """The checkout loses the deleted file, a missing one is no error, and a folder is refused."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "old.py").write_text("old\n")
+    (tmp_path / "keep.py").write_text("k\n")
+
+    write_to_checkout(tmp_path, {"new.py": "n\n"}, deleted=["src/old.py", "keep.py/x", "missing.py"])
+
+    assert not (tmp_path / "src" / "old.py").exists()
+    assert (tmp_path / "keep.py").read_text() == "k\n"
+    assert (tmp_path / "new.py").read_text() == "n\n"
+    with pytest.raises(DraftFileError):
+        write_to_checkout(tmp_path, {}, deleted=["src"])

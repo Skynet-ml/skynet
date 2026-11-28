@@ -260,6 +260,7 @@ def snapshot_zip(
     folder: str,
     drafts: Mapping[str, str] | None = None,
     readonly_paths: Iterable[str] = (),
+    deleted: Iterable[str] = (),
 ) -> Path:
     """Zip a local run's kept tree with the drafts written and one version's patch applied.
 
@@ -270,6 +271,7 @@ def snapshot_zip(
         folder: The one top-level folder name inside the zip.
         drafts: The run's ``draft_files``, which the patch was made against.
         readonly_paths: Paths a draft cannot change.
+        deleted: The run's ``draft_deleted``, removed with the drafts.
 
     Returns:
         The zip, its entries under ``<folder>/``, like a host run's zip.
@@ -279,7 +281,7 @@ def snapshot_zip(
             written, the patch does not apply, or the zip is larger than the limit.
     """
     checkout = workdir / "checkout"
-    _build_version(commit, patch, checkout, drafts, readonly_paths)
+    _build_version(commit, patch, checkout, drafts, readonly_paths, deleted)
     archive = workdir / f"{folder}.zip"
     # The pack stores every time as 0, which a zip cannot hold; this writes 1980 instead.
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as zipped:
@@ -583,7 +585,12 @@ def check_applied(root: str | os.PathLike[str], run_id: str) -> None:
 
 
 def _build_version(
-    commit: str, patch: str, checkout: Path, drafts: Mapping[str, str] | None, readonly_paths: Iterable[str]
+    commit: str,
+    patch: str,
+    checkout: Path,
+    drafts: Mapping[str, str] | None,
+    readonly_paths: Iterable[str],
+    deleted: Iterable[str] = (),
 ) -> dict[str, _Blob]:
     """Unpack the kept tree into a new folder, then write the drafts and the patch over it.
 
@@ -593,6 +600,7 @@ def _build_version(
         checkout: The folder to make; it must not exist.
         drafts: The run's ``draft_files``.
         readonly_paths: Paths a draft cannot change.
+        deleted: The run's ``draft_deleted``, removed with the drafts.
 
     Returns:
         The tree's files after the drafts and before the patch.
@@ -605,7 +613,7 @@ def _build_version(
     with _open_kept(commit) as packed:
         packed.extractall(checkout, filter="data")
     try:
-        write_to_checkout(checkout, drafts, readonly_paths)
+        write_to_checkout(checkout, drafts, readonly_paths, deleted)
         drafted = _scan(checkout) if drafts else {}
         apply_patch(checkout, patch)
     except (DraftFileError, RuntimeError) as error:

@@ -12,6 +12,7 @@ from ...config import settings
 from ...constants import OPTIMIZATION_TYPE_BLACKBOX
 from ...i18n import t_locale
 from ...models.blackbox import BLACKBOX_MODULE_NAME
+from ...service_gateway.agents import folder_workspace
 from ..routers import submissions as _sub_mod
 from ..routers import wizard_preflight as _preflight
 from .test_submissions_router import _FakeJobStore, make_client
@@ -139,6 +140,24 @@ def test_repo_run_binds_its_setup_chat_outside_the_payload(
     optimization_id = resp.json()["optimization_id"]
     assert binds == [(optimization_id, store._jobs[optimization_id]["payload"]["username"], "chat-1")]
     assert store._jobs[optimization_id]["payload"]["conversation_id"] is None
+
+
+def test_repo_run_with_a_setup_chat_deletes_its_folder_copy(
+    client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The submit closes the setup chat's folder copy (SKY-997), and leaves other chats' copies."""
+    client, _ = client_and_store
+    monkeypatch.setattr(_sub_mod, "_bind_setup_chat", lambda *_args: None)
+    closed: list[str] = []
+    copies = {key: SimpleNamespace(close=lambda key=key: closed.append(key)) for key in ("chat-1", "chat-2")}
+    monkeypatch.setattr(folder_workspace, "_WORKSPACES", copies)
+    monkeypatch.setattr(folder_workspace, "_KEY_LOCKS", {})
+
+    resp = client.post("/blackbox/run", json=repo_payload(conversation_id="chat-1"))
+
+    assert resp.status_code == 201, resp.json()
+    assert closed == ["chat-1"]
+    assert list(copies) == ["chat-2"]
 
 
 def test_repo_run_without_a_setup_chat_binds_nothing(

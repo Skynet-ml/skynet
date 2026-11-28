@@ -329,6 +329,19 @@ def _run_drafts(job_data: dict[str, Any]) -> dict[str, str]:
     return {str(path): str(text) for path, text in drafts.items()} if isinstance(drafts, dict) else {}
 
 
+def _run_deleted(job_data: dict[str, Any]) -> list[str]:
+    """Read the folder files the run's setup deleted (SKY-997).
+
+    Args:
+        job_data: The stored job row of a repository run.
+
+    Returns:
+        The paths; empty for a run that deleted none.
+    """
+    deleted = job_data["payload"]["target"]["repo"].get("draft_deleted")
+    return [str(path) for path in deleted] if isinstance(deleted, list) else []
+
+
 def _run_readonly_paths(job_data: dict[str, Any]) -> list[str]:
     """Read the run's recorded submodule and Git LFS paths, which a draft cannot change.
 
@@ -694,6 +707,7 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
                     folder=repository.rsplit("/", 1)[-1],
                     drafts=_run_drafts(job_data),
                     readonly_paths=_run_readonly_paths(job_data),
+                    deleted=_run_deleted(job_data),
                 )
             else:
                 token = _owner_token(getattr(job_store, "engine", None), job_owner(job_data) or "", provider)

@@ -400,7 +400,11 @@ def _read(root: Path, rel: str) -> tuple[str, int]:
 
 
 def apply_patch(root: Path, patch: str) -> list[str]:
-    """Apply a Codex patch to the copy, or change nothing.
+    """Apply a Codex patch to the copy.
+
+    Every file is checked and planned before the first write, so a
+    :class:`PatchError` changes nothing. The writes then run one file at a
+    time, so an :class:`OSError` in a write leaves the earlier files changed.
 
     Args:
         root: The copy's root folder.
@@ -413,6 +417,7 @@ def apply_patch(root: Path, patch: str) -> list[str]:
         PatchError: For a patch that does not parse, a refused path, a link,
             a missing file or a hunk that does not match; the copy is then
             unchanged.
+        OSError: When a write fails part way; the files written before it stay changed.
     """
     ops = parse_patch(patch)
     # Path to its new bytes and mode, or None for a delete, so later ops see earlier ones.

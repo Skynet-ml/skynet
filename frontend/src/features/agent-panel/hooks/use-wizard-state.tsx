@@ -533,6 +533,8 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
     );
     if (files.length > 0) patch.workspace_files = Object.fromEntries(files);
   }
+  // Sent whole, so an empty list clears the deletes.
+  if (isStringList(wrap.workspace_deleted)) patch.workspace_deleted = wrap.workspace_deleted;
   if (isStringList(wrap.dataset_columns)) patch.dataset_columns = wrap.dataset_columns;
   const notes = parseScreenNotes(wrap.screen_notes);
   if (notes) patch.screen_notes = notes;

@@ -668,6 +668,23 @@ test("a local folder run sends provider local with its path, and runs in the loc
   assert.equal(request.sandbox_provider, "docker");
 });
 
+test("a local folder run sends the shell deletes that no draft writes again (SKY-997)", () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo, localPath: "/Users/me/app", secrets: [] };
+  state.workspace.files = { "src/app.py": "x = 2\n", "lib/new/a.py": "a = 1\n" };
+  state.workspace.deleted = ["old.py", "src/app.py", "lib/new", "lib/new/a.py/x"];
+  assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_deleted, ["old.py"]);
+
+  state.workspace.deleted = ["src/app.py"];
+  assert.equal("draft_deleted" in repoRunRequest(state, options)!.target.repo, false);
+});
+
+test("a repository run never sends shell deletes (SKY-997)", () => {
+  const state = repoState();
+  state.workspace.deleted = ["old.py"];
+  assert.equal("draft_deleted" in repoRunRequest(state, options)!.target.repo, false);
+});
+
 test("a setup with only a chosen folder is worth keeping (SKY-993)", async () => {
   const { setupWorthKeeping } = await import("./session-state.ts");
   const state = initialWizardV2State();

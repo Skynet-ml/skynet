@@ -78,7 +78,7 @@ from ..optimization.training_ground.registry import hash_tool_schema
 from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
 from .approval_choices import declined_result, take_approval_choice
-from .attachment_sandbox import EXEC_COMMAND_TOOL, FILE_TOOLS_PROMPT, WRITE_STDIN_TOOL
+from .attachment_sandbox import EXEC_COMMAND_TOOL, FILE_TOOLS_PROMPT, WRITE_STDIN_TOOL, chat_file_loader
 from .auto_review import AutoReviewer
 from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
@@ -93,6 +93,7 @@ from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
 from .workspace_tools import (
     EDIT_FILE_TOOL,
+    FOLDER_FILES_PROMPT,
     FOLDER_SHELL_TOOLS,
     LIST_REPO_TOOL,
     METRIC_GUIDE,
@@ -1111,6 +1112,8 @@ class WizardState(TypedDict, total=False):
     workspace_files: dict[str, str]
     # The commit the workspace tools read the draft files at; the run refuses them on any other commit.
     workspace_base: str
+    # The folder files the Mac setup agent's shell deleted (SKY-997); the run removes them from its tree.
+    workspace_deleted: list[str]
     # The wizard screen on view (see ``_SCREEN_FIELDS``). Absent when the
     # wizard is not on screen, which leaves the agent unscoped.
     wizard_screen: str
@@ -3869,6 +3872,13 @@ async def _drive_generalist_agent(
                         if feedback_target
                         else None
                     ),
+                    attachments=(
+                        chat_file_loader(
+                            feedback_target.engine, feedback_target.username, feedback_target.conversation_id
+                        )
+                        if feedback_target
+                        else None
+                    ),
                 ),
             ]
             if screen is not None
@@ -3876,7 +3886,10 @@ async def _drive_generalist_agent(
         )
         folder_shell = any(tool.name in FOLDER_SHELL_TOOLS for tool in own_tools)
         # The folder shell has the attachment shell's tool names, and its commands run in the folder copy.
+        files_prompt = FILE_TOOLS_PROMPT if file_tools else None
         if folder_shell:
+            # The attached files stay readable there, next to the copy (SKY-997).
+            files_prompt = FOLDER_FILES_PROMPT if file_tools else None
             file_tools = None
         dspy_tools += [
             _wrap_tool_with_approval(
@@ -3944,8 +3957,8 @@ async def _drive_generalist_agent(
             if screen is None
             else screen_signature(screen or "", reply_language, cloned=bool(wizard_state.get("cloned_run")))
         )
-        if file_tools:
-            signature = signature.with_instructions(f"{signature.instructions}\n\n{FILE_TOOLS_PROMPT}")
+        if files_prompt:
+            signature = signature.with_instructions(f"{signature.instructions}\n\n{files_prompt}")
         if images:
             signature = signature.append(
                 _IMAGES_FIELD,

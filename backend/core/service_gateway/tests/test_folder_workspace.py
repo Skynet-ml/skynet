@@ -6,6 +6,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 from core.config import settings
 from core.service_gateway.agents import folder_workspace as fw
 from core.service_gateway.agents.apply_patch import apply_patch
+from core.service_gateway.agents.attachment_sandbox import stop_chat_runner
 from core.service_gateway.agents.folder_workspace import (
     FolderWorkspace,
     close_workspace,
@@ -24,6 +26,7 @@ from core.service_gateway.agents.folder_workspace import (
     open_workspace,
     saved_setup_secrets,
     session_folder,
+    sweep_stale_copies,
 )
 from core.service_gateway.agents.repo_browser import LocalFolderBrowser
 
@@ -67,7 +70,8 @@ def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
     monkeypatch.setattr(settings, "local_state_dir", str(state))
     monkeypatch.setattr(settings, "local_mode", True)
     monkeypatch.setattr(fw, "_WORKSPACES", {})
-    monkeypatch.setattr(fw, "_swept", [])
+    monkeypatch.setattr(fw, "_KEY_LOCKS", {})
+    monkeypatch.setattr(fw, "_ABORTED", set())
     yield state
     for key in list(fw._WORKSPACES):
         close_workspace(key)
@@ -221,11 +225,18 @@ def test_close_without_an_open_workspace_deletes_a_stale_copy(state_dir: Path) -
     assert not session_folder("chat2").exists()
 
 
-def test_the_first_open_deletes_copies_an_earlier_process_left(state_dir: Path, source: Path) -> None:
+def test_the_sweep_deletes_copies_and_proxy_state_an_earlier_process_left(state_dir: Path) -> None:
     stale = session_folder("old-chat") / "folder"
     stale.mkdir(parents=True)
-    open_workspace("chat1", source)
+    proxy = state_dir / fw.EGRESS_DIR / "egress-abc123"
+    proxy.mkdir(parents=True)
+    (proxy / "key.pem").write_text("k")
+    other = state_dir / fw.EGRESS_DIR / "keep.txt"
+    other.write_text("x")
+    sweep_stale_copies()
     assert not stale.exists()
+    assert not proxy.exists()
+    assert other.exists()
 
 
 @pytest.mark.parametrize("key", ["../x", "a/b", "", "a" * 129])
@@ -320,3 +331,154 @@ def test_only_saved_secrets_with_hosts_reach_the_proxy(monkeypatch: pytest.Monke
     assert [(item.name, item.value, item.allowed_hosts) for item in secrets] == [
         ("API_KEY", "value-1", ("api.example.com",))
     ]
+
+
+def test_a_slow_copy_of_one_chat_never_holds_up_another_chat(
+    state_dir: Path, source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While one chat's folder copies, another chat's lookup and open return at once."""
+    started = threading.Event()
+    release = threading.Event()
+    real_copy = fw.copy_folder
+
+    def slow_copy(*args: Any) -> dict[str, bytes]:
+        """Wait for the test before the first copy.
+
+        Args:
+            args: The :func:`copy_folder` arguments.
+
+        Returns:
+            The copy's snapshot.
+        """
+        if not started.is_set():
+            started.set()
+            assert release.wait(10)
+        return real_copy(*args)
+
+    monkeypatch.setattr(fw, "copy_folder", slow_copy)
+    slow = threading.Thread(target=open_workspace, args=("slow", source))
+    slow.start()
+    try:
+        assert started.wait(5)
+        begin = time.monotonic()
+        assert live_workspace("slow") is None
+        other, new = open_workspace("other", source)
+        assert new
+        assert time.monotonic() - begin < 5
+        assert other.folder.exists()
+    finally:
+        release.set()
+        slow.join(10)
+    assert live_workspace("slow") is not None
+
+
+def test_a_chat_closed_while_its_folder_copies_keeps_no_copy(
+    state_dir: Path, source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A close during the copy throws the new copy away, so no copy outlives the deleted chat."""
+    started = threading.Event()
+    release = threading.Event()
+    real_copy = fw.copy_folder
+    errors: list[BaseException] = []
+
+    def slow_copy(*args: Any) -> dict[str, bytes]:
+        """Wait for the test before the copy.
+
+        Args:
+            args: The :func:`copy_folder` arguments.
+
+        Returns:
+            The copy's snapshot.
+        """
+        started.set()
+        assert release.wait(10)
+        return real_copy(*args)
+
+    def open_it() -> None:
+        """Open the chat's copy, and keep the error it raises."""
+        try:
+            open_workspace("chat1", source)
+        except ValueError as error:
+            errors.append(error)
+
+    monkeypatch.setattr(fw, "copy_folder", slow_copy)
+    opener = threading.Thread(target=open_it)
+    opener.start()
+    assert started.wait(5)
+    close_workspace("chat1")
+    release.set()
+    opener.join(10)
+    assert [str(error) for error in errors] == ["The chat closed while its folder was copied."]
+    assert live_workspace("chat1") is None
+    assert not session_folder("chat1").exists()
+
+
+def test_two_chats_hold_two_copies_at_the_same_time(state_dir: Path, source: Path) -> None:
+    """Each chat edits its own copy, and closing one leaves the other."""
+    first, _ = open_workspace("chat1", source)
+    second, _ = open_workspace("chat2", source)
+    assert first.folder != second.folder
+    first.write("README.md", "# One\n")
+    assert (second.folder / "README.md").read_text() == "# Project\n"
+    close_workspace("chat1")
+    assert live_workspace("chat2") is second
+    assert second.folder.exists()
+    assert not first.folder.exists()
+
+
+def test_deleting_a_chat_deletes_its_folder_copy(state_dir: Path, source: Path) -> None:
+    """The chat delete path closes the copy with the chat's other sandbox state."""
+    workspace, _ = open_workspace("chat1", source)
+    stop_chat_runner("chat1").join(10)
+    assert workspace.closed
+    assert live_workspace("chat1") is None
+    assert not session_folder("chat1").exists()
+
+
+def test_revert_restores_the_folder_file_or_removes_a_new_one(state_dir: Path, source: Path) -> None:
+    """A refused change goes back to the folder's bytes and mode; a file the folder lacks goes away."""
+    workspace, _ = open_workspace("chat1", source)
+    (workspace.folder / "run.sh").unlink()
+    (workspace.folder / "new.txt").write_text("n\n")
+    workspace.revert("run.sh")
+    workspace.revert("new.txt")
+    assert (workspace.folder / "run.sh").read_text() == "echo hi\n"
+    assert (workspace.folder / "run.sh").stat().st_mode & 0o111
+    assert not (workspace.folder / "new.txt").exists()
+
+
+def test_a_tracked_path_the_copy_lost_is_dropped(state_dir: Path, source: Path) -> None:
+    """A tracked draft file that the folder never had and the copy no longer has is in ``dropped``."""
+    workspace, _ = open_workspace("chat1", source)
+    workspace.write("notes.txt", "n\n")
+    assert workspace.changes(["notes.txt"]).dropped == []
+    (workspace.folder / "notes.txt").unlink()
+    found = workspace.changes(["notes.txt", "README.md"])
+    assert found.dropped == ["notes.txt"]
+    assert found.deleted == []
+
+
+@on_mac
+def test_a_command_reads_the_chat_attachments_next_to_the_copy(state_dir: Path, source: Path) -> None:
+    """The chat's files sit outside the copy, a command reads them, and a removed file goes away."""
+    held = {"m1"}
+
+    def load(skip: set[str]) -> tuple[set[str], list[SimpleNamespace]]:
+        """Give the chat's files that the copy does not hold yet.
+
+        Args:
+            skip: The ids the copy holds.
+
+        Returns:
+            The chat's ids, and the new files.
+        """
+        files = [SimpleNamespace(id="m1", name="data.csv", data=b"a,b\n1,2\n")]
+        return set(held), [file for file in files if file.id in held and file.id not in skip]
+
+    workspace, _ = open_workspace("chat1", source, attachments=load)
+    result = workspace.exec_command("cat ../attachments/m1/data.csv")
+    assert "1,2" in result
+    assert workspace.changes().files == {}
+    held.clear()
+    workspace.exec_command("true")
+    assert not (workspace.session / fw.ATTACHMENTS_DIR / "m1").exists()

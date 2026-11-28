@@ -14,10 +14,14 @@ proxy mode. Its workspace is the chat's session folder, so ``HOME``, the
 temporary folder and tool caches stay outside the copy; the commands start in
 the copy. After each tool call :meth:`FolderWorkspace.changes` compares the
 copy with the folder as it was copied, and the changed files become the
-setup draft's files.
+setup draft's files, and the deleted ones become its deleted files.
+
+The chat's attached files go to ``attachments/<id>/<name>`` in the session
+folder, next to the copy and never in it, so a command reads them at
+``../attachments/<id>/<name>`` and they never become drafts.
 
 The copy is deleted when the chat is deleted, when its run is submitted, and
-at the app's next start.
+when the app starts (:func:`sweep_stale_copies`).
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ from ...local.folder_tree import (
     open_no_follow,
 )
 from ...models.blackbox import DRAFT_FILE_BYTES, clean_draft_path
-from .apply_patch import remove_inside, write_inside
+from .apply_patch import apply_patch, remove_inside, write_inside
 from .local_command_runner import LocalCommandRunner
 from .local_egress_proxy import LocalEgressProxy, SetupSecret
 
@@ -58,7 +62,12 @@ logger = logging.getLogger(__name__)
 SESSIONS_DIR = "setup-workspaces"
 EGRESS_DIR = "setup-egress"
 COPY_DIR = "folder"
+ATTACHMENTS_DIR = "attachments"
+CLOSED = "Error: the folder copy is closed. Send the message again to open a new copy."
 _KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# The shape of attachment_sandbox.FileLoader; that module imports this one, so the type is named here.
+# It takes the attachment ids the session holds, and gives the ids the chat holds now and its other files.
+AttachmentLoader = Callable[[set[str]], tuple[set[str], Iterable[Any]]]
 
 
 @dataclass
@@ -67,6 +76,8 @@ class Changes:
 
     files: dict[str, str] = field(default_factory=dict)
     deleted: list[str] = field(default_factory=list)
+    # Tracked draft paths that were never copied files and are gone from the copy now.
+    dropped: list[str] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
 
 
@@ -217,7 +228,14 @@ def _make_folder(root: Path, rel: str) -> None:
 class FolderWorkspace:
     """One setup chat's copy of a local folder, its command runner and its egress proxy."""
 
-    def __init__(self, source: Path, session: Path, egress_dir: Path, secrets: Iterable[SetupSecret] = ()) -> None:
+    def __init__(
+        self,
+        source: Path,
+        session: Path,
+        egress_dir: Path,
+        secrets: Iterable[SetupSecret] = (),
+        attachments: AttachmentLoader | None = None,
+    ) -> None:
         """Copy the folder and start the runner.
 
         Args:
@@ -225,6 +243,7 @@ class FolderWorkspace:
             session: The chat's session folder; it is emptied first.
             egress_dir: The proxy's state folder, outside ``session``.
             secrets: The saved secrets with hosts, which commands get as placeholders.
+            attachments: Loads the chat's attached files, which go next to the copy before each command.
 
         Raises:
             FolderTreeError: When ``source`` is not a folder.
@@ -234,6 +253,8 @@ class FolderWorkspace:
         self.folder = session / COPY_DIR
         self._lock = threading.Lock()
         self.closed = False
+        self._attachments = attachments
+        self._held: set[str] = set()
         entries, _ = folder_entries(source, limit=None)
         # The same id the folder browser gives, so the drafts' workspace_base compares with it.
         self.base = folder_source_id(source, entries)
@@ -330,6 +351,19 @@ class FolderWorkspace:
             with contextlib.suppress(ValueError, OSError):
                 remove_inside(self.folder, clean_draft_path(path))
 
+    def revert(self, rel: str) -> None:
+        """Make one file of the copy match the user's folder again.
+
+        Args:
+            rel: The file path; the copy's file is removed when the folder has none.
+        """
+        found = _read_source(self.source, rel)
+        with contextlib.suppress(OSError):
+            if found is None:
+                remove_inside(self.folder, rel)
+            else:
+                write_inside(self.folder, rel, found[0], 0o755 if found[1] else 0o644)
+
     def _restore(self, rel: str) -> None:
         """Copy one file of the user's folder into the copy again.
 
@@ -380,8 +414,10 @@ class FolderWorkspace:
                 folder's text.
 
         Returns:
-            The changed and tracked files as text, the deleted paths, and the
-            changed paths that cannot be drafts, each with its reason.
+            The changed and tracked files as text, the deleted copied files,
+            the tracked paths that are gone, and the changed paths that cannot
+            be drafts, each with its reason. A truncated listing finds no
+            deleted or gone path.
         """
         result = Changes()
         listed, truncated = self._scan()
@@ -393,6 +429,10 @@ class FolderWorkspace:
             if reason := self._text(rel, result):
                 result.skipped[rel] = reason
         result.deleted = self._deleted(listed, truncated)
+        if not truncated:
+            result.dropped = sorted(
+                rel for rel in set(tracked) - set(listed) - set(self.snapshot) if not os.path.lexists(self.folder / rel)
+            )
         return result
 
     def _text(self, rel: str, result: Changes) -> str:
@@ -433,8 +473,33 @@ class FolderWorkspace:
         """
         with self._lock:
             if self.closed:
-                return "Error: the folder copy is closed. Send the message again to open a new copy."
+                return CLOSED
+            self._sync_attachments()
         return self.runner.exec_command(*args)
+
+    def _sync_attachments(self) -> None:
+        """Write the chat's new attached files next to the copy, and remove the ones that left the chat."""
+        if self._attachments is None:
+            return
+        try:
+            held, new = self._attachments(set(self._held))
+            root = self.session.resolve()
+            for media_id in self._held - held:
+                gone = (self.session / ATTACHMENTS_DIR / media_id).resolve()
+                # A command can make ``attachments`` a link; never delete outside the session.
+                if root in gone.parents:
+                    shutil.rmtree(gone, ignore_errors=True)
+            self._held &= held
+            for file in new:
+                name = "file" if file.name in ("", ".", "..") else file.name
+                try:
+                    write_inside(self.session, f"{ATTACHMENTS_DIR}/{file.id}/{name}", file.data, 0o600)
+                except OSError:
+                    logger.warning("A chat file cannot be written next to the setup folder copy.")
+                    continue
+                self._held.add(file.id)
+        except Exception:  # the command still runs, without the newer files
+            logger.exception("The chat files cannot load for the setup folder copy")
 
     def write_stdin(self, *args: Any) -> str:
         """Send input to a running command, or read its newer output.
@@ -445,7 +510,27 @@ class FolderWorkspace:
         Returns:
             The result text for the model.
         """
+        if self.closed:
+            return CLOSED
         return self.runner.write_stdin(*args)
+
+    def apply_patch(self, patch: str) -> str:
+        """Apply one patch to the copy.
+
+        Args:
+            patch: The patch text.
+
+        Returns:
+            One line for each changed file.
+
+        Raises:
+            PatchError: For a patch that changes nothing.
+            OSError: When a write fails part way.
+        """
+        with self._lock:
+            if self.closed:
+                return CLOSED
+            return "\n".join(apply_patch(self.folder, patch))
 
     def stop_commands(self) -> None:
         """End every running command of the chat, for the Stop button."""
@@ -462,7 +547,10 @@ class FolderWorkspace:
 
 _WORKSPACES: dict[str, FolderWorkspace] = {}
 _LOCK = threading.Lock()
-_swept: list[bool] = []
+# One lock for each chat, so a slow copy of one folder never holds up another chat.
+_KEY_LOCKS: dict[str, threading.Lock] = {}
+# Chats closed while their copy was made; that copy is thrown away, not kept.
+_ABORTED: set[str] = set()
 
 
 def _state_root() -> Path:
@@ -491,39 +579,67 @@ def session_folder(key: str) -> Path:
     return _state_root() / SESSIONS_DIR / key
 
 
+def sweep_stale_copies() -> None:
+    """Delete the folder copies and proxy state folders that an earlier app process left.
+
+    The app's start calls this before any setup chat opens a copy.
+    """
+    root = _state_root()
+    shutil.rmtree(root / SESSIONS_DIR, ignore_errors=True)
+    egress = root / EGRESS_DIR
+    if egress.is_dir() and not egress.is_symlink():
+        for stale in egress.glob("egress-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+
+
 def open_workspace(
-    key: str, source: str | os.PathLike[str], secrets: Callable[[], list[SetupSecret]] | None = None
+    key: str,
+    source: str | os.PathLike[str],
+    secrets: Callable[[], list[SetupSecret]] | None = None,
+    attachments: AttachmentLoader | None = None,
 ) -> tuple[FolderWorkspace, bool]:
     """Return the chat's folder copy, and make it on first use or when the folder changed.
-
-    The first call in a process deletes the copies that an earlier process left.
 
     Args:
         key: The chat id.
         source: The user's folder.
         secrets: Returns the saved secrets with hosts, called only for a new copy.
+        attachments: Loads the chat's attached files, for a new copy.
 
     Returns:
         The workspace, and whether it is new.
 
     Raises:
         FolderTreeError: When ``source`` is not a folder.
-        ValueError: For a chat id that is not a safe folder name.
+        ValueError: For a chat id that is not a safe folder name, or a chat
+            that closed while its copy was made.
     """
     session = session_folder(key)
     folder = Path(source)
     with _LOCK:
-        if not _swept:
-            shutil.rmtree(_state_root() / SESSIONS_DIR, ignore_errors=True)
-            _swept.append(True)
-        found = _WORKSPACES.get(key)
+        key_lock = _KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        with _LOCK:
+            _ABORTED.discard(key)
+            found = _WORKSPACES.get(key)
         if found is not None and not found.closed and found.source == folder and not found.source_changed():
             return found, False
-        _WORKSPACES.pop(key, None)
         if found is not None:
+            with _LOCK:
+                if _WORKSPACES.get(key) is found:
+                    del _WORKSPACES[key]
             found.close()
-        workspace = FolderWorkspace(folder, session, _state_root() / EGRESS_DIR, secrets() if secrets else ())
-        _WORKSPACES[key] = workspace
+        workspace = FolderWorkspace(
+            folder, session, _state_root() / EGRESS_DIR, secrets() if secrets else (), attachments
+        )
+        with _LOCK:
+            aborted = key in _ABORTED
+            _ABORTED.discard(key)
+            if not aborted:
+                _WORKSPACES[key] = workspace
+        if aborted:
+            workspace.close()
+            raise ValueError("The chat closed while its folder was copied.")
         return workspace, True
 
 
@@ -548,10 +664,15 @@ def close_workspace(key: str) -> None:
     """
     with _LOCK:
         workspace = _WORKSPACES.pop(key, None)
+        key_lock = _KEY_LOCKS.get(key)
+        copying = key_lock is not None and key_lock.locked()
+        if copying:
+            _ABORTED.add(key)
     try:
         if workspace is not None:
             workspace.close()
-        elif settings.local_mode:
+        elif settings.local_mode and not copying:
+            # A copy in progress deletes its own folder when it sees the abort.
             shutil.rmtree(session_folder(key), ignore_errors=True)
     except Exception:
         logger.exception("A setup folder copy failed to close")
@@ -592,6 +713,7 @@ def saved_setup_secrets(engine: Any, username: str) -> list[SetupSecret]:
 __all__ = [
     "COPY_DIR",
     "SESSIONS_DIR",
+    "AttachmentLoader",
     "Changes",
     "FolderWorkspace",
     "close_workspace",
@@ -600,4 +722,5 @@ __all__ = [
     "open_workspace",
     "saved_setup_secrets",
     "session_folder",
+    "sweep_stale_copies",
 ]

@@ -193,7 +193,8 @@ export function listChange(
 
 /**
  * Merge a patch's `workspace_files` over the files the state holds: a file
- * tool's patch carries only the file it wrote.
+ * tool's patch carries only the file it wrote. A file in the patch's
+ * `workspace_deleted` leaves the map.
  *
  * Args:
  *   state: The wizard state the patch lands on.
@@ -206,8 +207,10 @@ export function mergedPatch(
   state: Readonly<Partial<WizardState>>,
   patch: Partial<WizardState>,
 ): Partial<WizardState> {
-  if (!patch.workspace_files) return patch;
-  return { ...patch, workspace_files: { ...state.workspace_files, ...patch.workspace_files } };
+  if (!patch.workspace_files && !patch.workspace_deleted) return patch;
+  const files = { ...state.workspace_files, ...patch.workspace_files };
+  for (const path of patch.workspace_deleted ?? []) delete files[path];
+  return { ...patch, workspace_files: files };
 }
 
 /**

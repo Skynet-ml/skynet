@@ -328,6 +328,13 @@ export function repoRunRequest(
     stop_at_score?: unknown;
   };
   const local = isLocalRepo(repo);
+  // Only a folder takes deletes; a written path or a folder of one stays written.
+  const draftDeleted = (workspace.deleted ?? []).filter(
+    (path) =>
+      !Object.keys(draftFiles).some(
+        (file) => file === path || file.startsWith(`${path}/`) || path.startsWith(`${file}/`),
+      ),
+  );
   // What a folder and a repository source send the same way.
   const shared = {
     // ascent.toml and every file the setup changed; metric.py goes as the scorer.
@@ -373,7 +380,13 @@ export function repoRunRequest(
     target: {
       kind: "repo",
       repo: local
-        ? { provider: "local", path: (repo.localPath ?? "").trim(), editable_paths: editablePaths, ...shared }
+        ? {
+            provider: "local",
+            path: (repo.localPath ?? "").trim(),
+            editable_paths: editablePaths,
+            ...shared,
+            ...(draftDeleted.length > 0 && { draft_deleted: draftDeleted }),
+          }
         : {
             provider: repo.provider ?? "github",
             repository: repo.repository.trim(),

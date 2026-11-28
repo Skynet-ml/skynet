@@ -589,3 +589,34 @@ def test_a_command_metric_scorer_needs_no_metric_code() -> None:
     assert request.scorer.metric_code is None
     with pytest.raises(ValidationError, match="needs metric_code"):
         BlackboxRunRequest.model_validate(_repo_request(scorer={"kind": "python"}))
+
+
+def test_only_a_local_source_takes_deleted_draft_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """A local source keeps each clean deleted path once; a hosted one refuses them (SKY-997)."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", True)
+
+    source = BlackboxRepoSource.model_validate(_local_source(str(tmp_path), draft_deleted=["a.py", "a.py", "b/c.py"]))
+
+    assert source.draft_deleted == ["a.py", "b/c.py"]
+    with pytest.raises(ValidationError, match="Only a local source"):
+        BlackboxRepoSource(repository="acme/app", editable_paths=["src"], draft_deleted=["a.py"])
+
+
+@pytest.mark.parametrize(
+    ("deleted", "drafts", "message"),
+    [
+        (["ascent.toml"], {}, "cannot delete ascent.toml"),
+        (["a.py"], {"a.py": "x\n"}, "both written and deleted"),
+        (["src"], {"src/a.py": "x\n"}, "both written and deleted"),
+        (["../a.py"], {}, "must stay inside"),
+    ],
+    ids=["ascent-toml", "same-path", "folder-of-a-draft", "outside"],
+)
+def test_a_deleted_draft_path_that_cannot_be_deleted_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, deleted: list[str], drafts: dict[str, str], message: str
+) -> None:
+    """The contract file, a written path and a path outside the folder cannot be deleted."""
+    monkeypatch.setattr(blackbox_models.settings, "local_mode", True)
+
+    with pytest.raises(ValidationError, match=message):
+        BlackboxRepoSource.model_validate(_local_source(str(tmp_path), draft_deleted=deleted, draft_files=drafts))

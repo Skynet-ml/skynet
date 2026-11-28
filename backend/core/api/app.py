@@ -64,6 +64,7 @@ from ..exceptions import AppError
 from ..models import HEALTH_STATUS_OK, HealthResponse, QueueStatusResponse
 from ..notifications import configure_notification_preferences, start_notification_hold_sweeper
 from ..registry import ServiceRegistry
+from ..service_gateway.agents.folder_workspace import sweep_stale_copies
 from ..service_gateway.embedding_pipeline import (
     backfill_missing_conversation_embeddings,
     purge_orphan_conversation_embeddings,
@@ -770,6 +771,9 @@ def create_app(
         # periodic sweeper (below) covers steady-state; this one-shot keeps
         # boot latency low when a single replica restarts.
         job_store.recover_orphaned_jobs()
+        if settings.local_mode:
+            # The Mac setup agent's folder copies (SKY-997) do not outlive the app process that made them.
+            await asyncio.to_thread(sweep_stale_copies)
         for problem in oauth_config_problems():
             logger.warning("Connector OAuth misconfigured: %s", problem)
         # ``recover_pending_jobs`` is no longer required for correctness because
