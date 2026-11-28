@@ -26,6 +26,20 @@ from typing import Any
 # Always left out, with or without a .gitignore: tool state and installed
 # packages that a run never needs and that can be very large.
 SKIPPED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__"})
+# Files and folders that the operating system writes on its own (Finder,
+# Explorer, Spotlight). They stay out so that opening a folder does not move its id.
+OS_NAMES = frozenset(
+    {
+        ".ds_store",
+        ".spotlight-v100",
+        ".trashes",
+        ".fseventsd",
+        ".temporaryitems",
+        "thumbs.db",
+        "ehthumbs.db",
+        "desktop.ini",
+    }
+)
 # A folder holding this file is a Python virtual environment, whatever its name.
 VENV_MARKER = "pyvenv.cfg"
 GITIGNORE = ".gitignore"
@@ -65,6 +79,18 @@ def is_env_name(name: str) -> bool:
     return name.lower().startswith(".env")
 
 
+def is_os_name(name: str) -> bool:
+    """Check whether a file or folder name is one that the operating system writes on its own.
+
+    Args:
+        name: One path part.
+
+    Returns:
+        True for :data:`OS_NAMES` in any case, and for ``._*`` AppleDouble files.
+    """
+    return name.startswith("._") or name.lower() in OS_NAMES
+
+
 def folder_entries(
     root: str | os.PathLike[str], limit: int | None = FOLDER_ENTRIES_MAX
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -73,7 +99,8 @@ def folder_entries(
     The ``.gitignore`` files apply with git's rules: the root file and nested
     ones, the last matching line wins, a deeper file wins over a higher one,
     and an ignored folder is never entered. :data:`SKIPPED_DIRS`, folders
-    with a :data:`VENV_MARKER`, ``.env*`` names and every symbolic link are
+    with a :data:`VENV_MARKER`, ``.env*`` names, operating system files
+    (:func:`is_os_name`) and every symbolic link are
     left out on top. Sockets, pipes and devices are left out too. A subfolder
     that cannot be read is listed with no children.
 
@@ -214,7 +241,7 @@ def _visit(
         return True
     for child in children:
         # A worktree's or submodule's ``.git`` is a file, and it stays out too.
-        if child.is_symlink() or is_env_name(child.name) or child.name == ".git":
+        if child.is_symlink() or is_env_name(child.name) or is_os_name(child.name) or child.name == ".git":
             continue
         child_rel = f"{rel}/{child.name}" if rel else child.name
         try:
@@ -358,6 +385,7 @@ def _glob(part: str) -> str:
 __all__ = [
     "FOLDER_ENTRIES_MAX",
     "GITIGNORE",
+    "OS_NAMES",
     "SKIPPED_DIRS",
     "UNREADABLE_DIGEST",
     "VENV_MARKER",
@@ -366,6 +394,7 @@ __all__ = [
     "folder_entries",
     "folder_source_id",
     "is_env_name",
+    "is_os_name",
     "open_no_follow",
     "parse_gitignore",
     "source_id",

@@ -200,6 +200,43 @@ def test_the_source_id_matches_the_setup_agents_draft_base(tmp_path: Path) -> No
     assert folder_tree.folder_source_id(root, folder_tree.folder_entries(root, limit=None)[0]) == SHARED_VECTOR_ID
 
 
+def test_files_that_the_operating_system_writes_keep_the_id(tmp_path: Path) -> None:
+    """Finder, Explorer and Spotlight files stay out, so opening the folder keeps the setup agent's id."""
+    files = {
+        "src/main.py": "x = 1\n",
+        "README.md": "hi\n",
+        ".env": "KEY=1\n",
+        ".git/HEAD": "ref\n",
+        ".gitignore": "*.log\n",
+        "a.log": "l\n",
+        "a-b.txt": "1\n",
+    }
+    root = _write(tmp_path / "app", files)
+    before = folder_tree.folder_source_id(root)
+    _write(
+        root,
+        {
+            ".DS_Store": "finder\n",
+            "src/.ds_store": "finder\n",
+            "._README.md": "appledouble\n",
+            "Thumbs.db": "explorer\n",
+            "src/desktop.ini": "explorer\n",
+            ".Spotlight-V100/store.db": "index\n",
+            ".Trashes/501/x": "trash\n",
+        },
+    )
+
+    assert before == SHARED_VECTOR_ID
+    assert folder_tree.folder_source_id(root) == SHARED_VECTOR_ID
+    assert [entry["path"] for entry in folder_tree.folder_entries(root)[0]] == [
+        ".gitignore",
+        "README.md",
+        "a-b.txt",
+        "src",
+        "src/main.py",
+    ]
+
+
 def test_a_file_that_goes_away_still_moves_the_id(tmp_path: Path) -> None:
     """A listed file that cannot be read gives another id than the readable folder."""
     root = _write(tmp_path / "app", {"a.txt": "1\n", "b.txt": "2\n"})
