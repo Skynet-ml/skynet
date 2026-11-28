@@ -133,7 +133,7 @@ export function RangeControl({
         <TooltipTrigger asChild>
           <PopoverTrigger asChild>
             <Button variant="ghost" size="icon-sm" aria-label={tip}>
-              <CalendarBlank className="size-[1.05rem] text-primary dark:text-white" aria-hidden="true" />
+              <CalendarBlank className="size-[1.05rem] text-primary" aria-hidden="true" />
             </Button>
           </PopoverTrigger>
         </TooltipTrigger>
