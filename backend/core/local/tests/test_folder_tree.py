@@ -288,11 +288,20 @@ def test_the_digest_refuses_a_pipe_without_blocking(tmp_path: Path) -> None:
         folder_tree.file_digest(root, "a.txt")
 
 
-def test_a_gitignore_that_is_a_pipe_gives_no_rules_without_blocking(tmp_path: Path) -> None:
+def test_a_gitignore_that_is_a_pipe_gives_no_rules_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A ``.gitignore`` swapped for a pipe with no writer is read as no rules, and the listing returns."""
     root = _write(tmp_path / "app", {"a.txt": "a", "b.log": "b", "sub/c.log": "c"})
     (root / "sub" / ".gitignore").write_text("*.log\n")
     os.mkfifo(root / ".gitignore")
+    pipe = root / ".gitignore"
+    real_is_file = Path.is_file
+    real_exists = Path.exists
+
+    # A check before the read sees the regular file that the pipe replaced, as in a swap after the check.
+    monkeypatch.setattr(Path, "is_file", lambda self, *a, **k: self == pipe or real_is_file(self, *a, **k))
+    monkeypatch.setattr(Path, "exists", lambda self, *a, **k: self == pipe or real_exists(self, *a, **k))
     listed: list[list[str]] = []
     worker = threading.Thread(target=lambda: listed.append(_names(root)), daemon=True)
 
