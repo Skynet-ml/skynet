@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -285,3 +286,18 @@ def test_the_digest_refuses_a_pipe_without_blocking(tmp_path: Path) -> None:
 
     with pytest.raises(OSError, match="Not a regular file"):
         folder_tree.file_digest(root, "a.txt")
+
+
+def test_a_gitignore_that_is_a_pipe_gives_no_rules_without_blocking(tmp_path: Path) -> None:
+    """A ``.gitignore`` swapped for a pipe with no writer is read as no rules, and the listing returns."""
+    root = _write(tmp_path / "app", {"a.txt": "a", "b.log": "b", "sub/c.log": "c"})
+    (root / "sub" / ".gitignore").write_text("*.log\n")
+    os.mkfifo(root / ".gitignore")
+    listed: list[list[str]] = []
+    worker = threading.Thread(target=lambda: listed.append(_names(root)), daemon=True)
+
+    worker.start()
+    worker.join(10)
+
+    assert not worker.is_alive()
+    assert listed == [["a.txt", "b.log", "sub", "sub/.gitignore"]]

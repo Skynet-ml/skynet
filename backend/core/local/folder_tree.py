@@ -277,10 +277,15 @@ def _visit(
     Returns:
         False once ``limit`` is reached.
     """
-    ignore_file = folder / GITIGNORE
     try:
-        if ignore_file.is_file() and not ignore_file.is_symlink():
-            rules = [*rules, (rel, parse_gitignore(ignore_file.read_text(encoding="utf-8", errors="replace")))]
+        # Opened without a check first, so a pipe or link swapped in cannot block or redirect the read.
+        with open_no_follow(folder, GITIGNORE) as ignore_file:
+            text = ignore_file.read().decode("utf-8", errors="replace")
+    except OSError:
+        text = None
+    if text is not None:
+        rules = [*rules, (rel, parse_gitignore(text))]
+    try:
         with os.scandir(folder) as found:
             children = sorted(found, key=lambda child: child.name)
     except OSError:
