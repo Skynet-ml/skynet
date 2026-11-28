@@ -3875,7 +3875,7 @@
   "submit.v2.repo.source.existing_desc": "בחירת מאגר מ-GitHub, ‏GitLab או Bitbucket.",
   "submit.v2.repo.source.new_desc": "Skynet יוצר אותו ב-GitHub, ב-GitLab או ב-Bitbucket ומוסיף את המשימה שלך.",
   "submit.v2.repo.source.folder": "שימוש בתיקייה מקומית",
-  "submit.v2.repo.source.folder_desc": "שימוש בתיקייה ב-Mac הזה. ההרצה מתבצעת על עותק ולא משנה את התיקייה.",
+  "submit.v2.repo.source.folder_desc": "תיקייה ב-Mac הזה. ההרצה מתבצעת על עותק ולא משנה את התיקייה.",
   "submit.v2.repo.folder.label": "תיקייה",
   "submit.v2.repo.folder.none": "עדיין לא נבחרה תיקייה.",
   "submit.v2.repo.folder.choose": "בחירת תיקייה…",
